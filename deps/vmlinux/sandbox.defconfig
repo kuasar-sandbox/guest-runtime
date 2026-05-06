@@ -1,0 +1,291 @@
+# arch/x86/configs/sandbox_defconfig
+# microVM kernel for sandbox-ctl on Cloud Hypervisor.
+#
+# This file is sparse — used as `make sandbox_defconfig`, the kbuild
+# driver walks "allnoconfig + the entries here + dependency closure".
+# Entries that look "default-on" elsewhere must be listed here, since
+# allnoconfig starts everything off.
+
+# === Architecture ===
+CONFIG_64BIT=y
+
+# === Build / format ===
+CONFIG_LOCALVERSION="-sandbox"
+CONFIG_DEFAULT_HOSTNAME="sandbox"
+CONFIG_CC_OPTIMIZE_FOR_SIZE=y
+# CONFIG_MODULES is not set
+
+# === HZ / scheduler ===
+CONFIG_HZ_100=y
+CONFIG_NO_HZ_IDLE=y
+CONFIG_HIGH_RES_TIMERS=y
+
+# === CPU count (max vCPU = 4 per sandbox; PROPOSAL fixed-spec) ===
+# CONFIG_SMP must be set explicitly: without NUMA (which used to pull
+# SMP transitively) NR_CPUS silently caps at 1, breaking any sandbox
+# declared with cpu > 1.
+CONFIG_SMP=y
+CONFIG_NR_CPUS=4
+
+# === Log buffer (small for dedup) ===
+CONFIG_LOG_BUF_SHIFT=14
+CONFIG_LOG_CPU_MAX_BUF_SHIFT=12
+
+# === Hypervisor / boot protocol ===
+CONFIG_HYPERVISOR_GUEST=y
+CONFIG_PARAVIRT=y
+CONFIG_PARAVIRT_SPINLOCKS=y
+CONFIG_KVM_GUEST=y
+CONFIG_PARAVIRT_CLOCK=y
+CONFIG_XEN=y
+CONFIG_XEN_PVH=y
+CONFIG_PVH=y
+# CONFIG_XEN_PV is not set
+# CONFIG_XEN_PVHVM is not set
+# CONFIG_XEN_DOM0 is not set
+
+# === Disable randomization (dedup-critical) ===
+# CONFIG_RANDOMIZE_BASE is not set
+# CONFIG_RANDOMIZE_MEMORY is not set
+# CONFIG_SLAB_FREELIST_RANDOM is not set
+# CONFIG_SLAB_FREELIST_HARDENED is not set
+# CONFIG_SHUFFLE_PAGE_ALLOCATOR is not set
+# CONFIG_SLUB_CPU_PARTIAL is not set
+
+# === NUMA disabled (sandbox is always single-zone single-node) ===
+# CONFIG_NUMA is not set
+
+# === userfaultfd / memfd ===
+# userfaultfd is a host-only feature in our architecture: sandbox-ctl
+# (host) creates uffd and registers it on the memfd backing guest RAM.
+# Guest never calls userfaultfd() — disable to shrink kernel.
+# CONFIG_USERFAULTFD is not set
+# memfd_create() is unconditional in modern kernels; the Kconfig entry
+# was removed and olddefconfig drops any explicit assignment, so we
+# don't list it here.
+
+# === Core kernel infrastructure (sandbox-init + Go runtime hard deps) ===
+CONFIG_BLOCK=y
+CONFIG_PROC_FS=y
+CONFIG_SYSFS=y
+CONFIG_DEVTMPFS=y
+CONFIG_DEVTMPFS_MOUNT=y
+CONFIG_TTY=y
+CONFIG_BINFMT_ELF=y
+CONFIG_BINFMT_SCRIPT=y
+CONFIG_FUTEX=y
+CONFIG_EPOLL=y
+CONFIG_EVENTFD=y
+CONFIG_SIGNALFD=y
+CONFIG_TIMERFD=y
+CONFIG_INOTIFY_USER=y
+CONFIG_FILE_LOCKING=y
+
+# === Entropy (boot-speed sensitive) ===
+CONFIG_HW_RANDOM=y
+CONFIG_RANDOM_TRUST_CPU=y
+CONFIG_RANDOM_TRUST_BOOTLOADER=y
+
+# === RTC (CH provides CMOS RTC) ===
+CONFIG_RTC_CLASS=y
+CONFIG_RTC_HCTOSYS=y
+CONFIG_RTC_DRV_CMOS=y
+
+# === virtio-pmem + DAX ===
+CONFIG_LIBNVDIMM=y
+CONFIG_BLK_DEV_PMEM=y
+CONFIG_NVDIMM_PFN=y
+CONFIG_NVDIMM_DAX=y
+CONFIG_DAX=y
+CONFIG_DEV_DAX=y
+CONFIG_DEV_DAX_PMEM=y
+CONFIG_FS_DAX=y
+CONFIG_FS_DAX_PMD=y
+CONFIG_VIRTIO_PMEM=y
+
+# === PCI bus (CH presents virtio devices over virtio-pci) ===
+# Without explicit CONFIG_PCI=y, allnoconfig leaves PCI off, and any
+# CONFIG_VIRTIO_PCI=y below gets silently dropped (unmet dep). Result:
+# the guest can't see CH's pmem / console / blk / vsock devices, root
+# pmem0 isn't found, kernel panics in prepare_namespace. Always pin PCI.
+#
+# CONFIG_PCI_MSI is critical: modern virtio-pci uses MSI-X for vqueue
+# interrupts; without it every virtio device probe fails -ENOSPC during
+# vqueue setup (silent unless serial console is wired).
+CONFIG_PCI=y
+CONFIG_PCI_MMCONFIG=y
+CONFIG_PCI_MSI=y
+
+# === virtio devices ===
+# NETDEVICES is the umbrella for network device drivers (virtio-net,
+# tun, etc.). Without explicit =y, allnoconfig leaves it off and
+# VIRTIO_NET is silently dropped — kernel sees CH's virtio-net PCI
+# device but never binds it, and `ip=...:eth0:off` on cmdline blocks
+# 12s waiting for eth0 before timing out (-ENODEV).
+CONFIG_NETDEVICES=y
+CONFIG_VIRTIO=y
+CONFIG_VIRTIO_PCI=y
+CONFIG_VIRTIO_MMIO=y
+CONFIG_VIRTIO_BLK=y
+CONFIG_VIRTIO_NET=y
+CONFIG_VIRTIO_CONSOLE=y
+CONFIG_VIRTIO_BALLOON=y
+CONFIG_VIRTIO_BALLOON_FREE_PAGE_REPORTING=y
+CONFIG_PAGE_REPORTING=y
+CONFIG_HW_RANDOM_VIRTIO=y
+
+# === vsock ===
+CONFIG_VSOCKETS=y
+CONFIG_VIRTIO_VSOCKETS=y
+
+# === Filesystems ===
+CONFIG_EXT4_FS=y
+CONFIG_EXT4_FS_POSIX_ACL=y
+CONFIG_EXT4_FS_SECURITY=y
+CONFIG_EROFS_FS=y
+CONFIG_EROFS_FS_XATTR=y
+CONFIG_EROFS_FS_POSIX_ACL=y
+CONFIG_EROFS_FS_SECURITY=y
+CONFIG_EROFS_FS_ZIP=y
+CONFIG_EROFS_FS_ZIP_LZMA=y
+CONFIG_OVERLAY_FS=y
+CONFIG_OVERLAY_FS_REDIRECT_DIR=y
+CONFIG_OVERLAY_FS_INDEX=y
+CONFIG_OVERLAY_FS_XINO_AUTO=y
+CONFIG_OVERLAY_FS_METACOPY=y
+CONFIG_TMPFS=y
+CONFIG_TMPFS_POSIX_ACL=y
+CONFIG_TMPFS_XATTR=y
+CONFIG_FANOTIFY=y
+
+# === Networking ===
+# Same allnoconfig-baseline trap as PCI/PCI_MSI: without explicit
+# CONFIG_NET=y, every socket family (AF_INET, AF_VSOCK, AF_NETLINK...)
+# silently drops. Pin the umbrella.
+CONFIG_NET=y
+CONFIG_INET=y
+CONFIG_PACKET=y
+CONFIG_UNIX=y
+CONFIG_IPV6=y
+CONFIG_NETFILTER=y
+# CONFIG_NETFILTER_ADVANCED is not set
+# IP_PNP series intentionally absent: network configured by sandbox-init
+# via netlink after vsock launch handshake (cmd/sandbox-init/network.go),
+# not by kernel ip_auto_config. Removes ~26ms ip_auto_config initcall +
+# ~10 KiB unused dhcp/bootp client code from the guest kernel.
+# CONFIG_IP_PNP is not set
+
+# === Disable unused subsystems ===
+# CONFIG_SOUND is not set
+# CONFIG_DRM is not set
+# CONFIG_FB is not set
+# CONFIG_INPUT is not set
+# CONFIG_HID is not set
+# CONFIG_USB_SUPPORT is not set
+# CONFIG_I2C is not set
+# CONFIG_SPI is not set
+# CONFIG_GPIOLIB is not set
+# CONFIG_W1 is not set
+# CONFIG_THERMAL is not set
+# CONFIG_WATCHDOG is not set
+# CONFIG_POWER_SUPPLY is not set
+# CONFIG_CPU_FREQ is not set
+# CONFIG_CPU_IDLE is not set
+
+# === Disable unused storage ===
+# CONFIG_SCSI is not set
+# CONFIG_ATA is not set
+# CONFIG_MD is not set
+# CONFIG_BCACHE is not set
+# CONFIG_BLK_DEV_NVME is not set
+# CONFIG_BLK_DEV_LOOP is not set
+
+# === Disable unused fs ===
+# CONFIG_BTRFS_FS is not set
+# CONFIG_F2FS_FS is not set
+# CONFIG_XFS_FS is not set
+# CONFIG_NFS_FS is not set
+# CONFIG_CIFS is not set
+# CONFIG_VFAT_FS is not set
+# CONFIG_NTFS_FS is not set
+# CONFIG_FUSE_FS is not set
+# CONFIG_AUTOFS4_FS is not set
+# CONFIG_HUGETLBFS is not set
+
+# === Disable unused network ===
+# CONFIG_BRIDGE is not set
+# CONFIG_VLAN_8021Q is not set
+# CONFIG_BONDING is not set
+# CONFIG_TUN is not set
+# CONFIG_VETH is not set
+# CONFIG_VXLAN is not set
+# CONFIG_GENEVE is not set
+# CONFIG_WLAN is not set
+# CONFIG_PPP is not set
+# CONFIG_INET_TUNNEL is not set
+# CONFIG_NET_IP_TUNNEL is not set
+
+# === Disable IOMMU (KVM guest) ===
+# CONFIG_INTEL_IOMMU is not set
+# CONFIG_AMD_IOMMU is not set
+
+# === Disable BPF JIT (dedup) ===
+CONFIG_BPF_SYSCALL=y
+# CONFIG_BPF_JIT is not set
+
+# === Disable memory hotplug ===
+# CONFIG_MEMORY_HOTPLUG is not set
+# CONFIG_MEMORY_HOTREMOVE is not set
+
+# === Disable detectors / debug threads ===
+# CONFIG_LOCKUP_DETECTOR is not set
+# CONFIG_DETECT_HUNG_TASK is not set
+# CONFIG_SOFTLOCKUP_DETECTOR is not set
+# CONFIG_HARDLOCKUP_DETECTOR_PERF is not set
+# CONFIG_BOOTPARAM_SOFTLOCKUP_PANIC is not set
+# CONFIG_BOOTPARAM_HARDLOCKUP_PANIC is not set
+
+# === Disable security modules ===
+# CONFIG_AUDIT is not set
+# CONFIG_SECURITY is not set
+# CONFIG_INTEGRITY is not set
+# CONFIG_HARDENED_USERCOPY is not set
+# CONFIG_FORTIFY_SOURCE is not set
+
+# === Cgroups (disabled in guest) ===
+# Sandbox model is one VM = one app: host applies cgroup v2 to the CH
+# process, guest sees the result and never creates internal sub-cgroups.
+# Disabling the umbrella drops all CGROUP_* sub-controllers.
+# CONFIG_CGROUPS is not set
+
+# === Namespaces (only PID + mount needed by sandbox-init) ===
+# sandbox-init does fork+clone(CLONE_NEWPID|CLONE_NEWNS) so the user app
+# sees itself as PID 1. Mount namespace support is included implicitly
+# in CONFIG_NAMESPACES; CLONE_NEWPID needs CONFIG_PID_NS.
+# Other namespaces (UTS / TIME / IPC / USER / NET) are not used in this
+# 1-VM = 1-app model — disabled to shrink kernel.
+CONFIG_NAMESPACES=y
+CONFIG_PID_NS=y
+# CONFIG_UTS_NS is not set
+# CONFIG_TIME_NS is not set
+# CONFIG_IPC_NS is not set
+# CONFIG_USER_NS is not set
+# CONFIG_NET_NS is not set
+
+# === Disable debug / tracing ===
+# CONFIG_DEBUG_KERNEL is not set
+# CONFIG_DEBUG_INFO is not set
+CONFIG_DEBUG_INFO_NONE=y
+# CONFIG_FTRACE is not set
+# CONFIG_KASAN is not set
+# CONFIG_UBSAN is not set
+# CONFIG_KMSAN is not set
+# CONFIG_KFENCE is not set
+# CONFIG_DEBUG_FS is not set
+# CONFIG_MAGIC_SYSRQ is not set
+# CONFIG_PROFILING is not set
+# CONFIG_DEBUG_OBJECTS is not set
+# CONFIG_DEBUG_KMEMLEAK is not set
+# CONFIG_PROVE_LOCKING is not set
+# CONFIG_RUNTIME_TESTING_MENU is not set
+# CONFIG_KGDB is not set
