@@ -1,0 +1,621 @@
+package vhost
+
+import (
+	"context"
+	"encoding/binary"
+	"fmt"
+	"io"
+	"net"
+	"os"
+	"sync"
+	"syscall"
+)
+
+// Backend is the per-device abstraction. blk0 (read-only base image)
+// uses a BlockReader without a writer. blk1 (COW) uses both a base
+// BlockReader (or nil) and a BlockCOW for writes.
+type Backend interface {
+	// ReadAt reads from the virtual disk at the given offset.
+	ReadAt(buf []byte, offset int64) (int, error)
+	// WriteAt writes to the virtual disk; returns ErrReadOnly if the
+	// backend is read-only.
+	WriteAt(buf []byte, offset int64) (int, error)
+	// Flush syncs the writable layer (no-op for read-only).
+	Flush() error
+	// Discard hints that a range is no longer needed (may be no-op).
+	Discard(offset, length int64) error
+	// Size returns the visible block-device size in bytes.
+	Size() int64
+	// ReadOnly reports whether writes are disallowed.
+	ReadOnly() bool
+}
+
+// ReadOnlyBackend wraps a BlockReader as a write-rejecting Backend.
+type ReadOnlyBackend struct{ R BlockReader }
+
+func (b *ReadOnlyBackend) ReadAt(buf []byte, offset int64) (int, error) {
+	return b.R.ReadAt(buf, offset)
+}
+func (b *ReadOnlyBackend) WriteAt([]byte, int64) (int, error)    { return 0, ErrReadOnly }
+func (b *ReadOnlyBackend) Flush() error                           { return nil }
+func (b *ReadOnlyBackend) Discard(offset, length int64) error     { return nil }
+func (b *ReadOnlyBackend) Size() int64                            { return b.R.Size() }
+func (b *ReadOnlyBackend) ReadOnly() bool                         { return true }
+
+// CowBackend wraps a BlockCOW.
+type CowBackend struct{ C *BlockCOW }
+
+func (b *CowBackend) ReadAt(buf []byte, offset int64) (int, error)  { return b.C.ReadAt(buf, offset) }
+func (b *CowBackend) WriteAt(buf []byte, offset int64) (int, error) { return b.C.WriteAt(buf, offset) }
+func (b *CowBackend) Flush() error                                  { return b.C.Flush() }
+func (b *CowBackend) Discard(offset, length int64) error            { return b.C.Discard(offset, length) }
+func (b *CowBackend) Size() int64                                   { return b.C.Size() }
+func (b *CowBackend) ReadOnly() bool                                { return false }
+func (b *CowBackend) BackendStats() map[string]any                  { return b.C.BackendStats() }
+
+// ErrReadOnly is returned by WriteAt on a read-only backend.
+var ErrReadOnly = fmt.Errorf("vhost: backend is read-only")
+
+// Server runs one vhost-user-blk backend on a UDS socket. The cloud-
+// hypervisor master connects exactly once; on disconnect, the server
+// reaps virtq workers and stops.
+type Server struct {
+	socketPath string
+	backend    Backend
+	logf       func(format string, args ...any)
+	stats      *Stats
+
+	// unified-memfd invariant (§10.3): SET_MEM_TABLE must arrive with
+	// fds whose inode matches memfdInode; mmapBytes are sub-slices of
+	// memfdSlab (sandbox-ctl's mmap of the same memfd).
+	memfdInode uint64
+	memfdSlab  []byte
+
+	// Quiesce/Resume gate for snapshot pause window (§10.7).
+	pauseMu  sync.Mutex
+	inflight sync.WaitGroup
+
+	// negotiated state (modified by master)
+	mu                     sync.Mutex
+	features               uint64
+	protocolFeatures       uint64
+	memTable               MemTable
+	queues                 []*virtq
+	stopOnce               sync.Once
+	stop                   chan struct{}
+	listener               *net.UnixListener
+}
+
+// virtq holds per-virtq state set up by SET_VRING_*.
+type virtq struct {
+	num         uint32
+	descAddr    uint64 // GPA
+	availAddr   uint64 // GPA
+	usedAddr    uint64 // GPA
+	baseIdx     uint16
+	kickFd      int
+	callFd      int
+	enabled     bool
+
+	stop chan struct{}
+	done chan struct{}
+}
+
+// NumQueues is the number of virtio queues we advertise. v1 uses a single
+// queue per device (sufficient for cold-start MVP).
+const NumQueues = 1
+
+// MaxBlockSizeBytes is the maximum I/O segment size advertised to the
+// guest via virtio_blk_config.size_max. 1 MiB is a comfortable default
+// for cloud-hypervisor's clamp behaviour.
+const MaxBlockSizeBytes = 1 << 20
+
+// MaxSegments caps virtio_blk_config.seg_max — the longest chain the
+// backend will accept. 128 is plenty for the typical 3-descriptor
+// header+data+status pattern.
+const MaxSegments = 128
+
+// NewServer returns an unstarted server bound to socketPath. backend
+// owns disk IO. logf may be nil (defaults to no-op).
+func NewServer(socketPath string, backend Backend, logf func(format string, args ...any)) *Server {
+	if logf == nil {
+		logf = func(string, ...any) {}
+	}
+	return &Server{
+		socketPath: socketPath,
+		backend:    backend,
+		logf:       logf,
+		queues:     make([]*virtq, NumQueues),
+		stop:       make(chan struct{}),
+	}
+}
+
+// EnableStats turns on per-request counters and coverage tracking,
+// labelling the backend in the eventual summary as name (e.g. "blk0")
+// with origin path (file path or URI). Must be called before Serve.
+// Without it, processChain skips its instrumentation hot path.
+func (s *Server) EnableStats(name, path string) {
+	s.stats = NewStats(name, path, s.backend.Size())
+}
+
+// SetMemfd configures the unified-memfd backing slab. Must be called
+// before Serve when CH is patched to share its memfd via SET_MEM_TABLE
+// (§10.3 invariant). slab is sandbox-ctl's mmap of the memfd; the
+// backend never opens its own mmap.
+func (s *Server) SetMemfd(inode uint64, slab []byte) {
+	s.memfdInode = inode
+	s.memfdSlab = slab
+}
+
+// Quiesce blocks until no worker is processing a chain and prevents
+// new processChain calls from starting until Resume(). Used by the
+// snapshot path to freeze backend DMA before reading memfd contents.
+//
+// The avail ring may accumulate KICKs during Quiesce; Resume() will
+// process them in the next iteration of the worker loop.
+func (s *Server) Quiesce() {
+	s.pauseMu.Lock()
+	s.inflight.Wait()
+}
+
+// Resume releases a Quiesce(); workers blocked on pauseMu are unblocked.
+func (s *Server) Resume() {
+	s.pauseMu.Unlock()
+}
+
+// Stats returns the live Stats handle (nil if EnableStats wasn't
+// called). Callers typically use SnapshotStats to render a summary.
+func (s *Server) Stats() *Stats { return s.stats }
+
+// SnapshotStats returns an immutable view of the current stats with
+// backend-specific extras merged in (when the backend implements
+// StatsReporter). Returns the zero StatsSnapshot if EnableStats wasn't
+// called.
+func (s *Server) SnapshotStats() StatsSnapshot {
+	if s.stats == nil {
+		return StatsSnapshot{}
+	}
+	snap := s.stats.Snapshot()
+	if reporter, ok := s.backend.(StatsReporter); ok {
+		snap.Extra = reporter.BackendStats()
+	}
+	return snap
+}
+
+// WriteStatsTo formats and writes the current snapshot to w.
+func (s *Server) WriteStatsTo(w io.Writer) (int64, error) {
+	if s.stats == nil {
+		return 0, nil
+	}
+	return s.SnapshotStats().WriteTo(w)
+}
+
+// Listen binds the UDS socket. Call Serve to start accepting.
+func (s *Server) Listen() error {
+	_ = os.Remove(s.socketPath)
+	addr, err := net.ResolveUnixAddr("unix", s.socketPath)
+	if err != nil {
+		return fmt.Errorf("vhost: resolve %s: %w", s.socketPath, err)
+	}
+	l, err := net.ListenUnix("unix", addr)
+	if err != nil {
+		return fmt.Errorf("vhost: listen %s: %w", s.socketPath, err)
+	}
+	s.listener = l
+	return nil
+}
+
+// Serve blocks accepting one connection from the master and processing
+// messages until the connection closes or Stop is called. Returns nil
+// on clean shutdown.
+func (s *Server) Serve(ctx context.Context) error {
+	if s.listener == nil {
+		return fmt.Errorf("vhost: Listen not called")
+	}
+	defer s.cleanup()
+
+	go func() {
+		<-ctx.Done()
+		s.Stop()
+	}()
+
+	conn, err := s.listener.AcceptUnix()
+	if err != nil {
+		select {
+		case <-s.stop:
+			return nil
+		default:
+			return fmt.Errorf("vhost: accept: %w", err)
+		}
+	}
+	s.logf("vhost: master connected on %s", s.socketPath)
+	defer conn.Close()
+
+	for {
+		select {
+		case <-s.stop:
+			return nil
+		default:
+		}
+		msg, err := ReadMessage(conn)
+		if err != nil {
+			s.logf("vhost: read: %v (master likely disconnected)", err)
+			return nil
+		}
+		if err := s.handle(conn, msg); err != nil {
+			s.logf("vhost: handle %s: %v", MsgName(msg.Header.Request), err)
+			closeFds(msg.Fds)
+			return err
+		}
+	}
+}
+
+// Stop terminates the serve loop and stops virtq workers.
+func (s *Server) Stop() {
+	s.stopOnce.Do(func() {
+		close(s.stop)
+		if s.listener != nil {
+			_ = s.listener.Close()
+		}
+		s.mu.Lock()
+		queues := s.queues
+		s.mu.Unlock()
+		for _, q := range queues {
+			if q != nil && q.stop != nil {
+				close(q.stop)
+				<-q.done
+			}
+		}
+	})
+}
+
+func (s *Server) cleanup() {
+	s.mu.Lock()
+	s.memTable.SetRegions(nil)
+	s.mu.Unlock()
+	_ = os.Remove(s.socketPath)
+}
+
+// handle dispatches one received message.
+func (s *Server) handle(conn *net.UnixConn, m *Message) error {
+	switch m.Header.Request {
+	case MsgGetFeatures:
+		return s.handleGetFeatures(conn, m)
+	case MsgSetFeatures:
+		return s.handleSetFeatures(conn, m)
+	case MsgGetProtocolFeatures:
+		return s.handleGetProtocolFeatures(conn, m)
+	case MsgSetProtocolFeatures:
+		return s.handleSetProtocolFeatures(conn, m)
+	case MsgSetOwner, MsgResetOwner:
+		// No payload, no reply required.
+		return nil
+	case MsgGetQueueNum:
+		return SendU64Reply(conn, m.Header.Request, NumQueues)
+	case MsgGetConfig:
+		return s.handleGetConfig(conn, m)
+	case MsgSetConfig:
+		// We don't honor SET_CONFIG; reply with empty payload if needed.
+		if m.NeedsReply() {
+			return SendReply(conn, m.Header.Request, nil)
+		}
+		return nil
+	case MsgSetMemTable:
+		return s.handleSetMemTable(conn, m)
+	case MsgSetVringNum:
+		return s.handleSetVringNum(m)
+	case MsgSetVringAddr:
+		return s.handleSetVringAddr(m)
+	case MsgSetVringBase:
+		return s.handleSetVringBase(m)
+	case MsgGetVringBase:
+		return s.handleGetVringBase(conn, m)
+	case MsgSetVringKick:
+		return s.handleSetVringKick(m)
+	case MsgSetVringCall:
+		return s.handleSetVringCall(m)
+	case MsgSetVringEnable:
+		return s.handleSetVringEnable(m)
+	case MsgGetMaxMemSlots:
+		return SendU64Reply(conn, m.Header.Request, MaxFds)
+	default:
+		s.logf("vhost: unhandled %s (size=%d fds=%d)",
+			MsgName(m.Header.Request), m.Header.Size, len(m.Fds))
+		closeFds(m.Fds)
+		if m.NeedsReply() {
+			return SendReply(conn, m.Header.Request, nil)
+		}
+		return nil
+	}
+}
+
+// VHOST_USER_F_PROTOCOL_FEATURES = bit 30 in vhost-user features.
+// VIRTIO_F_VERSION_1            = bit 32 in virtio features.
+// VIRTIO_BLK_F_RO               = bit 5
+// VIRTIO_BLK_F_FLUSH            = bit 9
+// VIRTIO_BLK_F_DISCARD          = bit 13
+const (
+	bitVhostProtocolFeatures = uint64(1) << 30
+	bitVirtioVersion1        = uint64(1) << 32
+	bitVirtioBlkRO           = uint64(1) << 5
+	bitVirtioBlkFlush        = uint64(1) << 9
+	bitVirtioBlkDiscard      = uint64(1) << 13
+)
+
+// VHOST_USER_PROTOCOL_F_MQ        = 0
+// VHOST_USER_PROTOCOL_F_CONFIG    = 9
+const (
+	bitProtocolMq     = uint64(1) << 0
+	bitProtocolConfig = uint64(1) << 9
+)
+
+func (s *Server) handleGetFeatures(conn *net.UnixConn, m *Message) error {
+	feats := bitVirtioVersion1 | bitVhostProtocolFeatures | bitVirtioBlkFlush
+	if s.backend.ReadOnly() {
+		feats |= bitVirtioBlkRO
+	}
+	return SendU64Reply(conn, m.Header.Request, feats)
+}
+
+func (s *Server) handleSetFeatures(conn *net.UnixConn, m *Message) error {
+	v, err := ParseU64(m.Payload)
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	s.features = v
+	s.mu.Unlock()
+	s.logf("vhost: SET_FEATURES = 0x%x", v)
+	return nil
+}
+
+func (s *Server) handleGetProtocolFeatures(conn *net.UnixConn, m *Message) error {
+	return SendU64Reply(conn, m.Header.Request, bitProtocolConfig)
+}
+
+func (s *Server) handleSetProtocolFeatures(conn *net.UnixConn, m *Message) error {
+	v, err := ParseU64(m.Payload)
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	s.protocolFeatures = v
+	s.mu.Unlock()
+	return nil
+}
+
+func (s *Server) handleGetConfig(conn *net.UnixConn, m *Message) error {
+	// Master sends [offset:u32, size:u32, flags:u32] + zero buf of size.
+	// We just return a virtio_blk_config of the requested size.
+	if len(m.Payload) < 12 {
+		return fmt.Errorf("vhost: GET_CONFIG payload too short: %d", len(m.Payload))
+	}
+	offset := binary.LittleEndian.Uint32(m.Payload[0:4])
+	size := binary.LittleEndian.Uint32(m.Payload[4:8])
+	flags := binary.LittleEndian.Uint32(m.Payload[8:12])
+	_ = offset
+	_ = flags
+
+	cfg := BlkConfig{
+		Capacity:  uint64(s.backend.Size()) / SectorSize,
+		SizeMax:   MaxBlockSizeBytes,
+		SegMax:    MaxSegments,
+		BlkSize:   SectorSize,
+		NumQueues: NumQueues,
+	}
+	full := cfg.Marshal()
+	// Reply must echo the request header (offset/size/flags) followed
+	// by the config bytes of size `size`.
+	out := make([]byte, 12+int(size))
+	copy(out[0:12], m.Payload[0:12])
+	if int(size) > len(full) {
+		size = uint32(len(full))
+	}
+	copy(out[12:12+size], full[:size])
+	return SendReply(conn, m.Header.Request, out)
+}
+
+func (s *Server) handleSetMemTable(_ *net.UnixConn, m *Message) error {
+	regs, err := ParseSetMemTable(m.Payload, m.Fds)
+	if err != nil {
+		closeFds(m.Fds)
+		return err
+	}
+	if s.memfdInode == 0 || len(s.memfdSlab) == 0 {
+		closeFds(m.Fds)
+		return fmt.Errorf("vhost: SET_MEM_TABLE arrived but SetMemfd was not called " +
+			"(unified-memfd invariant requires sandbox-ctl to pre-allocate the slab)")
+	}
+	if err := BindRegions(regs, m.Fds, s.memfdInode, s.memfdSlab); err != nil {
+		closeFds(m.Fds)
+		return err
+	}
+	// fds can be closed now; the backend never opens its own mmap.
+	closeFds(m.Fds)
+
+	s.mu.Lock()
+	s.memTable.SetRegions(regs)
+	s.mu.Unlock()
+	s.logf("vhost: SET_MEM_TABLE accepted %d regions (inode-match)", len(regs))
+	return nil
+}
+
+// queueIdx parses the 4-byte payload prefix used by all SET_VRING_*
+// messages: [u32 idx | flags-or-fd-marker | ... data].
+func queueIdx(payload []byte) (int, error) {
+	if len(payload) < 4 {
+		return 0, fmt.Errorf("vhost: vring payload too short: %d", len(payload))
+	}
+	idx := binary.LittleEndian.Uint32(payload[0:4])
+	if idx >= NumQueues {
+		return 0, fmt.Errorf("vhost: queue idx %d out of range (max %d)", idx, NumQueues)
+	}
+	return int(idx), nil
+}
+
+func (s *Server) ensureQueue(idx int) *virtq {
+	if s.queues[idx] == nil {
+		s.queues[idx] = &virtq{kickFd: -1, callFd: -1}
+	}
+	return s.queues[idx]
+}
+
+func (s *Server) handleSetVringNum(m *Message) error {
+	if len(m.Payload) < 8 {
+		return fmt.Errorf("SET_VRING_NUM payload too short")
+	}
+	idx, err := queueIdx(m.Payload)
+	if err != nil {
+		return err
+	}
+	num := binary.LittleEndian.Uint32(m.Payload[4:8])
+	s.mu.Lock()
+	q := s.ensureQueue(idx)
+	q.num = num
+	s.mu.Unlock()
+	return nil
+}
+
+func (s *Server) handleSetVringAddr(m *Message) error {
+	// Payload: u32 idx, u32 flags, u64 desc, u64 used, u64 avail, u64 log
+	if len(m.Payload) < 40 {
+		return fmt.Errorf("SET_VRING_ADDR payload too short: %d", len(m.Payload))
+	}
+	idx := binary.LittleEndian.Uint32(m.Payload[0:4])
+	desc := binary.LittleEndian.Uint64(m.Payload[8:16])
+	used := binary.LittleEndian.Uint64(m.Payload[16:24])
+	avail := binary.LittleEndian.Uint64(m.Payload[24:32])
+	if idx >= NumQueues {
+		return fmt.Errorf("vhost: SET_VRING_ADDR idx %d", idx)
+	}
+	s.mu.Lock()
+	q := s.ensureQueue(int(idx))
+	q.descAddr = desc
+	q.availAddr = avail
+	q.usedAddr = used
+	s.mu.Unlock()
+	return nil
+}
+
+func (s *Server) handleSetVringBase(m *Message) error {
+	if len(m.Payload) < 8 {
+		return fmt.Errorf("SET_VRING_BASE payload too short")
+	}
+	idx, err := queueIdx(m.Payload)
+	if err != nil {
+		return err
+	}
+	base := binary.LittleEndian.Uint16(m.Payload[4:6])
+	s.mu.Lock()
+	q := s.ensureQueue(idx)
+	q.baseIdx = base
+	s.mu.Unlock()
+	return nil
+}
+
+func (s *Server) handleGetVringBase(conn *net.UnixConn, m *Message) error {
+	idx, err := queueIdx(m.Payload)
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	q := s.ensureQueue(idx)
+	base := q.baseIdx
+	q.enabled = false
+	s.mu.Unlock()
+	// Stop the worker if running.
+	if q.stop != nil {
+		close(q.stop)
+		<-q.done
+		q.stop = nil
+	}
+	out := make([]byte, 8)
+	binary.LittleEndian.PutUint32(out[0:4], uint32(idx))
+	binary.LittleEndian.PutUint32(out[4:8], uint32(base))
+	return SendReply(conn, m.Header.Request, out)
+}
+
+// fdMarker says "idx implicit, no fd" if bit 8 set; otherwise an fd is attached.
+const noFdMarker = 1 << 8
+
+func (s *Server) handleSetVringKick(m *Message) error {
+	if len(m.Payload) < 4 {
+		return fmt.Errorf("SET_VRING_KICK payload too short")
+	}
+	idx := int(binary.LittleEndian.Uint32(m.Payload[0:4]) & 0xff)
+	if idx >= NumQueues {
+		closeFds(m.Fds)
+		return fmt.Errorf("vhost: SET_VRING_KICK idx %d", idx)
+	}
+	if len(m.Fds) != 1 {
+		closeFds(m.Fds)
+		return fmt.Errorf("SET_VRING_KICK expects 1 fd, got %d", len(m.Fds))
+	}
+	s.mu.Lock()
+	q := s.ensureQueue(idx)
+	if q.kickFd >= 0 {
+		_ = syscall.Close(q.kickFd)
+	}
+	q.kickFd = m.Fds[0]
+	s.mu.Unlock()
+	s.maybeStartWorker(idx)
+	return nil
+}
+
+func (s *Server) handleSetVringCall(m *Message) error {
+	if len(m.Payload) < 4 {
+		return fmt.Errorf("SET_VRING_CALL payload too short")
+	}
+	idx := int(binary.LittleEndian.Uint32(m.Payload[0:4]) & 0xff)
+	if idx >= NumQueues {
+		closeFds(m.Fds)
+		return fmt.Errorf("vhost: SET_VRING_CALL idx %d", idx)
+	}
+	if len(m.Fds) != 1 {
+		closeFds(m.Fds)
+		return fmt.Errorf("SET_VRING_CALL expects 1 fd, got %d", len(m.Fds))
+	}
+	s.mu.Lock()
+	q := s.ensureQueue(idx)
+	if q.callFd >= 0 {
+		_ = syscall.Close(q.callFd)
+	}
+	q.callFd = m.Fds[0]
+	s.mu.Unlock()
+	return nil
+}
+
+func (s *Server) handleSetVringEnable(m *Message) error {
+	if len(m.Payload) < 8 {
+		return fmt.Errorf("SET_VRING_ENABLE payload too short")
+	}
+	idx, err := queueIdx(m.Payload)
+	if err != nil {
+		return err
+	}
+	enabled := binary.LittleEndian.Uint32(m.Payload[4:8]) == 1
+	s.mu.Lock()
+	q := s.ensureQueue(idx)
+	q.enabled = enabled
+	s.mu.Unlock()
+	if enabled {
+		s.maybeStartWorker(idx)
+	}
+	return nil
+}
+
+// maybeStartWorker spawns the virtq worker once kick + call + addr are
+// all set. Idempotent: only starts once per queue (guarded by stop chan).
+func (s *Server) maybeStartWorker(idx int) {
+	s.mu.Lock()
+	q := s.queues[idx]
+	if q == nil || q.kickFd < 0 || q.callFd < 0 || q.descAddr == 0 || q.stop != nil {
+		s.mu.Unlock()
+		return
+	}
+	q.stop = make(chan struct{})
+	q.done = make(chan struct{})
+	s.mu.Unlock()
+	go s.runWorker(idx, q)
+	s.logf("vhost: started worker for queue %d", idx)
+}
