@@ -15,30 +15,42 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// VAReportServer accepts a single CH-side va_report message + the uffd
-// fd attached via SCM_RIGHTS, registers ProcessCH in the AddressMap,
-// and signals OnReady (if non-nil) with the uffd fd for handler
-// construction. After ack, CH proceeds to vCPU run.
-//
-// Only one va_report is expected per sandbox lifecycle (single zone).
+// VAReportServer accepts CH-side va_report messages plus the uffd fd
+// attached via SCM_RIGHTS. CH calls into this socket once per memory
+// region; on x86_64 a zone larger than 3 GiB is split across the PCI
+// hole into two regions, producing two reports. The first report
+// triggers OnReady (which constructs the uffd handler); subsequent
+// reports trigger OnRegister (which adds the new uffd to the existing
+// handler). Each registration appends a vma to the AddressMap with
+// the appropriate memfdOffset (assumed to start at 0 and accumulate
+// in arrival order — CH iterates regions by GPA, which equals memfd
+// offset order on x86 because the inode is contiguous and the GPA
+// PCI hole only affects how regions are mapped into guest, not the
+// underlying memfd layout).
 type VAReportServer struct {
 	Path    string
 	AddrMap *AddressMap
 	Logf    func(string, ...any)
 
-	// OnReady is invoked synchronously inside handle() right before
-	// sending ack. The handler should adopt the uffd fd (the server
-	// passes ownership) and start its goroutines. Returning an error
-	// causes the va_report to be NAK'd and the fd closed.
-	//
-	// Typical impl: construct uffd.Handler via NewFromFD and Start().
+	// OnReady is invoked synchronously on the FIRST va_report. The
+	// handler should adopt the uffd fd (the server passes ownership)
+	// and start its goroutines. Returning an error causes the
+	// va_report to be NAK'd and the fd closed.
 	OnReady func(uffdFD int, vaStart, size uint64) error
 
-	listener   *net.UnixListener
-	acceptedMu sync.Mutex
-	accepted   bool
-	stopOnce   sync.Once
-	stopped    chan struct{}
+	// OnRegister is invoked synchronously on each SUBSEQUENT va_report.
+	// The handler should adopt the new uffd fd (also passed by
+	// ownership) and add it to its epoll set. Returning an error NAKs.
+	// May be left nil; in that case any second va_report is rejected
+	// (single-region mode).
+	OnRegister func(uffdFD int, vaStart, size uint64) error
+
+	listener         *net.UnixListener
+	mu               sync.Mutex
+	regionsRegistered int    // count of va_report messages handled successfully
+	nextMemfdOffset  uint64 // accumulator: each new region's memfd offset
+	stopOnce         sync.Once
+	stopped          chan struct{}
 }
 
 // Listen binds the UDS socket. Must be called before CH spawns; CH's
@@ -142,36 +154,49 @@ func (s *VAReportServer) handle(conn *net.UnixConn) {
 		return
 	}
 
-	s.acceptedMu.Lock()
-	if s.accepted {
-		s.acceptedMu.Unlock()
-		s.Logf("vareport: duplicate report (zone=%s)", req.ZoneID)
-		_ = writeLPJSON(conn, ackMsg{Type: "error", Msg: "duplicate va_report"})
+	s.mu.Lock()
+	regionIdx := s.regionsRegistered
+	memfdOffset := s.nextMemfdOffset
+	if regionIdx > 0 && s.OnRegister == nil {
+		s.mu.Unlock()
+		s.Logf("vareport: extra report (zone=%s, region #%d) but OnRegister not set — single-region mode",
+			req.ZoneID, regionIdx)
+		_ = writeLPJSON(conn, ackMsg{Type: "error", Msg: "multi-region not supported by handler"})
 		return
 	}
-	if err := s.AddrMap.RegisterVMA(ProcessCH, req.VAStart, req.Size); err != nil {
-		s.acceptedMu.Unlock()
+	if err := s.AddrMap.RegisterVMA(ProcessCH, req.VAStart, req.Size, memfdOffset); err != nil {
+		s.mu.Unlock()
 		s.Logf("vareport: register vma failed: %v", err)
 		_ = writeLPJSON(conn, ackMsg{Type: "error", Msg: err.Error()})
 		return
 	}
 	uffdFD := fds[0]
-	if s.OnReady != nil {
-		if err := s.OnReady(uffdFD, req.VAStart, req.Size); err != nil {
-			s.acceptedMu.Unlock()
-			s.Logf("vareport: OnReady failed: %v", err)
+	if regionIdx == 0 {
+		if s.OnReady != nil {
+			if err := s.OnReady(uffdFD, req.VAStart, req.Size); err != nil {
+				s.mu.Unlock()
+				s.Logf("vareport: OnReady failed: %v", err)
+				_ = writeLPJSON(conn, ackMsg{Type: "error", Msg: err.Error()})
+				return
+			}
+		}
+	} else {
+		if err := s.OnRegister(uffdFD, req.VAStart, req.Size); err != nil {
+			s.mu.Unlock()
+			s.Logf("vareport: OnRegister failed: %v", err)
 			_ = writeLPJSON(conn, ackMsg{Type: "error", Msg: err.Error()})
 			return
 		}
-		// OnReady took ownership of uffdFD; remove from fds slice so
-		// the deferred closeAll doesn't double-close.
-		fds[0] = -1
 	}
-	s.accepted = true
-	s.acceptedMu.Unlock()
+	// Callback took ownership of uffdFD; remove from fds slice so
+	// the deferred closeAll doesn't double-close.
+	fds[0] = -1
+	s.regionsRegistered++
+	s.nextMemfdOffset += req.Size
+	s.mu.Unlock()
 
-	s.Logf("vareport: accepted zone=%s va=0x%x size=%d uffd_fd=%d",
-		req.ZoneID, req.VAStart, req.Size, uffdFD)
+	s.Logf("vareport: accepted region #%d zone=%s va=0x%x size=%d memfd_off=0x%x uffd_fd=%d",
+		regionIdx, req.ZoneID, req.VAStart, req.Size, memfdOffset, uffdFD)
 	if err := writeLPJSON(conn, ackMsg{Type: "ack"}); err != nil {
 		s.Logf("vareport: write ack: %v", err)
 	}

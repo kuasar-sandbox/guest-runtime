@@ -7,8 +7,10 @@ import (
 	"io"
 	"os"
 	"runtime"
+	"sort"
 	"sync"
 	"sync/atomic"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/unix"
@@ -35,10 +37,13 @@ type Config struct {
 	// Underlying memfd fd (for pread on the rare Loaded fault path).
 	MemfdFD int
 
-	// Sandbox-ctl-side mmap of the memfd. Used as the target for
-	// reciprocal madvise(DONTNEED) on EVENT_REMOVE, and as the VMA
-	// uffd_A registers MISSING on (so backend first-touch on
-	// backendVA also routes through the handler — see §11).
+	// Sandbox-ctl-side mmap of the memfd. Single-uffd model: backendVA
+	// is NOT registered with uffd; the handler only references it as
+	// the target of process-level madvise(DONTNEED) on EVENT_REMOVE,
+	// to clear sandbox-ctl's own PTE/RSS share of pages CH reclaimed
+	// at the inode via fallocate(PUNCH_HOLE) in its balloon path.
+	// Backend first-touch (vhost-blk DMA, snapshot copy) goes through
+	// plain shmem fileops with no uffd round-trip.
 	BackendVA uintptr
 	Size      int
 
@@ -53,50 +58,106 @@ type Config struct {
 	Logf func(string, ...any)
 }
 
-// Handler manages two userfaultfds:
-//   - uffdA: created in this (sandbox-ctl) process, registered
-//     MISSING on BackendVA. Catches first-touch from backend code
-//     paths (e.g. vhost-user-blk reading/writing guest buffers).
+// Handler manages a single userfaultfd:
 //   - uffdC: created in CH's process, registered MISSING on chVA,
-//     handed to us via SCM_RIGHTS in the va_report handshake.
-//     Catches first-touch from vCPU.
+//     handed to sandbox-ctl via SCM_RIGHTS in the va_report handshake.
+//     Catches first-touch from vCPU. The backendVA mmap that
+//     sandbox-ctl holds for the same memfd is left WITHOUT any uffd
+//     registration; kernel handles backend-mm faults via plain shmem
+//     fileops.
 //
-// Both fd's events feed the same fault-resolution logic. EEXIST race
-// recovery via UFFDIO_WAKE (then kernel auto-installs PTE on retry,
-// since MINOR is not registered).
+// Single-uffd correctness rests on EEXIST + UFFDIO_WAKE recovery, not
+// on a vhost-side touch-before-publish invariant:
+//
+//   - vhost-blk write path: Linux virtio_blk routinely places newly
+//     allocated, never-touched page-cache pages into the request's
+//     writable descriptors. Their GPAs translate to backendVA pages
+//     that are still in state Absent; the backend memcpy creates a
+//     folio on the shared shmem inode through plain shmem fileops.
+//
+//   - vCPU read on the same page later faults via uffdC. handleFault
+//     attempts UFFDIO_ZEROPAGE / UFFDIO_COPY; the kernel returns
+//     EEXIST because the folio already exists. The handler issues
+//     UFFDIO_WAKE; on retry the kernel installs the chVA PTE pointing
+//     at the backend-written folio (MISSING-only registration, the
+//     folio-found path bypasses uffd). Guest sees the disk data.
+//
+//   - Page state is set to Loaded after the EEXIST → WAKE recovery so
+//     subsequent faults short-circuit; ZEROPAGE counters reflect the
+//     attempted install, not the actual content (folio carries the
+//     backend bytes).
+//
+// EAGAIN on UFFDIO_ZEROPAGE/COPY signals partial-folio overlap within
+// a multi-page batch (kernel can't install some pages because folios
+// already exist for them). Treated as a soft error: counter bump,
+// return without state.Set; the next fault on the same VA re-enters
+// with a smaller batch and converges.
 //
 // 5.10+ kernel compatible — no MINOR_SHMEM / UFFDIO_CONTINUE required.
 type Handler struct {
 	cfg Config
 
-	uffdC       *os.File // CH-mm uffd, owns the inherited fd
-	addrMap     *AddressMap
-	state       *PageStateMap
-	overrideMap *OverrideMap // backend-supplied bytes pending fault-time install
+	// uffds holds the CH-mm uffd fds; on x86_64 a zone larger than
+	// 3 GiB is split into low + high regions and CH sends one uffd
+	// per region via successive va_report messages. Each fd is
+	// MISSING-registered on its own chVA range. Fault events from
+	// any of them feed the same handleFault logic; the addrMap
+	// translates the per-region chVA to the unified memfd offset.
+	uffds   []*os.File
+	uffdsMu sync.Mutex
+
+	addrMap *AddressMap
+	state   *PageStateMap
 
 	epfd int
 
-	logf  func(string, ...any)
-	stop  chan struct{}
-	wg    sync.WaitGroup
-	queue []chan faultEvent
+	// removeQ holds in-flight EVENT_REMOVE / EVENT_UNMAP requests.
+	// dispatch() pushes onto this channel non-blocking, and a single
+	// flusher goroutine merges contiguous ranges into one
+	// madvise(DONTNEED) on backendVA per merged run instead of issuing
+	// a syscall per event on the reader path. Decouples the reader
+	// from the (potentially thousands per second) free_page_reporting
+	// storm CH delivers during cold-start — without this, reader gets
+	// stuck issuing madvise back-to-back and page-fault events queue
+	// up behind it, stalling the vCPU.
+	removeQ chan removeReq
+
+	logf       func(string, ...any)
+	stop       chan struct{}
+	readerDone chan struct{} // closed when runReader exits — Close() waits on this before signalling stop, so the flusher's drain pass sees no further pushes
+	closeOnce  sync.Once
+	wg         sync.WaitGroup
+	queue      []chan faultEvent
 
 	stats handlerStats
 }
 
+// removeReq carries a coalesce-able EVENT_REMOVE notification. The
+// flusher sorts by memfd offset and merges contiguous ranges before
+// calling fallocate(PUNCH_HOLE).
+type removeReq struct {
+	memfdOffset uint64
+	length      uint64
+}
+
 type handlerStats struct {
-	faultsAbsent   atomic.Uint64
-	faultsReleased atomic.Uint64
-	zeropages      atomic.Uint64 // count of UFFDIO_ZEROPAGE calls
-	copies         atomic.Uint64 // count of UFFDIO_COPY calls
-	pagesZeroed    atomic.Uint64 // total pages installed via ZEROPAGE
-	pagesCopied    atomic.Uint64 // total pages installed via COPY
-	wakes          atomic.Uint64
-	removeEvents   atomic.Uint64
-	errors         atomic.Uint64
-	batchPagesSum  atomic.Uint64 // sum of run lengths (for avg calc)
-	batchCalls     atomic.Uint64 // count of batches (avg = sum/calls)
-	batchMaxPages  atomic.Uint64 // largest single batch observed
+	faultsAbsent    atomic.Uint64
+	faultsReleased  atomic.Uint64
+	zeropages       atomic.Uint64 // count of UFFDIO_ZEROPAGE calls
+	copies          atomic.Uint64 // count of UFFDIO_COPY calls
+	pagesZeroed     atomic.Uint64 // total pages installed via ZEROPAGE
+	pagesCopied     atomic.Uint64 // total pages installed via COPY
+	wakes           atomic.Uint64
+	removeEvents    atomic.Uint64
+	errors          atomic.Uint64
+	batchPagesSum   atomic.Uint64 // sum of run lengths (for avg calc)
+	batchCalls      atomic.Uint64 // count of batches (avg = sum/calls)
+	batchMaxPages   atomic.Uint64 // largest single batch observed
+	madviseCalls       atomic.Uint64 // madvise(DONTNEED) syscalls issued on backendVA
+	madviseBytes       atomic.Uint64 // total bytes advised DONTNEED
+	removeQDropped     atomic.Uint64 // events that fell back to sync flush (queue full)
+	removeEventsBatched atomic.Uint64 // events that went through the batch path (avg events/syscall = removeEventsBatched / madviseCalls)
+	backendLookupMiss  atomic.Uint64 // EVENT_REMOVE with no backend VMA covering the offset (registration bug)
 }
 
 type faultEvent struct {
@@ -105,29 +166,20 @@ type faultEvent struct {
 	uffdFD  int // which uffd this came from — determines ioctl target fd
 }
 
-// NewWithBackendUffd constructs the dual-uffd handler. The CH-side
+// NewWithBackendUffd constructs the single-uffd handler. The CH-side
 // uffd (uffdCFromCH) is provided by the va_report OnReady callback;
-// this constructor creates uffdA in the current process.
+// only this fd is registered MISSING on chVA. The backendVA mmap that
+// sandbox-ctl holds for the same memfd has no uffd attached — see the
+// Handler comment block above for the protocol-level safety argument.
 //
 // Steps:
-//  1. userfaultfd() in sandbox-ctl mm
-//  2. UFFDIO_API with MISSING_SHMEM | EVENT_REMOVE | EVENT_UNMAP | THREAD_ID
-//  3. UFFDIO_REGISTER MISSING on [BackendVA, +Size)
-//  4. epoll_create1 → add uffdA + uffdC
-//  5. AddressMap registers ProcessBackend (this constructor) and
-//     ProcessCH (caller did before calling us)
-//  6. Page state initialized to all-Absent
+//  1. epoll_create1 → add uffdC
+//  2. AddressMap registers ProcessCH (caller did before calling us);
+//     ProcessBackend is registered separately by the caller for the
+//     mmap whose VA range AssertLoaded validates against.
+//  3. Page state initialized to all-Absent
 //
 // Start the goroutines via Start(); stop via Close().
-//
-// Single-uffd architecture: only uffdC (CH-side) is registered. The
-// backendVA mmap that sandbox-ctl holds is left WITHOUT a userfaultfd —
-// kernel handles backend-mm faults directly via shmem fileops. Since
-// vhost backends never directly mutate a folio that the handler hasn't
-// already created (they go through Handler.WritePage which routes
-// through pwrite for Loaded pages and OverrideMap for Absent pages),
-// the cross-mm folio-creation race that produced the WSL2 wake loop
-// in dual-uffd mode cannot trigger.
 func NewWithBackendUffd(uffdCFromCH int, addrMap *AddressMap, cfg Config) (*Handler, error) {
 	if uffdCFromCH <= 0 {
 		return nil, fmt.Errorf("uffd: uffdCFromCH invalid")
@@ -175,16 +227,43 @@ func NewWithBackendUffd(uffdCFromCH int, addrMap *AddressMap, cfg Config) (*Hand
 	}
 
 	return &Handler{
-		cfg:         cfg,
-		uffdC:       os.NewFile(uintptr(uffdCFromCH), "uffd_C_chVA"),
-		addrMap:     addrMap,
-		state:       state,
-		overrideMap: NewOverrideMap(),
-		epfd:        epfd,
-		logf:        logf,
-		stop:        make(chan struct{}),
-		queue:       queues,
+		cfg:        cfg,
+		uffds:      []*os.File{os.NewFile(uintptr(uffdCFromCH), "uffd_C_chVA_region0")},
+		addrMap:    addrMap,
+		state:      state,
+		epfd:       epfd,
+		removeQ:    make(chan removeReq, 4096),
+		logf:       logf,
+		stop:       make(chan struct{}),
+		readerDone: make(chan struct{}),
+		queue:      queues,
 	}, nil
+}
+
+// AddUffd attaches an additional CH-side uffd fd to an already-running
+// handler. Used when CH issues per-region va_reports for a zone split
+// across the x86 PCI hole: the first va_report drove NewWithBackendUffd
+// and Start(); subsequent va_reports call this. Takes ownership of the
+// fd (closes it on handler shutdown).
+//
+// Safe to call concurrently with the reader goroutine — the new fd is
+// added to the same epoll set, and runReader picks events off any
+// ready fd without caring how many fds exist.
+func (h *Handler) AddUffd(uffdFD int) error {
+	if uffdFD <= 0 {
+		return fmt.Errorf("uffd: AddUffd fd=%d invalid", uffdFD)
+	}
+	h.uffdsMu.Lock()
+	defer h.uffdsMu.Unlock()
+	idx := len(h.uffds)
+	ev := unix.EpollEvent{Events: unix.EPOLLIN, Fd: int32(uffdFD)}
+	if err := unix.EpollCtl(h.epfd, unix.EPOLL_CTL_ADD, uffdFD, &ev); err != nil {
+		return fmt.Errorf("uffd: epoll_ctl ADD fd=%d: %w", uffdFD, err)
+	}
+	name := fmt.Sprintf("uffd_C_chVA_region%d", idx)
+	h.uffds = append(h.uffds, os.NewFile(uintptr(uffdFD), name))
+	h.logf("uffd: attached additional region uffd fd=%d (region #%d)", uffdFD, idx)
+	return nil
 }
 
 // AddressMap exposes the map for the va_report server to register
@@ -192,54 +271,6 @@ func NewWithBackendUffd(uffdCFromCH int, addrMap *AddressMap, cfg Config) (*Hand
 // so the handler can translate ev.address → memfd offset).
 func (h *Handler) AddressMap() *AddressMap { return h.addrMap }
 
-// WritePage routes one page worth of backend-supplied data into the
-// memfd. It is the only sanctioned way for vhost backends to update
-// guest memory in the single-uffd architecture; bypassing this and
-// pwrite-ing memfd directly creates folios outside the handler and
-// re-introduces the EEXIST / wake-loop race on uffdC.
-//
-// memfdOffset must be page-aligned. data length must be ≤ PageSize;
-// callers split larger writes across pages.
-//
-//	state == Loaded:
-//	    Handler has already created folio + PTE for chVA[N] via
-//	    UFFDIO_COPY/ZEROPAGE. CH's PTE points to that folio. pwrite
-//	    on memfd updates folio bytes; CH sees the new bytes on next
-//	    read with no further fault.
-//
-//	state ∈ {Absent, Released}:
-//	    Folio does not yet exist. Buffer the data in OverrideMap;
-//	    handler.handleFault consumes it on the next uffdC fault for
-//	    this page and resolves via UFFDIO_COPY (atomic folio + PTE).
-//
-// Safe for concurrent calls from many vhost workers.
-func (h *Handler) WritePage(memfdOffset uint64, data []byte) error {
-	if memfdOffset%PageSize != 0 {
-		return fmt.Errorf("uffd: WritePage offset 0x%x not page-aligned", memfdOffset)
-	}
-	if uint64(len(data)) > PageSize {
-		return fmt.Errorf("uffd: WritePage data %d > PageSize", len(data))
-	}
-	pageIdx := memfdOffset / PageSize
-	if pageIdx >= uint64(h.state.Len()) {
-		return fmt.Errorf("uffd: WritePage offset 0x%x past memfd size", memfdOffset)
-	}
-	if h.state.Get(pageIdx) == StateLoaded {
-		// Folio + PTE for chVA already installed by handler. pwrite
-		// the bytes; kernel updates the folio in place.
-		_, err := unix.Pwrite(h.cfg.MemfdFD, data, int64(memfdOffset))
-		if err != nil {
-			return fmt.Errorf("uffd: pwrite memfd offset 0x%x: %w", memfdOffset, err)
-		}
-		return nil
-	}
-	// Absent / Released: queue for handler.handleFault to install
-	// when CH next touches this page.
-	buf := make([]byte, PageSize)
-	copy(buf, data)
-	h.overrideMap.Set(pageIdx, buf)
-	return nil
-}
 
 // Start spawns the reader and worker goroutines.
 func (h *Handler) Start() {
@@ -249,28 +280,54 @@ func (h *Handler) Start() {
 		h.wg.Add(1)
 		go h.runWorker(i)
 	}
+	h.wg.Add(1)
+	go h.runRemoveFlusher()
 }
 
-// Close stops the reader+workers and closes uffdC + epfd.
+// Close stops the reader+workers+flusher and closes all uffd fds +
+// epfd. Idempotent.
+//
+// Ordering matters for the flusher's stop-time drain pass: we want
+// the flusher to see all in-flight EVENT_REMOVE pushes from the
+// reader before it drains-and-exits, otherwise residual events
+// stranded in removeQ would never be madvise'd.
+//
+//  1. close uffds + epfd → epoll_wait in reader returns error
+//     (EBADF) → reader breaks out of its loop and runs deferred
+//     close(readerDone). Reader cannot push more events after this.
+//  2. wait on readerDone — guarantees reader exited and flushed any
+//     final EVENT_REMOVE into removeQ.
+//  3. close(stop) → flusher's <-h.stop case fires, drains everything
+//     remaining in removeQ, issues final madvise, exits. Workers
+//     also unblock and exit.
+//  4. wg.Wait — collect reader+workers+flusher.
+//  5. close worker queues — safe now that workers have exited.
 func (h *Handler) Close() error {
-	select {
-	case <-h.stop:
-		return nil
-	default:
+	h.closeOnce.Do(func() {
+		// 1. break reader out of epoll_wait
+		h.uffdsMu.Lock()
+		for _, f := range h.uffds {
+			if f != nil {
+				_ = f.Close()
+			}
+		}
+		h.uffds = nil
+		h.uffdsMu.Unlock()
+		if h.epfd >= 0 {
+			_ = unix.Close(h.epfd)
+			h.epfd = -1
+		}
+		// 2. wait until reader has exited (no more pushes to removeQ)
+		<-h.readerDone
+		// 3. signal flusher + workers to exit; flusher drains removeQ
 		close(h.stop)
-	}
-	// Closing the uffd fd breaks epoll_wait blocked in reader.
-	if h.uffdC != nil {
-		_ = h.uffdC.Close()
-	}
-	if h.epfd >= 0 {
-		_ = unix.Close(h.epfd)
-		h.epfd = -1
-	}
-	h.wg.Wait()
-	for _, q := range h.queue {
-		close(q)
-	}
+		// 4. all goroutines should be finishing up now
+		h.wg.Wait()
+		// 5. close worker queues (workers already exited)
+		for _, q := range h.queue {
+			close(q)
+		}
+	})
 	return nil
 }
 
@@ -279,6 +336,7 @@ func (h *Handler) Close() error {
 // epoll reports ready, until EAGAIN, then wait again.
 func (h *Handler) runReader() {
 	defer h.wg.Done()
+	defer close(h.readerDone)
 	const msgSize = int(unsafe.Sizeof(uffdMsg{}))
 	buf := make([]byte, msgSize*16)
 	events := make([]unix.EpollEvent, 4)
@@ -365,52 +423,175 @@ func (h *Handler) dispatch(msg *uffdMsg, fromFD int) {
 	}
 }
 
+// handleRemove records a single EVENT_REMOVE: marks pages Released in
+// the state map (so subsequent faults see the right phase) and queues
+// a backendVA reclaim request on the flusher channel. The reader
+// returns immediately — the actual madvise(DONTNEED) on backendVA is
+// amortized across coalesced ranges by runRemoveFlusher.
+//
+// CH already does fallocate(PUNCH_HOLE) on the memfd inode in its
+// balloon free_page_reporting path; that drops the file-level pages.
+// We are responsible for the *process-level* reclaim on sandbox-ctl's
+// own backendVA mapping — without it, sandbox-ctl's PTE/RSS share of
+// each released page leaks for the lifetime of the sandbox.
+//
+// Queue full (rare; coalescer falls behind the reader): synchronously
+// madvise as a fallback so we don't lose the reclaim signal.
 func (h *Handler) handleRemove(startVA, endVA uint64, fromFD int) {
+	_ = fromFD
 	startOff, ok := h.addrMap.Locate(startVA)
 	if !ok {
 		h.logf("uffd: EVENT_REMOVE start 0x%x unknown", startVA)
 		return
 	}
-	endOff := startOff + (endVA - startVA)
+	length := endVA - startVA
+	endOff := startOff + length
 	startPage := startOff / PageSize
 	endPage := (endOff + PageSize - 1) / PageSize
 	h.state.SetRange(startPage, endPage, StateReleased)
 
-	// Reciprocal madvise(DONTNEED) on the OTHER side's VMA so the
-	// shmem inode page reference drops on both sides → kernel really
-	// frees the physical page. Pick the opposite VMA from where the
-	// EVENT_REMOVE came.
-	var otherProcess ProcessKind
-	if fromFD == int(h.uffdC.Fd()) {
-		otherProcess = ProcessBackend
-	} else {
-		otherProcess = ProcessCH
+	select {
+	case h.removeQ <- removeReq{memfdOffset: startOff, length: length}:
+	default:
+		h.stats.removeQDropped.Add(1)
+		h.madviseBackend(startOff, length)
 	}
-	otherVMAStart, ok := h.addrMap.VMAStart(otherProcess)
-	if !ok {
-		return
-	}
-	if otherProcess == ProcessBackend {
-		// We can madvise our own backend mm directly.
-		addr := otherVMAStart + startOff
-		length := uintptr(endPage-startPage) * PageSize
-		if length == 0 {
+}
+
+// madviseBackend resolves backendVA for [memfdOffset, +length) and
+// issues madvise(DONTNEED). Loops over BackendVAFor in case the range
+// straddles backend VMA boundaries (today backend is registered as a
+// single full-memfd VMA so the loop runs once; future multi-region
+// backend mappings would otherwise lose tail bytes silently — that's
+// the failure mode this loop guards against).
+//
+// On lookup miss (no backend VMA covers the offset, which means the
+// AddressMap is missing a registration the design requires) the call
+// is dropped with a log line and a counter bump so the regression is
+// visible in stats. Failure to madvise increments the error counter.
+func (h *Handler) madviseBackend(memfdOffset, length uint64) {
+	for length > 0 {
+		backendVA, mapped, ok := h.addrMap.BackendVAFor(memfdOffset, length)
+		if !ok {
+			h.logf("uffd: EVENT_REMOVE backendVA miss off=0x%x remaining=%d",
+				memfdOffset, length)
+			h.stats.backendLookupMiss.Add(1)
 			return
 		}
-		_, _, errno := unix.Syscall(unix.SYS_MADVISE,
-			uintptr(addr), length, uintptr(unix.MADV_DONTNEED))
-		if errno != 0 {
-			h.logf("uffd: madvise DONTNEED backendVA 0x%x len=%d failed: %v",
-				addr, length, errno)
+		if mapped == 0 {
+			// Defensive: BackendVAFor returned ok with zero length
+			// (would be a bug). Avoid an infinite loop.
+			h.logf("uffd: BackendVAFor returned zero mapped for off=0x%x len=%d",
+				memfdOffset, length)
+			return
+		}
+		if err := madviseDontneedRange(uintptr(backendVA), uintptr(mapped)); err != nil {
+			h.logf("uffd: madvise(DONTNEED) backendVA=0x%x len=%d: %v",
+				backendVA, mapped, err)
 			h.stats.errors.Add(1)
+			return
+		}
+		h.stats.madviseCalls.Add(1)
+		h.stats.madviseBytes.Add(mapped)
+		memfdOffset += mapped
+		length -= mapped
+	}
+}
+
+// runRemoveFlusher drains removeQ and amortizes madvise(DONTNEED) on
+// backendVA across coalesced ranges. Triggers on either: (1) queue
+// depth ≥ maxBatch (default 64 events), or (2) flushInterval since
+// first pending event (default 10 ms). On stop, flushes remaining
+// pending events and exits.
+//
+// Per-syscall cost of madvise(DONTNEED) on MAP_SHARED is small (just
+// zap_pte_range over the calling process's PTEs), but reader contention
+// at 5k+ events/s would still starve PAGEFAULT dispatch — the channel
+// indirection keeps reader's hot path in O(decode + chan-send).
+func (h *Handler) runRemoveFlusher() {
+	defer h.wg.Done()
+	const flushInterval = 10 * time.Millisecond
+	const maxBatch = 64
+
+	pending := make([]removeReq, 0, maxBatch)
+	timer := time.NewTimer(flushInterval)
+	if !timer.Stop() {
+		<-timer.C
+	}
+	timerArmed := false
+
+	flush := func() {
+		if len(pending) == 0 {
+			return
+		}
+		// Sort by memfdOffset and merge contiguous ranges so we issue
+		// one madvise per merged run instead of one per event.
+		sort.Slice(pending, func(i, j int) bool {
+			return pending[i].memfdOffset < pending[j].memfdOffset
+		})
+		merged := pending[:0:cap(pending)]
+		cur := pending[0]
+		for _, r := range pending[1:] {
+			if r.memfdOffset == cur.memfdOffset+cur.length {
+				cur.length += r.length
+			} else if r.memfdOffset < cur.memfdOffset+cur.length {
+				// overlap — extend cur to cover both
+				end := r.memfdOffset + r.length
+				if end > cur.memfdOffset+cur.length {
+					cur.length = end - cur.memfdOffset
+				}
+			} else {
+				merged = append(merged, cur)
+				cur = r
+			}
+		}
+		merged = append(merged, cur)
+
+		flushedEvents := uint64(len(pending))
+		for _, r := range merged {
+			h.madviseBackend(r.memfdOffset, r.length)
+		}
+		h.stats.removeEventsBatched.Add(flushedEvents)
+		pending = pending[:0]
+	}
+
+	for {
+		select {
+		case <-h.stop:
+			// Drain anything left in the channel before exiting so the
+			// reclaim signal isn't lost on shutdown.
+			for {
+				select {
+				case req := <-h.removeQ:
+					pending = append(pending, req)
+				default:
+					flush()
+					return
+				}
+			}
+		case req, ok := <-h.removeQ:
+			if !ok {
+				flush()
+				return
+			}
+			pending = append(pending, req)
+			if len(pending) >= maxBatch {
+				if timerArmed {
+					if !timer.Stop() {
+						<-timer.C
+					}
+					timerArmed = false
+				}
+				flush()
+			} else if !timerArmed {
+				timer.Reset(flushInterval)
+				timerArmed = true
+			}
+		case <-timer.C:
+			timerArmed = false
+			flush()
 		}
 	}
-	// If the EVENT_REMOVE came from uffdA (sandbox-ctl side), the
-	// reciprocal would be madvise on chVA in CH's mm — we can't do
-	// that from here. CH itself doesn't issue DONTNEED on its own
-	// VMA when sandbox-ctl side does, so this case is mostly dormant
-	// (sandbox-ctl never madvises backendVA on its own initiative).
-	// Left as a note; not exercised in P1.5/P2/P3 paths.
 }
 
 func (h *Handler) runWorker(idx int) {
@@ -494,32 +675,6 @@ func (h *Handler) handleFault(ev faultEvent, pageBuf []byte) {
 	case StateAbsent:
 		h.stats.faultsAbsent.Add(1)
 
-		// Backend may have queued a per-page override (vhost-blk
-		// read response, snapshot data) for this page. Override
-		// takes precedence over the source — handle one page at a
-		// time and leave run-batching to subsequent faults.
-		if data, ok := h.overrideMap.Pop(pageIdx); ok {
-			copy(pageBuf[:PageSize], data)
-			src := uint64(uintptr(unsafe.Pointer(&pageBuf[0])))
-			err := ioctlUffdCopy(ev.uffdFD, pageVA, src, PageSize)
-			if err != nil && !errors.Is(err, unix.EEXIST) {
-				h.logf("uffd: COPY(override) va=0x%x: %v", pageVA, err)
-				h.stats.errors.Add(1)
-				_ = ioctlUffdWake(ev.uffdFD, pageVA, PageSize)
-				return
-			}
-			if errors.Is(err, unix.EEXIST) {
-				// Folio appeared concurrently — wake the thread.
-				_ = ioctlUffdWake(ev.uffdFD, pageVA, PageSize)
-				h.stats.wakes.Add(1)
-			}
-			h.stats.copies.Add(1)
-			h.stats.pagesCopied.Add(1)
-			h.state.Set(pageIdx, StateLoaded)
-			h.recordBatch(1)
-			return
-		}
-
 		// State-side cap: how many consecutive Absent pages from
 		// pageIdx. Source then picks any n ≤ this, aligned to its
 		// own internal boundaries (chunk for manifest, IsZero
@@ -554,14 +709,35 @@ func (h *Handler) handleFault(ev faultEvent, pageBuf []byte) {
 
 		if isZero {
 			err := ioctlUffdZeropage(ev.uffdFD, pageVA, runBytes)
+			// EAGAIN on a multi-page batch means kernel did a partial
+			// install (some pages overlap existing folios, e.g. vhost
+			// backend memcpy'd into backendVA before this fault). The
+			// per-page install_bytes count isn't currently surfaced by
+			// our ioctl wrapper, so we can't tell which prefix succeeded.
+			// Conservative recovery: drop the batch entirely and retry
+			// the single faulting page. If the single page also EAGAINs
+			// (rare), fall through to EEXIST/error handling below.
+			if errors.Is(err, unix.EAGAIN) && runBytes > PageSize {
+				err = ioctlUffdZeropage(ev.uffdFD, pageVA, PageSize)
+				runBytes = PageSize
+				runPages = 1
+			}
 			if err != nil {
 				if errors.Is(err, unix.EEXIST) {
-					// Some page in the run already has a folio
-					// (other uffd raced). Wake the faulted thread;
-					// kernel auto-installs PTE on retry (MISSING-only,
-					// folio-found path bypasses uffd).
+					// Folio already present — wake the faulting thread;
+					// kernel re-fault path finds the folio (MISSING-only
+					// registration) and installs the PTE without a uffd
+					// round-trip. Mark Loaded below.
 					_ = ioctlUffdWake(ev.uffdFD, pageVA, runBytes)
 					h.stats.wakes.Add(1)
+				} else if errors.Is(err, unix.EAGAIN) {
+					// Even single-page EAGAIN — transient kernel state.
+					// Wake the faulting page so vCPU retries; do NOT
+					// mark Loaded (folio not installed). Next fault on
+					// this page re-enters the handler.
+					_ = ioctlUffdWake(ev.uffdFD, pageVA, PageSize)
+					h.stats.wakes.Add(1)
+					return
 				} else {
 					h.logf("uffd: ZEROPAGE va=0x%x len=%d: %v", pageVA, runBytes, err)
 					h.stats.errors.Add(1)
@@ -572,10 +748,23 @@ func (h *Handler) handleFault(ev faultEvent, pageBuf []byte) {
 			h.stats.pagesZeroed.Add(runPages)
 		} else {
 			src := uint64(uintptr(unsafe.Pointer(&pageBuf[0])))
-			if err := ioctlUffdCopy(ev.uffdFD, pageVA, src, runBytes); err != nil {
+			err := ioctlUffdCopy(ev.uffdFD, pageVA, src, runBytes)
+			if errors.Is(err, unix.EAGAIN) && runBytes > PageSize {
+				// Same partial-install fallback as ZEROPAGE: retry the
+				// faulting page only; pageBuf[0:PageSize] is already
+				// populated with the first page of source data.
+				err = ioctlUffdCopy(ev.uffdFD, pageVA, src, PageSize)
+				runBytes = PageSize
+				runPages = 1
+			}
+			if err != nil {
 				if errors.Is(err, unix.EEXIST) {
 					_ = ioctlUffdWake(ev.uffdFD, pageVA, runBytes)
 					h.stats.wakes.Add(1)
+				} else if errors.Is(err, unix.EAGAIN) {
+					_ = ioctlUffdWake(ev.uffdFD, pageVA, PageSize)
+					h.stats.wakes.Add(1)
+					return
 				} else {
 					h.logf("uffd: COPY va=0x%x len=%d: %v", pageVA, runBytes, err)
 					h.stats.errors.Add(1)
@@ -596,7 +785,7 @@ func (h *Handler) handleFault(ev faultEvent, pageBuf []byte) {
 		runPages := h.extendReleasedBatch(pageIdx)
 		runBytes := runPages * PageSize
 		if err := ioctlUffdZeropage(ev.uffdFD, pageVA, runBytes); err != nil {
-			if errors.Is(err, unix.EEXIST) {
+			if errors.Is(err, unix.EEXIST) || errors.Is(err, unix.EAGAIN) {
 				_ = ioctlUffdWake(ev.uffdFD, pageVA, runBytes)
 				h.stats.wakes.Add(1)
 			} else {
@@ -641,18 +830,23 @@ func (h *Handler) Stats() map[string]uint64 {
 		avgBatch = pagesSum / calls
 	}
 	return map[string]uint64{
-		"faults_absent":     h.stats.faultsAbsent.Load(),
-		"faults_released":   h.stats.faultsReleased.Load(),
-		"zeropage_calls":    h.stats.zeropages.Load(),
-		"copy_calls":        h.stats.copies.Load(),
-		"pages_zeroed":      h.stats.pagesZeroed.Load(),
-		"pages_copied":      h.stats.pagesCopied.Load(),
-		"wakes":             h.stats.wakes.Load(),
-		"remove_events":     h.stats.removeEvents.Load(),
-		"errors":            h.stats.errors.Load(),
-		"batch_calls":       calls,
-		"batch_pages_total": pagesSum,
-		"batch_avg_pages":   avgBatch,
-		"batch_max_pages":   h.stats.batchMaxPages.Load(),
+		"faults_absent":         h.stats.faultsAbsent.Load(),
+		"faults_released":       h.stats.faultsReleased.Load(),
+		"zeropage_calls":        h.stats.zeropages.Load(),
+		"copy_calls":            h.stats.copies.Load(),
+		"pages_zeroed":          h.stats.pagesZeroed.Load(),
+		"pages_copied":          h.stats.pagesCopied.Load(),
+		"wakes":                 h.stats.wakes.Load(),
+		"remove_events":         h.stats.removeEvents.Load(),
+		"remove_q_dropped":      h.stats.removeQDropped.Load(),
+		"remove_events_batched": h.stats.removeEventsBatched.Load(),
+		"madvise_calls":         h.stats.madviseCalls.Load(),
+		"madvise_bytes":         h.stats.madviseBytes.Load(),
+		"backend_lookup_miss":   h.stats.backendLookupMiss.Load(),
+		"errors":                h.stats.errors.Load(),
+		"batch_calls":           calls,
+		"batch_pages_total":     pagesSum,
+		"batch_avg_pages":       avgBatch,
+		"batch_max_pages":       h.stats.batchMaxPages.Load(),
 	}
 }

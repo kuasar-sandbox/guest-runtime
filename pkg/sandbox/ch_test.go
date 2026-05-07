@@ -50,9 +50,9 @@ func TestCHCommand_HasExpectedFlags(t *testing.T) {
 		"--kernel /vmlinux",
 		"file=/sandbox-runtime.erofs,discard_writes=on",
 		"size=4096M,shared=on,fd=3,uffd_socket=/run/sb/uffd.sock",
+		"size=2048M,free_page_reporting=on",
 		"boot=2",
 		"--disk vhost_user=on,socket=/run/sb/blk0.sock,readonly=on vhost_user=on,socket=/run/sb/blk1.sock",
-		"size=2048M,free_page_reporting=on",
 		"tap=tap0",
 		"cid=3,socket=/run/sb/vsock.sock", // vsock device
 		"console=hvc0",
