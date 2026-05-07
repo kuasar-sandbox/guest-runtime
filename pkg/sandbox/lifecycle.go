@@ -198,6 +198,13 @@ func Run(ctx context.Context, opts RunOptions) (int, error) {
 	// registers ProcessCH on receive) and the uffd Handler (which
 	// reads via Locate on each fault).
 	addrMap := uffd.NewAddressMap(uint64(memfd.Size()))
+	// Backend mmap is a single contiguous VMA covering the entire
+	// memfd at offset 0; register it so handleRemove can reciprocal-
+	// madvise(DONTNEED, backendVA range) when CH reports EVENT_REMOVE
+	// on chVA. CH-side VMAs come in later via va_report.
+	if err := addrMap.RegisterVMA(uffd.ProcessBackend, uint64(memfd.Addr()), uint64(memfd.Size()), 0); err != nil {
+		return -1, fmt.Errorf("addrmap register backend: %w", err)
+	}
 
 	// uffdHandler is constructed inside the va_report OnReady callback
 	// once we have CH's uffd fd. Held here so the deferred Close can
@@ -232,9 +239,22 @@ func Run(ctx context.Context, opts RunOptions) (int, error) {
 			uffdHandlerMu.Lock()
 			uffdHandler = h
 			uffdHandlerMu.Unlock()
-			logf("uffd handler: adopted CH uffd_C=%d (single-uffd; backendVA un-registered, "+
-				"backend writes route through Handler.WritePage / OverrideMap)",
-				uffdFD)
+			logf("uffd handler: adopted CH uffd region #0 fd=%d size=%d", uffdFD, size)
+			return nil
+		},
+		OnRegister: func(uffdFD int, vaStart, size uint64) error {
+			// Subsequent regions (PCI-hole-split: low + high). Add the
+			// new uffd to the existing handler's epoll set.
+			uffdHandlerMu.Lock()
+			h := uffdHandler
+			uffdHandlerMu.Unlock()
+			if h == nil {
+				return fmt.Errorf("OnRegister called before OnReady (no handler yet)")
+			}
+			if err := h.AddUffd(uffdFD); err != nil {
+				return err
+			}
+			logf("uffd handler: attached additional region fd=%d size=%d", uffdFD, size)
 			return nil
 		},
 	}
@@ -395,6 +415,11 @@ func writeUffdStats(w io.Writer, s map[string]uint64) {
 		"pages_copied",
 		"wakes",
 		"remove_events",
+		"remove_q_dropped",
+		"remove_events_batched",
+		"madvise_calls",
+		"madvise_bytes",
+		"backend_lookup_miss",
 		"errors",
 		"batch_calls",
 		"batch_pages_total",

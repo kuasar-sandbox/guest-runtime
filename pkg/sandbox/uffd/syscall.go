@@ -219,3 +219,40 @@ func ioctlUffdWake(fd int, start, length uint64) error {
 	}
 	return nil
 }
+
+// madviseDontneedRange clears the calling process's PTEs over
+// [addr, addr+length) via madvise(DONTNEED). For sandbox-ctl's
+// MAP_SHARED mmap of the memfd (backendVA), this releases the
+// process-side residency that accumulates as the backend touches
+// pages on behalf of vhost-blk DMA / snapshot bytes.
+//
+// Inode-level reclaim (file pages) is CH's job — its balloon path
+// already issues fallocate(PUNCH_HOLE) on the same memfd. We do NOT
+// duplicate that here. The split is intentional:
+//
+//   - fallocate(PUNCH_HOLE) is file-level reclaim → CH owns it (per
+//     guest free_page_reporting, region.file_offset() path)
+//   - madvise(DONTNEED) is process-level reclaim → each process must
+//     do its own; CH's punch on the inode does NOT authoritatively
+//     drop sandbox-ctl's PTE/RSS share. Without this call,
+//     sandbox-ctl's RSS accumulates 1:1 with guest-allocated memory
+//     across the sandbox lifetime, eventually OOM'ing the host even
+//     though the inode side is properly reclaimed.
+func madviseDontneedRange(addr, length uintptr) error {
+	if length == 0 {
+		return nil
+	}
+	// madvise(MADV_DONTNEED) requires page-aligned start AND length;
+	// the kernel returns EINVAL otherwise. Callers (handleRemove via
+	// uffd EVENT_REMOVE) get page-aligned ranges from the kernel by
+	// construction, but check defensively so an upstream bug surfaces
+	// here rather than as an unexplained EINVAL deeper in.
+	const pageMask = uintptr(PageSize - 1)
+	if addr&pageMask != 0 || length&pageMask != 0 {
+		return unix.EINVAL
+	}
+	// Build a slice header pointing at the mapping without holding
+	// a Go reference to the bytes — we never read/write through it.
+	b := unsafe.Slice((*byte)(unsafe.Pointer(addr)), length)
+	return unix.Madvise(b, unix.MADV_DONTNEED)
+}

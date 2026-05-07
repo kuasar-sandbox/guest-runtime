@@ -27,19 +27,24 @@ type statsReport struct {
 // resident-memory share without recomputing. Both file:// and
 // manifest:// snapshot paths surface the same shape.
 type uffdStatsJSON struct {
-	FaultsAbsent    uint64  `json:"faults_absent"`
-	FaultsReleased  uint64  `json:"faults_released"`
-	ZeropageCalls   uint64  `json:"zeropage_calls"`
-	CopyCalls       uint64  `json:"copy_calls"`
-	PagesZeroed     uint64  `json:"pages_zeroed"`
-	PagesCopied    uint64  `json:"pages_copied"`
-	Wakes           uint64  `json:"wakes"`
-	RemoveEvents    uint64  `json:"remove_events"`
-	Errors          uint64  `json:"errors"`
-	BatchCalls      uint64  `json:"batch_calls"`
-	BatchPagesTotal uint64  `json:"batch_pages_total"`
-	BatchAvgPages   uint64  `json:"batch_avg_pages"`
-	BatchMaxPages   uint64  `json:"batch_max_pages"`
+	FaultsAbsent     uint64 `json:"faults_absent"`
+	FaultsReleased   uint64 `json:"faults_released"`
+	ZeropageCalls    uint64 `json:"zeropage_calls"`
+	CopyCalls        uint64 `json:"copy_calls"`
+	PagesZeroed      uint64 `json:"pages_zeroed"`
+	PagesCopied      uint64 `json:"pages_copied"`
+	Wakes            uint64 `json:"wakes"`
+	RemoveEvents        uint64 `json:"remove_events"`
+	RemoveQDropped      uint64 `json:"remove_q_dropped"`
+	RemoveEventsBatched uint64 `json:"remove_events_batched"`
+	MadviseCalls        uint64 `json:"madvise_calls"`
+	MadviseBytes        uint64 `json:"madvise_bytes"`
+	BackendLookupMiss   uint64 `json:"backend_lookup_miss"`
+	Errors              uint64 `json:"errors"`
+	BatchCalls       uint64 `json:"batch_calls"`
+	BatchPagesTotal  uint64 `json:"batch_pages_total"`
+	BatchAvgPages    uint64 `json:"batch_avg_pages"`
+	BatchMaxPages    uint64 `json:"batch_max_pages"`
 	// LazyLoadRatio = (pages_zeroed + pages_copied) / total_pages.
 	// total_pages comes from RAMSize/PageSize. Cold-start tracks how
 	// little of declared RAM the guest actually touches; restore tracks
@@ -198,22 +203,27 @@ func buildUffdJSON(counters map[string]uint64, ramBytes int64) *uffdStatsJSON {
 		}
 	}
 	return &uffdStatsJSON{
-		FaultsAbsent:    counters["faults_absent"],
-		FaultsReleased:  counters["faults_released"],
-		ZeropageCalls:   counters["zeropage_calls"],
-		CopyCalls:       counters["copy_calls"],
-		PagesZeroed:     zeroed,
-		PagesCopied:     copied,
-		Wakes:           counters["wakes"],
-		RemoveEvents:    counters["remove_events"],
-		Errors:          counters["errors"],
-		BatchCalls:      counters["batch_calls"],
-		BatchPagesTotal: counters["batch_pages_total"],
-		BatchAvgPages:   counters["batch_avg_pages"],
-		BatchMaxPages:   counters["batch_max_pages"],
-		TotalPages:      totalPages,
-		ResidentPages:   resident,
-		LazyLoadRatio:   ratio,
+		FaultsAbsent:     counters["faults_absent"],
+		FaultsReleased:   counters["faults_released"],
+		ZeropageCalls:    counters["zeropage_calls"],
+		CopyCalls:        counters["copy_calls"],
+		PagesZeroed:      zeroed,
+		PagesCopied:      copied,
+		Wakes:            counters["wakes"],
+		RemoveEvents:        counters["remove_events"],
+		RemoveQDropped:      counters["remove_q_dropped"],
+		RemoveEventsBatched: counters["remove_events_batched"],
+		MadviseCalls:        counters["madvise_calls"],
+		MadviseBytes:        counters["madvise_bytes"],
+		BackendLookupMiss:   counters["backend_lookup_miss"],
+		Errors:           counters["errors"],
+		BatchCalls:       counters["batch_calls"],
+		BatchPagesTotal:  counters["batch_pages_total"],
+		BatchAvgPages:    counters["batch_avg_pages"],
+		BatchMaxPages:    counters["batch_max_pages"],
+		TotalPages:       totalPages,
+		ResidentPages:    resident,
+		LazyLoadRatio:    ratio,
 	}
 }
 

@@ -1,116 +1,132 @@
 package uffd
 
-import "sync"
+import (
+	"fmt"
+	"sync"
+)
 
 // ProcessKind labels which process's VMA recorded an entry.
 type ProcessKind uint8
 
 const (
-	// ProcessBackend = sandbox-ctl's mmap of the memfd (registered
-	// for uffd at startup; receives backend-side fault sources like
-	// pkg/vhost-induced direct accesses on backendVA).
+	// ProcessBackend = sandbox-ctl's mmap of the memfd. Single VMA
+	// covering the entire memfd at offset 0.
 	ProcessBackend ProcessKind = 1
-	// ProcessCH = cloud-hypervisor's mmap of the same memfd. Reported
-	// to us via the va_report handshake at CH boot.
+	// ProcessCH = cloud-hypervisor's mmap of the same memfd. May span
+	// multiple VMAs when CH splits the zone across the x86 PCI hole
+	// (low region [0,3GiB), high region [4GiB,...]); each region
+	// reports independently via va_report and arrives at a distinct
+	// memfdOffset.
 	ProcessCH ProcessKind = 2
 )
 
-// vma holds one virtual-memory-area record.
+// vma holds one virtual-memory-area record. memfdOffset is the byte
+// offset within the underlying memfd that this VMA's start corresponds
+// to; for a fault at faultVA in [start, end), the memfd offset is
+// memfdOffset + (faultVA - start).
 type vma struct {
-	process ProcessKind
-	start   uint64
-	end     uint64
+	process     ProcessKind
+	start       uint64
+	end         uint64
+	memfdOffset uint64
 }
 
 // AddressMap translates a fault VA (from any registered VMA) into the
 // memfd-relative offset. Both backendVA and chVA cover the same memfd
-// inode, so a fault at either VA → memfd_offset = offsetWithinVMA.
-//
-// Stable in steady state (RLock per fault). Only mutated when CH reports
-// its own VA at startup (one-time RegisterVMA from the va_report server).
+// inode; backend is one VMA, CH may be multiple. Stable in steady state
+// (RLock per fault); only mutated when registering a VMA at sandbox
+// startup or when handling a va_report from CH.
 type AddressMap struct {
 	mu       sync.RWMutex
-	memfdLen uint64 // covers the entire memfd
+	memfdLen uint64
 	vmas     []vma
 }
 
-// NewAddressMap creates an empty map sized for a memfd of memfdLen
-// bytes. RegisterVMA can be called any number of times; typical use:
-// once at sandbox-ctl startup for ProcessBackend, once on va_report ack
-// for ProcessCH.
+// NewAddressMap creates an empty map sized for a memfd of memfdLen bytes.
 func NewAddressMap(memfdLen uint64) *AddressMap {
 	return &AddressMap{memfdLen: memfdLen}
 }
 
-// RegisterVMA records that [vaStart, vaStart+size) maps the entire
-// memfd at offset 0. Returns nil on success or an error if size doesn't
-// match memfdLen (we only support whole-zone mappings; sub-range mmap
-// is not part of the unified-memfd model).
-func (m *AddressMap) RegisterVMA(p ProcessKind, vaStart uint64, size uint64) error {
-	if size != m.memfdLen {
-		return errSizeMismatch{want: m.memfdLen, got: size}
+// RegisterVMA records that [vaStart, vaStart+size) maps the memfd
+// starting at byte offset memfdOffset. Multiple registrations are
+// allowed; each is appended in arrival order.
+//
+// Validation: size > 0, memfdOffset + size ≤ memfdLen, and the new
+// memfd range [memfdOffset, memfdOffset+size) must not overlap any
+// previously-registered range owned by the same process (catches
+// duplicate-region registration mistakes early).
+func (m *AddressMap) RegisterVMA(p ProcessKind, vaStart, size, memfdOffset uint64) error {
+	if size == 0 {
+		return fmt.Errorf("uffd: AddressMap RegisterVMA size=0")
+	}
+	if memfdOffset+size > m.memfdLen || memfdOffset+size < memfdOffset {
+		return fmt.Errorf("uffd: AddressMap RegisterVMA range [0x%x,+0x%x) exceeds memfdLen 0x%x",
+			memfdOffset, size, m.memfdLen)
 	}
 	m.mu.Lock()
-	m.vmas = append(m.vmas, vma{process: p, start: vaStart, end: vaStart + size})
-	m.mu.Unlock()
+	defer m.mu.Unlock()
+	for i := range m.vmas {
+		v := &m.vmas[i]
+		if v.process != p {
+			continue
+		}
+		newEnd := memfdOffset + size
+		oldEnd := v.memfdOffset + (v.end - v.start)
+		if memfdOffset < oldEnd && v.memfdOffset < newEnd {
+			return fmt.Errorf(
+				"uffd: AddressMap RegisterVMA process=%d new memfd range [0x%x,+0x%x) overlaps existing [0x%x,+0x%x)",
+				p, memfdOffset, size, v.memfdOffset, v.end-v.start)
+		}
+	}
+	m.vmas = append(m.vmas, vma{
+		process:     p,
+		start:       vaStart,
+		end:         vaStart + size,
+		memfdOffset: memfdOffset,
+	})
 	return nil
 }
 
 // Locate returns (memfdOffset, true) if faultVA falls within any
-// registered VMA, else (_, false).
+// registered VMA (any process), else (_, false).
 func (m *AddressMap) Locate(faultVA uint64) (uint64, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	for i := range m.vmas {
 		v := &m.vmas[i]
 		if faultVA >= v.start && faultVA < v.end {
-			return faultVA - v.start, true
+			return v.memfdOffset + (faultVA - v.start), true
 		}
 	}
 	return 0, false
 }
 
-// VMAStart returns the start VA of the VMA owned by the given process,
-// or (0, false) if none registered. Used by the EVENT_REMOVE handler to
-// translate the CH-side range to the backend-side range for the
-// reciprocal madvise(DONTNEED, backendVA).
-func (m *AddressMap) VMAStart(p ProcessKind) (uint64, bool) {
+// BackendVAFor returns the backendVA address that corresponds to the
+// given memfd offset (for issuing a reciprocal madvise(DONTNEED) on
+// backend mm in response to EVENT_REMOVE on a CH-side VMA). Returns
+// (0, 0, false) if no backend VMA covers the offset.
+//
+// Returns (va, length, true) where length is the contiguous bytes of
+// backendVA aligned with [memfdOffset, +reqLen) within the matching
+// VMA. Backend is registered as a single full-memfd VMA in the
+// current architecture, so length always equals reqLen.
+func (m *AddressMap) BackendVAFor(memfdOffset, reqLen uint64) (uint64, uint64, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	for i := range m.vmas {
-		if m.vmas[i].process == p {
-			return m.vmas[i].start, true
+		v := &m.vmas[i]
+		if v.process != ProcessBackend {
+			continue
+		}
+		size := v.end - v.start
+		if memfdOffset >= v.memfdOffset && memfdOffset < v.memfdOffset+size {
+			vaOff := memfdOffset - v.memfdOffset
+			avail := size - vaOff
+			if avail > reqLen {
+				avail = reqLen
+			}
+			return v.start + vaOff, avail, true
 		}
 	}
-	return 0, false
-}
-
-type errSizeMismatch struct {
-	want, got uint64
-}
-
-func (e errSizeMismatch) Error() string {
-	return formatSizeMismatch(e.want, e.got)
-}
-
-func formatSizeMismatch(want, got uint64) string {
-	return "uffd: AddressMap RegisterVMA size mismatch: want " +
-		formatHex(want) + " got " + formatHex(got)
-}
-
-func formatHex(v uint64) string {
-	const digits = "0123456789abcdef"
-	if v == 0 {
-		return "0x0"
-	}
-	var buf [18]byte
-	buf[0] = '0'
-	buf[1] = 'x'
-	i := len(buf)
-	for v > 0 {
-		i--
-		buf[i] = digits[v&0xf]
-		v >>= 4
-	}
-	return string(buf[i:])
+	return 0, 0, false
 }

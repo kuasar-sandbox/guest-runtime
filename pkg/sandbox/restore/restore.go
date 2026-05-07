@@ -235,6 +235,9 @@ func Run(ctx context.Context, opts Options) (int, error) {
 	}
 
 	addrMap := uffd.NewAddressMap(uint64(memfd.Size()))
+	if err := addrMap.RegisterVMA(uffd.ProcessBackend, uint64(memfd.Addr()), uint64(memfd.Size()), 0); err != nil {
+		return -1, fmt.Errorf("addrmap register backend: %w", err)
+	}
 	var uffdHandler *uffd.Handler
 	var uffdHandlerMu sync.Mutex
 	defer func() {
@@ -245,6 +248,7 @@ func Run(ctx context.Context, opts Options) (int, error) {
 			_ = h.Close()
 		}
 	}()
+
 	vaSrv := &uffd.VAReportServer{
 		Path:    uffdSock,
 		AddrMap: addrMap,
@@ -264,7 +268,20 @@ func Run(ctx context.Context, opts Options) (int, error) {
 			uffdHandlerMu.Lock()
 			uffdHandler = h
 			uffdHandlerMu.Unlock()
-			logf("dual-uffd handler: adopted CH uffd_C=%d + created backend uffd_A", uffdFD)
+			logf("uffd handler: adopted CH uffd region #0 fd=%d size=%d", uffdFD, size)
+			return nil
+		},
+		OnRegister: func(uffdFD int, vaStart, size uint64) error {
+			uffdHandlerMu.Lock()
+			h := uffdHandler
+			uffdHandlerMu.Unlock()
+			if h == nil {
+				return fmt.Errorf("OnRegister called before OnReady")
+			}
+			if err := h.AddUffd(uffdFD); err != nil {
+				return err
+			}
+			logf("uffd handler: attached additional region fd=%d size=%d", uffdFD, size)
 			return nil
 		},
 	}
@@ -500,7 +517,8 @@ func dumpUffdStats(w io.Writer, s map[string]uint64) {
 		"faults_absent", "faults_released",
 		"zeropage_calls", "copy_calls",
 		"pages_zeroed", "pages_copied",
-		"wakes", "remove_events", "errors",
+		"wakes", "remove_events", "remove_q_dropped", "remove_events_batched",
+		"madvise_calls", "madvise_bytes", "backend_lookup_miss", "errors",
 		"batch_calls", "batch_pages_total", "batch_avg_pages", "batch_max_pages",
 	}
 	for _, k := range keys {

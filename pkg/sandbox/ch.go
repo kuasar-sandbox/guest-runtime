@@ -17,7 +17,7 @@ import (
 // shared=on so vhost-user backends in the same process can mmap the
 // memfd CH creates. Balloon size = capacity - allocatable, releasing the
 // difference back to host at boot; free_page_reporting=on lets the guest
-// continuously report unused pages.
+// continuously report unused pages (drives EVENT_REMOVE on the uffd).
 //
 // uffdSock is the path of the va_report UDS server (sandbox-design.md
 // §9.2). Patched CH connects to it during create_ram_region.
