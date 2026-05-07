@@ -48,8 +48,13 @@ resolve_tarball() {
     esac
     [ -n "$filename" ] || die "could not derive filename from spec: $spec"
 
-    mkdir -p "$BUILD_DIR/tarball"
-    local cache="$BUILD_DIR/tarball/$filename"
+    # Tarball cache is shared across architectures (same upstream source
+    # for both x86_64 and aarch64 builds). Defaults under $BUILD_DIR for
+    # backward compat with single-arch callers; multi-arch Makefile sets
+    # TARBALL_CACHE to an arch-neutral location (build/tarball).
+    : "${TARBALL_CACHE:=$BUILD_DIR/tarball}"
+    mkdir -p "$TARBALL_CACHE"
+    local cache="$TARBALL_CACHE/$filename"
 
     if [ -f "$cache" ]; then
         log "tarball cache hit: $cache" >&2
