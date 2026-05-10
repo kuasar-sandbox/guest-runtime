@@ -73,6 +73,35 @@ func TestCHCommand_HasExpectedFlags(t *testing.T) {
 	}
 }
 
+func TestCHCommand_BalloonDeflateOnOOMDefault(t *testing.T) {
+	cfg := makeMinimalCfg()
+	args, err := CHCommand(cfg, "/0", "/1", "/c", "/v", "/k", "/r", "/u")
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(args, " ")
+	if !strings.Contains(joined, "deflate_on_oom=on") {
+		t.Errorf("balloon should contain deflate_on_oom=on by default, got: %s", joined)
+	}
+}
+
+func TestCHCommand_BalloonDeflateOnOOMDisabled(t *testing.T) {
+	cfg := makeMinimalCfg()
+	off := false
+	cfg.Resources.Allocatable.DeflateOnOOM = &off
+	args, err := CHCommand(cfg, "/0", "/1", "/c", "/v", "/k", "/r", "/u")
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(args, " ")
+	if strings.Contains(joined, "deflate_on_oom=on") {
+		t.Errorf("balloon should NOT contain deflate_on_oom=on when explicitly disabled, got: %s", joined)
+	}
+	if !strings.Contains(joined, "free_page_reporting=on") {
+		t.Errorf("balloon should still contain free_page_reporting=on, got: %s", joined)
+	}
+}
+
 func TestCHCommand_NoBalloonWhenAllocEqualsCapacity(t *testing.T) {
 	cfg := makeMinimalCfg()
 	cfg.Resources.Allocatable.Memory = cfg.Resources.Capacity.Memory

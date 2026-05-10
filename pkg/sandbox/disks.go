@@ -39,7 +39,7 @@ func openBlockReader(ctx context.Context, uri string, accel *accelRuntime) (vhos
 		return fr, fr.Size(), nil
 	case "manifest":
 		if accel == nil {
-			return nil, 0, errors.New("manifest:// disk URI requires accelerator config (run sandbox-ctl with --accelerator-config)")
+			return nil, 0, errors.New("manifest:// disk URI requires manifest config (run sandbox-ctl with --manifest-config or set MANIFEST_CONFIG)")
 		}
 		return openManifestReader(ctx, value, accel)
 	default:
@@ -63,10 +63,10 @@ func openManifestReader(ctx context.Context, hexKey string, accel *accelRuntime)
 // OpenManifestFetcher dials a manifest:// resource and returns a
 // fetch.Fetcher (random-access reader) over its content. Used by
 // snapshot restore to read the ZIP at the end of a manifest://
-// sandbox.snapshot bundle and to feed ManifestSnapshotSource for
+// snapshot bundle and to feed ManifestSnapshotSource for
 // memory-page lazy loading.
 //
-// Exposed in capital case so cmd/sandbox-ctl/restore.go can invoke it
+// Exposed in capital case so cmd/sandbox-ctl/run.go can invoke it
 // without going through the per-disk wrapper.
 func OpenManifestFetcher(ctx context.Context, hexKey string, accel *AccelRuntime) (*fetch.Fetcher, int64, error) {
 	if accel == nil || accel.inner == nil {
@@ -76,16 +76,16 @@ func OpenManifestFetcher(ctx context.Context, hexKey string, accel *AccelRuntime
 }
 
 // AccelRuntime is a public wrapper around the per-sandbox accelerator
-// runtime so commands outside pkg/sandbox (cmd/sandbox-ctl/restore.go)
-// can pass it through without exposing the internal struct.
+// runtime so commands outside pkg/sandbox (cmd/sandbox-ctl/run.go) can
+// pass it through without exposing the internal struct.
 type AccelRuntime struct {
 	inner *accelRuntime
 }
 
 // OpenAccelRuntime is the package-public constructor for AccelRuntime.
-// Call once per sandbox-ctl restore invocation when --snapshot is a
-// manifest:// reference.
-func OpenAccelRuntime(cfg *AcceleratorConfig) (*AccelRuntime, error) {
+// Call once per `sandbox-ctl run --restore=` invocation when the
+// reference is manifest://.
+func OpenAccelRuntime(cfg *ManifestConfig) (*AccelRuntime, error) {
 	r, err := openAccelRuntime(cfg)
 	if err != nil {
 		return nil, err

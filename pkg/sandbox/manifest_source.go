@@ -17,9 +17,9 @@ import (
 // IsZero chunks) the run extends through the contiguous zero span
 // without any source I/O.
 //
-// The reader is intended for sandbox-ctl restore from a manifest://
-// sandbox.snapshot — one fetch.Fetcher constructed against the
-// snapshot's memory section, wrapped here, plugged into uffd.Config.
+// The reader is intended for `sandbox-ctl run --restore=manifest://...`
+// — one fetch.Fetcher constructed against the snapshot bundle's memory
+// section, wrapped here, plugged into uffd.Config.
 type ManifestSnapshotSource struct {
 	fetcher *fetch.Fetcher
 	ctx     context.Context

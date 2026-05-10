@@ -23,7 +23,7 @@ resources:
     cpu: 2
     memory: 2GiB
   allocatable:
-    cpu: 1.5
+    cpu: 2
     memory: 1GiB
 network:
   tap: tap0
@@ -166,6 +166,230 @@ func TestValidateCold_MissingFields(t *testing.T) {
 				t.Errorf("error %q does not contain %q", err.Error(), tc.wantSubst)
 			}
 		})
+	}
+}
+
+func TestValidateCold_ResourceControl(t *testing.T) {
+	// Helper: write a minimal config and apply mutator before validating.
+	run := func(t *testing.T, mutate func(c *SandboxConfig), wantErrSubstr string) {
+		t.Helper()
+		cfg, err := Load(writeYAML(t, minimalCold))
+		if err != nil {
+			t.Fatal(err)
+		}
+		mutate(cfg)
+		err = cfg.ValidateCold()
+		if wantErrSubstr == "" {
+			if err != nil {
+				t.Errorf("expected no error, got: %v", err)
+			}
+			return
+		}
+		if err == nil {
+			t.Fatalf("expected error containing %q, got nil", wantErrSubstr)
+		}
+		if !strings.Contains(err.Error(), wantErrSubstr) {
+			t.Errorf("error %q does not contain %q", err.Error(), wantErrSubstr)
+		}
+	}
+
+	t.Run("controller without cgroup", func(t *testing.T) {
+		run(t, func(c *SandboxConfig) {
+			c.Resources.Control.Controller = "/run/x.sock"
+		}, "controller requires resources.control.cgroup_path")
+	})
+
+	t.Run("overhead without cgroup", func(t *testing.T) {
+		run(t, func(c *SandboxConfig) {
+			c.Resources.Overhead = &OverheadConfig{Memory: "32MiB"}
+		}, "resources.overhead requires")
+	})
+
+	t.Run("watermark_high without cgroup", func(t *testing.T) {
+		run(t, func(c *SandboxConfig) {
+			c.Resources.WatermarkHigh = &WatermarkHighConfig{Memory: "256MiB"}
+		}, "resources.watermark_high requires")
+	})
+
+	t.Run("startup_burst without controller", func(t *testing.T) {
+		// Even with cgroup_path set, startup_burst still needs controller.
+		dir := t.TempDir()
+		run(t, func(c *SandboxConfig) {
+			c.Resources.Control.CgroupPath = dir
+			c.Resources.StartupBurst = &StartupBurstConfig{Memory: "256MiB"}
+		}, "resources.startup_burst requires")
+	})
+
+	t.Run("fractional cpu without cgroup", func(t *testing.T) {
+		run(t, func(c *SandboxConfig) {
+			c.Resources.Allocatable.CPU = 0.5 // < capacity.cpu (2)
+		}, "fractional cpu requires cgroup_path")
+	})
+
+	t.Run("cgroup_path missing on disk", func(t *testing.T) {
+		run(t, func(c *SandboxConfig) {
+			c.Resources.Control.CgroupPath = "/nonexistent/cgroup/path/abc"
+		}, "does not exist")
+	})
+
+	t.Run("cgroup_path file not dir", func(t *testing.T) {
+		f, err := os.CreateTemp(t.TempDir(), "notadir")
+		if err != nil {
+			t.Fatal(err)
+		}
+		f.Close()
+		run(t, func(c *SandboxConfig) {
+			c.Resources.Control.CgroupPath = f.Name()
+		}, "is not a directory")
+	})
+
+	t.Run("watermark_high above allocatable", func(t *testing.T) {
+		dir := t.TempDir()
+		run(t, func(c *SandboxConfig) {
+			c.Resources.Control.CgroupPath = dir
+			// allocatable.memory = 1GiB; set watermark_high above that
+			c.Resources.WatermarkHigh = &WatermarkHighConfig{Memory: "2GiB"}
+		}, "watermark_high.memory")
+	})
+
+	t.Run("startup_burst below allocatable", func(t *testing.T) {
+		dir := t.TempDir()
+		run(t, func(c *SandboxConfig) {
+			c.Resources.Control.CgroupPath = dir
+			c.Resources.Control.Controller = "/run/x.sock"
+			// allocatable=1GiB; startup below it
+			c.Resources.StartupBurst = &StartupBurstConfig{Memory: "256MiB"}
+		}, "startup_burst.memory")
+	})
+
+	t.Run("startup_burst above capacity", func(t *testing.T) {
+		dir := t.TempDir()
+		run(t, func(c *SandboxConfig) {
+			c.Resources.Control.CgroupPath = dir
+			c.Resources.Control.Controller = "/run/x.sock"
+			// capacity=2GiB; startup above
+			c.Resources.StartupBurst = &StartupBurstConfig{Memory: "4GiB"}
+		}, "startup_burst.memory")
+	})
+
+	t.Run("valid static-cgroup mode with fractional cpu", func(t *testing.T) {
+		dir := t.TempDir()
+		run(t, func(c *SandboxConfig) {
+			c.Resources.Control.CgroupPath = dir
+			c.Resources.Allocatable.CPU = 0.5
+		}, "")
+	})
+
+	t.Run("valid dynamic mode with explicit startup_burst", func(t *testing.T) {
+		dir := t.TempDir()
+		run(t, func(c *SandboxConfig) {
+			c.Resources.Control.CgroupPath = dir
+			c.Resources.Control.Controller = "/run/x.sock"
+			c.Resources.StartupBurst = &StartupBurstConfig{Memory: "1500MiB"}
+		}, "")
+	})
+}
+
+func TestResourceControlDefaults(t *testing.T) {
+	dir := t.TempDir()
+	cfg, err := Load(writeYAML(t, `
+resources:
+  capacity: { cpu: 2, memory: 2GiB }
+  allocatable: { cpu: 2, memory: 256MiB }
+  control:
+    cgroup_path: `+dir+`
+    controller: /run/x.sock
+network: { tap: tap0 }
+boot:
+  kernel: file:///k
+  runtime: file:///r
+  root:
+    base: file:///b
+    overlay: { diff: file:///d }
+launch: { exec: /bin/true }
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cfg.ValidateCold(); err != nil {
+		t.Fatalf("ValidateCold: %v", err)
+	}
+
+	// Overhead default = 32 MiB
+	ovh, err := cfg.OverheadMemoryBytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ovh != 32<<20 {
+		t.Errorf("default overhead = %d, want 32 MiB (%d)", ovh, 32<<20)
+	}
+
+	// WatermarkHigh default = allocatable * 0.875
+	wm, err := cfg.WatermarkHighBytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := uint64(float64(256<<20) * 0.875)
+	if wm != want {
+		t.Errorf("default watermark_high = %d, want %d", wm, want)
+	}
+
+	// StartupBurst default = allocatable
+	sb, err := cfg.StartupBurstBytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sb != 256<<20 {
+		t.Errorf("default startup_burst = %d, want allocatable %d", sb, 256<<20)
+	}
+
+	// DeflateOnOOM default = true
+	if !cfg.DeflateOnOOM() {
+		t.Errorf("default DeflateOnOOM = false, want true")
+	}
+}
+
+func TestDeflateOnOOM_Override(t *testing.T) {
+	cfg, err := Load(writeYAML(t, `
+resources:
+  capacity: { cpu: 1, memory: 1GiB }
+  allocatable: { cpu: 1, memory: 256MiB, deflate_on_oom: false }
+network: { tap: tap0 }
+boot:
+  kernel: file:///k
+  runtime: file:///r
+  root:
+    base: file:///b
+    overlay: { diff: file:///d }
+launch: { exec: /bin/true }
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.DeflateOnOOM() {
+		t.Errorf("DeflateOnOOM = true, want false (explicit override)")
+	}
+}
+
+func TestCPUWeight_Mapping(t *testing.T) {
+	cases := []struct {
+		alloc float64
+		want  uint64
+	}{
+		{0.001, 1},   // clamp lower
+		{0.1, 10},    // 0.1 core
+		{1.0, 100},   // 1 core (kernel default)
+		{2.0, 200},   // 2 cores
+		{50.0, 5000}, // mid-range
+		{200.0, 10000}, // clamp upper
+	}
+	for _, tc := range cases {
+		cfg := &SandboxConfig{}
+		cfg.Resources.Allocatable.CPU = tc.alloc
+		got := cfg.CPUWeight()
+		if got != tc.want {
+			t.Errorf("CPUWeight(%g) = %d, want %d", tc.alloc, got, tc.want)
+		}
 	}
 }
 

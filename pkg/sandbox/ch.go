@@ -19,8 +19,8 @@ import (
 // difference back to host at boot; free_page_reporting=on lets the guest
 // continuously report unused pages (drives EVENT_REMOVE on the uffd).
 //
-// uffdSock is the path of the va_report UDS server (sandbox-design.md
-// §9.2). Patched CH connects to it during create_ram_region.
+// uffdSock is the path of the va_report UDS server (cloud-hypervisor.md
+// §3.3). Patched CH connects to it during create_ram_region.
 //
 // The memfd fd and uffd fd are inherited via cmd.ExtraFiles; CH sees
 // them at fd=3 and fd=4 respectively, referenced in --memory-zone.
@@ -62,8 +62,11 @@ func CHCommand(cfg *SandboxConfig, blk0Sock, blk1Sock, chSock, vsockSock, kernel
 
 	if allocBytes < capBytes {
 		balloonBytes := capBytes - allocBytes
-		args = append(args, "--balloon",
-			fmt.Sprintf("size=%dM,free_page_reporting=on", balloonBytes>>20))
+		balloonOpts := fmt.Sprintf("size=%dM,free_page_reporting=on", balloonBytes>>20)
+		if cfg.DeflateOnOOM() {
+			balloonOpts += ",deflate_on_oom=on"
+		}
+		args = append(args, "--balloon", balloonOpts)
 	}
 
 	if cfg.Network.TAP != "" {

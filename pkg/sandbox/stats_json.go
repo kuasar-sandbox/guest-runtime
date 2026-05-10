@@ -19,6 +19,7 @@ type statsReport struct {
 	Backends  []statsBackendJSON `json:"backends"`
 	Uffd      *uffdStatsJSON     `json:"uffd,omitempty"`
 	Runtime   *runtimeStatsJSON  `json:"runtime,omitempty"`
+	Ping      *PingSnapshot      `json:"ping,omitempty"`
 	Wallclock wallclockJSON      `json:"wallclock"`
 }
 
@@ -123,6 +124,7 @@ type statsBundle struct {
 	Servers     []*vhost.Server
 	Uffd        map[string]uint64 // counter snapshot from uffd.Handler.Stats()
 	UffdRAMSize int64             // total RAM in bytes; 0 ⇒ skip lazy-ratio
+	Ping        *PingSnapshot     // host→guest health probe stats; nil ⇒ omit
 	StartUnixNs int64             // sandbox.Run T0
 	EndUnixNs   int64             // sandbox.Run T_exit
 }
@@ -133,6 +135,7 @@ type StatsBundle struct {
 	Servers     []*vhost.Server
 	Uffd        map[string]uint64
 	UffdRAMSize int64
+	Ping        *PingSnapshot
 	StartUnixNs int64
 	EndUnixNs   int64
 }
@@ -175,6 +178,9 @@ func writeStatsJSON(path string, b statsBundle) error {
 	}
 	if b.Uffd != nil {
 		report.Uffd = buildUffdJSON(b.Uffd, b.UffdRAMSize)
+	}
+	if b.Ping != nil {
+		report.Ping = b.Ping
 	}
 	report.Runtime = collectRuntimeStats()
 

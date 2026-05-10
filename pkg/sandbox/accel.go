@@ -20,7 +20,7 @@ import (
 //
 // Open and Close are paired with the sandbox-ctl process — clients are
 // dialled at sandbox start, freed at exit. Per-RPC timeouts come from
-// AcceleratorConfig (Store.Timeout / Cache.Timeout); there is no
+// ManifestConfig (Store.Timeout / Cache.Timeout); there is no
 // separate dial timeout (gRPC dials are non-blocking and the first RPC
 // surfaces unreachability via the per-RPC deadline).
 type accelRuntime struct {
@@ -34,10 +34,10 @@ type accelRuntime struct {
 
 // openAccelRuntime dials store-ctl + cache-ctl and constructs the
 // crypto encryptors based on cfg. Mirrors the boot path used by
-// manifest-ctl so the same accelerator.yaml drives both.
-func openAccelRuntime(cfg *AcceleratorConfig) (*accelRuntime, error) {
+// manifest-ctl so the same manifest config YAML drives both.
+func openAccelRuntime(cfg *ManifestConfig) (*accelRuntime, error) {
 	if cfg == nil {
-		return nil, errors.New("accel: nil accelerator config (manifest:// disks require --accelerator-config)")
+		return nil, errors.New("accel: nil manifest config (manifest:// disks require --manifest-config or MANIFEST_CONFIG)")
 	}
 	if cfg.Store.Endpoint == "" {
 		return nil, errors.New("accel: store.endpoint is required for manifest:// disks")
@@ -159,7 +159,7 @@ func (a *accelRuntime) Close() error {
 // available, falling back to 1 MiB (matches the default CDC max).
 // Add a small slack for the encryptor flag byte and any future
 // header growth.
-func blobPoolSize(cfg *AcceleratorConfig) int {
+func blobPoolSize(cfg *ManifestConfig) int {
 	const fallback = 1 << 20 // 1 MiB
 	if cfg == nil {
 		return fallback
