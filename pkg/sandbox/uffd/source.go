@@ -37,7 +37,7 @@ func unixPread(fd int, buf []byte, off int64) (int, error) {
 //
 // Implementations:
 //   - ZeroSource:             cold-start. Always zero, full buf.
-//   - SparseSnapshotSource:   restore from local sandbox.snapshot file.
+//   - SparseSnapshotSource:   restore from local <sid>.snapshot file.
 //                             Walks holeMap.
 //   - ManifestSnapshotSource: restore from manifest://. Caps at chunk
 //                             edges and decrypts via fetch.Fetcher.
@@ -72,8 +72,8 @@ func (ZeroSource) ReadAt(buf []byte, _ uint64) (int, bool, error) {
 }
 
 // SparseSnapshotSource implements SnapshotReader for restore from a
-// local sandbox.snapshot file. Backed by [BaseOff, BaseOff+RAMSize)
-// of fd, with a pre-built hole bitmap walked from SEEK_DATA / SEEK_HOLE
+// local <sid>.snapshot file. Backed by [BaseOff, BaseOff+RAMSize) of
+// fd, with a pre-built hole bitmap walked from SEEK_DATA / SEEK_HOLE
 // at restore-prep time.
 type SparseSnapshotSource struct {
 	FD      int

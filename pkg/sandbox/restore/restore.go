@@ -1,13 +1,13 @@
-// Package restore implements the sandbox-ctl restore lifecycle.
-// Reads a sandbox.snapshot bundle (memory + ZIP at end), prepares
-// memfd + va_report server, spawns patched CH with --restore source_url
-// pointing at a temp dir holding state.json, and lets faults flow.
+// Package restore implements the `sandbox-ctl run --restore=` lifecycle.
+// Reads a <sid>.snapshot bundle (memory + ZIP at end with config.json /
+// state.json / snapshot.cfg), prepares memfd + va_report server, spawns
+// patched CH with --restore source_url pointing at a temp dir holding
+// the rewritten state.json, and lets faults flow.
 package restore
 
 import (
 	"archive/zip"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -25,6 +25,7 @@ import (
 	"github.com/fullof-work/mass-sandbox/pkg/sandbox"
 	"github.com/fullof-work/mass-sandbox/pkg/sandbox/memory"
 	"github.com/fullof-work/mass-sandbox/pkg/sandbox/snapshot"
+	"github.com/fullof-work/mass-sandbox/pkg/sandbox/stdio"
 	"github.com/fullof-work/mass-sandbox/pkg/sandbox/uffd"
 	"github.com/fullof-work/mass-sandbox/pkg/vhost"
 )
@@ -40,15 +41,16 @@ import (
 // blk0 / overlay.base in the embedded sandbox.cfg likewise support
 // manifest:// when AccelRuntime is set.
 type Options struct {
-	SnapshotPath        string                    // file path; mutually exclusive with SnapshotManifestKey
-	SnapshotManifestKey string                    // hex content key; mutually exclusive with SnapshotPath
-	HostCfg             *sandbox.SandboxConfig    // host yaml: TAP, blk1.diff, etc.
-	AccelCfg            *sandbox.AcceleratorConfig // for snapshot --upload from a restored sandbox
-	AccelRuntime        *sandbox.AccelRuntime     // required when any URI is manifest://
+	SnapshotPath        string                  // file path; mutually exclusive with SnapshotManifestKey
+	SnapshotManifestKey string                  // hex content key; mutually exclusive with SnapshotPath
+	HostCfg             *sandbox.SandboxConfig  // host yaml: TAP, blk1.diff, etc.
+	ManifestCfg         *sandbox.ManifestConfig // for snapshot --upload from a restored sandbox
+	AccelRuntime        *sandbox.AccelRuntime   // required when any URI is manifest://
 	SandboxID           string
 	CHBinary            string
 	RuntimeRoot         string
-	StatsJSONPath       string // if non-empty, dump uffd + per-backend stats here on exit
+	StatsJSONPath       string     // if non-empty, dump uffd + per-backend stats here on exit
+	StdioMode           stdio.Mode // CH process stdio wiring; see pkg/sandbox/stdio
 }
 
 // Run executes restore. Returns the CH exit code.
@@ -75,7 +77,21 @@ func Run(ctx context.Context, opts Options) (int, error) {
 		opts.CHBinary = "cloud-hypervisor"
 	}
 
-	logf := func(format string, a ...any) { log.Printf("[sandbox-ctl restore] "+format, a...) }
+	logf := func(format string, a ...any) { log.Printf("[sandbox-ctl run --restore] "+format, a...) }
+
+	// cgroup join (same semantics as cold-start lifecycle.go). No-cgroup
+	// mode (no cgroup_path) is a no-op. See docs/sandbox.md §4.1.
+	// Initial memory.high uses the configured allocatable; the value gets
+	// bumped after we derive allocatable_at_snapshot from the bundle's
+	// state.json balloon (below).
+	cg, err := sandbox.JoinCgroupForConfig(opts.HostCfg)
+	if err != nil {
+		return -1, fmt.Errorf("cgroup: %w", err)
+	}
+	if cg.Path != "" {
+		logf("cgroup joined: %s", cg.Path)
+	}
+	defer func() { _ = cg.Cleanup() }()
 
 	runDir := filepath.Join(opts.RuntimeRoot, opts.SandboxID)
 	if err := os.MkdirAll(runDir, 0o755); err != nil {
@@ -91,6 +107,20 @@ func Run(ctx context.Context, opts Options) (int, error) {
 	if err := os.MkdirAll(stateDir, 0o755); err != nil {
 		return -1, err
 	}
+
+	// Restore-side controller hooks. Admit happens once we've derived
+	// allocatable_at_snapshot from the bundle's state.json balloon section
+	// (see deriveAllocatableAtSnapshot below).
+	hooks, err := sandbox.NewControllerHooks(sandbox.ControllerHookOptions{
+		SocketPath: opts.HostCfg.Resources.Control.Controller,
+		CHSocket:   chSock,
+		CgroupPath: opts.HostCfg.Resources.Control.CgroupPath,
+		Logf:       logf,
+	}, opts.HostCfg)
+	if err != nil {
+		return -1, fmt.Errorf("controller dial: %w", err)
+	}
+	defer hooks.Release("normal")
 
 	// Source dispatch: file:// → mmap-style local file; manifest:// →
 	// fetch.Fetcher random-access via cache-ctl. Both expose the same
@@ -145,21 +175,77 @@ func Run(ctx context.Context, opts Options) (int, error) {
 		}
 		entries[f.Name] = body
 	}
-	for _, want := range []string{"config.json", "state.json", "sandbox.cfg"} {
+	for _, want := range []string{"config.json", "state.json", "snapshot.cfg"} {
 		if _, ok := entries[want]; !ok {
-			return -1, fmt.Errorf("snapshot bundle missing %s", want)
+			return -1, fmt.Errorf("snapshot bundle missing %s (produced by old sandbox-ctl?)", want)
 		}
 	}
 
-	// sandbox.cfg has the snapshotted config. Use its memory size and
-	// merge selected fields from host yaml (TAP, overlay.diff).
-	var snapCfg sandbox.SandboxConfig
-	if err := json.Unmarshal(entries["sandbox.cfg"], &snapCfg); err != nil {
-		return -1, fmt.Errorf("unmarshal sandbox.cfg: %w", err)
+	// snapshot.cfg carries the post-quiesce platform contract: capacity,
+	// runtime_ref, base_ref, overlay.base. ApplyRules merges it with the
+	// host sandbox.yaml per docs/sandbox.md §11.0 — capacity must match
+	// exactly when host provides it, runtime/base are validated against
+	// digest, network.tap is required, overlay.diff is required.
+	parsedSnap, err := ParseSnapshotCfg(entries["snapshot.cfg"])
+	if err != nil {
+		return -1, err
 	}
-	snapCfg.Network.TAP = opts.HostCfg.Network.TAP
-	if opts.HostCfg.Boot.Root.Overlay.Diff != "" {
-		snapCfg.Boot.Root.Overlay.Diff = opts.HostCfg.Boot.Root.Overlay.Diff
+	merged, err := ApplyRules(opts.HostCfg, parsedSnap, opts.SnapshotPath)
+	if err != nil {
+		return -1, err
+	}
+	snapCfg := *merged
+
+	// Derive allocatable_at_snapshot from CH state.json's balloon section
+	// (no separate resource-state.json file — see §13). When the bundle
+	// predates balloon use or balloon was disabled, parseBalloonFromState
+	// returns ok=false and we fall back to yaml.allocatable as if it were
+	// a cold start.
+	snapCap, err := snapCfg.CapacityMemoryBytes()
+	if err != nil {
+		return -1, fmt.Errorf("snap sandbox.cfg capacity: %w", err)
+	}
+	balTarget, balCurrent, balOk, err := parseBalloonFromState(entries["state.json"])
+	if err != nil {
+		return -1, fmt.Errorf("parse balloon from state.json: %w", err)
+	}
+	allocAtSnap := deriveAllocatableAtSnapshot(snapCap, balTarget, balCurrent, balOk)
+
+	yamlAlloc, err := opts.HostCfg.AllocatableMemoryBytes()
+	if err != nil {
+		return -1, err
+	}
+
+	// Static mode: take max(yaml, snapshot allocatable). When the snapshot
+	// was captured under a controller (dynamic mode) at a burst-elevated
+	// allocatable, restoring under static mode (A/B) preserves that
+	// elevated working set rather than throttling the guest.
+	initialAlloc := yamlAlloc
+	if allocAtSnap > initialAlloc {
+		initialAlloc = allocAtSnap
+	}
+	if hooks.Enabled() {
+		// Dynamic mode: controller decides. Floor sent = yaml.allocatable
+		// (controller's 2-tier fallback uses it if headroom can't fit
+		// allocAtSnap).
+		granted, err := hooks.Admit(opts.SandboxID, allocAtSnap)
+		if err != nil {
+			return -1, fmt.Errorf("controller admit: %w", err)
+		}
+		initialAlloc = granted
+		logf("controller admit ok, restored allocatable=%d (snapshot allocatable=%d, balloon target/current=%d/%d)",
+			granted, allocAtSnap, balTarget, balCurrent)
+	} else if allocAtSnap > yamlAlloc {
+		logf("static mode: bumping initial allocatable from yaml=%d to snapshot allocatable=%d (balloon target/current=%d/%d)",
+			yamlAlloc, allocAtSnap, balTarget, balCurrent)
+	}
+	// Re-apply cgroup memory.high and (later) balloon target to match
+	// initialAlloc. Balloon is configured via vm.resize after /vm.resume
+	// because restore loads its initial balloon size from state.json.
+	if hooks != nil {
+		if err := hooks.ApplyInitialAllocatable(initialAlloc); err != nil {
+			logf("apply initial allocatable: %v (continuing)", err)
+		}
 	}
 
 	// Resolve disk reference. file:// is opened directly; manifest://
@@ -377,26 +463,37 @@ func Run(ctx context.Context, opts Options) (int, error) {
 		return -1, err
 	}
 
+	// Pinger drives the host→guest health probe across the restored
+	// sandbox lifetime (§9.1.4). Started after the restore notification
+	// is acked; paused around any subsequent snapshot quiesce window.
+	pinger := &sandbox.Pinger{
+		Client: &sandbox.HostClient{BasePath: vsockSock, Logf: logf},
+		Stats:  &sandbox.PingStats{},
+		Logf:   logf,
+	}
+	defer pinger.Stop()
+
 	// ctl.sock server — same protocol as Run, lets `sandbox-ctl
 	// snapshot --sandbox-id <sid>` work against a restored sandbox.
 	ctlSockPath := filepath.Join(runDir, "ctl.sock")
 	snapHandler := &sandbox.SnapshotHandler{
-		Cfg:      &snapCfg,
-		AccelCfg: nil, // restore.Run owns AccelRuntime via opts; AccelCfg only needed for ChunkConfig
-		Memfd:    memfd,
-		DiffPath: diffPath,
-		Srv0:     srv0,
-		Srv1:     srv1,
-		CHSock:   chSock,
-		RunDir:   runDir,
-		Accel:    opts.AccelRuntime,
-		Logf:     logf,
+		Cfg:         &snapCfg,
+		ManifestCfg: nil, // restore.Run owns AccelRuntime via opts; ManifestCfg only needed for ChunkConfig
+		Memfd:       memfd,
+		DiffPath:    diffPath,
+		Srv0:        srv0,
+		Srv1:        srv1,
+		CHSock:      chSock,
+		RunDir:      runDir,
+		Accel:       opts.AccelRuntime,
+		Pinger:      pinger,
+		Logf:        logf,
 	}
-	// AccelCfg is needed for chunker config in upload mode. The host
-	// passes it via the new option; if absent, --upload from a restored
+	// ManifestCfg is needed for chunker config in upload mode. The host
+	// passes it via the option; if absent, --upload from a restored
 	// sandbox will fail with a clear message.
-	if opts.AccelCfg != nil {
-		snapHandler.AccelCfg = opts.AccelCfg
+	if opts.ManifestCfg != nil {
+		snapHandler.ManifestCfg = opts.ManifestCfg
 	}
 	ctlSrv := &snapshot.Server{
 		Path:    ctlSockPath,
@@ -429,8 +526,11 @@ func Run(ctx context.Context, opts Options) (int, error) {
 	logf("spawning %s --api-socket %s --restore source_url=file://%s",
 		opts.CHBinary, chSock, stateDir)
 	cmd := exec.CommandContext(ctx, opts.CHBinary, args...)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	stdioCleanup, err := opts.StdioMode.Apply(cmd)
+	if err != nil {
+		return -1, fmt.Errorf("stdio: %w", err)
+	}
+	defer stdioCleanup()
 	cmd.ExtraFiles = []*os.File{memfd.File()}
 
 	sigCh := make(chan os.Signal, 4)
@@ -460,6 +560,35 @@ func Run(ctx context.Context, opts Options) (int, error) {
 	}
 	logf("VM resumed, vCPU running")
 	startUnixNs := time.Now().UnixNano()
+
+	// Notify guest agent of the restore (§7.1 T13a). The guest's
+	// reverse-channel listener was preserved across the snapshot
+	// (§9.1.5), so the first dial after vm.resume should land in
+	// kernel-microseconds. Failure here aborts restore — we don't
+	// want to hand back a sandbox whose guest agent is unreachable.
+	tRestore := time.Now()
+	if err := sandbox.SendRestore(pinger.Client, 1); err != nil {
+		_ = cmd.Process.Kill()
+		return -1, fmt.Errorf("notify restore: %w (guest agent unreachable)", err)
+	}
+	logf("restore notify acked in %dµs; starting ping ticker",
+		time.Since(tRestore).Microseconds())
+	pinger.Start(backendCtx)
+	// Restore-path settled trigger (docs/sandbox.md §10.1):
+	// SendRestore returning nil means guest replied `restored` ack,
+	// equivalent to cold-start `hello` from the controller's POV. Unlike
+	// cold start we do NOT shrink balloon — restored allocatable is
+	// preserved as-is. SettledRestore writes memory.high in BOTH static
+	// and dynamic modes (deferred from JoinCgroup; Issue 4 root cause).
+	if hooks != nil {
+		if err := hooks.SettledRestore(); err != nil {
+			logf("settled-restore: %v (continuing)", err)
+		}
+		if hooks.Enabled() {
+			hooks.StartHeartbeat(backendCtx, 5*time.Second)
+			hooks.StartSensor(backendCtx, 64<<20)
+		}
+	}
 
 	doneCh := make(chan error, 1)
 	go func() { doneCh <- cmd.Wait() }()
@@ -499,6 +628,10 @@ func Run(ctx context.Context, opts Options) (int, error) {
 					if cap, err := snapCfg.CapacityMemoryBytes(); err == nil {
 						bundle.UffdRAMSize = int64(cap)
 					}
+				}
+				if pinger.Stats != nil {
+					snap := pinger.Stats.Snapshot()
+					bundle.Ping = &snap
 				}
 				if err := sandbox.WriteStatsJSON(opts.StatsJSONPath, bundle); err != nil {
 					logf("stats json write %s: %v", opts.StatsJSONPath, err)

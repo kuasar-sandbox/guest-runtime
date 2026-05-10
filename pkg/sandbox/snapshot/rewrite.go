@@ -3,27 +3,26 @@ package snapshot
 import (
 	"archive/zip"
 	"encoding/binary"
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 
-	"github.com/fullof-work/mass-sandbox/pkg/store"
+	"gopkg.in/yaml.v3"
 )
 
-// rewriteSandboxCfgInBundle patches the trailing-ZIP entry sandbox.cfg
-// inside a sandbox.snapshot bundle so its boot.root.overlay.base
-// reads `manifest://<diskKey>`. The memory section is left untouched
-// (sparse layout preserved). The ZIP is rewritten in place: the file
-// is truncated to the memory-section size, then AppendZIP is called
-// with the same entries (config.json, state.json, sandbox.cfg) plus
-// the patched sandbox.cfg.
+// rewriteSnapshotCfgInBundle patches the trailing-ZIP entry snapshot.cfg
+// inside a <sid>.snapshot bundle so its boot.root.overlay.base reads
+// `overlayRef` (`manifest://<key>` for upload-mode patches; `file://...`
+// for tests). The memory section is left untouched (sparse layout
+// preserved). The ZIP is rewritten in place: the file is truncated to
+// the memory-section size, then AppendZIP is called with the same
+// entries (config.json, state.json, snapshot.cfg) plus the patched
+// snapshot.cfg.
 //
-// Memory-section size is recovered from the ZIP central directory:
-// archive/zip's BaseOffset (set when there's a prefix before the
-// archive) gives the offset where the ZIP starts, which is exactly
-// the memfd size that produced the bundle.
-func rewriteSandboxCfgInBundle(path string, diskKey store.ContentKey) error {
+// Memory-section size is recovered from the ZIP central directory via
+// the EOCD record (archive/zip's BaseOffset is unexported, so we derive
+// it ourselves).
+func rewriteSnapshotCfgInBundle(path, overlayRef string) error {
 	f, err := os.OpenFile(path, os.O_RDWR, 0)
 	if err != nil {
 		return err
@@ -40,7 +39,6 @@ func rewriteSandboxCfgInBundle(path string, diskKey store.ContentKey) error {
 		return fmt.Errorf("zip read: %w", err)
 	}
 
-	// Capture entries verbatim except sandbox.cfg, which we patch.
 	entries := make(map[string][]byte, len(r.File))
 	for _, file := range r.File {
 		rc, err := file.Open()
@@ -55,17 +53,16 @@ func rewriteSandboxCfgInBundle(path string, diskKey store.ContentKey) error {
 		entries[file.Name] = body
 	}
 
-	cfgBody, ok := entries["sandbox.cfg"]
+	cfgBody, ok := entries["snapshot.cfg"]
 	if !ok {
-		return fmt.Errorf("bundle missing sandbox.cfg")
+		return fmt.Errorf("bundle missing snapshot.cfg")
 	}
-	patched, err := patchSandboxCfg(cfgBody, diskKey)
+	patched, err := patchSnapshotCfgYAML(cfgBody, overlayRef)
 	if err != nil {
-		return fmt.Errorf("patch sandbox.cfg: %w", err)
+		return fmt.Errorf("patch snapshot.cfg: %w", err)
 	}
-	entries["sandbox.cfg"] = patched
+	entries["snapshot.cfg"] = patched
 
-	// Locate ZIP base = first local file header offset = memory-section size.
 	zipBase, err := zipBaseOffsetFromFile(f, totalSize)
 	if err != nil {
 		return fmt.Errorf("locate zip base: %w", err)
@@ -73,9 +70,7 @@ func rewriteSandboxCfgInBundle(path string, diskKey store.ContentKey) error {
 	if zipBase < 0 || zipBase > totalSize {
 		return fmt.Errorf("invalid zip base offset %d (totalSize=%d)", zipBase, totalSize)
 	}
-	_ = r // keep variable in scope; entries already extracted
 
-	// Truncate the bundle to memory-section size, then re-write the ZIP.
 	if err := f.Truncate(zipBase); err != nil {
 		return fmt.Errorf("truncate: %w", err)
 	}
@@ -88,18 +83,18 @@ func rewriteSandboxCfgInBundle(path string, diskKey store.ContentKey) error {
 	return nil
 }
 
-// patchSandboxCfg rewrites the JSON's boot.root.overlay.base field to
-// `manifest://<hex-disk-key>`. Round-trips through map[string]any so
-// extra fields the rest of the system might add stay intact.
-func patchSandboxCfg(body []byte, diskKey store.ContentKey) ([]byte, error) {
-	var obj map[string]any
-	if err := json.Unmarshal(body, &obj); err != nil {
+// patchSnapshotCfgYAML rewrites the YAML's boot.root.overlay.base field
+// to overlayRef. Round-trips through map[string]any so extra fields stay
+// intact.
+func patchSnapshotCfgYAML(body []byte, overlayRef string) ([]byte, error) {
+	var doc map[string]any
+	if err := yaml.Unmarshal(body, &doc); err != nil {
 		return nil, err
 	}
-	boot, _ := obj["boot"].(map[string]any)
+	boot, _ := doc["boot"].(map[string]any)
 	if boot == nil {
 		boot = map[string]any{}
-		obj["boot"] = boot
+		doc["boot"] = boot
 	}
 	root, _ := boot["root"].(map[string]any)
 	if root == nil {
@@ -111,8 +106,8 @@ func patchSandboxCfg(body []byte, diskKey store.ContentKey) ([]byte, error) {
 		overlay = map[string]any{}
 		root["overlay"] = overlay
 	}
-	overlay["base"] = "manifest://" + HexKey(diskKey)
-	return json.Marshal(obj)
+	overlay["base"] = overlayRef
+	return yaml.Marshal(doc)
 }
 
 // zipBaseOffsetFromFile scans the file's tail for the ZIP End-of-
@@ -121,8 +116,6 @@ func patchSandboxCfg(body []byte, diskKey store.ContentKey) ([]byte, error) {
 // keeps the equivalent (`baseOffset`) unexported, so we derive it
 // ourselves.
 //
-// Layout invariants:
-//
 //	[..memory section..][..ZIP body..][..central dir..][EOCD]
 //
 // EOCD record fields used:
@@ -130,12 +123,7 @@ func patchSandboxCfg(body []byte, diskKey store.ContentKey) ([]byte, error) {
 //	+12: u32 size_of_central_dir
 //	+16: u32 offset_of_central_dir (relative to start of ZIP)
 //
-// So:
-//
 //	zipBase = eocd_pos_in_file - size_of_central_dir - offset_of_central_dir
-//
-// EOCD itself is ≥22 bytes; the comment field (≤64 KiB) trails it. We
-// scan the last 64 KiB + 22 bytes for the signature.
 func zipBaseOffsetFromFile(f *os.File, totalSize int64) (int64, error) {
 	const eocdSig uint32 = 0x06054b50
 	const minEOCDSize = 22
@@ -150,13 +138,9 @@ func zipBaseOffsetFromFile(f *os.File, totalSize int64) (int64, error) {
 	if _, err := f.ReadAt(buf, scanStart); err != nil && err != io.EOF {
 		return 0, err
 	}
-	// Scan from the end for the signature.
 	eocdRel := int64(-1)
 	for i := len(buf) - minEOCDSize; i >= 0; i-- {
 		if binary.LittleEndian.Uint32(buf[i:i+4]) == eocdSig {
-			// Ensure comment_len is consistent with this position
-			// (commentLen + 22 + i == len(buf) means EOCD ends at buf
-			// end and matches comment trailer).
 			commentLen := int(binary.LittleEndian.Uint16(buf[i+20 : i+22]))
 			if i+minEOCDSize+commentLen <= len(buf) {
 				eocdRel = int64(i)
@@ -174,6 +158,3 @@ func zipBaseOffsetFromFile(f *os.File, totalSize int64) (int64, error) {
 	zipBase := eocdAbs - sizeCD - offsetCD
 	return zipBase, nil
 }
-
-// keep zip import in scope; archive/zip is used by callers above.
-var _ = zip.NewReader

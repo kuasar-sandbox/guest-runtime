@@ -24,45 +24,42 @@ type Storer interface {
 	Put(ctx context.Context, p store.Partition, key store.ContentKey, data []byte) (isNew bool, err error)
 }
 
-// UploadSources gathers the inputs needed to ingest disk + sandbox.snapshot.
-// All paths point at files already produced by Take into a staging dir.
+// UploadSources gathers the inputs needed to ingest overlay + snapshot
+// bundle. Both paths point at files already produced or referenced by
+// Take into the staging dir.
 type UploadSources struct {
-	DiskPath        string         // local disk.ext4 from Take
-	SnapshotPath    string         // local sandbox.snapshot from Take (memory + ZIP at end)
-	SnapshotHoles   []manifest.HoleExtent // hole extents inside SnapshotPath (memory section only)
-	CustomerKey     [32]byte
-	ChunkConfig     chunker.Config
-	ChunkEncryptor  crypto.ChunkEncryptor
-	KTEncryptor     crypto.KeyTableEncryptor
-	Storer          Storer
-	Logf            func(string, ...any)
+	OverlayPath    string                // local blk1.diff (live; quiesce-stable)
+	SnapshotPath   string                // local <sid>.snapshot from Take (memory + ZIP at end)
+	SnapshotHoles  []manifest.HoleExtent // hole extents inside SnapshotPath (memory section only)
+	CustomerKey    [32]byte
+	ChunkConfig    chunker.Config
+	ChunkEncryptor crypto.ChunkEncryptor
+	KTEncryptor    crypto.KeyTableEncryptor
+	Storer         Storer
+	Logf           func(string, ...any)
 }
 
 // UploadResult summarises the bytes/dedup metrics for both ingests.
 type UploadResult struct {
-	DiskKey            store.ContentKey
-	SnapshotKey        store.ContentKey
-	DiskStoredBytes    uint64
-	DiskDedupChunks    uint32
-	DiskTotalChunks    uint32
+	OverlayKey          store.ContentKey
+	SnapshotKey         store.ContentKey
+	OverlayStoredBytes  uint64
+	OverlayDedupChunks  uint32
+	OverlayTotalChunks  uint32
 	SnapshotStoredBytes uint64
 	SnapshotDedupChunks uint32
 	SnapshotTotalChunks uint32
-	WallclockUploadMs  int64
+	WallclockUploadMs   int64
 }
 
-// Upload ingests disk.ext4 then rewrites the sandbox.cfg embedded in
-// sandbox.snapshot to point at the disk's manifest key, then ingests
-// sandbox.snapshot. Returns the snapshot manifest key (= the `--snapshot
-// manifest://<key>` reference for restore).
+// Upload ingests blk1.diff (the live overlay) then patches the
+// snapshot.cfg embedded in <sid>.snapshot to point overlay.base at
+// `manifest://<overlay-key>`, then ingests <sid>.snapshot.
 //
-// The disk + snapshot must reside in the same target store (single
+// The two manifests must reside in the same target store (single
 // `--upload` switch in CLI). Two-step ingest order matters:
-//  1. Disk ingest first → disk_key known.
-//  2. Rewrite sandbox.cfg's overlay.base = "manifest://<disk-key>"
-//     (the sandbox.snapshot ZIP at the end already contains a
-//     placeholder; we patch it in-place via re-packaging the ZIP
-//     before snapshot ingest).
+//  1. Overlay ingest first → overlay_key known.
+//  2. Patch snapshot.cfg's overlay.base in the bundle's trailing ZIP.
 //  3. Snapshot ingest with hole map preserved.
 func Upload(ctx context.Context, src UploadSources) (*UploadResult, error) {
 	logf := src.Logf
@@ -79,25 +76,26 @@ func Upload(ctx context.Context, src UploadSources) (*UploadResult, error) {
 	logf("upload: store generation=%s", gen)
 	ing := ingest.NewIngester(src.Storer.Put, src.ChunkEncryptor, src.KTEncryptor)
 
-	// 1. Ingest disk.ext4 (fresh from sparse copy).
-	diskKey, diskRes, err := ingestFile(ctx, ing, src.DiskPath, src.CustomerKey, salt,
-		src.ChunkConfig, nil /*holes; sparse copy preserved them as fs holes which Ingest can detect via SEEK_DATA but we pass nil and rely on chunker; for cleanliness we skip hole tracking here and let dedup take care*/, src.Storer.Put)
+	// 1. Ingest blk1.diff (the live overlay; quiesce-stable).
+	overlayKey, overlayRes, err := ingestFile(ctx, ing, src.OverlayPath, src.CustomerKey, salt,
+		src.ChunkConfig, nil, src.Storer.Put)
 	if err != nil {
-		return nil, fmt.Errorf("upload disk: %w", err)
+		return nil, fmt.Errorf("upload overlay: %w", err)
 	}
-	logf("upload: disk ingested key=%x stored=%d dedup=%d total=%d",
-		diskKey, diskRes.StoredChunks, diskRes.DedupChunks, diskRes.StoredChunks+diskRes.DedupChunks)
+	logf("upload: overlay ingested key=%x stored=%d dedup=%d total=%d",
+		overlayKey, overlayRes.StoredChunks, overlayRes.DedupChunks, overlayRes.StoredChunks+overlayRes.DedupChunks)
 
-	// 2. Patch sandbox.cfg inside sandbox.snapshot's trailing ZIP so
-	//    overlay.base references manifest://<diskKey>. The patch is a
-	//    "read ZIP entry → JSON edit → re-encode trailing ZIP". The
+	// 2. Patch snapshot.cfg inside <sid>.snapshot's trailing ZIP so
+	//    overlay.base references manifest://<overlayKey>. The patch is a
+	//    "read ZIP entry → YAML edit → re-encode trailing ZIP". The
 	//    memory section stays untouched; the sparse layout is preserved.
-	if err := rewriteSandboxCfgInBundle(src.SnapshotPath, diskKey); err != nil {
-		return nil, fmt.Errorf("upload: rewrite sandbox.cfg: %w", err)
+	overlayRef := "manifest://" + HexKey(overlayKey)
+	if err := rewriteSnapshotCfgInBundle(src.SnapshotPath, overlayRef); err != nil {
+		return nil, fmt.Errorf("upload: rewrite snapshot.cfg: %w", err)
 	}
-	logf("upload: sandbox.cfg in bundle patched: overlay.base=manifest://%x", diskKey)
+	logf("upload: snapshot.cfg in bundle patched: overlay.base=%s", overlayRef)
 
-	// 3. Ingest sandbox.snapshot with hole map (memory section's holes).
+	// 3. Ingest <sid>.snapshot with hole map (memory section's holes).
 	snapKey, snapRes, err := ingestFile(ctx, ing, src.SnapshotPath, src.CustomerKey, salt,
 		src.ChunkConfig, src.SnapshotHoles, src.Storer.Put)
 	if err != nil {
@@ -107,11 +105,11 @@ func Upload(ctx context.Context, src UploadSources) (*UploadResult, error) {
 		snapKey, snapRes.StoredChunks, snapRes.DedupChunks, snapRes.StoredChunks+snapRes.DedupChunks)
 
 	return &UploadResult{
-		DiskKey:             diskKey,
+		OverlayKey:          overlayKey,
 		SnapshotKey:         snapKey,
-		DiskStoredBytes:     diskRes.StoredBytes,
-		DiskDedupChunks:     diskRes.DedupChunks,
-		DiskTotalChunks:     diskRes.StoredChunks + diskRes.DedupChunks,
+		OverlayStoredBytes:  overlayRes.StoredBytes,
+		OverlayDedupChunks:  overlayRes.DedupChunks,
+		OverlayTotalChunks:  overlayRes.StoredChunks + overlayRes.DedupChunks,
 		SnapshotStoredBytes: snapRes.StoredBytes,
 		SnapshotDedupChunks: snapRes.DedupChunks,
 		SnapshotTotalChunks: snapRes.StoredChunks + snapRes.DedupChunks,
@@ -151,7 +149,6 @@ func ingestFile(
 	if err != nil {
 		return store.ContentKey{}, nil, err
 	}
-	// Marshal manifest blob and put it under the manifest partition.
 	body, err := manifest.Marshal(res.Manifest, res.SealedKeyTable)
 	if err != nil {
 		return store.ContentKey{}, nil, fmt.Errorf("marshal manifest: %w", err)
@@ -198,7 +195,6 @@ func SparseHoles(path string, limit uint64) ([]manifest.HoleExtent, error) {
 	for off < end {
 		dataOff, derr := f.Seek(off, seekData)
 		if derr != nil {
-			// ENXIO → no more data: rest is a hole until end.
 			if e, ok := derr.(*os.PathError); ok && e.Err.Error() == "no such device or address" {
 				if uint64(off) < limit {
 					holes = append(holes, manifest.HoleExtent{

@@ -232,8 +232,7 @@ func (c *BlockCOW) Flush() error {
 // start and P2 snapshot. With a base layer (P3 restore), bitmap=clean
 // would route reads to base.ReadAt instead of zero, returning stale
 // content the guest considered freed. The P3-era extension switches to
-// a 3-state stateMap (clean/dirty/discard); see sandbox-design.md
-// §10.5.1.
+// a 3-state stateMap (clean/dirty/discard); see sandbox.md §12.4.
 func (c *BlockCOW) Discard(offset, length int64) error {
 	if offset < 0 || length < 0 || offset+length > c.size {
 		return fmt.Errorf("vhost: discard out of bounds: off=%d len=%d size=%d",

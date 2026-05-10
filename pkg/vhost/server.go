@@ -9,6 +9,7 @@ import (
 	"os"
 	"sync"
 	"syscall"
+	"time"
 )
 
 // Backend is the per-device abstraction. blk0 (read-only base image)
@@ -84,6 +85,11 @@ type Server struct {
 	stopOnce               sync.Once
 	stop                   chan struct{}
 	listener               *net.UnixListener
+	// activeConn is the currently-connected master conn. Stop closes it
+	// to unblock any in-flight ReadMessage; otherwise a serve loop
+	// inside Read could wait up to VhostReadIdleTimeout (5 min) before
+	// noticing Stop, leaving sandbox-ctl pinned in backendWG.Wait().
+	activeConn *net.UnixConn
 }
 
 // virtq holds per-virtq state set up by SET_VRING_*.
@@ -205,9 +211,21 @@ func (s *Server) Listen() error {
 	return nil
 }
 
-// Serve blocks accepting one connection from the master and processing
-// messages until the connection closes or Stop is called. Returns nil
-// on clean shutdown.
+// VhostReadIdleTimeout bounds how long ReadMessage will block on a
+// connected master. Without this, a stuck CH (vCPU wedged, signal not
+// drained) leaves the vhost server pinned forever. Long enough to
+// dwarf any legitimate inter-message gap during normal operation.
+const VhostReadIdleTimeout = 5 * time.Minute
+
+// Serve accepts master connections in a loop and processes messages
+// for each. When a master disconnects, per-connection state is reset
+// (memtable cleared, virtq workers stopped) and the listener accepts
+// the next master. This removes the "single connection per lifetime"
+// invariant that previously forced sandbox-init to use POWER_OFF (vs
+// RESTART) and that left CH unable to reattach after any reset.
+//
+// Serve returns nil on Stop() or context cancel. Returns error only on
+// fatal accept failures (other than the close-driven case).
 func (s *Server) Serve(ctx context.Context) error {
 	if s.listener == nil {
 		return fmt.Errorf("vhost: Listen not called")
@@ -219,38 +237,127 @@ func (s *Server) Serve(ctx context.Context) error {
 		s.Stop()
 	}()
 
-	conn, err := s.listener.AcceptUnix()
-	if err != nil {
-		select {
-		case <-s.stop:
-			return nil
-		default:
-			return fmt.Errorf("vhost: accept: %w", err)
-		}
-	}
-	s.logf("vhost: master connected on %s", s.socketPath)
-	defer conn.Close()
-
 	for {
 		select {
 		case <-s.stop:
 			return nil
 		default:
 		}
+		conn, err := s.listener.AcceptUnix()
+		if err != nil {
+			select {
+			case <-s.stop:
+				return nil
+			default:
+				return fmt.Errorf("vhost: accept: %w", err)
+			}
+		}
+		s.logf("vhost: master connected on %s", s.socketPath)
+		s.mu.Lock()
+		s.activeConn = conn
+		s.mu.Unlock()
+		s.serveOneMaster(conn)
+		s.mu.Lock()
+		s.activeConn = nil
+		s.mu.Unlock()
+		s.resetConnectionState()
+	}
+}
+
+// serveOneMaster runs the vhost-user protocol loop on a single master
+// connection until the master disconnects, the read deadline expires,
+// or Stop fires. Errors are logged; the loop never returns them up to
+// Serve, since a wedged master should not kill the listener.
+func (s *Server) serveOneMaster(conn *net.UnixConn) {
+	defer conn.Close()
+	for {
+		select {
+		case <-s.stop:
+			return
+		default:
+		}
+		_ = conn.SetReadDeadline(time.Now().Add(VhostReadIdleTimeout))
 		msg, err := ReadMessage(conn)
 		if err != nil {
-			s.logf("vhost: read: %v (master likely disconnected)", err)
-			return nil
+			s.logf("vhost: read: %v (master likely disconnected or idle-timeout)", err)
+			return
 		}
 		if err := s.handle(conn, msg); err != nil {
 			s.logf("vhost: handle %s: %v", MsgName(msg.Header.Request), err)
 			closeFds(msg.Fds)
-			return err
+			return
 		}
 	}
 }
 
-// Stop terminates the serve loop and stops virtq workers.
+// resetConnectionState clears per-master state so the next master
+// connection starts from a clean slate. virtq workers from the prior
+// connection are stopped; memtable, features, and queue addrs are
+// zeroed. The backend itself is preserved across reconnects.
+//
+// Workers block in syscall.Read on the kick eventfd; closing q.stop
+// alone is not enough because the Read won't observe the channel
+// closure. We close the kickFd which makes the read return EBADF and
+// the worker exits. The callFd is also closed for symmetry.
+func (s *Server) resetConnectionState() {
+	s.mu.Lock()
+	queues := s.queues
+	s.queues = make([]*virtq, NumQueues)
+	s.features = 0
+	s.protocolFeatures = 0
+	s.memTable.SetRegions(nil)
+	s.mu.Unlock()
+	stopAndDrainQueues(queues)
+}
+
+// stopAndDrainQueues signals each queue to stop and unblocks any
+// worker blocked in syscall.Read on the kick eventfd. We use two
+// mechanisms because either alone is racy:
+//  1. eventfd_write to the kickFd: the worker's blocking Read returns
+//     with the count we wrote; then it observes q.stop on the next
+//     loop iteration and exits cleanly.
+//  2. close(kickFd) as a backstop: if the worker missed the wakeup
+//     for any reason, the next read returns EBADF and the worker
+//     exits. close() alone is racy because close on a fd that another
+//     thread is already inside a syscall on does not abort the syscall
+//     on Linux.
+func stopAndDrainQueues(queues []*virtq) {
+	for _, q := range queues {
+		if q == nil {
+			continue
+		}
+		if q.stop != nil {
+			select {
+			case <-q.stop:
+			default:
+				close(q.stop)
+			}
+		}
+		if q.kickFd >= 0 {
+			// Wake the blocking Read.
+			one := []byte{1, 0, 0, 0, 0, 0, 0, 0}
+			_, _ = syscall.Write(q.kickFd, one)
+			_ = syscall.Close(q.kickFd)
+			q.kickFd = -1
+		}
+		if q.callFd >= 0 {
+			_ = syscall.Close(q.callFd)
+			q.callFd = -1
+		}
+		if q.done != nil {
+			<-q.done
+		}
+	}
+}
+
+// Stop terminates the serve loop and stops virtq workers. Closes the
+// active master connection (so a serveOneMaster blocked in ReadMessage
+// returns immediately) and the kick eventfds (so virtq workers blocked
+// in syscall.Read on the kick fd return immediately with EBADF).
+// Without these explicit closes, sandbox-ctl shutdown could block for
+// up to VhostReadIdleTimeout (5 min) on the master read, or
+// indefinitely on the kick read since the worker only checks q.stop
+// between iterations not during the syscall.
 func (s *Server) Stop() {
 	s.stopOnce.Do(func() {
 		close(s.stop)
@@ -259,13 +366,12 @@ func (s *Server) Stop() {
 		}
 		s.mu.Lock()
 		queues := s.queues
+		conn := s.activeConn
 		s.mu.Unlock()
-		for _, q := range queues {
-			if q != nil && q.stop != nil {
-				close(q.stop)
-				<-q.done
-			}
+		if conn != nil {
+			_ = conn.Close()
 		}
+		stopAndDrainQueues(queues)
 	})
 }
 

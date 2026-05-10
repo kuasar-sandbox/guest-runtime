@@ -2,8 +2,7 @@
 // IPC, CH /vm.snapshot orchestration, sparse memfd copy, ZIP-at-end
 // bundle composition.
 //
-// See sandbox-design.md §6 for the file format and §6.2 for the
-// timing.
+// See sandbox.md §6 for the file format and timing.
 package snapshot
 
 import (
@@ -13,31 +12,34 @@ import (
 	"io"
 )
 
-// Wire format on /run/<sid>/ctl.sock — JSON over u32 LE length prefix,
-// matching launch / va_report.
+// Wire format on <run-dir>/<sid>/ctl.sock — JSON over u32 LE length
+// prefix, matching launch / va_report.
 
 // Request is the snapshot request from sandbox-ctl snapshot to the
-// running sandbox-ctl run.
+// running sandbox-ctl run. OutDir and Upload are mutually exclusive
+// (the receiving run process enforces); ResumeAfter defaults to false
+// (zero value = sandbox is destroyed after snapshot).
 type Request struct {
-	Type         string `json:"type"`
-	OutDir       string `json:"out_dir,omitempty"`        // local mode: write here
-	Upload       bool   `json:"upload,omitempty"`         // ingest into manifest store
-	ResumeAfter  bool   `json:"resume_after,omitempty"`
-	StagingDir   string `json:"staging_dir,omitempty"`    // CH /vm.snapshot dest
+	Type        string `json:"type"`
+	OutDir      string `json:"out_dir,omitempty"`     // local mode: write <sid>.snapshot + <sha256>.overlay here
+	Upload      bool   `json:"upload,omitempty"`      // ingest into manifest store
+	ResumeAfter bool   `json:"resume_after,omitempty"`
+	StagingDir  string `json:"staging_dir,omitempty"` // CH /vm.snapshot dest
 }
 
 // Response is the success reply from the run-process.
 type Response struct {
-	Type                 string `json:"type"`
-	MemorySize           uint64 `json:"memory_size,omitempty"`
-	MemoryResident       uint64 `json:"memory_resident,omitempty"`
-	WallclockPauseMs     int64  `json:"wallclock_pause_ms,omitempty"`
-	WallclockDumpMs      int64  `json:"wallclock_dump_ms,omitempty"`
-	SnapshotManifestKey  string `json:"snapshot_manifest_key,omitempty"`
-	DiskManifestKey      string `json:"disk_manifest_key,omitempty"`
-	SnapshotPath         string `json:"snapshot_path,omitempty"`
-	DiskPath             string `json:"disk_path,omitempty"`
-	Msg                  string `json:"msg,omitempty"` // for type=error
+	Type                string `json:"type"`
+	MemorySize          uint64 `json:"memory_size,omitempty"`
+	MemoryResident      uint64 `json:"memory_resident,omitempty"`
+	WallclockPauseMs    int64  `json:"wallclock_pause_ms,omitempty"`
+	WallclockDumpMs     int64  `json:"wallclock_dump_ms,omitempty"`
+	SnapshotManifestKey string `json:"snapshot_manifest_key,omitempty"`
+	OverlayManifestKey  string `json:"overlay_manifest_key,omitempty"`
+	SnapshotPath        string `json:"snapshot_path,omitempty"` // <out_dir>/<sid>.snapshot
+	OverlayPath         string `json:"overlay_path,omitempty"`  // <out_dir>/<sha256>.overlay
+	OverlayRef          string `json:"overlay_ref,omitempty"`   // file://<sha256>.overlay 或 manifest://<key>
+	Msg                 string `json:"msg,omitempty"`           // for type=error
 }
 
 const (

@@ -9,7 +9,7 @@
 // every Absent fault becomes ZEROPAGE) and restore mode (snapshotReader
 // = SparseSnapshotSource, Absent → COPY from snapshot bytes).
 //
-// See sandbox-design.md §11 for the full contract.
+// See sandbox.md §8 for the full contract.
 package uffd
 
 import (
