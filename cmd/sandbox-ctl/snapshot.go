@@ -11,13 +11,18 @@ import (
 	"github.com/fullof-work/mass-sandbox/pkg/sandbox/snapshot"
 )
 
+// snapshotCmd implements `sandbox-ctl snapshot`. --output and --upload
+// are strictly mutually exclusive (one required); --resume defaults to
+// false (post-snapshot the sandbox is destroyed via /vm.shutdown).
+//
+// See docs/sandbox.md §2.3.
 func snapshotCmd(args []string) int {
 	fs := flag.NewFlagSet("snapshot", flag.ContinueOnError)
 	sandboxID := fs.String("sandbox-id", "", "target sandbox id (required)")
-	outDir := fs.String("output", "", "local output dir (required when --upload not given)")
-	upload := fs.Bool("upload", false, "ingest disk + snapshot into manifest store; stdout = snapshot manifest key")
-	resume := fs.Bool("resume", true, "resume the sandbox after snapshot")
-	runtimeRoot := fs.String("runtime-root", "/run", "directory containing /<sid>/ctl.sock")
+	outDir := fs.String("output", "", "local output dir; produces <sid>.snapshot + <sha256>.overlay")
+	upload := fs.Bool("upload", false, "ingest snapshot bundle + overlay into manifest store; stdout = snapshot manifest key")
+	resume := fs.Bool("resume", false, "keep sandbox running after snapshot (default: destroy via /vm.shutdown)")
+	runDir := fs.String("run-dir", "", "host runtime state dir (overrides SANDBOX_RUN_DIR env; default /run)")
 	timeoutS := fs.Int("timeout", 60, "seconds to wait for snapshot_done")
 
 	if err := fs.Parse(args); err != nil {
@@ -27,8 +32,14 @@ func snapshotCmd(args []string) int {
 		fmt.Fprintln(os.Stderr, "snapshot: --sandbox-id required")
 		return 2
 	}
+
+	// Strict mutual exclusion (docs/sandbox.md §13.3).
+	if *upload && *outDir != "" {
+		fmt.Fprintln(os.Stderr, "snapshot: --output and --upload are mutually exclusive")
+		return 2
+	}
 	if !*upload && *outDir == "" {
-		fmt.Fprintln(os.Stderr, "snapshot: --output required when --upload not given")
+		fmt.Fprintln(os.Stderr, "snapshot: --output and --upload are mutually exclusive; one is required")
 		return 2
 	}
 
@@ -45,7 +56,15 @@ func snapshotCmd(args []string) int {
 		}
 	}
 
-	ctlSock := filepath.Join(*runtimeRoot, *sandboxID, "ctl.sock")
+	rd := *runDir
+	if rd == "" {
+		rd = os.Getenv("SANDBOX_RUN_DIR")
+	}
+	if rd == "" {
+		rd = "/run"
+	}
+
+	ctlSock := filepath.Join(rd, *sandboxID, "ctl.sock")
 	c, err := net.DialTimeout("unix", ctlSock, 5*time.Second)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "snapshot: dial %s: %v\n", ctlSock, err)
@@ -79,8 +98,8 @@ func snapshotCmd(args []string) int {
 		// --upload ...)` work in shell pipelines.
 		fmt.Fprintf(os.Stderr, "snapshot upload done: memory_size=%d resident=%d pause_ms=%d dump_ms=%d\n",
 			resp.MemorySize, resp.MemoryResident, resp.WallclockPauseMs, resp.WallclockDumpMs)
-		if resp.DiskManifestKey != "" {
-			fmt.Fprintf(os.Stderr, "  disk manifest key: %s\n", resp.DiskManifestKey)
+		if resp.OverlayManifestKey != "" {
+			fmt.Fprintf(os.Stderr, "  overlay manifest key: %s\n", resp.OverlayManifestKey)
 		}
 		if resp.Msg != "" {
 			fmt.Fprintf(os.Stderr, "  %s\n", resp.Msg)
@@ -92,10 +111,10 @@ func snapshotCmd(args []string) int {
 	fmt.Printf("snapshot done: memory_size=%d resident=%d pause_ms=%d dump_ms=%d\n",
 		resp.MemorySize, resp.MemoryResident, resp.WallclockPauseMs, resp.WallclockDumpMs)
 	if resp.SnapshotPath != "" {
-		fmt.Printf("  sandbox.snapshot: %s\n", resp.SnapshotPath)
+		fmt.Printf("  snapshot bundle: %s\n", resp.SnapshotPath)
 	}
-	if resp.DiskPath != "" {
-		fmt.Printf("  disk.ext4: %s\n", resp.DiskPath)
+	if resp.OverlayPath != "" {
+		fmt.Printf("  overlay file:    %s\n", resp.OverlayPath)
 	}
 	return 0
 }

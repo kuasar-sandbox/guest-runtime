@@ -1,20 +1,19 @@
 // sandbox-ctl is the host-side control tool for one sandbox lifecycle.
 // Subcommands:
-//   run       — cold-start a sandbox from sandbox.yaml
-//   snapshot  — pause + dump to sandbox.snapshot + disk.ext4
-//   restore   — start from a sandbox.snapshot via uffd lazy memory load
+//
+//	run       — start a sandbox (cold-start; or with --restore=<ref> from a snapshot)
+//	snapshot  — pause + dump to <sid>.snapshot + <sha256>.overlay (or upload)
+//
+// See docs/sandbox.md for the full design.
 package main
 
 import (
 	"context"
-	"flag"
 	"fmt"
 	"log"
 	"os"
 	"os/signal"
 	"syscall"
-
-	"github.com/fullof-work/mass-sandbox/pkg/sandbox"
 )
 
 func init() {
@@ -34,8 +33,6 @@ func main() {
 		os.Exit(runCmd(os.Args[2:]))
 	case "snapshot":
 		os.Exit(snapshotCmd(os.Args[2:]))
-	case "restore":
-		os.Exit(restoreCmd(os.Args[2:]))
 	case "-h", "--help", "help":
 		printUsage(os.Stdout)
 		os.Exit(0)
@@ -50,61 +47,31 @@ func printUsage(w *os.File) {
 	fmt.Fprintf(w, `sandbox-ctl — sandbox runtime control
 
 Usage:
-  sandbox-ctl run       --config sandbox.yaml [--accelerator-config accelerator.yaml] [--sandbox-id <sid>] [--ch-binary <path>]
-  sandbox-ctl snapshot  --sandbox-id <sid> --output <out_dir> [--upload]
-  sandbox-ctl restore   --snapshot <file_path> --config <path> [--sandbox-id <sid>]
+  sandbox-ctl run       --config sandbox.yaml [--manifest-config <path>]
+                        [--sandbox-id <sid>] [--ch-binary <path>] [--run-dir <dir>]
+                        [--restore <file_path|manifest://hex>]
+                        [--stdin] [--stdout=false] [--stderr=false]
+                        [--stdin-from F] [--stdout-to F] [--stderr-to F]
+                        [--tty]
+  sandbox-ctl snapshot  --sandbox-id <sid> (--output <out_dir> | --upload)
+                        [--resume] [--run-dir <dir>] [--timeout <sec>]
 
-Run cold-starts one sandbox VM and blocks until the guest exits. See
-docs/sandbox-design.md for the full design.
+--manifest-config (or MANIFEST_CONFIG env) is required for any
+manifest:// resource (boot.root.base, --restore manifest://, --upload).
+file://-only configurations may omit it.
+
+run starts one sandbox VM and blocks until the guest exits. With
+--restore, the sandbox is resumed from a snapshot bundle instead of
+cold-starting (sandbox.yaml field semantics in restore mode are listed
+in docs/sandbox.md §11.0).
+
+snapshot pauses a running sandbox and writes a snapshot bundle either
+to a local directory (--output) or to the manifest store (--upload).
+The two are mutually exclusive. By default the sandbox is destroyed
+after a successful snapshot; use --resume to keep it running.
+
+See docs/sandbox.md for the full design.
 `)
-}
-
-func runCmd(args []string) int {
-	fs := flag.NewFlagSet("run", flag.ContinueOnError)
-	configPath := fs.String("config", "", "path to sandbox.yaml (required)")
-	accelPath := fs.String("accelerator-config", "", "path to accelerator.yaml (default: search ./accelerator.yaml then ~/.config/...)")
-	sandboxID := fs.String("sandbox-id", "", "sandbox id (overrides sandbox.yaml)")
-	chBinary := fs.String("ch-binary", "cloud-hypervisor", "path to cloud-hypervisor binary")
-	runtimeRoot := fs.String("runtime-root", "/run", "directory under which /<sid>/{ch,blk0,blk1}.sock are created")
-	statsJSON := fs.String("stats-json", "", "if set, write vhost-blk per-backend stats as JSON to this path on shutdown")
-
-	if err := fs.Parse(args); err != nil {
-		return 2
-	}
-	if *configPath == "" {
-		fmt.Fprintln(os.Stderr, "sandbox-ctl run: --config is required")
-		return 2
-	}
-
-	cfg, err := sandbox.Load(*configPath)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		return 1
-	}
-
-	accelCfg, err := sandbox.LoadAccelerator(*accelPath)
-	if err != nil {
-		// Not fatal: only manifest:// disks need it; we proceed with nil.
-		fmt.Fprintf(os.Stderr, "[sandbox-ctl] warn: accelerator config not loaded: %v (manifest:// disks will fail)\n", err)
-		accelCfg = nil
-	}
-
-	ctx, cancel := signalContext()
-	defer cancel()
-
-	exit, err := sandbox.Run(ctx, sandbox.RunOptions{
-		Cfg:           cfg,
-		AccelCfg:      accelCfg,
-		SandboxID:     *sandboxID,
-		CHBinary:      *chBinary,
-		RuntimeRoot:   *runtimeRoot,
-		StatsJSONPath: *statsJSON,
-	})
-	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		return 1
-	}
-	return exit
 }
 
 func signalContext() (context.Context, context.CancelFunc) {
