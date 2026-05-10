@@ -69,9 +69,14 @@ for d in e2e perf scripts; do
     fi
 done
 
-# Docs — README at root, cross-arch guide for build/run reference.
+# Docs — README at root + design docs (build.md is the build/run reference).
 cp "$repo_root/README.md" "$stage/README.md"
-[ -f "$repo_root/docs/cross-arch.md" ] && cp "$repo_root/docs/cross-arch.md" "$stage/docs/cross-arch.md"
+mkdir -p "$stage/docs"
+for f in build.md perf.md flatten.md manifest.md store.md cache.md \
+         sandbox.md sandbox-runtime.md sandbox-kernel.md \
+         cloud-hypervisor.md node.md; do
+    [ -f "$repo_root/docs/$f" ] && cp "$repo_root/docs/$f" "$stage/docs/$f"
+done
 
 # VERSION file — release identity for support / bug reports. Includes
 # git commit + build date so a binary can be traced back to source state.

@@ -79,7 +79,7 @@ else
 
 Architectures: x86_64, aarch64.
 
-See README.md and docs/cross-arch.md inside each tarball for build
+See README.md and docs/build.md inside each tarball for build
 prerequisites and end-to-end test instructions."
     gh release create "$VERSION" "${tarballs[@]}" \
         --title "$VERSION" \
