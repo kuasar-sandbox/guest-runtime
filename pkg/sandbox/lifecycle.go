@@ -2,7 +2,8 @@ package sandbox
 
 import (
 	"context"
-	"encoding/json"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"log"
@@ -10,13 +11,17 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
 
+	"gopkg.in/yaml.v3"
+
 	"github.com/fullof-work/mass-sandbox/pkg/sandbox/memory"
 	"github.com/fullof-work/mass-sandbox/pkg/sandbox/proto"
 	"github.com/fullof-work/mass-sandbox/pkg/sandbox/snapshot"
+	"github.com/fullof-work/mass-sandbox/pkg/sandbox/stdio"
 	"github.com/fullof-work/mass-sandbox/pkg/sandbox/uffd"
 	"github.com/fullof-work/mass-sandbox/pkg/vhost"
 )
@@ -24,11 +29,12 @@ import (
 // RunOptions controls a single sandbox-ctl run invocation.
 type RunOptions struct {
 	Cfg           *SandboxConfig
-	AccelCfg      *AcceleratorConfig // for manifest:// resolution; may be nil if all file://
-	SandboxID     string             // generated if empty
-	CHBinary      string             // path to bin/cloud-hypervisor
-	RuntimeRoot   string             // /run prefix; "/run" by default
-	StatsJSONPath string             // if set, write vhost stats as JSON to this path on shutdown
+	ManifestCfg   *ManifestConfig // for manifest:// resolution; may be nil if all file://
+	SandboxID     string          // generated if empty
+	CHBinary      string          // path to bin/cloud-hypervisor
+	RuntimeRoot   string          // /run prefix; "/run" by default
+	StatsJSONPath string          // if set, write vhost stats as JSON to this path on shutdown
+	StdioMode     stdio.Mode      // CH process stdio wiring; see pkg/sandbox/stdio
 }
 
 // Run executes one sandbox lifecycle: prepare backends + launch server,
@@ -55,6 +61,9 @@ func Run(ctx context.Context, opts RunOptions) (int, error) {
 	if err := VerifyTAP(opts.Cfg.Network.TAP); err != nil {
 		return -1, err
 	}
+	if err := populateSnapshotRefs(opts.Cfg); err != nil {
+		return -1, fmt.Errorf("snapshot refs: %w", err)
+	}
 
 	runDir := filepath.Join(opts.RuntimeRoot, opts.SandboxID)
 	if err := os.MkdirAll(runDir, 0o755); err != nil {
@@ -70,45 +79,77 @@ func Run(ctx context.Context, opts RunOptions) (int, error) {
 
 	logf := func(format string, a ...any) { log.Printf("[sandbox-ctl] "+format, a...) }
 
-	// cgroup setup. Skip on dev hosts without cgroup v2 access.
-	allocMemBytes, err := opts.Cfg.AllocatableMemoryBytes()
+	// Controller handshake (dynamic mode) — must happen before cgroup write
+	// so that the controller-granted initial allocatable can override
+	// the static startup-burst value when degraded.
+	hooks, err := NewControllerHooks(ControllerHookOptions{
+		SocketPath: opts.Cfg.Resources.Control.Controller,
+		CHSocket:   chSock,
+		CgroupPath: opts.Cfg.Resources.Control.CgroupPath,
+		Logf:       logf,
+	}, opts.Cfg)
+	if err != nil {
+		return -1, fmt.Errorf("controller dial: %w", err)
+	}
+	if hooks.Enabled() {
+		grantedInitial, err := hooks.Admit(opts.SandboxID, 0)
+		if err != nil {
+			return -1, err
+		}
+		logf("controller admit ok, initial allocatable=%d", grantedInitial)
+	}
+	defer hooks.Release("normal")
+
+	// cgroup join. CgroupPath empty → no-cgroup mode, no cgroup operations.
+	// CgroupPath set → join existing cgroup (must already exist; not
+	// created by sandbox-ctl). See docs/sandbox.md §4.1.
+	cgCfg, err := buildCgroupConfig(opts.Cfg)
 	if err != nil {
 		return -1, err
 	}
-	cg, err := SetupCgroup(opts.SandboxID,
-		opts.Cfg.Resources.Allocatable.CPU,
-		int(allocMemBytes>>20))
+	// Defer memory.high write to Settled (launch hello). Cold boot's
+	// uffd-driven page-fault burst can push the cgroup well past
+	// allocatable*0.875; if memory.high is already in effect, every
+	// UFFDIO_ZEROPAGE/COPY syscall returns through
+	// mem_cgroup_handle_over_high reclaim, throttling the uffd handler
+	// against the very faults it's trying to resolve (Issue 4 root cause).
+	// memory.max remains the hard ceiling during boot; memory.high gets
+	// written by Settled() once the boot transient is past.
+	cgCfg.MemoryHighBytes = 0
+	cg, err := JoinCgroup(cgCfg)
 	if err != nil {
-		logf("cgroup setup failed (continuing without): %v", err)
-		cg = nil
+		return -1, fmt.Errorf("cgroup: %w", err)
 	}
-	defer func() {
-		if cg != nil {
-			_ = cg.Cleanup()
-		}
-	}()
+	if cg.joined {
+		logf("cgroup joined: %s memory.max=%d memory.high=%d cpu.max=%dus/100000us cpu.weight=%d",
+			cg.Path, cgCfg.MemoryMaxBytes, cgCfg.MemoryHighBytes,
+			cgCfg.CPUMaxQuotaUs, cgCfg.CPUWeight)
+	} else {
+		logf("cgroup: no path configured, running without cgroup limits (no-cgroup mode)")
+	}
+	defer func() { _ = cg.Cleanup() }()
 
 	// Open the accelerator runtime (store + cache clients + crypto)
 	// once per sandbox when:
 	//   1. any disk URI uses manifest:// (Run / Restore data path), or
-	//   2. AccelCfg points at a store endpoint (lets snapshot --upload
+	//   2. ManifestCfg points at a store endpoint (lets snapshot --upload
 	//      work without re-dialing during the live request).
-	// file://-only configs without an accel-config skip the dial.
+	// file://-only configs without a manifest config skip the dial.
 	var accel *accelRuntime
 	wantAccel := needsAccelRuntime(opts.Cfg) ||
-		(opts.AccelCfg != nil && opts.AccelCfg.Store.Endpoint != "")
+		(opts.ManifestCfg != nil && opts.ManifestCfg.Store.Endpoint != "")
 	if wantAccel {
-		if opts.AccelCfg == nil {
-			return -1, fmt.Errorf("manifest:// disk requires --accelerator-config")
+		if opts.ManifestCfg == nil {
+			return -1, fmt.Errorf("manifest:// disk requires --manifest-config or MANIFEST_CONFIG")
 		}
-		accel, err = openAccelRuntime(opts.AccelCfg)
+		accel, err = openAccelRuntime(opts.ManifestCfg)
 		if err != nil {
 			return -1, fmt.Errorf("accelerator runtime: %w", err)
 		}
 		defer accel.Close()
 		logf("accelerator runtime: store=%s cache=%s crypto=%s/%s",
-			opts.AccelCfg.Store.Endpoint, opts.AccelCfg.Cache.Endpoint,
-			opts.AccelCfg.Crypto.Chunk, opts.AccelCfg.Crypto.Manifest)
+			opts.ManifestCfg.Store.Endpoint, opts.ManifestCfg.Cache.Endpoint,
+			opts.ManifestCfg.Crypto.Chunk, opts.ManifestCfg.Crypto.Manifest)
 	}
 
 	// Resolve disk URIs. blk0 (boot.root.base) is read-only base;
@@ -145,9 +186,6 @@ func Run(ctx context.Context, opts RunOptions) (int, error) {
 			Gateway:   opts.Cfg.Network.Gateway,
 			Hostname:  opts.Cfg.Network.Hostname,
 		}
-		logf("network spec: iface=%s ip=%s gw=%s hostname=%s",
-			launchSpec.Network.Interface, launchSpec.Network.IPCIDR,
-			launchSpec.Network.Gateway, launchSpec.Network.Hostname)
 	}
 
 	var overlayBase vhost.BlockReader
@@ -189,8 +227,6 @@ func Run(ctx context.Context, opts RunOptions) (int, error) {
 		return -1, fmt.Errorf("memfd create: %w", err)
 	}
 	defer memfd.Close()
-	logf("memfd ready: inode=%d size=%d backendVA=0x%x",
-		memfd.Inode(), memfd.Size(), memfd.Addr())
 
 	uffdSockPath := filepath.Join(runDir, "uffd.sock")
 
@@ -239,7 +275,6 @@ func Run(ctx context.Context, opts RunOptions) (int, error) {
 			uffdHandlerMu.Lock()
 			uffdHandler = h
 			uffdHandlerMu.Unlock()
-			logf("uffd handler: adopted CH uffd region #0 fd=%d size=%d", uffdFD, size)
 			return nil
 		},
 		OnRegister: func(uffdFD int, vaStart, size uint64) error {
@@ -254,7 +289,6 @@ func Run(ctx context.Context, opts RunOptions) (int, error) {
 			if err := h.AddUffd(uffdFD); err != nil {
 				return err
 			}
-			logf("uffd handler: attached additional region fd=%d size=%d", uffdFD, size)
 			return nil
 		},
 	}
@@ -278,14 +312,25 @@ func Run(ctx context.Context, opts RunOptions) (int, error) {
 		return -1, err
 	}
 	launch := &LaunchServer{
-		Path: launchSock,
-		Spec: launchSpec,
-		Logf: logf,
+		Path:         launchSock,
+		Spec:         launchSpec,
+		Logf:         logf,
+		OnAppStarted: func(pid int) { logf("guest reports user app pid=%d", pid) },
+		OnAppExited:  func(code int) { logf("guest reports user app exited code=%d", code) },
 	}
 	if err := launch.Listen(); err != nil {
 		srv0.Stop()
 		srv1.Stop()
 		return -1, err
+	}
+
+	// Pinger drives the host→guest health probe (§9.1.4). Started
+	// after the launch handshake completes, paused around quiesce, and
+	// finally stopped when CH exits.
+	pinger := &Pinger{
+		Client: &HostClient{BasePath: vsockBase, Logf: logf},
+		Stats:  &PingStats{},
+		Logf:   logf,
 	}
 
 	// ctl.sock server for snapshot requests (P2). The Handler runs in
@@ -296,7 +341,7 @@ func Run(ctx context.Context, opts RunOptions) (int, error) {
 		Path: ctlSockPath,
 		Logf: logf,
 		Handler: func(req snapshot.Request) (snapshot.Response, error) {
-			return handleSnapshotRequest(req, opts, memfd, diffPath, srv0, srv1, chSock, runDir, accel, logf)
+			return handleSnapshotRequest(req, opts, memfd, diffPath, srv0, srv1, chSock, runDir, accel, pinger, logf)
 		},
 	}
 	if err := ctlSrv.Listen(); err != nil {
@@ -317,6 +362,33 @@ func Run(ctx context.Context, opts RunOptions) (int, error) {
 	go func() { defer backendWG.Done(); _ = vaReportSrv.Serve(backendCtx) }()
 	go func() { defer backendWG.Done(); _ = ctlSrv.Serve(backendCtx) }()
 
+	// Start the ping ticker as soon as the launch handshake completes
+	// (HelloDone = LaunchSpec sent), then gate Settled on the guest's
+	// launch_ack — guest has applied the spec, brought up the network,
+	// and is about to fork the user app. By that point the boot/launch
+	// transient page-fault burst is over, so it is safe to engage
+	// memory.high and (in dynamic mode) controller RPCs.
+	go func() {
+		select {
+		case <-launch.HelloDone():
+			pinger.Start(backendCtx)
+		case <-backendCtx.Done():
+			return
+		}
+		select {
+		case <-launch.LaunchAckDone():
+			if err := hooks.Settled(); err != nil {
+				logf("settled: %v", err)
+			}
+			if hooks.Enabled() {
+				hooks.StartHeartbeat(backendCtx, 5*time.Second)
+				hooks.StartSensor(backendCtx, 64<<20)
+			}
+		case <-backendCtx.Done():
+		}
+	}()
+	defer pinger.Stop()
+
 	_, kernelPath, _ := SchemeAndPath(opts.Cfg.Boot.Kernel)
 	_, runtimePath, _ := SchemeAndPath(opts.Cfg.Boot.Runtime)
 
@@ -326,13 +398,15 @@ func Run(ctx context.Context, opts RunOptions) (int, error) {
 		backendWG.Wait()
 		return -1, fmt.Errorf("CH cmdline: %w", err)
 	}
-	logf("spawning %s with %d args", opts.CHBinary, len(args))
-	logf("CH cmdline: %s %s", opts.CHBinary, joinSpaces(args))
-	logf("launch spec: exec=%s args=%v", launchSpec.Exec, launchSpec.Args)
-
+	logf("CH args: %s", strings.Join(args, " "))
 	cmd := exec.Command(opts.CHBinary, args...)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	stdioCleanup, err := opts.StdioMode.Apply(cmd)
+	if err != nil {
+		cancelBackends()
+		backendWG.Wait()
+		return -1, fmt.Errorf("stdio: %w", err)
+	}
+	defer stdioCleanup()
 	// fd=3 ← memfd in CH (after stdin/out/err). CH creates its own
 	// uffd in create_ram_region and hands it back via SCM_RIGHTS;
 	// see uffd.VAReportServer.OnReady.
@@ -353,50 +427,104 @@ func Run(ctx context.Context, opts RunOptions) (int, error) {
 	doneCh := make(chan error, 1)
 	go func() { doneCh <- cmd.Wait() }()
 
+	waitErr := waitForCHWithSignalEscalation(doneCh, sigCh, cmd.Process, chPid, chShutdownGrace, logf)
+	cancelBackends()
+	backendWG.Wait()
+	exit := 0
+	if waitErr != nil {
+		if exitErr, ok := waitErr.(*exec.ExitError); ok {
+			exit = exitErr.ExitCode()
+		} else {
+			return -1, fmt.Errorf("CH wait: %w", waitErr)
+		}
+	}
+	logf("CH exited code=%d", exit)
+	_, _ = srv0.WriteStatsTo(os.Stderr)
+	_, _ = srv1.WriteStatsTo(os.Stderr)
+	uffdHandlerMu.Lock()
+	h := uffdHandler
+	uffdHandlerMu.Unlock()
+	if h != nil {
+		writeUffdStats(os.Stderr, h.Stats())
+	}
+	if opts.StatsJSONPath != "" {
+		bundle := statsBundle{
+			Servers:     []*vhost.Server{srv0, srv1},
+			StartUnixNs: startUnixNs,
+			EndUnixNs:   time.Now().UnixNano(),
+		}
+		if h != nil {
+			bundle.Uffd = h.Stats()
+			if capBytes, err := opts.Cfg.CapacityMemoryBytes(); err == nil {
+				bundle.UffdRAMSize = int64(capBytes)
+			}
+		}
+		if pinger != nil && pinger.Stats != nil {
+			snap := pinger.Stats.Snapshot()
+			bundle.Ping = &snap
+		}
+		if err := writeStatsJSON(opts.StatsJSONPath, bundle); err != nil {
+			logf("stats json write %s: %v", opts.StatsJSONPath, err)
+		} else {
+			logf("stats json written to %s", opts.StatsJSONPath)
+		}
+	}
+	return exit, nil
+}
+
+// chShutdownGrace bounds how long we wait for CH to exit cleanly after
+// forwarding the first SIGTERM. Cold-target hangs in production observed
+// CH not draining the signal for >50 minutes because vCPU was stuck;
+// without this escalation, sandbox-ctl waits indefinitely on cmd.Wait.
+const chShutdownGrace = 5 * time.Second
+
+// processSignaler is the subset of *os.Process needed by
+// waitForCHWithSignalEscalation, exposed for testability.
+type processSignaler interface {
+	Signal(sig os.Signal) error
+}
+
+// waitForCHWithSignalEscalation blocks until doneCh fires, forwarding
+// host SIGTERM/SIGINT to the CH process. After the first forward we arm
+// a grace deadline; if CH doesn't exit within grace we SIGKILL. A second
+// SIGTERM/INT escalates immediately.
+func waitForCHWithSignalEscalation(
+	doneCh <-chan error,
+	sigCh <-chan os.Signal,
+	proc processSignaler,
+	chPid int,
+	grace time.Duration,
+	logf func(format string, args ...any),
+) error {
+	var killTimer *time.Timer
+	var killCh <-chan time.Time
+	sigtermSent := false
 	for {
 		select {
 		case sig := <-sigCh:
-			logf("received %v, forwarding SIGTERM to CH", sig)
-			_ = cmd.Process.Signal(syscall.SIGTERM)
+			if !sigtermSent {
+				logf("received %v, forwarding SIGTERM to CH (will SIGKILL after %s)", sig, grace)
+				_ = proc.Signal(syscall.SIGTERM)
+				sigtermSent = true
+				killTimer = time.NewTimer(grace)
+				killCh = killTimer.C
+			} else {
+				logf("received %v while shutdown in progress, sending SIGKILL now", sig)
+				_ = proc.Signal(syscall.SIGKILL)
+				if killTimer != nil {
+					killTimer.Stop()
+				}
+				killCh = nil
+			}
+		case <-killCh:
+			logf("CH didn't exit within %s of SIGTERM, sending SIGKILL pid=%d", grace, chPid)
+			_ = proc.Signal(syscall.SIGKILL)
+			killCh = nil
 		case waitErr := <-doneCh:
-			cancelBackends()
-			backendWG.Wait()
-			exit := 0
-			if waitErr != nil {
-				if exitErr, ok := waitErr.(*exec.ExitError); ok {
-					exit = exitErr.ExitCode()
-				} else {
-					return -1, fmt.Errorf("CH wait: %w", waitErr)
-				}
+			if killTimer != nil {
+				killTimer.Stop()
 			}
-			logf("CH exited code=%d", exit)
-			_, _ = srv0.WriteStatsTo(os.Stderr)
-			_, _ = srv1.WriteStatsTo(os.Stderr)
-			uffdHandlerMu.Lock()
-			h := uffdHandler
-			uffdHandlerMu.Unlock()
-			if h != nil {
-				writeUffdStats(os.Stderr, h.Stats())
-			}
-			if opts.StatsJSONPath != "" {
-				bundle := statsBundle{
-					Servers:     []*vhost.Server{srv0, srv1},
-					StartUnixNs: startUnixNs,
-					EndUnixNs:   time.Now().UnixNano(),
-				}
-				if h != nil {
-					bundle.Uffd = h.Stats()
-					if capBytes, err := opts.Cfg.CapacityMemoryBytes(); err == nil {
-						bundle.UffdRAMSize = int64(capBytes)
-					}
-				}
-				if err := writeStatsJSON(opts.StatsJSONPath, bundle); err != nil {
-					logf("stats json write %s: %v", opts.StatsJSONPath, err)
-				} else {
-					logf("stats json written to %s", opts.StatsJSONPath)
-				}
-			}
-			return exit, nil
+			return waitErr
 		}
 	}
 }
@@ -451,15 +579,16 @@ func (p *pairQuiescer) Resume() {
 // that owns the bundle holds references; the snapshot path consumes
 // them when a request arrives.
 type SnapshotHandler struct {
-	Cfg      *SandboxConfig
-	AccelCfg *AcceleratorConfig
-	Memfd    *memory.Memfd
+	Cfg         *SandboxConfig
+	ManifestCfg *ManifestConfig
+	Memfd       *memory.Memfd
 	DiffPath string
 	Srv0     *vhost.Server
 	Srv1     *vhost.Server
 	CHSock   string
 	RunDir   string
 	Accel    *AccelRuntime // wraps internal accelRuntime for cross-package use
+	Pinger   *Pinger       // optional; if non-nil, paused around quiesce/Take
 	Logf     func(string, ...any)
 }
 
@@ -471,8 +600,8 @@ func (h *SnapshotHandler) Handle(req snapshot.Request) (snapshot.Response, error
 	if h.Accel != nil {
 		inner = h.Accel.inner
 	}
-	opts := RunOptions{Cfg: h.Cfg, AccelCfg: h.AccelCfg}
-	return handleSnapshotRequest(req, opts, h.Memfd, h.DiffPath, h.Srv0, h.Srv1, h.CHSock, h.RunDir, inner, h.Logf)
+	opts := RunOptions{Cfg: h.Cfg, ManifestCfg: h.ManifestCfg}
+	return handleSnapshotRequest(req, opts, h.Memfd, h.DiffPath, h.Srv0, h.Srv1, h.CHSock, h.RunDir, inner, h.Pinger, h.Logf)
 }
 
 // handleSnapshotRequest executes one snapshot_request received via
@@ -486,52 +615,68 @@ func handleSnapshotRequest(
 	srv0, srv1 *vhost.Server,
 	chSock, runDir string,
 	accel *accelRuntime,
+	pinger *Pinger,
 	logf func(string, ...any),
 ) (snapshot.Response, error) {
+	// Quiesce sequence (§6.2 T2a, §9.1.5): pause ping ticker, ask
+	// guest to drain + drop caches, then proceed to /vm.pause via
+	// snapshot.Take. Quiesce failure aborts this snapshot rather than
+	// degrading dedup; sandbox keeps running.
+	if pinger != nil {
+		pinger.Pause()
+		defer pinger.Resume()
+		client := pinger.Client
+		if client == nil {
+			client = &HostClient{BasePath: filepath.Join(runDir, "vsock.sock"), Logf: logf}
+		}
+		if err := SendQuiesce(client); err != nil {
+			logf("quiesce: %v (aborting snapshot)", err)
+			return snapshot.Response{}, fmt.Errorf("quiesce: %w", err)
+		}
+		logf("quiesce: guest acked, proceeding to /vm.pause")
+	}
+
 	if req.Upload && accel == nil {
-		return snapshot.Response{}, fmt.Errorf("upload mode requires --accelerator-config (manifest store endpoints)")
+		return snapshot.Response{}, fmt.Errorf("upload mode requires --manifest-config or MANIFEST_CONFIG (manifest store endpoints)")
+	}
+	// --output 与 --upload 互斥(docs/sandbox.md §13.3)。CLI 已经做过这道
+	// 校验,但 ctl.sock 协议是开放的,run 进程也守在最后一关。
+	if req.Upload && req.OutDir != "" {
+		return snapshot.Response{}, fmt.Errorf("--output and --upload are mutually exclusive")
 	}
 	if !req.Upload && req.OutDir == "" {
-		return snapshot.Response{}, fmt.Errorf("OutDir required when Upload=false")
+		return snapshot.Response{}, fmt.Errorf("--output and --upload are mutually exclusive; one is required")
 	}
 	stagingDir := filepath.Join(runDir, "snap-stage")
 	if err := os.MkdirAll(stagingDir, 0o755); err != nil {
 		return snapshot.Response{}, err
 	}
-	// Local-mode: keep stagingDir for Take to work in but write outputs to req.OutDir.
-	// Upload-mode: stagingDir holds disk + bundle, both ingested then dropped.
-	if !req.Upload {
-		defer os.RemoveAll(stagingDir)
-	} else {
-		defer os.RemoveAll(stagingDir)
+	defer os.RemoveAll(stagingDir)
+
+	// Build snapshot.cfg builder closure. Take() invokes it with the
+	// final overlay_ref (file://<sha256>.overlay in --output mode, or
+	// the placeholder in --upload mode which Upload() patches afterward
+	// with manifest://<key>).
+	cfg := opts.Cfg
+	snapCfgBuilder := func(overlayRef string) ([]byte, error) {
+		return buildSnapshotCfg(cfg, overlayRef)
 	}
 
-	// Build sandbox.cfg with a placeholder disk reference. Local mode
-	// rewrites to "file://disk.ext4" (relative to snapshot file). Upload
-	// mode rewrites to "manifest://<disk-key>" *after* the disk is
-	// ingested (snapshot.Upload patches the embedded sandbox.cfg).
-	cfg := *opts.Cfg
-	cfg.Boot.Root.Overlay.Base = "file://disk.ext4"
-	sandboxCfg, err := json.Marshal(&cfg)
-	if err != nil {
-		return snapshot.Response{}, fmt.Errorf("marshal sandbox.cfg: %w", err)
-	}
-
-	// Take always produces files in stagingDir/outDir.
 	takeOutDir := req.OutDir
-	if req.Upload {
-		takeOutDir = stagingDir
-	}
+	sandboxID := opts.SandboxID
+	// opts.SandboxID is always populated by the run path (generated when
+	// CLI didn't pass one); see Run() in this file.
 
 	src := snapshot.Sources{
-		APISock:    chSock,
-		MemfdFD:    mfd.FD(),
-		MemfdSize:  int64(mfd.Size()),
-		DiffPath:   diffPath,
-		StagingDir: stagingDir,
-		SandboxCfg: sandboxCfg,
-		Quiescer:   &pairQuiescer{a: srv0, b: srv1},
-		Logf:       logf,
+		SandboxID:   sandboxID,
+		APISock:     chSock,
+		MemfdFD:     mfd.FD(),
+		MemfdSize:   int64(mfd.Size()),
+		DiffPath:    diffPath,
+		StagingDir:  stagingDir,
+		SnapshotCfg: snapCfgBuilder,
+		Quiescer:    &pairQuiescer{a: srv0, b: srv1},
+		Logf:        logf,
 	}
 	out, err := snapshot.Take(src, takeOutDir, req.ResumeAfter)
 	if err != nil {
@@ -545,23 +690,24 @@ func handleSnapshotRequest(
 			WallclockPauseMs: out.WallclockPauseMs,
 			WallclockDumpMs:  out.WallclockDumpMs,
 			SnapshotPath:     out.SnapshotPath,
-			DiskPath:         out.DiskPath,
+			OverlayPath:      out.OverlayPath,
+			OverlayRef:       "file://" + out.OverlaySha256 + ".overlay",
 		}, nil
 	}
 
-	// Upload mode: ingest disk + snapshot bundle.
+	// Upload mode: ingest blk1.diff (overlay) + snapshot bundle.
 	holes, err := snapshot.SparseHoles(out.SnapshotPath, out.MemorySize)
 	if err != nil {
 		return snapshot.Response{}, fmt.Errorf("scan snapshot holes: %w", err)
 	}
 	logf("snapshot upload: hole extents=%d (memory section)", len(holes))
 
-	chunkCfg, err := opts.AccelCfg.BuildChunker()
+	chunkCfg, err := opts.ManifestCfg.BuildChunker()
 	if err != nil {
 		return snapshot.Response{}, fmt.Errorf("chunker config: %w", err)
 	}
 	upRes, err := snapshot.Upload(context.Background(), snapshot.UploadSources{
-		DiskPath:       out.DiskPath,
+		OverlayPath:    diffPath,
 		SnapshotPath:   out.SnapshotPath,
 		SnapshotHoles:  holes,
 		CustomerKey:    accel.customerKey,
@@ -575,14 +721,109 @@ func handleSnapshotRequest(
 		return snapshot.Response{}, err
 	}
 	return snapshot.Response{
-		MemorySize:           out.MemorySize,
-		MemoryResident:       out.MemoryResident,
-		WallclockPauseMs:     out.WallclockPauseMs,
-		WallclockDumpMs:      out.WallclockDumpMs,
-		SnapshotManifestKey:  snapshot.HexKey(upRes.SnapshotKey),
-		DiskManifestKey:      snapshot.HexKey(upRes.DiskKey),
-		Msg:                  fmt.Sprintf("upload OK in %d ms; disk total=%d dedup=%d, snapshot total=%d dedup=%d", upRes.WallclockUploadMs, upRes.DiskTotalChunks, upRes.DiskDedupChunks, upRes.SnapshotTotalChunks, upRes.SnapshotDedupChunks),
+		MemorySize:          out.MemorySize,
+		MemoryResident:      out.MemoryResident,
+		WallclockPauseMs:    out.WallclockPauseMs,
+		WallclockDumpMs:     out.WallclockDumpMs,
+		SnapshotManifestKey: snapshot.HexKey(upRes.SnapshotKey),
+		OverlayManifestKey:  snapshot.HexKey(upRes.OverlayKey),
+		OverlayRef:          "manifest://" + snapshot.HexKey(upRes.OverlayKey),
+		Msg:                 fmt.Sprintf("upload OK in %d ms; overlay total=%d dedup=%d, snapshot total=%d dedup=%d", upRes.WallclockUploadMs, upRes.OverlayTotalChunks, upRes.OverlayDedupChunks, upRes.SnapshotTotalChunks, upRes.SnapshotDedupChunks),
 	}, nil
+}
+
+// buildSnapshotCfg renders the snapshot.cfg YAML body per docs §3.4.
+// runtime_ref / base_ref are pre-computed by sandbox-ctl at boot
+// (file SHA256 is hashed once at startup; see SnapshotRefs in
+// SandboxConfig). overlayRef is filled in by Take() after overlay
+// digest is known, or by Upload() after overlay manifest key is known.
+func buildSnapshotCfg(cfg *SandboxConfig, overlayRef string) ([]byte, error) {
+	doc := snapshotCfgYAML{}
+	doc.Resources.Capacity.CPU = cfg.Resources.Capacity.CPU
+	doc.Resources.Capacity.Memory = cfg.Resources.Capacity.Memory
+	doc.Boot.RuntimeRef = cfg.SnapshotRefs.RuntimeRef
+	doc.Boot.Root.BaseRef = cfg.SnapshotRefs.BaseRef
+	doc.Boot.Root.Overlay.Base = overlayRef
+	return yaml.Marshal(&doc)
+}
+
+// snapshotCfgYAML mirrors the on-disk snapshot.cfg schema. Extracted
+// type so buildSnapshotCfg + applyrules.SnapshotCfg share a definition.
+type snapshotCfgYAML struct {
+	Resources struct {
+		Capacity struct {
+			CPU    int    `yaml:"cpu"`
+			Memory string `yaml:"memory"`
+		} `yaml:"capacity"`
+	} `yaml:"resources"`
+	Boot struct {
+		RuntimeRef string `yaml:"runtime_ref"`
+		Root       struct {
+			BaseRef string `yaml:"base_ref"`
+			Overlay struct {
+				Base string `yaml:"base"`
+			} `yaml:"overlay"`
+		} `yaml:"root"`
+	} `yaml:"boot"`
+}
+
+// populateSnapshotRefs hashes boot.runtime + boot.root.base (when file://)
+// and stores the canonical refs on cfg.SnapshotRefs so buildSnapshotCfg
+// can render snapshot.cfg without re-hashing on each request. Called once
+// during Run() startup; cost is one streamed read per artifact (typical
+// runtime ≈ 5 MiB, base ≈ 100 MiB).
+func populateSnapshotRefs(cfg *SandboxConfig) error {
+	rRef, err := buildBootRef(cfg.Boot.Runtime, false /* fileOnly=false; runtime is file:// only but caller fields enforce */)
+	if err != nil {
+		return fmt.Errorf("boot.runtime: %w", err)
+	}
+	cfg.SnapshotRefs.RuntimeRef = rRef
+
+	if cfg.Boot.Root.Base == "" {
+		return nil
+	}
+	bRef, err := buildBootRef(cfg.Boot.Root.Base, true /* allowManifest */)
+	if err != nil {
+		return fmt.Errorf("boot.root.base: %w", err)
+	}
+	cfg.SnapshotRefs.BaseRef = bRef
+	return nil
+}
+
+// buildBootRef produces the canonical snapshot.cfg ref for a host URL.
+//   - file:///abs/path → "file://<basename>@sha256:<hex>"
+//   - manifest://<key> → "manifest://<key>" (passthrough; only when
+//     allowManifest is true)
+func buildBootRef(uri string, allowManifest bool) (string, error) {
+	if strings.HasPrefix(uri, "manifest://") {
+		if !allowManifest {
+			return "", fmt.Errorf("manifest:// not permitted here")
+		}
+		return uri, nil
+	}
+	if !strings.HasPrefix(uri, "file://") {
+		return "", fmt.Errorf("expected file:// or manifest://, got %q", uri)
+	}
+	path := strings.TrimPrefix(uri, "file://")
+	digest, err := streamFileSha256(path)
+	if err != nil {
+		return "", err
+	}
+	return "file://" + filepath.Base(path) + "@sha256:" + digest, nil
+}
+
+// streamFileSha256 returns hex(SHA256(file)). Sparse holes read as 0.
+func streamFileSha256(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 func generateSandboxID() string {
@@ -595,13 +836,3 @@ func generateSandboxID() string {
 	return "sb-default"
 }
 
-func joinSpaces(args []string) string {
-	out := ""
-	for i, a := range args {
-		if i > 0 {
-			out += " "
-		}
-		out += a
-	}
-	return out
-}

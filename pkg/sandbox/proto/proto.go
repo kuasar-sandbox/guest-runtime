@@ -1,13 +1,22 @@
 // Package proto defines the wire protocol for the sandbox-ctl ↔
 // sandbox-init control channel that runs over virtio-vsock.
 //
-// The host's sandbox-ctl listens on a UDS that cloud-hypervisor's hybrid
-// vsock proxies to/from guest CID=2 (host) port=LaunchPort. The guest's
-// sandbox-init opens a vsock socket (AF_VSOCK) to (CID=2, port=LaunchPort)
-// and exchanges JSON-over-length-prefix messages.
+// The channel is bidirectional and short-lived (one request + one
+// response per connection, then close). Both directions reuse port
+// 5000:
 //
-// This package is dependency-light (stdlib only) so the guest sandbox-init
-// binary can import it without dragging in YAML or other heavy deps.
+//   - guest → host: sandbox-init dial(CID=2, port=5000); CH hybrid
+//     vsock proxies to "<vsock-base>_5000" UDS that sandbox-ctl
+//     listens on.
+//   - host → guest: sandbox-ctl dial(<vsock-base>) UDS, write
+//     "CONNECT 5000\n" first; CH proxies the rest to guest port 5000
+//     listener that sandbox-init runs.
+//
+// Wire format on every connection: [4 bytes LE length] [JSON payload].
+//
+// This package is dependency-light (stdlib only) so the guest
+// sandbox-init binary can import it without dragging in YAML or other
+// heavy deps.
 package proto
 
 import (
@@ -16,6 +25,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"time"
 )
 
 // VsockHostCID is the well-known guest-side address of the host (always 2).
@@ -25,24 +35,32 @@ const VsockHostCID = 2
 // 3 is conventional for single-VM-per-host setups.
 const VsockGuestCID = 3
 
-// LaunchPort is the vsock port sandbox-init connects to for receiving the
-// launch spec from sandbox-ctl. Hard-coded so guest doesn't need extra
-// kernel cmdline parameters.
+// LaunchPort is the vsock port both directions use. sandbox-init dials
+// host:LaunchPort for the cold-start hello/launch handshake and for
+// app_started/app_exited notifications; sandbox-init also listens on
+// guest:LaunchPort so sandbox-ctl can push ping/restore/quiesce.
 const LaunchPort = 5000
 
 // MaxMessageBytes bounds the JSON payload size for one message.
 const MaxMessageBytes = 64 * 1024
 
-// LaunchSpec is the payload sandbox-ctl pushes to sandbox-init telling it
-// how to start the user application after rootfs is assembled.
+// HostConnectLine is the ASCII prefix sandbox-ctl writes as the first
+// bytes of a host→guest connection, telling CH's hybrid vsock proxy
+// which guest port to connect to. CH consumes this line and forwards
+// everything after it to the guest listener.
 //
-// The fields mirror the merged result of:
+// Trailing "\n" is required.
+var HostConnectLine = []byte(fmt.Sprintf("CONNECT %d\n", LaunchPort))
+
+// LaunchSpec is the payload sandbox-ctl pushes to sandbox-init telling
+// it how to start the user application after rootfs is assembled.
+//
+// Fields mirror the merged result of:
 //   - the OCI image config.json appended to boot.root.base (defaults)
 //   - the sandbox.yaml `launch:` section (overrides)
 //
 // Network (optional) carries the IP-layer config for sandbox-init's
-// netlink-based applyNetwork pass — replaces the kernel `ip=...`
-// cmdline + CONFIG_IP_PNP path. nil → no network configuration.
+// netlink-based applyNetwork pass. nil → no network configuration.
 type LaunchSpec struct {
 	Exec    string            `json:"exec"`
 	Args    []string          `json:"args,omitempty"`
@@ -53,18 +71,16 @@ type LaunchSpec struct {
 }
 
 // NetworkSpec is the resolved guest IP-layer config sandbox-init applies
-// via netlink before forking the user app. All fields optional — empty
-// fields fall back to "skip that step" (e.g. empty Gateway → no default
-// route added).
+// via netlink before forking the user app. Empty fields fall back to
+// "skip that step" (e.g. empty Gateway → no default route).
 type NetworkSpec struct {
-	Interface string `json:"interface,omitempty"` // guest iface (default "eth0")
-	IPCIDR    string `json:"ip_cidr,omitempty"`   // e.g. "169.254.1.1/31"; IPv4 or IPv6
-	Gateway   string `json:"gateway,omitempty"`   // default route next-hop
-	Hostname  string `json:"hostname,omitempty"`  // sethostname target
+	Interface string `json:"interface,omitempty"`
+	IPCIDR    string `json:"ip_cidr,omitempty"`
+	Gateway   string `json:"gateway,omitempty"`
+	Hostname  string `json:"hostname,omitempty"`
 }
 
-// Message is the typed envelope for messages on the launch channel. Only
-// fields relevant to the message Type are populated.
+// Message is the typed envelope. Only fields relevant to Type are populated.
 type Message struct {
 	Type string `json:"type"`
 
@@ -76,18 +92,52 @@ type Message struct {
 	Launch *LaunchSpec `json:"launch,omitempty"`
 
 	// app_started: guest → host after fork/exec succeeds.
+	// launch_ack: guest → host after launch spec received and network applied,
+	// before forking the user app. Marks the end of the boot/launch transient
+	// so host can engage post-boot enforcement (memory.high, controller RPCs).
 	PID int `json:"pid,omitempty"`
 
 	// app_exited: guest → host before reboot.
 	Code int `json:"code,omitempty"`
+
+	// ping/pong: monotonic id host-assigned; host clock t_send_ns
+	// echoed back in pong so host computes RTT without time-sync.
+	ID       uint64 `json:"id,omitempty"`
+	TSendNs  int64  `json:"t_send_ns,omitempty"`
+
+	// restore: incremented on each restore. Lets guest distinguish
+	// "fresh wake" from a duplicate restore message in flight.
+	Epoch uint32 `json:"epoch,omitempty"`
+
+	// error: human-readable reason on rejection paths.
+	Msg string `json:"msg,omitempty"`
 }
 
-// Message type constants.
+// Message type constants. See docs/sandbox-runtime.md §4.3 for the
+// directions and configured-response pairs.
 const (
 	TypeHello      = "hello"
 	TypeLaunch     = "launch"
 	TypeAppStarted = "app_started"
 	TypeAppExited  = "app_exited"
+	TypeLaunchAck  = "launch_ack"
+	TypePing       = "ping"
+	TypePong       = "pong"
+	TypeRestore    = "restore"
+	TypeRestored   = "restored"
+	TypeQuiesce    = "quiesce"
+	TypeQuiesced   = "quiesced"
+	TypeAck        = "ack"
+	TypeError      = "error"
+)
+
+// Default per-message deadlines (§9.1.6). Callers pass these to
+// SetDeadline on the underlying conn covering dial+write+read.
+const (
+	DeadlineAppNotify = 200 * time.Millisecond // app_started / app_exited / launch_ack
+	DeadlinePing      = 200 * time.Millisecond
+	DeadlineQuiesce   = 5 * time.Second
+	DeadlineRestore   = 5 * time.Second
 )
 
 // WriteMessage writes one message in length-prefix-JSON wire format:

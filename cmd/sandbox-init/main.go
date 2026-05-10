@@ -1,14 +1,19 @@
 // sandbox-init is the guest PID 1 binary inside the sandbox VM.
 //
 // It runs three phases:
-//   1. Mount /proc /sys /dev, wait for /dev/vda + /dev/vdb, mount overlay
-//      (lower=blk0 erofs ro, upper=blk1 ext4 rw) at /mnt/newroot, then
-//      MS_MOVE + chroot to make the overlay the new root.
-//   2. Connect over virtio-vsock (CID 2:5000) to sandbox-ctl, send hello,
-//      receive the launch spec (exec/args/env/workdir/restart), then fork
-//      a child with CLONE_NEWPID|CLONE_NEWNS, in the child remount /proc
-//      and exec the user app.
-//   3. Supervise: reap children, on user app exit reboot the VM.
+//   1. Mount /proc /sys /dev, wait for /dev/vda + /dev/vdb, mount
+//      overlay (lower=blk0 erofs ro, upper=blk1 ext4 rw) at
+//      /mnt/newroot, then MS_MOVE + chroot. **Then** bind+listen
+//      AF_VSOCK :5000 — the host→guest reverse channel must be open
+//      before we dial host:5000 (avoids the race with the host's ping
+//      ticker that starts firing as soon as `launch` is written, see
+//      docs/sandbox-runtime.md §4.4).
+//   2. Connect over virtio-vsock (CID 2:5000) to sandbox-ctl, send
+//      hello, receive the launch spec, applyNetwork, fork the user app
+//      with CLONE_NEWPID|CLONE_NEWNS, then send `app_started{pid}`.
+//   3. Supervise: in parallel, the vsock listener goroutine dispatches
+//      host-initiated ping / restore / quiesce; the signal loop reaps
+//      children. On user-app exit we send `app_exited{code}` then reboot.
 //
 // All work is done via syscalls; no busybox or external tools are
 // included in sandbox-runtime.erofs.
@@ -17,7 +22,6 @@ package main
 import (
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -33,16 +37,6 @@ const (
 	devicePollInterval = 50 * time.Millisecond
 	devicePollTimeout  = 10 * time.Second
 	gracefulShutdown   = 10 * time.Second
-
-	// Vsock dial uses exponential backoff because sandbox boot latency
-	// is the project's primary metric — every additional millisecond on
-	// the cold-start path matters. Start tight (microsecond grain) so
-	// the first ECONNREFUSED is followed almost immediately by a retry,
-	// then ramp until we hit a 10ms cap. Total budget bounded by
-	// vsockDialDeadline.
-	vsockDialStart    = 100 * time.Microsecond
-	vsockDialMax      = 10 * time.Millisecond
-	vsockDialDeadline = 5 * time.Second
 )
 
 func main() {
@@ -61,31 +55,38 @@ func main() {
 	if err := phase1MountAndPivot(); err != nil {
 		die("phase 1 failed: %v", err)
 	}
-	logf("phase 1 done: rootfs assembled")
 
-	spec, err := phase2ReceiveLaunch()
+	// Reverse-channel listener is brought up **before** hello (§9.1.3).
+	// The fd lives for the entire sandbox lifetime — listener goroutine
+	// is spawned in phase 3 once we have the app pid; the bound socket
+	// itself is created here so host ping that starts as soon as `launch`
+	// is written never hits ECONNREFUSED.
+	revFD, err := bindVsockListener(proto.LaunchPort)
 	if err != nil {
-		die("phase 2 receive: %v", err)
+		die("phase 1 vsock listen: %v", err)
 	}
-	logf("phase 2: received launch spec exec=%s args=%v restart=%s workdir=%s",
-		spec.Exec, spec.Args, spec.Restart, spec.Workdir)
 
-	if spec.Network != nil {
-		if err := applyNetwork(spec.Network); err != nil {
-			die("phase 2 network: %v", err)
-		}
-		logf("phase 2: network applied iface=%s ip=%s gw=%s hostname=%s",
-			spec.Network.Interface, spec.Network.IPCIDR,
-			spec.Network.Gateway, spec.Network.Hostname)
+	spec, err := phase2HelloAndLaunchAck()
+	if err != nil {
+		die("phase 2 launch handshake: %v", err)
 	}
 
 	appPid, err := phase2ForkApp(spec)
 	if err != nil {
 		die("phase 2 fork: %v", err)
 	}
-	logf("phase 2 done: app pid=%d", appPid)
 
-	phase3Supervise(appPid, spec)
+	// Notify host before entering supervisor — best-effort short conn.
+	if err := notifyAppStarted(appPid); err != nil {
+		logf("warn: app_started notify failed (continuing): %v", err)
+	}
+
+	supervisor := &supervisorState{appPid: appPid, restart: spec.Restart}
+
+	// Reverse-channel dispatch goroutine. Lives until reboot.
+	go serveReverseChannel(revFD, supervisor)
+
+	phase3Supervise(supervisor)
 	// phase3Supervise does not return.
 }
 
@@ -163,17 +164,24 @@ func phase1MountAndPivot() error {
 	return nil
 }
 
-// phase2ReceiveLaunch opens a vsock connection to the host, exchanges
-// hello → launch with sandbox-ctl, and **closes the connection** before
-// returning. Holding the channel open through phase 3 would leave a
-// live vsock socket in any subsequent VM snapshot, polluting both guest
-// and host VMM state — short-lived handshake keeps snapshots clean.
-func phase2ReceiveLaunch() (*proto.LaunchSpec, error) {
+// phase2HelloAndLaunchAck opens one vsock connection, runs the full
+// cold-start launch handshake on it, then closes:
+//
+//	guest → host: hello
+//	host  → guest: launch{spec}
+//	guest applies network
+//	guest → host: launch_ack
+//	host  → guest: ack
+//
+// Settled triggers on launch_ack (post-boot transient over). Keeping
+// the exchange on a single connection means the host's OnLaunchAck
+// fires only after the guest has actually applied the spec — no race
+// where a stale second connection arrives before the first closes.
+func phase2HelloAndLaunchAck() (*proto.LaunchSpec, error) {
 	conn, err := dialVsock(proto.VsockHostCID, proto.LaunchPort)
 	if err != nil {
 		return nil, fmt.Errorf("vsock dial host:%d: %w", proto.LaunchPort, err)
 	}
-	// Closed before returning — single-shot handshake.
 	defer conn.Close()
 
 	if err := proto.WriteMessage(conn, &proto.Message{
@@ -193,51 +201,24 @@ func phase2ReceiveLaunch() (*proto.LaunchSpec, error) {
 	if msg.Launch.Exec == "" {
 		return nil, errors.New("launch spec missing exec")
 	}
-	return msg.Launch, nil
-}
 
-// vsockConn wraps an AF_VSOCK SOCK_STREAM fd as io.ReadWriteCloser.
-// Go's stdlib net package doesn't recognize AF_VSOCK (net.FileConn
-// returns "protocol not supported"), so we drive the syscall directly.
-type vsockConn struct{ fd int }
-
-func (c *vsockConn) Read(b []byte) (int, error)  { return syscall.Read(c.fd, b) }
-func (c *vsockConn) Write(b []byte) (int, error) { return syscall.Write(c.fd, b) }
-func (c *vsockConn) Close() error                { return syscall.Close(c.fd) }
-
-// dialVsock opens an AF_VSOCK SOCK_STREAM socket and connects to (cid,
-// port). The first attempt fires immediately; on ECONNREFUSED (host
-// listener not yet ready) we exponentially back off from vsockDialStart
-// up to vsockDialMax until vsockDialDeadline elapses.
-//
-// Boot-latency sensitive: each microsecond on the cold-start critical
-// path matters, so the early backoff stays sub-millisecond.
-func dialVsock(cid, port uint32) (io.ReadWriteCloser, error) {
-	deadline := time.Now().Add(vsockDialDeadline)
-	delay := vsockDialStart
-	var lastErr error
-	for {
-		fd, err := unix.Socket(unix.AF_VSOCK, unix.SOCK_STREAM, 0)
-		if err != nil {
-			return nil, fmt.Errorf("socket: %w", err)
-		}
-		err = unix.Connect(fd, &unix.SockaddrVM{CID: cid, Port: port})
-		if err == nil {
-			return &vsockConn{fd: fd}, nil
-		}
-		_ = unix.Close(fd)
-		lastErr = err
-		if time.Now().After(deadline) {
-			return nil, fmt.Errorf("dial deadline %s exceeded: %w", vsockDialDeadline, lastErr)
-		}
-		time.Sleep(delay)
-		if delay < vsockDialMax {
-			delay *= 2
-			if delay > vsockDialMax {
-				delay = vsockDialMax
-			}
+	if msg.Launch.Network != nil {
+		if err := applyNetwork(msg.Launch.Network); err != nil {
+			return nil, fmt.Errorf("apply network: %w", err)
 		}
 	}
+
+	if err := proto.WriteMessage(conn, &proto.Message{Type: proto.TypeLaunchAck}); err != nil {
+		return nil, fmt.Errorf("send launch_ack: %w", err)
+	}
+	ack, err := proto.ReadMessage(conn)
+	if err != nil {
+		return nil, fmt.Errorf("read ack: %w", err)
+	}
+	if ack.Type != proto.TypeAck {
+		return nil, fmt.Errorf("expected ack, got %q", ack.Type)
+	}
+	return msg.Launch, nil
 }
 
 // phase2ForkApp re-execs ourselves with "exec-child" sentinel argv,
@@ -275,9 +256,6 @@ func phase2ForkApp(spec *proto.LaunchSpec) (int, error) {
 // often holds bare names like "python3" or "node", expecting standard
 // PATH search semantics like sh/cmd would do).
 func runExecChild(workdir, appPath string, args []string) {
-	logf("exec-child pid=%d (in new pid+mount ns) workdir=%s app=%s",
-		os.Getpid(), workdir, appPath)
-
 	if err := unix.Mount("proc", "/proc", "proc", 0, ""); err != nil {
 		if errRemount := unix.Mount("none", "/proc", "", unix.MS_REMOUNT, ""); errRemount != nil {
 			die("exec-child: remount /proc: %v / %v", err, errRemount)
@@ -305,9 +283,16 @@ func runExecChild(workdir, appPath string, args []string) {
 	}
 }
 
-// phase3Supervise reaps children and reboots the VM when the user app
-// exits or we receive SIGTERM/SIGINT.
-func phase3Supervise(appPid int, spec *proto.LaunchSpec) {
+// supervisorState is shared between the signal loop and the reverse
+// channel goroutine.
+type supervisorState struct {
+	appPid  int
+	restart string
+}
+
+// phase3Supervise reaps children. On user-app exit, notifies the host
+// (best-effort) then reboots.
+func phase3Supervise(s *supervisorState) {
 	sigCh := make(chan os.Signal, 16)
 	signal.Notify(sigCh, syscall.SIGCHLD, syscall.SIGTERM, syscall.SIGINT)
 
@@ -322,24 +307,26 @@ func phase3Supervise(appPid int, spec *proto.LaunchSpec) {
 					break
 				}
 				logf("reaped pid=%d exit=%d signal=%v", pid, status.ExitStatus(), status.Signal())
-				if pid == appPid {
-					handleAppExit(status, spec)
+				if pid == s.appPid {
+					handleAppExit(status, s)
 					return
 				}
 			}
 		case syscall.SIGTERM, syscall.SIGINT:
-			logf("received %v, sending SIGTERM to app pid=%d", sig, appPid)
-			_ = syscall.Kill(appPid, syscall.SIGTERM)
-			waitOrTimeout(appPid, gracefulShutdown)
+			logf("received %v, sending SIGTERM to app pid=%d", sig, s.appPid)
+			_ = syscall.Kill(s.appPid, syscall.SIGTERM)
+			waitOrTimeout(s.appPid, gracefulShutdown)
+			notifyAppExited(0)
 			doReboot()
 			return
 		}
 	}
 }
 
-func handleAppExit(status syscall.WaitStatus, spec *proto.LaunchSpec) {
+func handleAppExit(status syscall.WaitStatus, s *supervisorState) {
 	code := status.ExitStatus()
-	logf("app exited code=%d (restart=%s); rebooting VM", code, spec.Restart)
+	logf("app exited code=%d (restart=%s); notifying host then rebooting", code, s.restart)
+	notifyAppExited(code)
 	// v1: all restart policies just reboot. Real in-place restart is v2.
 	doReboot()
 }
@@ -366,7 +353,6 @@ func doReboot() {
 	// only accept one connection (sandbox = single VM lifetime), so
 	// reconnect fails and CH exits non-zero. POWER_OFF cleanly signals
 	// vCPU shutdown; CH exits 0.
-	logf("calling reboot syscall (POWER_OFF — sandbox lifecycle ends)")
 	if err := unix.Reboot(unix.LINUX_REBOOT_CMD_POWER_OFF); err != nil {
 		die("reboot: %v", err)
 	}

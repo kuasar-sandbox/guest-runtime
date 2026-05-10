@@ -114,3 +114,76 @@ func TestWrite_TooLarge(t *testing.T) {
 		t.Fatal("expected error for oversized payload")
 	}
 }
+
+func TestRoundTrip_PingPong(t *testing.T) {
+	ping := &Message{Type: TypePing, ID: 42, TSendNs: 1715000000000000000}
+	var buf bytes.Buffer
+	if err := WriteMessage(&buf, ping); err != nil {
+		t.Fatal(err)
+	}
+	got, err := ReadMessage(&buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Type != TypePing || got.ID != 42 || got.TSendNs != 1715000000000000000 {
+		t.Errorf("ping round-trip: got %+v", got)
+	}
+
+	pong := &Message{Type: TypePong, ID: 42, TSendNs: 1715000000000000000}
+	buf.Reset()
+	if err := WriteMessage(&buf, pong); err != nil {
+		t.Fatal(err)
+	}
+	got, _ = ReadMessage(&buf)
+	if got.Type != TypePong || got.ID != 42 {
+		t.Errorf("pong round-trip: got %+v", got)
+	}
+}
+
+func TestRoundTrip_RestoreEpoch(t *testing.T) {
+	m := &Message{Type: TypeRestore, Epoch: 7}
+	var buf bytes.Buffer
+	if err := WriteMessage(&buf, m); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := ReadMessage(&buf)
+	if got.Type != TypeRestore || got.Epoch != 7 {
+		t.Errorf("restore round-trip: got %+v", got)
+	}
+}
+
+func TestRoundTrip_AppLifecycle(t *testing.T) {
+	for _, tc := range []*Message{
+		{Type: TypeAppStarted, PID: 4711},
+		{Type: TypeAppExited, Code: 137},
+		{Type: TypeQuiesce},
+		{Type: TypeQuiesced},
+		{Type: TypeAck},
+		{Type: TypeError, Msg: "bad request"},
+	} {
+		var buf bytes.Buffer
+		if err := WriteMessage(&buf, tc); err != nil {
+			t.Fatalf("write %s: %v", tc.Type, err)
+		}
+		got, err := ReadMessage(&buf)
+		if err != nil {
+			t.Fatalf("read %s: %v", tc.Type, err)
+		}
+		if got.Type != tc.Type {
+			t.Errorf("%s: type mismatch %q", tc.Type, got.Type)
+		}
+		if tc.PID != 0 && got.PID != tc.PID {
+			t.Errorf("%s: pid mismatch %d", tc.Type, got.PID)
+		}
+		if tc.Code != 0 && got.Code != tc.Code {
+			t.Errorf("%s: code mismatch %d", tc.Type, got.Code)
+		}
+	}
+}
+
+func TestHostConnectLine(t *testing.T) {
+	want := "CONNECT 5000\n"
+	if string(HostConnectLine) != want {
+		t.Errorf("HostConnectLine = %q, want %q", HostConnectLine, want)
+	}
+}
