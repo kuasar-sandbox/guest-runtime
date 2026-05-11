@@ -23,25 +23,24 @@ page cache 的密度收益。
 ### 1.2 系统中的位置
 
 ```
-HOST                                                GUEST VM
-─────                                                ─────────
-sandbox-ctl  ──spawn CH ────►  cloud-hypervisor      kernel boot
-                                  │                    │
-                                  │ virtio-pmem        │
-                                  │ DAX                │ pivot to /
-                                  │                    │ /sbin/init = sandbox-init
-                                  │                    │   phase 1: mount + overlayfs
-sandbox-runtime.erofs ◄───────────┤                    │   phase 2: vsock launch handshake
-(host shared file)                                     │   phase 3: supervisor loop
-                                                       │
-                                  ▲────launch───────►  │   fork/exec user app
-                                  ▲                    │     - new PID/Mount ns
-                                  ▲────ping──────────► │     - app sees itself PID 1
-                                  ◄────app_started──── │
-                                                       │
-  /run/<sid>/vsock.sock          ◄────app_exited────── │ user app exits
-                                                       │ reboot()
-                                  ◄────CH exits─────── │
+   HOST                                                      GUEST VM
+   ────                                                      ────────
+
+   sandbox-ctl ── spawn CH ──►  cloud-hypervisor             kernel boot
+                                       │                          │
+                                       │ virtio-pmem / DAX        │  pivot to /
+   sandbox-runtime.erofs  ◄────────────┤  (host shared file)      │  /sbin/init = sandbox-init
+                                       │                          │    phase 1: mount + overlayfs
+                                       │                          │    phase 2: vsock launch handshake
+                                       │                          │    phase 3: supervisor loop
+                                       │                          │
+                                       ├──────── launch ─────────►│    fork/exec user app
+                                       ├──────── ping ───────────►│      - new PID / Mount ns
+                                       │◄──────── app_started ────┤      - app sees itself PID 1
+                                       │                          │
+   /run/<sid>/vsock.sock  ◄────────────┤◄──────── app_exited ─────┤    user app exits
+                                       │                          │    reboot()
+                                       │◄──────── CH exits ───────┤
 ```
 
 ### 1.3 不做的事
@@ -317,54 +316,55 @@ JSON 可读、调试友好;消息量极少,无需 protobuf 工具链。
 冷启动主时序:
 
 ```
-sandbox-ctl                                        sandbox-init (guest)
-───────────                                        ────────────────────
-listen <base>_5000          ◄── guest→host UDS 起
-spawn CH                                           kernel boot
-                                                   phase 1 mount + pivot
-                                                   AF_VSOCK bind+listen :5000
-                            ┌──── conn1: hello/launch ───┐
-                       ◄────│ dial CID=2:5000            │
-                            │ → "hello"                  │
-                       ────►│ ← "launch" + LaunchSpec    │
-                            │ close (双方)               │
-                            └────────────────────────────┘
-ping ticker (1 Hz) start    ◄── launch 写入完成即开
-                                                   applyNetwork
-                                                   fork/exec user app
-                            ┌──── conn2: app_started ────┐
-                       ◄────│ dial CID=2:5000            │
-                            │ → "app_started" pid=N      │
-                       ────►│ ← "ack"                    │
-                            │ close                      │
-                            └────────────────────────────┘
-                            ┌──── conn3..k: ping/pong ───┐
-                       ────►│ host→guest "ping" id=k     │
-                            │ ← "pong" id=k              │
-                            │ close                      │
-                            └────────────────────────────┘
-                            ...
-                                                   user app exits
-                            ┌──── conn_last: app_exited ──┐
-                       ◄────│ → "app_exited" code=C       │
-                       ────►│ ← "ack"                     │
-                            │ close                       │
-                            └─────────────────────────────┘
-                                                   reboot()
+   sandbox-ctl                                       sandbox-init  (guest)
+   ───────────                                       ─────────────────────
+   listen <base>_5000        ◄── guest→host UDS ready
+   spawn CH                                          kernel boot
+                                                     phase 1: mount + pivot
+                                                     AF_VSOCK bind+listen :5000
+                             ┌── conn1: hello / launch ──┐
+                        ◄────│ dial CID=2:5000           │
+                             │ → "hello"                 │
+                        ────►│ ← "launch" + LaunchSpec   │
+                             │ close (both sides)        │
+                             └───────────────────────────┘
+   ping ticker (1 Hz) start  ◄── starts once "launch" write completes
+                                                     applyNetwork
+                                                     fork/exec user app
+                             ┌── conn2: app_started ─────┐
+                        ◄────│ dial CID=2:5000           │
+                             │ → "app_started" pid=N     │
+                        ────►│ ← "ack"                   │
+                             │ close                     │
+                             └───────────────────────────┘
+                             ┌── conn3..k: ping / pong ──┐
+                        ────►│ host→guest "ping" id=k    │
+                             │ ← "pong" id=k             │
+                             │ close                     │
+                             └───────────────────────────┘
+                             ...
+                                                     user app exits
+                             ┌── conn_last: app_exited ──┐
+                        ◄────│ → "app_exited" code=C     │
+                        ────►│ ← "ack"                   │
+                             │ close                     │
+                             └───────────────────────────┘
+                                                     reboot()
 ```
 
 快照前后:
 
 ```
-snapshot:                                          restore:
-sandbox-ctl                  sandbox-init           sandbox-ctl                  sandbox-init
-───────────                  ────────────           ───────────                  ────────────
-ping ticker stop                                    /vm.resume OK
-"quiesce" ──────────────►   排空数据连接           "restore" epoch=N ────────►   (listener 已在,接收并处理)
-                             执行 pre-snap 清理              ◄── "restored" ──── ack ready
-            ◄── "quiesced" ── (listener 保留)       ping ticker (re)start
-/vm.pause                                                                        (listener 保持不变)
-/vm.snapshot
+   snapshot                                          restore
+   ────────                                          ───────
+   sandbox-ctl                 sandbox-init           sandbox-ctl                 sandbox-init
+   ───────────                 ────────────           ───────────                 ────────────
+   ping ticker stop                                   /vm.resume OK
+   "quiesce" ─────────────►    drain data conns       "restore" epoch=N ──────►   (listener up; recv + handle)
+                               run pre-snap cleanup            ◄── "restored" ─── ack ready
+              ◄── "quiesced" ──(listener kept)        ping ticker (re)start
+   /vm.pause                                                                      (listener unchanged)
+   /vm.snapshot
 ```
 
 **listener 跨快照不关闭**——若 quiesce 把 listener 关掉,host 之后下发的

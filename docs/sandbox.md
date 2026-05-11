@@ -14,49 +14,40 @@ handler、cgroup/balloon 联动(含 host 端 BalloonController)、与 node-ctl
 ### 1.1 系统中的位置
 
 ```
-┌──────────────────────────────────────────────────────────────────────────────┐
-│ HOST                                                                          │
-│                                                                               │
-│  ┌─── 全局共享 ──────────────────────────────────────────────────────────┐   │
-│  │  /opt/sandbox/vmlinux              kernel 镜像,各 sandbox 各自加载   │   │
-│  │  /opt/sandbox/sandbox-runtime.erofs Guest PID 1 镜像,DAX 共享       │   │
-│  │  cache-ctl daemon                  跨 sandbox 共享的 chunk 缓存     │   │
-│  │  store-ctl daemon                  内容寻址存储后端                  │   │
-│  │  node-ctl  daemon                  沙箱资源控制器(可选)            │   │
-│  └────────────────────────────────────────────────────────────────────────┘   │
-│                                                                               │
-│  ┌─── per-sandbox(每个 sandbox 一组进程) ────────────────────────────┐    │
-│  │                                                                       │    │
-│  │  ┌─────────────────────────────────────┐                             │    │
-│  │  │ sandbox-ctl 进程                    │                             │    │
-│  │  │                                     │                             │    │
-│  │  │  control plane (lifecycle)          │                             │    │
-│  │  │  vhost-user-blk backend × 2         │                             │    │
-│  │  │  uffd handler                       │                             │    │
-│  │  │  va_report UDS server               │                             │    │
-│  │  │  resource executor (→ node-ctl)     │                             │    │
-│  │  │                                     │                             │    │
-│  │  │  link: pkg/fetch → cache-ctl RPC    │                             │    │
-│  │  │  link: pkg/ingest(快照上传时使用)   │                             │    │
-│  │  └─────┬───────────┬───────────┬───────┘                             │    │
-│  │        │           │           │                                      │    │
-│  │        │ vhost-user│ vhost-user│ CH API UDS                           │    │
-│  │        │ blk0      │ blk1      │                                      │    │
-│  │        ▼           ▼           ▼                                      │    │
-│  │  ┌──────────────────────────────────────┐                            │    │
-│  │  │ cloud-hypervisor (patched)           │                            │    │
-│  │  │   KVM + virtio devices              │                            │    │
-│  │  │   pmem → sandbox-runtime.erofs      │                            │    │
-│  │  │   blk0/blk1 → sandbox-ctl backend   │                            │    │
-│  │  └──────────────────────────────────────┘                            │    │
-│  │                                                                       │    │
-│  │  /run/<sid>/                                                          │    │
-│  │    ch.sock   blk0.sock   blk1.sock   uffd.sock   ctl.sock            │    │
-│  │    vsock.sock + vsock.sock_5000                                       │    │
-│  │    blk1.diff(本地 ext4 COW 上层文件)                                │    │
-│  │  /var/lib/sandbox/<sid>/snap/  [snapshot/restore 中转目录]           │    │
-│  └────────────────────────────────────────────────────────────────────────┘   │
-└──────────────────────────────────────────────────────────────────────────────┘
+   HOST
+   ────
+
+   node-shared  (one set per host)
+       /opt/sandbox/vmlinux                  kernel image — each sandbox loads its own
+       /opt/sandbox/sandbox-runtime.erofs    guest PID 1 image — DAX-shared host page cache
+       /opt/sandbox/overlay-templates/*.ext4 pre-formatted COW upper templates (multiple sizes)
+       cache-ctl  (tiered)                   chunk cache shared across sandboxes
+       store-ctl                             content-addressed store backend (OBS proxy)
+       node-ctl   (daemon)                   sandbox resource controller (dynamic mode)
+
+   per-sandbox  (one process group per sandbox)
+
+       ┌─ sandbox-ctl ───────────────────────────┐
+       │   control plane (lifecycle)             │
+       │   vhost-user-blk backend × 2            │
+       │   uffd handler  +  va_report UDS server │
+       │   resource executor   → node-ctl        │
+       │   BalloonController   → CH vm.resize    │
+       │   link: pkg/fetch     → cache-ctl wire  │
+       │   link: pkg/ingest    → store-ctl gRPC  │   (snapshot upload only)
+       └──────┬────────────┬────────────┬────────┘
+              │ vhost      │ vhost      │ CH API UDS
+              │ blk0       │ blk1       │
+              ▼            ▼            ▼
+       ┌─ cloud-hypervisor (patched) ────────────┐
+       │   KVM + virtio devices                  │
+       │   pmem  → sandbox-runtime.erofs         │
+       │   blk0 / blk1 → sandbox-ctl backend     │
+       └─────────────────────────────────────────┘
+
+       /run/<sid>/        ch.sock  blk0.sock  blk1.sock  uffd.sock  ctl.sock  vsock.sock (+ _5000)
+       /run/<sid>/blk1.diff                  local ext4 COW upper file (copied from a template)
+       /var/lib/sandbox/<sid>/snap/          snapshot / restore staging dir
 ```
 
 sandbox-ctl 是 CH 的父进程。CH 退出 → sandbox-ctl 收 SIGCHLD → 优雅
