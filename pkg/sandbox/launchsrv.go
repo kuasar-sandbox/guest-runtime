@@ -52,6 +52,12 @@ type LaunchServer struct {
 	// exited. Optional; nil → just ack.
 	OnAppExited func(code int)
 
+	// OnMemReport fires on every periodic mem_report from the guest
+	// (sandbox-init's /proc/meminfo sampler). Drives the host-side
+	// balloon controller (replaces virtio-balloon free-page-reporting).
+	// Optional; nil → just ack.
+	OnMemReport func(memAvailableBytes, memTotalBytes uint64)
+
 	listener      *net.UnixListener
 	stopOnce      sync.Once
 	stopped       chan struct{}
@@ -203,6 +209,12 @@ func (s *LaunchServer) handleConn(conn *net.UnixConn) {
 			s.OnAppExited(msg.Code)
 		}
 		_ = proto.WriteMessage(conn, &proto.Message{Type: proto.TypeAck})
+
+	case proto.TypeMemReport:
+		if s.OnMemReport != nil {
+			s.OnMemReport(msg.MemAvailableBytes, msg.MemTotalBytes)
+		}
+		_ = proto.WriteMessage(conn, &proto.Message{Type: proto.TypeMemReportAck})
 
 	default:
 		s.Logf("launch: unknown message type %q", msg.Type)

@@ -61,8 +61,14 @@ func CHCommand(cfg *SandboxConfig, blk0Sock, blk1Sock, chSock, vsockSock, kernel
 	}
 
 	if allocBytes < capBytes {
-		balloonBytes := capBytes - allocBytes
-		balloonOpts := fmt.Sprintf("size=%dM,free_page_reporting=on", balloonBytes>>20)
+		// size=0 at boot: guest sees full capacity until Settled.
+		// The host-side BalloonController (pkg/sandbox/balloon.go)
+		// drives the actual target via /api/v1/vm.resize after
+		// launch_ack, fed by sandbox-init mem_report samples.
+		// free_page_reporting is intentionally OFF — its mmu_notifier
+		// traffic starves the guest vsock kthread (see balloon.go
+		// rationale).
+		balloonOpts := "size=0"
 		if cfg.DeflateOnOOM() {
 			balloonOpts += ",deflate_on_oom=on"
 		}

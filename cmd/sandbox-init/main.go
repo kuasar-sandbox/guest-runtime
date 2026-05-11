@@ -25,6 +25,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -37,6 +38,12 @@ const (
 	devicePollInterval = 50 * time.Millisecond
 	devicePollTimeout  = 10 * time.Second
 	gracefulShutdown   = 10 * time.Second
+
+	// memReportInterval is the period of the /proc/meminfo sampler
+	// that feeds the host-side balloon controller. Matches the
+	// host-side reconcile cadence; at this rate the worst-case
+	// reclaim latency is ~2 × interval.
+	memReportInterval = 5 * time.Second
 )
 
 func main() {
@@ -85,6 +92,12 @@ func main() {
 
 	// Reverse-channel dispatch goroutine. Lives until reboot.
 	go serveReverseChannel(revFD, supervisor)
+
+	// Memory reporter: feeds the host-side balloon controller with
+	// /proc/meminfo snapshots so it can drive vm.resize. Replaces
+	// virtio-balloon free-page-reporting (whose mmu_notifier traffic
+	// starves this very vsock listener after ~16 s).
+	go runMemReporter(memReportInterval)
 
 	phase3Supervise(supervisor)
 	// phase3Supervise does not return.
@@ -381,6 +394,73 @@ func envSliceFromMap(m map[string]string) []string {
 		out = append(out, k+"="+v)
 	}
 	return out
+}
+
+// runMemReporter samples /proc/meminfo every interval and pushes a
+// mem_report to the host. Best-effort: errors logged, ticker continues.
+// First report fires immediately so the host's BalloonController gets
+// a baseline before its first reconcile tick.
+func runMemReporter(interval time.Duration) {
+	push := func() {
+		avail, total, err := readMemInfo()
+		if err != nil {
+			logf("mem_report: read /proc/meminfo: %v", err)
+			return
+		}
+		if err := notifyMemReport(avail, total); err != nil {
+			logf("mem_report: %v", err)
+		}
+	}
+	push()
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for range t.C {
+		push()
+	}
+}
+
+// readMemInfo parses /proc/meminfo's MemTotal and MemAvailable in
+// bytes. Linux reports kB; we shift to bytes for the wire protocol.
+func readMemInfo() (memAvailable, memTotal uint64, err error) {
+	f, err := os.Open("/proc/meminfo")
+	if err != nil {
+		return 0, 0, err
+	}
+	defer f.Close()
+	buf := make([]byte, 4096)
+	n, err := f.Read(buf)
+	if err != nil {
+		return 0, 0, err
+	}
+	for _, line := range strings.Split(string(buf[:n]), "\n") {
+		switch {
+		case strings.HasPrefix(line, "MemTotal:"):
+			memTotal = parseMemInfoKB(line) << 10
+		case strings.HasPrefix(line, "MemAvailable:"):
+			memAvailable = parseMemInfoKB(line) << 10
+		}
+		if memTotal != 0 && memAvailable != 0 {
+			break
+		}
+	}
+	if memTotal == 0 {
+		return 0, 0, errors.New("MemTotal not found")
+	}
+	return memAvailable, memTotal, nil
+}
+
+// parseMemInfoKB pulls the kB-scale integer out of a /proc/meminfo
+// line of shape "MemTotal:    8064212 kB". Returns 0 on malformed input.
+func parseMemInfoKB(line string) uint64 {
+	fields := strings.Fields(line)
+	if len(fields) < 2 {
+		return 0
+	}
+	v, err := strconv.ParseUint(fields[1], 10, 64)
+	if err != nil {
+		return 0
+	}
+	return v
 }
 
 // initStart is the wall clock at sandbox-init main() entry. Used to

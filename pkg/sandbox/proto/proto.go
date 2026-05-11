@@ -109,6 +109,15 @@ type Message struct {
 	// "fresh wake" from a duplicate restore message in flight.
 	Epoch uint32 `json:"epoch,omitempty"`
 
+	// mem_report: guest → host periodic /proc/meminfo snapshot used by
+	// the host-side balloon controller to drive vm.resize. Replaces
+	// virtio-balloon free-page-reporting (whose mmu_notifier traffic
+	// starves the guest vsock kthread, see docs/sandbox.md §known-issues).
+	// `MemAvailableBytes` is Linux's si_mem_available()
+	// (free + reclaimable cache + slab); `MemTotalBytes` is a sanity check.
+	MemAvailableBytes uint64 `json:"mem_avail_bytes,omitempty"`
+	MemTotalBytes     uint64 `json:"mem_total_bytes,omitempty"`
+
 	// error: human-readable reason on rejection paths.
 	Msg string `json:"msg,omitempty"`
 }
@@ -127,6 +136,8 @@ const (
 	TypeRestored   = "restored"
 	TypeQuiesce    = "quiesce"
 	TypeQuiesced   = "quiesced"
+	TypeMemReport    = "mem_report"
+	TypeMemReportAck = "mem_report_ack"
 	TypeAck        = "ack"
 	TypeError      = "error"
 )

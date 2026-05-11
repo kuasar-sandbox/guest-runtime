@@ -203,6 +203,36 @@ func notifyAppStarted(pid int) error {
 	return nil
 }
 
+// notifyMemReport dials the host launch UDS and pushes a /proc/meminfo
+// snapshot. Best-effort: errors logged, the next ticker iteration tries
+// again. Used by the host-side balloon controller (replaces
+// virtio-balloon free-page-reporting, see docs/sandbox.md §known-issues).
+func notifyMemReport(memAvailable, memTotal uint64) error {
+	conn, err := dialVsock(proto.VsockHostCID, proto.LaunchPort)
+	if err != nil {
+		return fmt.Errorf("dial: %w", err)
+	}
+	defer conn.Close()
+	if vc, ok := conn.(*vsockConn); ok {
+		_ = vc.SetDeadline(time.Now().Add(proto.DeadlineAppNotify))
+	}
+	if err := proto.WriteMessage(conn, &proto.Message{
+		Type:              proto.TypeMemReport,
+		MemAvailableBytes: memAvailable,
+		MemTotalBytes:     memTotal,
+	}); err != nil {
+		return fmt.Errorf("write: %w", err)
+	}
+	resp, err := proto.ReadMessage(conn)
+	if err != nil {
+		return fmt.Errorf("read: %w", err)
+	}
+	if resp.Type != proto.TypeMemReportAck {
+		return fmt.Errorf("unexpected response %q", resp.Type)
+	}
+	return nil
+}
+
 // notifyAppExited dials the host launch UDS and sends a short-conn
 // app_exited notification. Best-effort — guest reboots regardless of
 // outcome (§9.1.6).
