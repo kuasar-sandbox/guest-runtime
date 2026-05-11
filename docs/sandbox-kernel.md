@@ -17,7 +17,7 @@ vmlinux 是平台资产,**不**对外暴露内核版本/配置接口给租户。
 | 镜像小、启动快 | allnoconfig 起步;仅启用沙箱必需的子系统;HZ=100;TTY 单端口 |
 | 跨实例可去重 | 关闭所有运行时随机化(KASLR、SLAB freelist、页面 shuffle);固定 LOCALVERSION |
 | 单 VM = 单 app 模型 | 关闭 cgroups、user/net/uts/ipc/time namespace、in-guest userfaultfd |
-| host 控制 guest 内存 | 启用 virtio-balloon free_page_reporting + virtio-mem |
+| host 控制 guest 内存 | 启用 virtio-balloon(host-driven inflate via vm.resize)+ virtio-mem |
 | 单一 rootfs 路径 | virtio-pmem + DAX + EROFS(只读) + ext4(可写) + overlayfs |
 
 ### 1.2 内核版本
@@ -91,7 +91,8 @@ VIRTIO_BLK=y                    blk0/blk1(基础磁盘 + COW 上层)
 VIRTIO_NET=y                    eth0(连到 host TAP)
 VIRTIO_PMEM=y                   sandbox-runtime.erofs 通过 virtio-pmem 挂入
 VIRTIO_VSOCKETS=y               sandbox-init ↔ sandbox-ctl 控制面
-VIRTIO_BALLOON=y                host 内存回收(free_page_reporting)
+VIRTIO_BALLOON=y                host 内存回收(host 通过 vm.resize 推 inflate;
+                                平台不启用 free_page_reporting,见 §5.5)
 VIRTIO_MEM=y                    host 主动 unplug 内存块
 LIBNVDIMM + DAX                 virtio-pmem DAX 直接映射 host page cache
 EROFS_FS=y                      只读根文件系统
@@ -289,17 +290,25 @@ sandbox-init,sandbox-init 用 raw netlink 配置。`ip_auto_config` initcall
 NR_CPUS=4 让 guest 内核数据结构(per-cpu / cpumask)按 4 核维度分配——
 NR_CPUS=8/16 多余的 per-cpu 字段会让跨实例 RAM 多出一些低利用率脏页。
 
-### 5.5 为什么开 VIRTIO_MEM
+### 5.5 为什么不启用 free_page_reporting,以及 VIRTIO_MEM 的角色
 
-balloon free_page_reporting 是**guest 主动**回收 → host PUNCH_HOLE 路径,在
-启动期会产生 EVENT_REMOVE 风暴(数千次,~7-8 GiB 空闲页一次性还给 host)。
+`virtio-balloon free_page_reporting` 让 guest 把每轮 page reclaim 中的空闲页号
+持续推到 host;host 端 CH 的 `release_memory_range` 在收到这些页号时,对自身
+mmap 做 `madvise(MADV_DONTNEED)` 释放进程 PTE。在平台的统一 memfd / 外部 uffd
+模型下,这条 madvise 会广播 mmu_notifier 失效到 KVM EPT,持续的 IPI shootdown
+会饿死 guest vsock kthread(timer 中断丢失,host→guest ping 在十数秒内全部
+timeout)。因此平台**关闭 free_page_reporting**——内核侧 `VIRTIO_BALLOON=y`
+启用模块,但 CH 命令行不开 FPR feature。
 
-virtio-mem 是 host 主动 → guest unplug 路径:sandbox-ctl 通过 CH `vm.resize`
-显式告诉 guest "把这块内存还回来",guest 在 unplug 完成后 CH 再 PUNCH_HOLE。
-事件粒度大、数量少,启动期资源回收更平滑。
+替代路径:host 端 BalloonController 周期(默认 5 s)从 guest 拉取 mem_report
+(MemAvailable/MemTotal,详见 sandbox-runtime.md §4.3),按反馈策略推
+`PUT /api/v1/vm.resize` 改变 balloon target;guest balloon 驱动按 target inflate,
+CH 在 inflate 处理路径里 `fallocate(PUNCH_HOLE) + madvise(DONTNEED)`。事件量
+被反馈环 `MaxStep`(默认 ≤ 256 MiB/tick)限速,不会形成 IPI 风暴。
 
-两条路径并存:balloon 处理稳态空闲页回报,virtio-mem 处理 host-driven 主动
-回收。
+`VIRTIO_MEM=y` 仍保留作扩展点:virtio-mem 是 host 主动 → guest unplug 路径,
+事件粒度大、批量少,适合 NUMA / 横向扩 zone 等场景。当前 v1 不依赖
+virtio-mem 路径,但保留驱动让未来扩展无需重打 vmlinux。
 
 ## 6. 验证
 

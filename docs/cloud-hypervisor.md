@@ -255,8 +255,10 @@ CH 暴露给 guest 的设备清单(冷启动):
 virtio-pmem    → sandbox-runtime.erofs (DAX, MAP_SHARED 共享 host page cache)
 virtio-blk × 2 → blk0 (base, ro) + blk1 (overlay COW, rw),vhost-user backend
 virtio-net     → eth0,host TAP 后端
-virtio-vsock   → CID=3,launch protocol + ping/restore/quiesce 通道
-virtio-balloon → free_page_reporting=on [+ deflate_on_oom=on]
+virtio-vsock   → CID=3,launch + ping/restore/quiesce + mem_report 通道
+virtio-balloon → size=0 [+ deflate_on_oom=on];host BalloonController 通过
+                 /vm.resize 推 target(见 sandbox.md §9.3);free_page_reporting
+                 不启用(广播 mmu_notifier 会饿死 guest vsock kthread)
 virtio-mem     → host-driven 主动 unplug(扩展点)
 ```
 
@@ -290,13 +292,16 @@ host → guest 方向需要在第一笔写入发 ASCII `CONNECT <port>\n`,CH 据
 | 命令行写 `fd=` + `uffd_socket=` | ✗ | ✓(创建 uffd + sendmsg + 等 ack)|
 | `/vm.snapshot` 对 user_managed zone | (不适用) | 跳过 dump,memory-ranges 表无此 zone |
 | `/vm.restore` 对 user_managed zone | (不适用) | 跳过 fill;mmap 直接 fault 触发 uffd |
-| balloon `free_page_reporting=on` | ✓ | ✓ |
 | balloon `deflate_on_oom=on` | ✓(v51.1 已就绪) | ✓ |
-| `vm.resize` `desired_balloon` | ✓ | ✓(平台动态调用)|
+| `vm.resize` `desired_balloon` | ✓ | ✓(平台周期调用,host BalloonController)|
 | virtio-mem `vm.resize` | ✓ | ✓ |
 
-`free_page_reporting` 与 `deflate_on_oom` 都是 upstream v51.1 原生支持,
-无需新 patch。
+平台**不**使用 `free_page_reporting`——upstream 支持完好,但在统一 memfd /
+外部 uffd 模型下,CH `release_memory_range` 对自身 mmap 做
+`madvise(MADV_DONTNEED)` 会广播 mmu_notifier 失效到 KVM EPT,持续 IPI
+shootdown 饿死 guest vsock kthread。改由 host 端 BalloonController 通过
+`/vm.resize` 推 inflate target,事件量被反馈环 `MaxStep` 限速。`deflate_on_oom`
+是 upstream v51.1 原生,无需新 patch。
 
 ## 7. 已知限制
 
