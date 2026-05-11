@@ -181,6 +181,11 @@ shutdown → CH 看到 vCPU 关 → CH 进程退出。
 沙箱生命周期(冷启动 + snapshot/restore + 退出)持续存在,唯一退出点是进程
 reboot。
 
+**mem_report 上报 goroutine**:与 supervisor 并行的第二个常驻 goroutine,默认
+每 5 s 读一次 `/proc/meminfo` 的 `MemAvailable:` 和 `MemTotal:`,短连接发
+`mem_report` 给 host(协议见 §4.3)。host 端 BalloonController 据此把 balloon
+target 锚定在合理水位(详见 sandbox.md §9.3);失败仅记 stderr,不影响 supervisor。
+
 ### 3.4 quiesce 处理
 
 quiesce 是 host `/vm.pause` 之前的最后一次清理机会,目的是把跨实例 snapshot
@@ -284,6 +289,7 @@ JSON 可读、调试友好;消息量极少,无需 protobuf 工具链。
 | `ping` | host → guest | `pong` | 健康探测,host 计 RTT、超时、失败数 |
 | `restore` | host → guest | `restored` | 快照恢复 vCPU 起跑后 host 主动通知 guest;guest 回 ack 即视为 ready |
 | `quiesce` | host → guest | `quiesced` | 快照前要求 guest 完成清理动作并排空数据连接 |
+| `mem_report` | guest → host | `mem_report_ack` | guest 周期(默认 5 s)上报 `/proc/meminfo` 的 MemAvailable/MemTotal,喂给 host 端 BalloonController(§sandbox §9.3) |
 | `error` | 任意 | (终止) | 任一端拒绝/出错的兜底响应 |
 
 字段集合(`Message` 结构体在 `pkg/sandbox/proto`):
@@ -298,6 +304,8 @@ JSON 可读、调试友好;消息量极少,无需 protobuf 工具链。
   "id":       42,                      // ping/pong: 单调递增,host 分配
   "t_send_ns":1715000000000000000,     // ping: host 单调时钟 ns;guest 原样回填到 pong
   "epoch":    3,                       // restore: 第 N 次 restore;每次 +1
+  "mem_avail_bytes": 4294967296,       // mem_report: /proc/meminfo MemAvailable (bytes)
+  "mem_total_bytes": 8589934592,       // mem_report: /proc/meminfo MemTotal (bytes)
   "msg":      "<reason>"               // error: 人类可读理由
 }
 ```
@@ -438,6 +446,7 @@ timeout**):
 | `ping` | 200 ms | 1 s interval 下足够裕度;到点计入 `ping_timeout_total` |
 | `quiesce` | 5 s | guest 要 drop caches / 清 /tmp / 关闭 outbound 连接,数十 ms 起步,留足头部 |
 | `restore` | 5 s | kernel vsock 层在此期间 hold 住连接请求等 vCPU 跑起来 accept |
+| `mem_report` | 200 ms | guest 每 5 s 一次,host 失败仅记日志、controller 在下一 tick 用旧 hint |
 
 ## 5. 应用契约
 

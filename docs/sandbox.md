@@ -3,7 +3,8 @@
 `sandbox-ctl` 是平台沙箱的 host 端控制平面,管理一个 microVM 的完整生命周期
 (冷启动、快照、恢复)。每个沙箱由一组 `sandbox-ctl + cloud-hypervisor` 双
 进程承载,sandbox-ctl 是 CH 的父进程,负责 vhost-user-blk backend、uffd
-handler、cgroup/balloon 联动、与 node-ctl 的资源协议对话。
+handler、cgroup/balloon 联动(含 host 端 BalloonController)、与 node-ctl
+的资源协议对话。
 
 进程模型类 `runc run`:一个 `sandbox-ctl run` 命令就是一个 sandbox 的完整
 生命周期。退出 = sandbox 销毁。
@@ -448,7 +449,7 @@ CPU 通过 cpu.max + cpu.weight 静态表达;无 cgroup / 静态 cgroup 模式�
 | 反压机制 | cgroup memory.high(PSI) | cgroup cpu.max(throttle) |
 | 灾难性后果 | OOM kill | 仅减速,无 kill |
 | 调整生效延迟 | balloon 数 ms-数十 ms | cpu.max 立即(下一 period) |
-| 释放路径 | madvise / free_page_reporting,异步 | 无需释放;period 边界自动 |
+| 释放路径 | balloon inflate(host-driven via vm.resize)→ fallocate+madvise,异步 | 无需释放;period 边界自动 |
 | 安全网 | deflate_on_oom | 不需要 |
 | 是否有 burst 状态机 | 是 | 否 |
 
@@ -519,9 +520,13 @@ T20  vCPU 跑过程中:
      · vCPU 首次访问页 → uffd_C MISSING fault → handler 走 Absent → ZEROPAGE
      · backend 访问 backendVA → kernel 默认 shmem 缺页:folio 已存在(handler 装的)→
        直接装 sandbox-ctl mm PTE,无 uffd 事件
-     · guest balloon free_page_reporting → CH 在 memfd 上 fallocate(PUNCH_HOLE)
-       + 在 chVA 上 madvise(DONTNEED) → uffd_C 投 EVENT_REMOVE → handler push
-       到 removeQ → flusher batch+merge 后 madvise(DONTNEED, backendVA)
+     · sandbox-init 周期(默认 5s)从 /proc/meminfo 读 MemAvailable/MemTotal,
+       走短连接发 mem_report(§sandbox-runtime §4.3)给 host
+     · host BalloonController 按策略推 desired_balloon target(详见 §9.3),通过
+       CH HTTP API PUT /api/v1/vm.resize 落到 guest;guest balloon 驱动 inflate
+       → CH 在 memfd 上 fallocate(PUNCH_HOLE) + 在 chVA 上 madvise(DONTNEED)
+       → uffd_C 投 EVENT_REMOVE → handler push 到 removeQ → flusher batch+merge
+       后 madvise(DONTNEED, backendVA)
 T21  user app 退出 → sandbox-init reboot → CH vCPU shutdown → CH 进程退出
 T22  sandbox-ctl cmd.Wait() 返回
 T23  cleanup:停 backend / 关 uffd / munmap / unlink sockets / 移除 cgroup
@@ -540,7 +545,7 @@ cloud-hypervisor \
   --kernel      /opt/sandbox/vmlinux \
   --pmem        file=/opt/sandbox/sandbox-runtime.erofs,discard_writes=on,iommu=off \
   --memory-zone size=8G,shared=on,fd=3,uffd_socket=/run/<sid>/uffd.sock \
-  --balloon     size=4G,free_page_reporting=on \
+  --balloon     size=0[,deflate_on_oom=on] \
   --disk        vhost_user=on,socket=/run/<sid>/blk0.sock,readonly=on \
   --disk        vhost_user=on,socket=/run/<sid>/blk1.sock \
   --vsock       cid=3,socket=/run/<sid>/vsock.sock \
@@ -552,8 +557,11 @@ cloud-hypervisor \
 ```
 
 要点:
-- `--memory-zone size=8G` 是 capacity;balloon 在启动时自动膨胀到 4G(=
-  capacity − allocatable)
+- `--memory-zone size=8G` 是 capacity;balloon boot 时 `size=0`,sandbox-ctl
+  端的 BalloonController 在 settled 后通过 `/api/v1/vm.resize` 把 target 推到
+  `capacity − allocatable_now`,过程受 mem_report 驱动的反馈策略约束(§9.3)
+- balloon 行只在 `allocatable_now < capacity` 时出现;两者相等时省略
+  balloon 设备,无 host 端 RAM 回收路径
 - `--memory-zone fd=3,uffd_socket=...`:patched CH 跳过 memfd_create,直接用
   sandbox-ctl 传入的 fd 当 backing;在 create_ram_region 内自己创建 uffd,
   通过 uffd_socket 发 va_report + SCM_RIGHTS,等 sandbox-ctl ack 后才允许
@@ -892,8 +900,8 @@ PageState 用 `[]uint8`,size = ramSize / pageSize。每 4 GiB RAM = 1 MiB 状态
 
 ### 8.5 EVENT_REMOVE 处理
 
-CH 在 balloon free_page_reporting 路径里,对每段 guest 上报为空闲的页同时做
-两件事:
+CH 的 balloon inflate 路径(消费 virtio-balloon inflate vq 的页号)对每个
+被让出的页同时做两件事:
 
 1. 在 memfd 上 `fallocate(FALLOC_FL_PUNCH_HOLE | KEEP_SIZE)` —— 释放 inode 页
 2. 在 chVA 上 `madvise(DONTNEED)` —— 清自己进程的 PTE
@@ -909,19 +917,19 @@ handler 收到 `EVENT_REMOVE` 后做 **process-level reclaim**:对 sandbox-ctl
 
 | 端 | 动作 | 释放对象 | 触发时机 |
 |---|---|---|---|
-| CH(balloon 处理函数) | `fallocate(PUNCH_HOLE)` on memfd + `madvise(DONTNEED)` on chVA | inode 页 + CH 自己的 PTE | guest free_page_reporting 上报 |
+| CH(balloon inflate 处理) | `fallocate(PUNCH_HOLE)` on memfd + `madvise(DONTNEED)` on chVA | inode 页 + CH 自己的 PTE | guest balloon 驱动把页交还(host 通过 `/vm.resize` 推 target → guest inflate) |
 | sandbox-ctl handler | `madvise(DONTNEED)` on backendVA | sandbox-ctl 自己的 PTE/RSS | 收到 `EVENT_REMOVE` |
 
-**事件量级与异步化**:cold-start 前 ~1s,balloon inflate + free_page_reporting
-把 ~7-8 GiB 空闲页一次性还给 host,产生数千条 `EVENT_REMOVE` 事件。reader
-goroutine 同步处理 madvise 会被 syscall 时间挤占,page-fault 派发饿死。
-所以 EVENT_REMOVE 路径异步化:reader 只更新 pageStates(同步,fault 路径要
-看)+ push 到 removeQ;flusher goroutine batch + merge contiguous ranges +
-sort by offset → 几十次 madvise 完成数千事件。
+**触发节奏**:平台**不**使用 `free_page_reporting`——其连续 mmu_notifier 广播
+会饿死 guest vsock kthread(详见 §9.3)。改用 host 端 BalloonController 按
+mem_report 反馈周期(默认 5 s,单步 ≤ 256 MiB)推 inflate target,EVENT_REMOVE
+因此呈"周期性小批量"而非"持续高频",对 fault 派发的挤压可控。
 
 **关键不变量**:CH 的 fallocate(PUNCH_HOLE) 与 sandbox-ctl 的
 madvise(DONTNEED) 是**互补**的,不是 redundant。前者管 file pages,后者管
-process PTE,缺任一边都泄漏。
+process PTE,缺任一边都泄漏。EVENT_REMOVE 路径仍然异步化(reader 只更新
+pageStates + push removeQ;flusher batch + merge + sort 后批量 madvise),
+保留 cold-start 早期 boot 阶段大批量事件的吞吐能力。
 
 ## 9. cgroup 与 balloon 联动
 
@@ -968,21 +976,52 @@ cpu.weight  ← clamp(round(allocatable.cpu × 100), 1, 10000)
 这套静态模型实现了"无竞争时给 capacity / 有竞争时给 floor",**完全不需要
 运行时调整 cpu.max,也不需要 CPU 维度的 burst/recover 状态机或 RPC**。
 
-### 9.3 balloon 配置
+### 9.3 balloon 配置与 BalloonController
 
 CH 命令行(三种模式都用,跟 cgroup 解耦):
 
 ```
---balloon size=<initial>,free_page_reporting=on[,deflate_on_oom=on]
+--balloon size=0[,deflate_on_oom=on]
 ```
 
-- `size = capacity − allocatable_now`(无 cgroup / 静态 cgroup 模式 = capacity −
-  allocatable.memory;动态控制模式启动时 = capacity − startup_burst.memory)
-- `free_page_reporting=on` 持续回收 guest 内 free 页
-- `deflate_on_oom=on` 由 `allocatable.deflate_on_oom` 决定
+仅当 `allocatable_now < capacity` 时附加 `--balloon`;两者相等时省略,无 host
+端 RAM 回收路径。
 
-balloon target 的运行期变化(仅动态控制模式)通过 CH HTTP API
-`PUT /api/v1/vm.resize`(payload `{"desired_balloon": <bytes>}`)发起。
+- `size=0` boot 期 guest 看到 capacity 等额内存,balloon 尚未持有页。host 端
+  BalloonController 在 settled 之后(launch 握手完成)接管 target,把 balloon
+  推到 `capacity − allocatable_now`
+- **不**启用 `free_page_reporting`。FPR 让 guest 在每轮 page reclaim 中把空闲
+  页号高频推到 host,CH 的 `release_memory_range` 对自身 mmap 做
+  `madvise(MADV_DONTNEED)` 广播 mmu_notifier 失效到 KVM EPT,持续的 IPI
+  shootdown 饿死 guest vsock kthread → host→guest ping 在十数秒内全部 timeout。
+  改由 host 端按周期主动推 inflate target,事件量被速率限制,问题消除
+- `deflate_on_oom=on` 由 `allocatable.deflate_on_oom` 决定(默认 on)
+
+**BalloonController(host 侧反馈环)**:
+
+```
+guest sandbox-init  ─ mem_report (vsock, 5 s) ─►  Controller.Hint
+                       MemAvailable/MemTotal               │
+                                                           ▼
+       ◄─── PUT /api/v1/vm.resize {desired_balloon} ─── Reconcile (5 s tick)
+```
+
+策略要点:
+
+- **目标自由缓冲**`TargetFreeBuffer`:默认 `max(64 MiB, Capacity/32)`。Hint 根据
+  `delta = MemAvailable − TargetFreeBuffer` 调整 target,把 guest 的自由内存
+  锚定在该值附近
+- **anti-hunting**:`|delta| < Slack`(默认 32 MiB)的样本直接丢弃
+- **MaxStep 限速**:单次 Hint 调整 ≤ `MaxStep`(默认 256 MiB),把每个 tick 的
+  mmu_notifier 突发量盖住
+- **stale 防护**:刚推过一次 inflate,guest MemTotal 还没收到本次让出量的反映,
+  此时 MemAvailable 偏大。若 `MemAvailable > (Capacity − max(target, actual)) +
+  64 MiB`(visible slack)判为 stale,跳过该样本,避免反馈环正反馈失控
+- **Reconcile**:5 s ticker;`target != actual` 时一次 `PUT /api/v1/vm.resize`,
+  成功后写回 `actual`。Start 立即跑一次以便 settled 后尽快进入 target
+
+**手动覆盖**:动态控制模式下 sandbox-ctl 也可以通过 `Controller.SetTarget`
+直接设值(node-ctl grant/reclaim 时使用),Hint 与 SetTarget 互不干扰。
 
 ### 9.4 deflate_on_oom 安全网
 
@@ -1129,8 +1168,9 @@ EROFS 挂载或运行时读会读到诡异数据)。
 
 ### 11.1 唯一来源:CH 自己的 balloon 状态
 
-`sandbox-ctl` 在运行期通过 `applyAllocatable()` 维护 `balloon.target =
-capacity − allocatable_now`,因此 balloon target/current 已经把 allocatable_now
+`sandbox-ctl` 在运行期通过 BalloonController(§9.3)维护 `balloon.target =
+capacity − allocatable_now`(node-ctl grant/reclaim 走 SetTarget,稳态由
+mem_report Hint 驱动),因此 balloon target/current 已经把 allocatable_now
 的语义编码进去了。CH 在 `/vm.snapshot` 时把 balloon 设备状态(含 `num_pages`
 = host 想拿走的页数 / target、`actual` = guest 已交还的页数 / current)写入
 bundle 内的 `state.json`,**无须再额外保存**。
@@ -1155,8 +1195,10 @@ allocatable_at_snapshot = capacity − min(balloon.target, balloon.current)
 - **deflating**(host 想还给 guest,guest 还没扩张,target < current):取
   target → host 已经计划放出,sensor/heartbeat 会让 guest 后续扩到该值
 
-恢复后,sandbox-ctl 通过 `/vm.resize` 把 balloon target 重新设回该 allocatable
-对应的值,使 host 与 guest 视图一致。
+恢复后,BalloonController 通过 `SetTarget(capacity − allocatable)` 把 balloon
+target 重新设回该值,首次 Reconcile 通过 `/vm.resize` 落到 guest,使 host
+与 guest 视图一致;mem_report 反馈环在 guest 恢复 sandbox-init supervisor
+循环后自动续上。
 
 ### 11.2 无 cgroup / 静态 cgroup 模式(无控制器)的恢复决策
 
@@ -1304,8 +1346,10 @@ snapshot 路径要求 `/vm.pause` 之后内存内容稳定,但 backend worker �
 | `overhead.memory ≥ 0` | "overhead.memory must be non-negative" |
 | `watermark_high.memory > 0` 且 `≤ allocatable.memory`(静态 cgroup / 动态控制模式启动初值) | "watermark_high.memory out of (0, allocatable.memory]" |
 
-`allocatable.memory == capacity.memory` 时若 `deflate_on_oom` 显式写 true
-(默认值)不报错,记 warn 日志:"deflate_on_oom set but balloon not configured"。
+`allocatable.memory == capacity.memory` 时整个 balloon 设备不挂载
+(`--balloon` 不出现于 CH 命令行),BalloonController 不启动。若
+`deflate_on_oom` 显式写 true(默认值)不报错,记 warn 日志:
+"deflate_on_oom set but balloon not configured"。
 
 ### 13.2 stdio flag 互斥(`run --restore` / 冷启动同)
 
