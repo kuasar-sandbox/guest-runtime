@@ -414,32 +414,7 @@ make test
 make test-e2e-sandbox-cold
 ```
 
-## 10. 网络代理(本地源不可达时)
-
-如果 git/cargo/curl 无法直连 github / crates.io / kernel.org,运行环境通常
-提供 HTTP 代理 `127.0.0.1:9999`:
-
-```bash
-export https_proxy=http://127.0.0.1:9999
-export http_proxy=http://127.0.0.1:9999
-export no_proxy=localhost,127.0.0.1
-```
-
-cargo 额外需要在 `~/.cargo/config.toml` 配:
-
-```toml
-[http]
-proxy = "http://127.0.0.1:9999"
-```
-
-git config(可临时):
-
-```bash
-git config --global http.proxy http://127.0.0.1:9999
-git config --global https.proxy http://127.0.0.1:9999
-```
-
-## 11. 已知架构差异
+## 10. 已知架构差异
 
 详细架构差异(启动协议、中断控制器、串口、页大小、PCI 拓扑)见
 [`sandbox-kernel.md`](sandbox-kernel.md) §架构差异和
@@ -450,7 +425,7 @@ git config --global https.proxy http://127.0.0.1:9999
 两个 cargo target 上均能编译。运行时验证以 native host 跑
 `e2e_sandbox_cold.sh` 为准。
 
-## 12. See Also
+## 11. See Also
 
 - [`flatten.md`](flatten.md) §mkfs.erofs 调用 —— flatten-ctl 与 mkfs.erofs
   的运行时关系
