@@ -311,12 +311,30 @@ func Run(ctx context.Context, opts RunOptions) (int, error) {
 		srv0.Stop()
 		return -1, err
 	}
+	// BalloonController drives CH balloon size via /api/v1/vm.resize,
+	// fed by guest mem_report samples. Replaces virtio-balloon FPR
+	// (whose mmu_notifier traffic deadlocks the guest vsock kthread).
+	// Constructed even when allocatable == capacity (no balloon) so
+	// later grant/reclaim callbacks have somewhere to land; in that
+	// case Start() is a no-op because target stays at 0.
+	allocBytes, _ := opts.Cfg.AllocatableMemoryBytes()
+	var balloonCtl *BalloonController
+	if allocBytes < capBytes {
+		balloonCtl = NewBalloonController(chSock, capBytes, logf)
+		balloonCtl.SetTarget(0) // boot value; Settled hook ramps to cap-alloc
+	}
+
 	launch := &LaunchServer{
 		Path:         launchSock,
 		Spec:         launchSpec,
 		Logf:         logf,
 		OnAppStarted: func(pid int) { logf("guest reports user app pid=%d", pid) },
 		OnAppExited:  func(code int) { logf("guest reports user app exited code=%d", code) },
+		OnMemReport: func(memAvail, memTotal uint64) {
+			if balloonCtl != nil {
+				balloonCtl.Hint(memAvail, memTotal)
+			}
+		},
 	}
 	if err := launch.Listen(); err != nil {
 		srv0.Stop()
@@ -380,6 +398,16 @@ func Run(ctx context.Context, opts RunOptions) (int, error) {
 			if err := hooks.Settled(); err != nil {
 				logf("settled: %v", err)
 			}
+			// Engage the balloon controller now that the guest is past
+			// the boot transient. Initial inflate target = cap - alloc,
+			// then Hint feedback adjusts dynamically as mem_report
+			// samples arrive.
+			if balloonCtl != nil {
+				balloonCtl.SetTarget(capBytes - allocBytes)
+				if err := balloonCtl.Start(backendCtx); err != nil {
+					logf("balloon: start: %v", err)
+				}
+			}
 			if hooks.Enabled() {
 				hooks.StartHeartbeat(backendCtx, 5*time.Second)
 				hooks.StartSensor(backendCtx, 64<<20)
@@ -388,6 +416,11 @@ func Run(ctx context.Context, opts RunOptions) (int, error) {
 		}
 	}()
 	defer pinger.Stop()
+	defer func() {
+		if balloonCtl != nil {
+			balloonCtl.Stop()
+		}
+	}()
 
 	_, kernelPath, _ := SchemeAndPath(opts.Cfg.Boot.Kernel)
 	_, runtimePath, _ := SchemeAndPath(opts.Cfg.Boot.Runtime)

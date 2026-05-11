@@ -50,7 +50,7 @@ func TestCHCommand_HasExpectedFlags(t *testing.T) {
 		"--kernel /vmlinux",
 		"file=/sandbox-runtime.erofs,discard_writes=on",
 		"size=4096M,shared=on,fd=3,uffd_socket=/run/sb/uffd.sock",
-		"size=2048M,free_page_reporting=on",
+		"--balloon size=0",
 		"boot=2",
 		"--disk vhost_user=on,socket=/run/sb/blk0.sock,readonly=on vhost_user=on,socket=/run/sb/blk1.sock",
 		"tap=tap0",
@@ -97,8 +97,11 @@ func TestCHCommand_BalloonDeflateOnOOMDisabled(t *testing.T) {
 	if strings.Contains(joined, "deflate_on_oom=on") {
 		t.Errorf("balloon should NOT contain deflate_on_oom=on when explicitly disabled, got: %s", joined)
 	}
-	if !strings.Contains(joined, "free_page_reporting=on") {
-		t.Errorf("balloon should still contain free_page_reporting=on, got: %s", joined)
+	// free_page_reporting is now intentionally OFF (its mmu_notifier
+	// traffic deadlocks the guest vsock kthread; replaced by the
+	// host-side BalloonController + sandbox-init mem_report).
+	if strings.Contains(joined, "free_page_reporting") {
+		t.Errorf("balloon must not advertise free_page_reporting (replaced by mem_report-driven vm.resize), got: %s", joined)
 	}
 }
 
@@ -154,7 +157,9 @@ func TestCHCommand_MemoryStringsHonored(t *testing.T) {
 	if !strings.Contains(joined, "size=512M,shared=on") {
 		t.Errorf("expected 512M memory, got: %s", joined)
 	}
-	if !strings.Contains(joined, "size=256M,free_page_reporting=on") {
-		t.Errorf("expected 256M balloon, got: %s", joined)
+	// Balloon starts at size=0 and is driven up to (cap-alloc) post-Settled
+	// by the host BalloonController. The cmdline carries size=0 always.
+	if !strings.Contains(joined, "--balloon size=0") {
+		t.Errorf("expected --balloon size=0 (boot value; controller drives to target), got: %s", joined)
 	}
 }
