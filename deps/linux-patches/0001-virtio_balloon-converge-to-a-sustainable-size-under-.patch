@@ -1,0 +1,256 @@
+From 56ea69f9fbbdaa086ff6903bbb13895f6a14f203 Mon Sep 17 00:00:00 2001
+From: Chen Xiaohui <graych@gmail.com>
+Date: Sun, 17 May 2026 00:26:57 +0800
+Subject: [PATCH] virtio_balloon: converge to a sustainable size under memory
+ pressure
+
+When the host asks the guest to inflate past what its workload can
+survive, the stock driver does not converge -- it slowly strangles the
+guest:
+
+  - fill_balloon()'s allocation fails ("Out of puff"); it sleeps and the
+    size worker re-queues, so the failed inflate is retried forever
+    without ever giving memory back;
+  - if reclaim escalates to OOM, virtio_balloon_oom_notify() frees a
+    batch, so out_of_memory() takes the "notifier freed something"
+    early-return and never kills a victim -- the OOM killer is
+    effectively disabled;
+  - the host balloon target never changes, so the guest spends the rest
+    of its life at an infeasible size with vsock/userspace wedged.
+
+Observed in a cloud-hypervisor guest: the balloon target stays pinned at
+an infeasible value, guest MemAvailable decays to near zero, the workload
+freezes and the control vsock dead-lines out, with no OOM kill ever
+issued.
+
+Converge instead.  An allocation failure in fill_balloon() fires via the
+NORETRY balloon allocation *before* the guest is OOM-dead, so treat it as
+the authoritative "this target is infeasible" signal: arm a sticky
+self-cap a margin below the size the guest was sustaining.
+towards_target() honours the cap, so the worker deflates by the margin
+and the guest gets a working cushion back.  The cap only ever ratchets
+*down* -- each fresh pressure event (a later fill failure, or an OOM as a
+secondary signal) lowers it by another margin -- so the balloon converges
+monotonically to the largest size the guest can sustain and then stays
+there.  Convergence is driven entirely by the guest; no host feedback is
+required and there is no inflate/deflate oscillation.
+
+The cap is a single u32, zero by default (kzalloc), so the path is inert
+until the first pressure event and there is no boot-time false positive.
+
+While converging is the safety property, the common case is a feasible
+target with memory to spare.  There, inflate fast: a larger pfn batch and
+many batches per work invocation with cond_resched(), throttling back to
+one gentle batch once si_mem_available() nears a floor so the fast path
+can never itself cause OOM.  Deflate uses the same batched loop so the
+cushion is restored promptly when the guest is starved.
+
+Signed-off-by: Chen Xiaohui <graych@gmail.com>
+---
+ drivers/virtio/virtio_balloon.c | 144 ++++++++++++++++++++++++++++++--
+ 1 file changed, 139 insertions(+), 5 deletions(-)
+
+diff --git a/drivers/virtio/virtio_balloon.c b/drivers/virtio/virtio_balloon.c
+index 41fa694d8..45d6bd7d0 100644
+--- a/drivers/virtio/virtio_balloon.c
++++ b/drivers/virtio/virtio_balloon.c
+@@ -25,11 +25,38 @@
+  * page units.
+  */
+ #define VIRTIO_BALLOON_PAGES_PER_PAGE (unsigned int)(PAGE_SIZE >> VIRTIO_BALLOON_PFN_SHIFT)
+-#define VIRTIO_BALLOON_ARRAY_PFNS_MAX 256
++#define VIRTIO_BALLOON_ARRAY_PFNS_MAX 1024
+ /* Maximum number of (4k) pages to deflate on OOM notifications. */
+ #define VIRTIO_BALLOON_OOM_NR_PAGES 256
+ #define VIRTIO_BALLOON_OOM_NOTIFY_PRIORITY 80
+ 
++/*
++ * The host can ask the guest to inflate past the point its workload can
++ * survive.  The stock driver keeps retrying the failed allocation forever
++ * (fill_balloon: msleep + the worker re-queues), slowly strangling the
++ * guest until vsock/userspace wedge -- and because deflate-on-OOM always
++ * frees something, out_of_memory() never kills a victim to break it.
++ *
++ * Converge instead: an allocation failure ("Out of puff"), which fires
++ * via __GFP_NORETRY *before* the guest is OOM-dead, is the authoritative
++ * "this target is infeasible" signal.  Treat it (and an OOM) by ratcheting
++ * a sticky self-cap to (sustained_pages - margin): towards_target() then
++ * yields a negative diff, the worker deflates by the margin, and the guest
++ * gets a working cushion back.  The cap only ever ratchets *down* (each
++ * fresh pressure event lowers it by another margin) so the balloon
++ * converges monotonically to the largest size the guest can sustain and
++ * then stays there -- no host feedback required, no oscillation.
++ */
++#define VIRTIO_BALLOON_DEFLATE_MARGIN_PAGES (256L << (20 - PAGE_SHIFT))
++/*
++ * While estimated-available memory stays above this floor, inflate many
++ * batches per work invocation for a fast start; below it, fall back to one
++ * gentle batch per cycle so a burst can't itself drive the guest to OOM.
++ */
++#define VIRTIO_BALLOON_INFLATE_FLOOR_PAGES (64L << (20 - PAGE_SHIFT))
++/* Cap on batches pushed per work invocation (fast inflate / deflate). */
++#define VIRTIO_BALLOON_FAST_BATCHES 128
++
+ #define VIRTIO_BALLOON_FREE_PAGE_ALLOC_FLAG (__GFP_NORETRY | __GFP_NOWARN | \
+ 					     __GFP_NOMEMALLOC)
+ /* The order of free page blocks to report to host */
+@@ -116,6 +143,15 @@ struct virtio_balloon {
+ 	/* OOM notifier to deflate on OOM - VIRTIO_BALLOON_F_DEFLATE_ON_OOM */
+ 	struct notifier_block oom_nb;
+ 
++	/*
++	 * Sticky, ratchet-down-only self-cap on the balloon target, armed by
++	 * memory pressure (fill_balloon allocation failure or OOM) so the
++	 * guest converges to a sustainable size instead of being strangled
++	 * at an infeasible host target.  0 == no cap (the kzalloc default,
++	 * so this is inert until the first pressure event).
++	 */
++	u32 balloon_cap_pages;
++
+ 	/* Free page reporting device */
+ 	struct virtqueue *reporting_vq;
+ 	struct page_reporting_dev_info pr_dev_info;
+@@ -201,6 +237,47 @@ static void set_page_pfns(struct virtio_balloon *vb,
+ 					  page_to_balloon_pfn(page) + i);
+ }
+ 
++/*
++ * Arm (or ratchet down) the sticky self-cap in response to a memory
++ * pressure event observed at @sustained_pages balloon pages.  The cap is
++ * placed a margin below the level we could sustain and only ever moves
++ * down, so repeated pressure converges the balloon monotonically to the
++ * feasible size.  Callers need not hold balloon_lock: the field is a
++ * single u32 read locklessly by towards_target(); a torn/stale read at
++ * worst delays convergence by one worker cycle.
++ */
++static void virtio_balloon_cap_at(struct virtio_balloon *vb,
++				  unsigned int sustained_pages)
++{
++	u32 cap;
++
++	if (sustained_pages > VIRTIO_BALLOON_DEFLATE_MARGIN_PAGES)
++		cap = sustained_pages - VIRTIO_BALLOON_DEFLATE_MARGIN_PAGES;
++	else
++		cap = VIRTIO_BALLOON_PAGES_PER_PAGE;
++
++	/*
++	 * A cap is already armed.  If we have not finished deflating to it
++	 * (num_pages still above it), the outstanding deflate will resolve
++	 * this pressure -- don't re-arm off the transiently dropping
++	 * num_pages, or one episode spam-lowers the cap.  Only ratchet
++	 * further once we have deflated to the cap and *still* hit
++	 * pressure: that is a genuinely insufficient margin.
++	 */
++	if (vb->balloon_cap_pages) {
++		if (vb->num_pages > vb->balloon_cap_pages)
++			return;
++		if (cap >= vb->balloon_cap_pages)
++			return;
++	}
++
++	vb->balloon_cap_pages = cap;
++	pr_warn_ratelimited("virtio_balloon: pressure at %u pages -> cap %u pages (deflate ~%ld MiB), converging\n",
++			    sustained_pages, cap,
++			    (long)VIRTIO_BALLOON_DEFLATE_MARGIN_PAGES >>
++				    (20 - PAGE_SHIFT));
++}
++
+ static unsigned int fill_balloon(struct virtio_balloon *vb, size_t num)
+ {
+ 	unsigned int num_allocated_pages;
+@@ -219,6 +296,14 @@ static unsigned int fill_balloon(struct virtio_balloon *vb, size_t num)
+ 			dev_info_ratelimited(&vb->vdev->dev,
+ 					     "Out of puff! Can't get %u pages\n",
+ 					     VIRTIO_BALLOON_PAGES_PER_PAGE);
++			/*
++			 * The guest has no memory to spare: this is the
++			 * earliest reliable infeasibility signal (NORETRY
++			 * alloc, before OOM).  Cap below the size we already
++			 * sustain so the worker deflates and the guest gets a
++			 * cushion back, instead of retrying this forever.
++			 */
++			virtio_balloon_cap_at(vb, vb->num_pages);
+ 			/* Sleep for at least 1/5 of a second before retry. */
+ 			msleep(200);
+ 			break;
+@@ -400,6 +485,16 @@ static inline s64 towards_target(struct virtio_balloon *vb)
+ 	 * balloon endlessly.
+ 	 */
+ 	target = ALIGN(num_pages, VIRTIO_BALLOON_PAGES_PER_PAGE);
++
++	/*
++	 * Honour the sticky self-cap armed by memory pressure.  When the
++	 * host target exceeds what the guest proved it can sustain, this
++	 * makes the returned diff negative so the worker deflates toward
++	 * the feasible size and then holds there.
++	 */
++	if (vb->balloon_cap_pages && target > vb->balloon_cap_pages)
++		target = vb->balloon_cap_pages;
++
+ 	return target - vb->num_pages;
+ }
+ 
+@@ -481,10 +576,42 @@ static void update_balloon_size_func(struct work_struct *work)
+ 	if (!diff)
+ 		return;
+ 
+-	if (diff > 0)
+-		diff -= fill_balloon(vb, diff);
+-	else
+-		diff += leak_balloon(vb, -diff);
++	if (diff > 0) {
++		unsigned int batches = 0;
++
++		/*
++		 * Fast start while memory is ample: push many batches in one
++		 * go (cond_resched keeps the CPU shareable) instead of a
++		 * single batch per workqueue round-trip.  Throttle to one
++		 * batch as available memory nears the floor so a burst of
++		 * inflation can't itself drive the guest to OOM.  (When the
++		 * sticky cap is armed, towards_target() already yields diff
++		 * <= 0, so this branch never re-inflates past the cap.)
++		 */
++		do {
++			diff -= fill_balloon(vb, diff);
++			if (diff <= 0)
++				break;
++			if (si_mem_available() <
++			    VIRTIO_BALLOON_INFLATE_FLOOR_PAGES)
++				break;
++			cond_resched();
++		} while (++batches < VIRTIO_BALLOON_FAST_BATCHES);
++	} else {
++		unsigned int batches = 0;
++
++		/*
++		 * Deflate just as fast: a pressure-armed cap means the guest
++		 * is starved and needs its cushion back promptly to avoid
++		 * wedging, so claw the whole margin back in one invocation.
++		 */
++		do {
++			diff += leak_balloon(vb, -diff);
++			if (diff >= 0)
++				break;
++			cond_resched();
++		} while (++batches < VIRTIO_BALLOON_FAST_BATCHES);
++	}
+ 	update_balloon_size(vb);
+ 
+ 	if (diff)
+@@ -844,6 +971,13 @@ static int virtio_balloon_oom_notify(struct notifier_block *nb,
+ 		  VIRTIO_BALLOON_PAGES_PER_PAGE;
+ 	update_balloon_size(vb);
+ 
++	/*
++	 * Reaching OOM means the fill-time signal was missed or
++	 * insufficient; ratchet the cap below the post-leak size so we
++	 * stop re-inflating into OOM and converge from here.
++	 */
++	virtio_balloon_cap_at(vb, vb->num_pages);
++
+ 	return NOTIFY_OK;
+ }
+ 
+-- 
+2.30.2
+
