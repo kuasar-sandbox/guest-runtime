@@ -29,7 +29,7 @@ import (
 //
 // All RPC calls are non-blocking with respect to the tick: a failed
 // call simply logs and waits for the next opportunity. Successful
-// grants are applied via ControllerHooks.applyAllocatable so cgroup
+// grants are applied via ControllerHooks.OnAllocatableChanged so cgroup
 // memory.high and CH balloon target stay consistent.
 type PressureSensor struct {
 	hooks         *ControllerHooks
@@ -146,7 +146,7 @@ func (s *PressureSensor) tickOnce(now time.Time) {
 	if g == 0 {
 		return
 	}
-	if err := s.hooks.ApplyInitialAllocatable(newAlloc); err != nil {
+	if err := s.hooks.OnAllocatableChanged(newAlloc); err != nil {
 		s.logf("sensor: apply allocatable %d: %v", newAlloc, err)
 		return
 	}

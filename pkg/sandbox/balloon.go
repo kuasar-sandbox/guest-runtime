@@ -70,6 +70,18 @@ type BalloonController struct {
 	target atomic.Uint64 // desired balloon size in bytes
 	actual atomic.Uint64 // last successfully applied size
 
+	// kick is a non-blocking signal channel: SetTarget (and therefore
+	// SetAllocatable, which wraps SetTarget) pokes it on every write.
+	// The reconcile loop responds immediately when the previous reconcile
+	// was ≥ Interval ago, otherwise it drops the kick and lets the next
+	// ticker tick apply the pending target. Cap = 1, drop-on-full.
+	kick chan struct{}
+
+	// lastReconcileAt is the wall time of the most recent successful or
+	// no-op Reconcile, in unix nanos. Used by the loop to decide whether
+	// a kick can fire immediately.
+	lastReconcileAt atomic.Int64
+
 	startOnce sync.Once
 	stopOnce  sync.Once
 	stopCh    chan struct{}
@@ -90,6 +102,7 @@ func NewBalloonController(chSock string, capacity uint64, logf func(string, ...a
 		Logf:     logf,
 		chSock:   chSock,
 		client:   &http.Client{Transport: tr, Timeout: 3 * time.Second},
+		kick:     make(chan struct{}, 1),
 	}
 }
 
@@ -115,12 +128,36 @@ func (b *BalloonController) defaults() {
 }
 
 // SetTarget overrides the desired balloon size in bytes. Clamped to
-// Capacity. Picked up on the next reconcile tick (or via Reconcile).
+// Capacity. Pokes the kick channel; the reconcile loop applies the new
+// target immediately if the last reconcile was ≥ Interval ago, otherwise
+// the pending change rides on the next ticker tick.
+//
+// Hint uses this for mem_report-driven feedback. External callers that
+// think in terms of "guest-visible allocatable memory" should prefer
+// SetAllocatable, which derives the balloon target from that.
 func (b *BalloonController) SetTarget(sizeBytes uint64) {
 	if sizeBytes > b.Capacity {
 		sizeBytes = b.Capacity
 	}
 	b.target.Store(sizeBytes)
+	select {
+	case b.kick <- struct{}{}:
+	default: // already pending; drop
+	}
+}
+
+// SetAllocatable sets the balloon target from a guest-visible
+// allocatable-memory budget: target = Capacity − allocBytes, clamped
+// to [0, Capacity]. Used by ControllerHooks at every allocatable-now
+// change (Settled / Heartbeat-grant / Sensor-grant / restore correction)
+// and by lifecycle / restore at construction so the in-memory target
+// matches the value baked into CH's --balloon arg or the snapshot.
+func (b *BalloonController) SetAllocatable(allocBytes uint64) {
+	var target uint64
+	if b.Capacity > allocBytes {
+		target = b.Capacity - allocBytes
+	}
+	b.SetTarget(target)
 }
 
 // Hint adjusts the balloon target based on a guest /proc/meminfo
@@ -243,6 +280,24 @@ func (b *BalloonController) loop(ctx context.Context) {
 			if err := b.Reconcile(ctx); err != nil {
 				b.Logf("balloon: reconcile: %v", err)
 			}
+		case <-b.kick:
+			// Immediate-response path: SetTarget/SetAllocatable poked us.
+			// Honour the Interval rate limit — if the last reconcile is
+			// fresher than Interval, drop this kick and let the next
+			// ticker tick (≤ Interval - elapsed away) catch the pending
+			// target. Reconcile is idempotent (no-op when target==actual),
+			// so a dropped kick can never leave the state divergent.
+			last := time.Unix(0, b.lastReconcileAt.Load())
+			if time.Since(last) < b.Interval {
+				continue
+			}
+			if err := b.Reconcile(ctx); err != nil {
+				b.Logf("balloon: reconcile (kick): %v", err)
+			}
+			// Re-anchor the ticker so the next periodic tick is one
+			// full Interval away from this kick-driven reconcile, not
+			// from the original Ticker start.
+			t.Reset(b.Interval)
 		}
 	}
 }
@@ -252,6 +307,10 @@ func (b *BalloonController) loop(ctx context.Context) {
 // SetTarget/Hint.
 func (b *BalloonController) Reconcile(ctx context.Context) error {
 	target := b.target.Load()
+	// Record the attempt time regardless of whether a resize is actually
+	// needed: the kick-rate-limit only cares "did we recently look", not
+	// "did we recently change CH state".
+	defer b.lastReconcileAt.Store(time.Now().UnixNano())
 	if target == b.actual.Load() {
 		return nil
 	}

@@ -1,13 +1,8 @@
 package sandbox
 
 import (
-	"bytes"
 	"context"
-	"errors"
 	"fmt"
-	"io"
-	"log"
-	"net"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -19,28 +14,36 @@ import (
 
 // ControllerHookOptions configures the dynamic-mode controller integration.
 //
-// SocketPath: UDS path of the controller endpoint. Empty disables
-// the integration (sandbox runs in no-cgroup mode or static-cgroup mode).
+// SocketPath: UDS path of the controller endpoint. Empty disables the
+// node-ctl RPC integration; hooks still run in a degraded form (writes
+// cgroup memory.high, updates in-memory allocatable_now), but no
+// controller RPCs are issued and no Heartbeat/Sensor goroutines start.
 //
-// CHSocket: ch.sock path to send /api/v1/vm.resize when balloon target
-// changes after Settled or Reclaim.
+// CgroupPath: directory used for memory.high writes and memory.current /
+// memory.events.local reads. Empty = no-cgroup mode.
 //
-// CgroupPath: directory used for memory.high adjustments and
-// memory.current reads.
+// Balloon: the per-sandbox BalloonController owning /api/v1/vm.resize.
+// Hooks never speaks CH HTTP directly — every balloon change goes
+// through Balloon.SetAllocatable, so the BalloonController stays the
+// sole writer of /vm.resize. May be nil when allocatable.memory ==
+// capacity.memory (no balloon device on this VM).
 type ControllerHookOptions struct {
 	SocketPath string
-	CHSocket   string
 	CgroupPath string
 	Logf       func(string, ...any)
+	Balloon    *BalloonController
 }
 
-// ControllerHooks bundles the per-sandbox state for dynamic-mode
-// resource control: a connected client, current allocatable, and the
-// background goroutines for Heartbeat and pressure-driven RequestBudget.
+// ControllerHooks bundles the per-sandbox state for resource control:
+// the node-ctl client (dynamic mode only), the current allocatable_now,
+// and the background goroutines for Heartbeat and pressure-driven
+// RequestBudget.
 //
-// The zero value with SocketPath empty is a safe no-op — every method
-// becomes a noop. This lets lifecycle.go always call the hooks without
-// branching on mode.
+// A nil receiver — or a receiver whose SocketPath was empty at
+// construction — is a safe no-op for every method that requires an
+// active client; the cgroup-side writes (memory.high) and the balloon
+// hand-off still happen in static mode. This lets lifecycle.go always
+// call into hooks without branching on mode.
 type ControllerHooks struct {
 	opts ControllerHookOptions
 	cfg  *SandboxConfig
@@ -54,14 +57,15 @@ type ControllerHooks struct {
 }
 
 // NewControllerHooks dials the controller and returns hooks ready for
-// Admit. Returns nil hooks (no-op) when SocketPath is empty.
+// Admit. Returns hooks with no client (static-mode no-op for RPC calls)
+// when SocketPath is empty.
 func NewControllerHooks(opts ControllerHookOptions, cfg *SandboxConfig) (*ControllerHooks, error) {
 	h := &ControllerHooks{opts: opts, cfg: cfg}
-	if opts.SocketPath == "" {
-		return h, nil
-	}
 	if h.opts.Logf == nil {
 		h.opts.Logf = func(string, ...any) {}
+	}
+	if opts.SocketPath == "" {
+		return h, nil
 	}
 	h.client = &nodectl.Client{SocketPath: opts.SocketPath}
 	if err := h.client.Connect(); err != nil {
@@ -70,15 +74,31 @@ func NewControllerHooks(opts ControllerHookOptions, cfg *SandboxConfig) (*Contro
 	return h, nil
 }
 
-// Enabled reports whether dynamic mode is in effect.
+// Enabled reports whether dynamic-mode controller integration is in
+// effect (i.e. a controller client is connected).
 func (h *ControllerHooks) Enabled() bool {
 	return h != nil && h.client != nil
 }
 
-// AllocatableNowMem returns the current granted allocatable memory.
-// In static or no-cgroup mode, returns 0.
+// SetBalloon late-injects the BalloonController owning /vm.resize.
+// Used by the restore path, where snapCap (and hence the BalloonController
+// constructor argument) is only known after the snapshot bundle has
+// been parsed — well after NewControllerHooks. lifecycle (cold-start)
+// passes Balloon via ControllerHookOptions at construction and does not
+// need this. Caller must ensure no concurrent Heartbeat/Sensor goroutine
+// has been started yet (they read opts.Balloon).
+func (h *ControllerHooks) SetBalloon(b *BalloonController) {
+	if h == nil {
+		return
+	}
+	h.opts.Balloon = b
+}
+
+// AllocatableNowMem returns the current allocatable_now in bytes. Set
+// by SetAllocatableNow / OnAllocatableChanged / Settled. Returns 0 when
+// the receiver is nil or no Settled-equivalent has run yet.
 func (h *ControllerHooks) AllocatableNowMem() uint64 {
-	if !h.Enabled() {
+	if h == nil {
 		return 0
 	}
 	h.mu.Lock()
@@ -143,75 +163,77 @@ func (h *ControllerHooks) Admit(sid string, allocatableAtSnapshot uint64) (uint6
 	return res.GrantedInitialAlloc, nil
 }
 
-// Settled marks the cold-start launch hello arrival. Writes memory.high
-// (in both static and dynamic modes) so cold boot's transient page-fault
-// burst is not PSI-throttled — JoinCgroup deliberately defers the
-// memory.high write to here. In dynamic mode, also notifies the
-// controller and shrinks the CH balloon to the floor.
+// Settled marks the cold-start launch hello arrival.
 //
-// Cold-start invariant: at this point, allocatable_now drops to the
-// configured allocatable.memory floor.
+// Writes cgroup memory.high (in both static and dynamic modes — the
+// boot-time uffd page-fault burst is past, PSI throttling is now safe;
+// JoinCgroup deliberately deferred the write here, Issue 4).
+//
+// Does NOT touch the balloon: cold-start CH was launched with
+// `--balloon size=cap-floor` already, so the device is at the right
+// inflation from the moment the guest boots. The BalloonController's
+// in-memory target is initialised by lifecycle.go before CH starts so
+// it agrees with reality without needing a fresh /vm.resize here.
+//
+// In dynamic mode, also notifies the controller RPC of the settled
+// transition.
 func (h *ControllerHooks) Settled() error {
 	if h == nil {
 		return nil
 	}
-	// In no-cgroup mode (no CgroupPath), nothing to do here even if the
-	// hooks struct is non-nil. setMemoryHigh below handles the path-empty
-	// case as a no-op, but we still update allocatable_now state so
-	// callers that read it (e.g. SettledRestore fallback) see the floor.
 	floor, err := h.cfg.AllocatableMemoryBytes()
 	if err != nil {
 		return err
 	}
-	// (1) memory.high write — both modes. Independent of Enabled() because
-	//     static-mode sandboxes still want PSI throttling once the boot
-	//     transient is over; the only thing dynamic-mode adds is
-	//     controller-driven dynamic reclaim, not the watermark itself.
 	if err := h.setMemoryHigh(floor); err != nil {
 		h.opts.Logf("settled: setMemoryHigh: %v", err)
-	}
-	if !h.Enabled() {
-		// Static mode: no controller RPC, no dynamic balloon shrink. Done.
-		h.mu.Lock()
-		h.allocatableNowMem = floor
-		h.mu.Unlock()
-		return nil
-	}
-	// (2) dynamic-only: notify controller and shrink balloon to floor.
-	rss := readMemoryCurrent(h.opts.CgroupPath)
-	if err := h.client.Settled(rss, 0); err != nil {
-		return fmt.Errorf("controller.Settled: %w", err)
-	}
-	if err := h.resizeBalloonTo(floor); err != nil {
-		h.opts.Logf("settled: resizeBalloonTo: %v", err)
 	}
 	h.mu.Lock()
 	h.allocatableNowMem = floor
 	h.mu.Unlock()
+	if !h.Enabled() {
+		return nil
+	}
+	rss := readMemoryCurrent(h.opts.CgroupPath)
+	if err := h.client.Settled(rss, 0); err != nil {
+		return fmt.Errorf("controller.Settled: %w", err)
+	}
 	return nil
 }
 
-// SettledRestore is the restore-path settled trigger. Writes memory.high
-// using the current allocatable_now (set by ApplyInitialAllocatable
-// pre-resume). Unlike cold-start Settled, does NOT shrink balloon —
-// the allocatable_at_snapshot value granted at Admit is preserved as
-// runtime allocatable_now (balloon was already set by
-// ApplyInitialAllocatable). In dynamic mode, also notifies controller.
-func (h *ControllerHooks) SettledRestore() error {
+// SettledRestore is the restore-path equivalent of Settled, fired on
+// the guest's restore_ack. Writes cgroup memory.high using the current
+// allocatable_now (set pre-resume by restore.go via SetAllocatableNow;
+// fallback = yaml.floor when in-memory state is zero — usually a bug
+// elsewhere, but we don't want to crash).
+//
+// allocAtSnap is the allocatable_at_snapshot derived from the bundle's
+// state.json balloon section. The CH balloon was reloaded to that value
+// when CH started with --restore, so a balloon /vm.resize is only issued
+// when the local allocatable_now decision (yaml.max-with-snap in static,
+// controller granted in dynamic) differs from it. When they agree —
+// the common case — no balloon write happens, avoiding mmu_notifier
+// traffic on top of the ongoing uffd-driven page replay.
+//
+// In dynamic mode, also notifies the controller RPC.
+func (h *ControllerHooks) SettledRestore(allocAtSnap uint64) error {
 	if h == nil {
 		return nil
 	}
-	h.mu.Lock()
-	cur := h.allocatableNowMem
-	h.mu.Unlock()
+	cur := h.AllocatableNowMem()
 	if cur == 0 {
-		// Fallback: no ApplyInitialAllocatable was called; use yaml floor.
 		if floor, err := h.cfg.AllocatableMemoryBytes(); err == nil {
 			cur = floor
 		}
 	}
 	if err := h.setMemoryHigh(cur); err != nil {
 		h.opts.Logf("settled-restore: setMemoryHigh: %v", err)
+	}
+	// Balloon was already at `cap - allocAtSnap` from the snapshot
+	// restore. Only correct it when the decision diverges.
+	if cur != allocAtSnap && h.opts.Balloon != nil {
+		h.opts.Balloon.SetAllocatable(cur)
+		h.opts.Logf("settled-restore: balloon correction alloc %d → %d", allocAtSnap, cur)
 	}
 	if !h.Enabled() {
 		return nil
@@ -223,22 +245,51 @@ func (h *ControllerHooks) SettledRestore() error {
 	return nil
 }
 
-// ApplyInitialAllocatable sets the runtime allocatable_now and the CH
-// balloon target. Does NOT write memory.high — that is deferred to
-// SettledRestore so restore-replay's uffd-driven page faults are not
-// PSI-throttled (Issue 4 root cause).
+// SetAllocatableNow updates the in-memory allocatable_now state without
+// any external side effect (no cgroup write, no balloon write).
 //
-// Used by restore (initialAlloc derived from snapshot) and dynamic-mode
-// heartbeat-driven adjustments. In static mode caller passes
-// max(yaml.allocatable, memory_resident) to avoid OOM during replay.
-func (h *ControllerHooks) ApplyInitialAllocatable(initialAlloc uint64) error {
+// Used by restore.go before vm.resume to record the controller-granted
+// (or static-mode-decided) allocatable, so that the subsequent
+// SettledRestore can compute memory.high and decide whether a balloon
+// correction is needed. Doing the in-memory update before CH is even up
+// is safe; doing any external write here is not (CH socket doesn't
+// exist yet pre-cmd.Start; even after, pre-resume balloon writes step
+// on the snapshot-loaded balloon state, and pre-replay memory.high
+// throttles the uffd page-fault burst).
+func (h *ControllerHooks) SetAllocatableNow(allocBytes uint64) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	h.allocatableNowMem = allocBytes
+	h.mu.Unlock()
+}
+
+// OnAllocatableChanged is the runtime-adjustment entry point used by
+// the dynamic-mode Heartbeat and Sensor loops when the controller's
+// authoritative allocatable_now has changed (admin grant, admin
+// reclaim, or sensor-triggered RequestBudget). Writes cgroup memory.high
+// and the balloon target together, then updates allocatable_now state.
+//
+// memory.high and balloon move in lock-step per docs/sandbox.md §10.2:
+// PSI threshold and host-side reclaim target must agree, or the guest
+// hits PSI throttling at a watermark inconsistent with what the balloon
+// is letting it use. No-op on the balloon side when Balloon is nil
+// (allocatable.memory == capacity.memory — no balloon device).
+func (h *ControllerHooks) OnAllocatableChanged(allocBytes uint64) error {
 	if h == nil {
 		return nil
 	}
+	if err := h.setMemoryHigh(allocBytes); err != nil {
+		return err
+	}
+	if h.opts.Balloon != nil {
+		h.opts.Balloon.SetAllocatable(allocBytes)
+	}
 	h.mu.Lock()
-	h.allocatableNowMem = initialAlloc
+	h.allocatableNowMem = allocBytes
 	h.mu.Unlock()
-	return h.resizeBalloonTo(initialAlloc)
+	return nil
 }
 
 // setMemoryHigh writes memory.high = allocBytes * watermark_ratio. The
@@ -265,47 +316,14 @@ func (h *ControllerHooks) setMemoryHigh(allocBytes uint64) error {
 	return nil
 }
 
-// resizeBalloonTo writes desired_balloon = capacity - allocBytes via CH
-// /vm.resize. No-op when CHSocket unset.
-func (h *ControllerHooks) resizeBalloonTo(allocBytes uint64) error {
-	if h == nil || h.opts.CHSocket == "" {
-		return nil
-	}
-	cap, err := h.cfg.CapacityMemoryBytes()
-	if err != nil {
-		return err
-	}
-	target := cap - allocBytes
-	if cap < allocBytes {
-		target = 0
-	}
-	timing, err := chResizeBalloon(h.opts.CHSocket, target)
-	if err != nil {
-		return fmt.Errorf("vm.resize balloon: %w", err)
-	}
-	h.opts.Logf("balloon resize target=%dB ok (%s)", target, timing)
-	return nil
-}
-
-// applyAllocatable writes both memory.high and balloon target. Used by
-// heartbeat-driven adjustments (post-Settled), where both must move
-// together to keep host PSI threshold consistent with guest free-page
-// reporting target.
-func (h *ControllerHooks) applyAllocatable(newAlloc uint64) error {
-	if err := h.setMemoryHigh(newAlloc); err != nil {
-		return err
-	}
-	return h.resizeBalloonTo(newAlloc)
-}
-
 // StartHeartbeat spawns the periodic Heartbeat goroutine. Stops on ctx
-// cancel or Release.
+// cancel or Release. No-op in static mode (no controller to talk to).
 //
 // Each heartbeat returns the controller's authoritative allocatable_now.
 // If it differs from the local value, the active reclaimer (or an
-// admin reclaim command) shrank the sandbox; we apply the new value
-// here (cgroup memory.high + balloon resize). Conversely, an admin
-// grant grew it; same code path applies.
+// admin reclaim/grant command) changed our budget; we apply it via
+// OnAllocatableChanged so cgroup memory.high and CH balloon target
+// move together.
 func (h *ControllerHooks) StartHeartbeat(ctx context.Context, period time.Duration) {
 	if !h.Enabled() {
 		return
@@ -336,13 +354,11 @@ func (h *ControllerHooks) StartHeartbeat(ctx context.Context, period time.Durati
 					continue
 				}
 				if res != nil && res.NewAllocatable > 0 {
-					h.mu.Lock()
-					local := h.allocatableNowMem
-					h.mu.Unlock()
+					local := h.AllocatableNowMem()
 					if res.NewAllocatable != local {
 						h.opts.Logf("heartbeat: controller adjusted alloc %d → %d, applying",
 							local, res.NewAllocatable)
-						if err := h.ApplyInitialAllocatable(res.NewAllocatable); err != nil {
+						if err := h.OnAllocatableChanged(res.NewAllocatable); err != nil {
 							h.opts.Logf("apply allocatable: %v", err)
 						}
 					}
@@ -394,177 +410,3 @@ func readMemoryCurrent(cgroupPath string) uint64 {
 	}
 	return n
 }
-
-// chResizeBalloon issues PUT /api/v1/vm.resize with desired_balloon=
-// to the CH api socket. Returns segmented timing so applyAllocatable
-// can log it; previous "10s before fail" reports were not actionable
-// because the timing was a single number with no breakdown.
-func chResizeBalloon(sock string, desiredBalloonBytes uint64) (chAPITiming, error) {
-	body := fmt.Sprintf(`{"desired_balloon":%d}`, desiredBalloonBytes)
-	return chAPISendWithTiming(sock, "PUT", "/api/v1/vm.resize", body)
-}
-
-// chAPITiming records segmented latency for one chAPISend call. All
-// fields are durations from the start of the call. Zero means "did not
-// reach this stage". Surfaced via chAPISendWithTiming for diagnostics
-// when investigating slow CH responses (e.g. the "10s before fail"
-// reports — without this, we only see the 10s total, not where it
-// went).
-type chAPITiming struct {
-	Dial      time.Duration
-	Write     time.Duration
-	FirstByte time.Duration
-	Total     time.Duration
-}
-
-func (t chAPITiming) String() string {
-	return fmt.Sprintf("dial=%s write=%s first_byte=%s total=%s",
-		t.Dial.Truncate(time.Microsecond),
-		t.Write.Truncate(time.Microsecond),
-		t.FirstByte.Truncate(time.Microsecond),
-		t.Total.Truncate(time.Microsecond))
-}
-
-func chAPISend(sock, method, path, body string) error {
-	_, err := chAPISendWithTiming(sock, method, path, body)
-	return err
-}
-
-// chAPISendWithTiming performs the same HTTP/1.1-over-UDS call as
-// chAPISend but returns per-stage timings and surfaces read errors
-// instead of silently truncating to whatever bytes arrived first. The
-// previous implementation did `n, _ := c.Read(buf)` which discarded
-// EOF/timeout/short-read errors, making it impossible to tell whether a
-// "ch api short response" was caused by CH closing early, the deadline
-// firing, or a single-Read returning partial bytes (HTTP/1.1 over a UDS
-// can deliver headers and body across multiple read syscalls).
-func chAPISendWithTiming(sock, method, path, body string) (chAPITiming, error) {
-	t0 := time.Now()
-	var t chAPITiming
-
-	c, err := net.DialTimeout("unix", sock, 5*time.Second)
-	if err != nil {
-		t.Total = time.Since(t0)
-		return t, fmt.Errorf("ch api dial %s: %w", sock, err)
-	}
-	t.Dial = time.Since(t0)
-	defer c.Close()
-	_ = c.SetDeadline(time.Now().Add(10 * time.Second))
-
-	req := fmt.Sprintf("%s %s HTTP/1.1\r\nHost: ch\r\n", method, path)
-	if body != "" {
-		req += fmt.Sprintf("Content-Type: application/json\r\nContent-Length: %d\r\n", len(body))
-	}
-	req += "Connection: close\r\n\r\n" + body
-	if _, err := c.Write([]byte(req)); err != nil {
-		t.Total = time.Since(t0)
-		return t, fmt.Errorf("ch api write: %w (timing %s)", err, t)
-	}
-	t.Write = time.Since(t0)
-
-	// Read the response. CH replies with "HTTP/1.1 <code> ...\r\n\r\n"
-	// (often empty body for 204). We stop as soon as we see the
-	// header terminator "\r\n\r\n" or a Content-Length-bounded body
-	// arrives — *not* waiting for EOF. CH keeps the conn open briefly
-	// after a Connection: close response (~tens of ms typical, but
-	// up to the read deadline observed empirically), so reading-to-EOF
-	// would inflate every successful call to the deadline duration.
-	//
-	// Cap at maxResp bytes; CH responses are tiny.
-	const maxResp = 16 * 1024
-	buf := make([]byte, 0, maxResp)
-	chunk := make([]byte, 4096)
-	firstByteRecorded := false
-	headersDone := false
-	contentLen := -1
-	bodyStart := -1
-	var readErr error
-	for {
-		n, err := c.Read(chunk)
-		if n > 0 && !firstByteRecorded {
-			t.FirstByte = time.Since(t0)
-			firstByteRecorded = true
-		}
-		if n > 0 {
-			if len(buf)+n > maxResp {
-				n = maxResp - len(buf)
-			}
-			buf = append(buf, chunk[:n]...)
-
-			// Detect end of headers.
-			if !headersDone {
-				if idx := bytes.Index(buf, []byte("\r\n\r\n")); idx >= 0 {
-					headersDone = true
-					bodyStart = idx + 4
-					contentLen = parseContentLength(buf[:idx])
-				}
-			}
-			// If we have headers AND (no body expected, or full body
-			// received), stop. CH 204 has Content-Length: 0 or absent;
-			// CH 200 with payload has explicit Content-Length.
-			if headersDone {
-				bodyHave := len(buf) - bodyStart
-				if contentLen <= 0 || bodyHave >= contentLen {
-					break
-				}
-			}
-			if len(buf) >= maxResp {
-				break
-			}
-		}
-		if err != nil {
-			readErr = err
-			break
-		}
-	}
-	t.Total = time.Since(t0)
-
-	resp := string(buf)
-	if len(resp) < 12 {
-		// Surface the read error (was previously discarded).
-		if readErr != nil && !errors.Is(readErr, io.EOF) {
-			return t, fmt.Errorf("ch api %s %s read failed: %w (got %dB; timing %s)",
-				method, path, readErr, len(buf), t)
-		}
-		return t, fmt.Errorf("ch api %s %s short response: %q (timing %s)",
-			method, path, resp, t)
-	}
-	status := resp[9:12]
-	if status[0] != '2' {
-		return t, fmt.Errorf("ch api %s %s non-2xx: %q (timing %s)",
-			method, path, resp, t)
-	}
-	return t, nil
-}
-
-// parseContentLength scans HTTP response headers for "Content-Length:".
-// Returns -1 if not found. Header bytes are case-insensitive per RFC.
-func parseContentLength(headers []byte) int {
-	const key = "content-length:"
-	lower := make([]byte, len(headers))
-	for i, b := range headers {
-		if b >= 'A' && b <= 'Z' {
-			b += 'a' - 'A'
-		}
-		lower[i] = b
-	}
-	idx := bytes.Index(lower, []byte(key))
-	if idx < 0 {
-		return -1
-	}
-	// Skip key, then whitespace, then read digits to end of line.
-	pos := idx + len(key)
-	for pos < len(headers) && (headers[pos] == ' ' || headers[pos] == '\t') {
-		pos++
-	}
-	val := 0
-	for pos < len(headers) && headers[pos] >= '0' && headers[pos] <= '9' {
-		val = val*10 + int(headers[pos]-'0')
-		pos++
-	}
-	return val
-}
-
-// Suppress "unused" complaint when log import is not yet referenced
-// elsewhere in this file (pulled in for diagnostics).
-var _ = log.Default
