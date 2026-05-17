@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/fullof-work/mass-sandbox/pkg/fetch"
+	"github.com/fullof-work/mass-sandbox/pkg/manifest/fetch"
 )
 
 // ManifestSnapshotSource implements SnapshotReader against a manifest://
@@ -28,7 +28,7 @@ import (
 // Safe for concurrent use: the Fetcher is concurrent-safe and ctx is
 // shared read-only.
 type ManifestSnapshotSource struct {
-	fetcher *fetch.Fetcher
+	fetcher fetch.Stream
 	ctx     context.Context
 	ramSize uint64
 }
@@ -41,7 +41,7 @@ type ManifestSnapshotSource struct {
 // ramSize is the memory section size (= sandbox memory capacity); it
 // must be ≤ fetcher.ImageSize() because the bundle = memory + ZIP and
 // the source only serves the memory prefix.
-func NewManifestSnapshotSource(ctx context.Context, fetcher *fetch.Fetcher, ramSize uint64) (*ManifestSnapshotSource, error) {
+func NewManifestSnapshotSource(ctx context.Context, fetcher fetch.Stream, ramSize uint64) (*ManifestSnapshotSource, error) {
 	if fetcher == nil {
 		return nil, errors.New("uffd: nil fetcher")
 	}

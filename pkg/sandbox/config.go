@@ -12,7 +12,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/fullof-work/mass-sandbox/pkg/config"
+	"github.com/fullof-work/mass-sandbox/pkg/manifest"
+	"github.com/fullof-work/mass-sandbox/pkg/util"
 	"gopkg.in/yaml.v3"
 )
 
@@ -217,7 +218,7 @@ func (c *SandboxConfig) CapacityMemoryBytes() (uint64, error) {
 	if c.Resources.Capacity.Memory == "" {
 		return 0, errors.New("resources.capacity.memory is required")
 	}
-	return config.ParseSize(c.Resources.Capacity.Memory)
+	return util.ParseSize(c.Resources.Capacity.Memory)
 }
 
 // AllocatableMemoryBytes returns the parsed allocatable memory in bytes.
@@ -225,7 +226,7 @@ func (c *SandboxConfig) AllocatableMemoryBytes() (uint64, error) {
 	if c.Resources.Allocatable.Memory == "" {
 		return c.CapacityMemoryBytes()
 	}
-	return config.ParseSize(c.Resources.Allocatable.Memory)
+	return util.ParseSize(c.Resources.Allocatable.Memory)
 }
 
 // DeflateOnOOM returns whether CH --balloon should carry deflate_on_oom=on.
@@ -254,7 +255,7 @@ func (c *SandboxConfig) OverheadMemoryBytes() (uint64, error) {
 	if c.Resources.Overhead == nil {
 		return 32 << 20, nil
 	}
-	return config.ParseSize(c.Resources.Overhead.Memory)
+	return util.ParseSize(c.Resources.Overhead.Memory)
 }
 
 // WatermarkHighBytes returns the cgroup memory.high initial value.
@@ -271,7 +272,7 @@ func (c *SandboxConfig) WatermarkHighBytes() (uint64, error) {
 		}
 		return uint64(float64(alloc) * 0.875), nil
 	}
-	return config.ParseSize(c.Resources.WatermarkHigh.Memory)
+	return util.ParseSize(c.Resources.WatermarkHigh.Memory)
 }
 
 // StartupBurstBytes returns the elevated startup-phase allocatable_now.
@@ -285,7 +286,7 @@ func (c *SandboxConfig) StartupBurstBytes() (uint64, error) {
 	if c.Resources.StartupBurst == nil {
 		return c.AllocatableMemoryBytes()
 	}
-	return config.ParseSize(c.Resources.StartupBurst.Memory)
+	return util.ParseSize(c.Resources.StartupBurst.Memory)
 }
 
 // CPUWeight maps allocatable.cpu to a cgroup v2 cpu.weight value in
@@ -310,7 +311,7 @@ func (c *SandboxConfig) OverlaySize() (int64, error) {
 	if c.Boot.Root.Overlay.Size == "" {
 		return 10 << 30, nil
 	}
-	v, err := config.ParseSize(c.Boot.Root.Overlay.Size)
+	v, err := util.ParseSize(c.Boot.Root.Overlay.Size)
 	if err != nil {
 		return 0, fmt.Errorf("boot.root.overlay.size: %w", err)
 	}
@@ -384,14 +385,14 @@ func (c *SandboxConfig) ValidateCold() error {
 
 	// Overhead value
 	if c.Resources.Overhead != nil {
-		if _, err := config.ParseSize(c.Resources.Overhead.Memory); err != nil {
+		if _, err := util.ParseSize(c.Resources.Overhead.Memory); err != nil {
 			return fmt.Errorf("resources.overhead.memory: %w", err)
 		}
 	}
 
 	// WatermarkHigh ∈ (0, allocatable.memory]
 	if c.Resources.WatermarkHigh != nil {
-		wm, err := config.ParseSize(c.Resources.WatermarkHigh.Memory)
+		wm, err := util.ParseSize(c.Resources.WatermarkHigh.Memory)
 		if err != nil {
 			return fmt.Errorf("resources.watermark_high.memory: %w", err)
 		}
@@ -405,7 +406,7 @@ func (c *SandboxConfig) ValidateCold() error {
 
 	// StartupBurst ∈ [allocatable.memory, capacity.memory]
 	if c.Resources.StartupBurst != nil {
-		sb, err := config.ParseSize(c.Resources.StartupBurst.Memory)
+		sb, err := util.ParseSize(c.Resources.StartupBurst.Memory)
 		if err != nil {
 			return fmt.Errorf("resources.startup_burst.memory: %w", err)
 		}
@@ -505,7 +506,7 @@ func SchemeAndPath(uri string) (scheme, value string, ok bool) {
 // sandbox-ctl uses for any `manifest://` resource (boot blk0 base,
 // snapshot bundle, snapshot --upload). Same shape as manifest-ctl's
 // config so the same YAML drives both.
-type ManifestConfig = config.Config
+type ManifestConfig = manifest.Config
 
 // ManifestConfigEnv is the process-environment variable consulted as
 // a fallback when --manifest-config is not passed on the CLI.
@@ -513,8 +514,8 @@ const ManifestConfigEnv = "MANIFEST_CONFIG"
 
 // LoadManifestConfig returns the manifest config, choosing the file
 // path in order: flagPath, then $MANIFEST_CONFIG. Returns
-// (nil, config.ErrConfigNotProvided) when neither is set — callers
+// (nil, manifest.ErrConfigNotProvided) when neither is set — callers
 // running with file://-only resources may treat that as a soft skip.
 func LoadManifestConfig(flagPath string) (*ManifestConfig, error) {
-	return config.LoadFromFlagOrEnv(flagPath, ManifestConfigEnv)
+	return manifest.LoadConfig(flagPath, ManifestConfigEnv)
 }

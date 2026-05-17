@@ -4,7 +4,7 @@ import (
 	"context"
 	"io"
 
-	"github.com/fullof-work/mass-sandbox/pkg/fetch"
+	"github.com/fullof-work/mass-sandbox/pkg/manifest/fetch"
 )
 
 // fetcherReaderAt wraps a fetch.Fetcher as an io.ReaderAt. archive/zip's
@@ -17,7 +17,7 @@ import (
 // Holes are zero-filled per fetch.Fetcher.ReadAtBlock semantics.
 type fetcherReaderAt struct {
 	ctx     context.Context
-	fetcher *fetch.Fetcher
+	fetcher fetch.Stream
 	size    int64
 }
 

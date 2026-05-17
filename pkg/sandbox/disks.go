@@ -2,14 +2,11 @@ package sandbox
 
 import (
 	"context"
-	"encoding/hex"
 	"errors"
 	"fmt"
 
-	"github.com/fullof-work/mass-sandbox/pkg/cache"
-	"github.com/fullof-work/mass-sandbox/pkg/crypto"
-	"github.com/fullof-work/mass-sandbox/pkg/fetch"
 	"github.com/fullof-work/mass-sandbox/pkg/manifest"
+	"github.com/fullof-work/mass-sandbox/pkg/manifest/fetch"
 	"github.com/fullof-work/mass-sandbox/pkg/store"
 	"github.com/fullof-work/mass-sandbox/pkg/vhost"
 )
@@ -17,15 +14,16 @@ import (
 // openBlockReader resolves a file:// or manifest:// disk URI into a
 // vhost.BlockReader plus the total disk size.
 //
-// For manifest:// the accel parameter must carry an opened
-// accelRuntime (store + cache clients + crypto encryptors). Callers
-// are responsible for opening accel ahead of time when any disk URI in
-// the sandbox config uses manifest://.
+// For manifest:// the fetcher parameter must be non-nil — it carries
+// the cache-ctl / store-ctl client and the per-process decryptor.
+// Cold-start lifecycle and restore both construct the fetcher up front
+// (only when manifest:// resources are referenced) and share it across
+// every disk URI.
 //
 // ctx scopes the lifetime of asynchronous chunk fetches kicked off by
 // later ReadAt calls; cancelling it makes pending vhost-user-blk reads
 // fail promptly during sandbox shutdown.
-func openBlockReader(ctx context.Context, uri string, accel *accelRuntime) (vhost.BlockReader, int64, error) {
+func openBlockReader(ctx context.Context, uri string, fetcher fetch.Fetcher) (vhost.BlockReader, int64, error) {
 	scheme, value, ok := SchemeAndPath(uri)
 	if !ok {
 		return nil, 0, fmt.Errorf("invalid disk URI: %s", uri)
@@ -38,128 +36,61 @@ func openBlockReader(ctx context.Context, uri string, accel *accelRuntime) (vhos
 		}
 		return fr, fr.Size(), nil
 	case "manifest":
-		if accel == nil {
+		if fetcher == nil {
 			return nil, 0, errors.New("manifest:// disk URI requires manifest config (run sandbox-ctl with --manifest-config or set MANIFEST_CONFIG)")
 		}
-		return openManifestReader(ctx, value, accel)
+		stream, size, err := OpenManifestStream(ctx, value, fetcher)
+		if err != nil {
+			return nil, 0, err
+		}
+		return vhost.NewManifestReader(ctx, stream, size), size, nil
 	default:
 		return nil, 0, fmt.Errorf("unknown disk URI scheme: %s", scheme)
 	}
 }
 
-// openManifestReader fetches the manifest blob keyed by hex, decodes
-// it, unseals the key table, and constructs a vhost.BlockReader backed
-// by a fetch.Fetcher. The returned reader's underlying chunk fetches
-// reuse the connection pools owned by accel — there is no per-reader
-// dial.
-func openManifestReader(ctx context.Context, hexKey string, accel *accelRuntime) (vhost.BlockReader, int64, error) {
-	fetcher, size, err := openManifestFetcher(ctx, hexKey, accel)
-	if err != nil {
-		return nil, 0, err
-	}
-	return vhost.NewManifestReader(ctx, fetcher, size), size, nil
-}
-
-// OpenManifestFetcher dials a manifest:// resource and returns a
-// fetch.Fetcher (random-access reader) over its content. Used by
-// snapshot restore to read the ZIP at the end of a manifest://
-// snapshot bundle and to feed ManifestSnapshotSource for
-// memory-page lazy loading.
+// OpenManifestStream resolves a manifest:// hex content key into a
+// fetch.Stream and its image size. Exported so callers outside this
+// package (notably pkg/sandbox/restore for snapshot bundles) can share
+// the same code path.
 //
-// Exposed in capital case so cmd/sandbox-ctl/run.go can invoke it
-// without going through the per-disk wrapper.
-func OpenManifestFetcher(ctx context.Context, hexKey string, accel *AccelRuntime) (*fetch.Fetcher, int64, error) {
-	if accel == nil || accel.inner == nil {
-		return nil, 0, errors.New("manifest:// requires accelerator runtime")
+// fetcher's underlying store/cache client is shared with every read it
+// produces; callers are responsible for closing it when the sandbox
+// lifecycle ends.
+func OpenManifestStream(ctx context.Context, hexKey string, fetcher fetch.Fetcher) (fetch.Stream, int64, error) {
+	if fetcher == nil {
+		return nil, 0, errors.New("manifest:// requires a fetch.Fetcher")
 	}
-	return openManifestFetcher(ctx, hexKey, accel.inner)
-}
-
-// AccelRuntime is a public wrapper around the per-sandbox accelerator
-// runtime so commands outside pkg/sandbox (cmd/sandbox-ctl/run.go) can
-// pass it through without exposing the internal struct.
-type AccelRuntime struct {
-	inner *accelRuntime
-}
-
-// OpenAccelRuntime is the package-public constructor for AccelRuntime.
-// Call once per `sandbox-ctl run --restore=` invocation when the
-// reference is manifest://.
-func OpenAccelRuntime(cfg *ManifestConfig) (*AccelRuntime, error) {
-	r, err := openAccelRuntime(cfg)
-	if err != nil {
-		return nil, err
-	}
-	return &AccelRuntime{inner: r}, nil
-}
-
-// Close releases the underlying connection pools.
-func (a *AccelRuntime) Close() error {
-	if a == nil || a.inner == nil {
-		return nil
-	}
-	return a.inner.Close()
-}
-
-// openManifestFetcher is the unexported core that disks.go and the
-// public restore helper share.
-func openManifestFetcher(ctx context.Context, hexKey string, accel *accelRuntime) (*fetch.Fetcher, int64, error) {
-	keyBytes, err := hex.DecodeString(hexKey)
-	if err != nil || len(keyBytes) != 32 {
-		return nil, 0, fmt.Errorf("manifest:// expects 32-byte hex content key, got %q", hexKey)
-	}
-	var key store.ContentKey
-	copy(key[:], keyBytes)
-
-	result, blob, err := accel.cacheGetter.Get(ctx, store.PartitionManifest, key)
-	if err != nil {
-		return nil, 0, fmt.Errorf("fetch manifest blob: %w", err)
-	}
-	if result != cache.CacheHit {
-		return nil, 0, fmt.Errorf("manifest blob not found: %s", hexKey)
-	}
-	mData := append([]byte(nil), blob.Bytes()...)
-	blob.Release()
-
-	m, sealedKT, err := manifest.Unmarshal(mData)
-	if err != nil {
-		return nil, 0, fmt.Errorf("unmarshal manifest: %w", err)
-	}
-	keys, err := unsealManifestKeys(m, sealedKT, accel.customerKey, accel.ktEnc)
+	key, err := manifest.ParseHexKey(hexKey)
 	if err != nil {
 		return nil, 0, err
 	}
-	fetcher := fetch.NewFetcher(m, keys, accel.cacheGetter, accel.chunkEnc)
-	return fetcher, int64(m.ImageSize), nil
+	stream, err := fetcher.Fetch(ctx, key)
+	if err != nil {
+		return nil, 0, err
+	}
+	return stream, int64(stream.ImageSize()), nil
 }
 
-// unsealManifestKeys decrypts the sealed key table and expands it into
-// a sparse N-length slice (N = chunk count). Zero entries get a zero
-// key (never read by the fetch path). Mirrors manifest-ctl's helper of
-// the same name so failure modes are consistent across CLIs.
-func unsealManifestKeys(m *manifest.Manifest, sealedKT []byte, customerKey [32]byte, kte crypto.KeyTableEncryptor) ([][32]byte, error) {
-	flat, err := kte.Unseal(customerKey, sealedKT, manifest.BuildAAD(m))
-	if err != nil {
-		return nil, fmt.Errorf("unseal key table: %w", err)
+// needsManifestFetcher returns true if any disk URI in cfg uses the
+// manifest:// scheme. The result decides whether sandbox-ctl must
+// dial store-ctl / cache-ctl on this run.
+func needsManifestFetcher(cfg *SandboxConfig) bool {
+	candidates := []string{
+		cfg.Boot.Root.Base,
+		cfg.Boot.Root.Overlay.Base,
 	}
-	count := int(m.ChunkCount())
-	nonZero := 0
-	for _, e := range m.Entries {
-		if !e.IsZero {
-			nonZero++
-		}
-	}
-	if len(flat) != nonZero*32 {
-		return nil, fmt.Errorf("key table size mismatch: got %d bytes, want %d (non-zero chunks: %d)", len(flat), nonZero*32, nonZero)
-	}
-	keys := make([][32]byte, count)
-	pos := 0
-	for i, e := range m.Entries {
-		if e.IsZero {
+	for _, uri := range candidates {
+		if uri == "" {
 			continue
 		}
-		copy(keys[i][:], flat[pos*32:(pos+1)*32])
-		pos++
+		if scheme, _, ok := SchemeAndPath(uri); ok && scheme == "manifest" {
+			return true
+		}
 	}
-	return keys, nil
+	return false
 }
+
+// Compile-time guard: store.ContentKey is used indirectly by
+// ParseHexKey above. Keep the import alive without an unused symbol.
+var _ = store.PartitionChunk

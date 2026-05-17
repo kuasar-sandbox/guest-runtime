@@ -5,8 +5,8 @@ import (
 	"errors"
 	"io"
 
-	"github.com/fullof-work/mass-sandbox/pkg/fetch"
-	"github.com/fullof-work/mass-sandbox/pkg/manifest"
+	"github.com/fullof-work/mass-sandbox/pkg/manifest/fetch"
+	"github.com/fullof-work/mass-sandbox/pkg/manifest/codec"
 	"github.com/fullof-work/mass-sandbox/pkg/sandbox/uffd"
 )
 
@@ -21,14 +21,14 @@ import (
 // — one fetch.Fetcher constructed against the snapshot bundle's memory
 // section, wrapped here, plugged into uffd.Config.
 type ManifestSnapshotSource struct {
-	fetcher *fetch.Fetcher
+	fetcher fetch.Stream
 	ctx     context.Context
 }
 
 // NewManifestSnapshotSource wraps fetcher as a uffd snapshot source.
 // ctx scopes asynchronous chunk fetches; cancelling it makes pending
 // uffd-driven reads fail promptly during sandbox shutdown.
-func NewManifestSnapshotSource(ctx context.Context, fetcher *fetch.Fetcher) *ManifestSnapshotSource {
+func NewManifestSnapshotSource(ctx context.Context, fetcher fetch.Stream) *ManifestSnapshotSource {
 	return &ManifestSnapshotSource{fetcher: fetcher, ctx: ctx}
 }
 
@@ -110,7 +110,7 @@ func (s *ManifestSnapshotSource) classifyAndRunEnd(memfdOffset, capEnd uint64) (
 	}
 
 	// Otherwise must be in a chunk.
-	idx := manifest.ChunkIndexForOffset(m.Entries, memfdOffset)
+	idx := codec.ChunkIndexForOffset(m.Entries, memfdOffset)
 	if idx < 0 {
 		// Defensive: geometry says entries+holes tile [0, ImageSize),
 		// so this is unreachable. Fall back to a one-page zero run
@@ -136,7 +136,7 @@ func (s *ManifestSnapshotSource) classifyAndRunEnd(memfdOffset, capEnd uint64) (
 // (chunk or hole) starting at runEnd is also zero-classified.
 // Bounded by capEnd. Used after a hole or IsZero-chunk has been
 // consumed up to runEnd.
-func extendZeroRun(m *manifest.Manifest, runEnd, capEnd uint64) uint64 {
+func extendZeroRun(m *codec.Manifest, runEnd, capEnd uint64) uint64 {
 	for runEnd < capEnd {
 		// Hole at runEnd?
 		if h, inHole := findHoleAt(m, runEnd); inHole {
@@ -144,7 +144,7 @@ func extendZeroRun(m *manifest.Manifest, runEnd, capEnd uint64) uint64 {
 			continue
 		}
 		// Zero chunk at runEnd?
-		idx := manifest.ChunkIndexForOffset(m.Entries, runEnd)
+		idx := codec.ChunkIndexForOffset(m.Entries, runEnd)
 		if idx < 0 {
 			break
 		}
@@ -163,13 +163,13 @@ func extendZeroRun(m *manifest.Manifest, runEnd, capEnd uint64) uint64 {
 // findHoleAt returns the hole that contains off (if any). Linear
 // scan; manifest hole counts are small (single-digit to low-double-
 // digit per typical sandbox snapshot).
-func findHoleAt(m *manifest.Manifest, off uint64) (manifest.HoleExtent, bool) {
+func findHoleAt(m *codec.Manifest, off uint64) (codec.HoleExtent, bool) {
 	for _, h := range m.Holes {
 		if off >= h.Offset && off < h.Offset+h.Size {
 			return h, true
 		}
 	}
-	return manifest.HoleExtent{}, false
+	return codec.HoleExtent{}, false
 }
 
 func minU64(a, b uint64) uint64 {
