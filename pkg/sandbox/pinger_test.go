@@ -2,6 +2,7 @@ package sandbox
 
 import (
 	"context"
+	"io"
 	"net"
 	"path/filepath"
 	"sync/atomic"
@@ -91,6 +92,99 @@ func TestPinger_TickAndPause(t *testing.T) {
 	}
 }
 
+// TestPinger_FatalThreshold simulates a guest that accepts but never
+// replies to pings; verifies the host fires OnFatal after the configured
+// threshold and exactly once (sync.Once), regardless of subsequent ticks.
+func TestPinger_FatalThreshold(t *testing.T) {
+	dir := t.TempDir()
+	base := filepath.Join(dir, "vsock.sock")
+
+	// Guest reads the request and never replies — host RoundTrip's read
+	// times out, counts as failure. Each ping = fresh conn = fresh handler.
+	proxy := newFakeCHProxy(t, base, func(c net.Conn) {
+		_, _ = proto.ReadMessage(c)
+		time.Sleep(500 * time.Millisecond) // hold so the read deadline trips on the host
+	})
+	defer proxy.close()
+
+	p := &Pinger{
+		Client: &HostClient{BasePath: base},
+		Cfg: PingerConfig{
+			Interval:       20 * time.Millisecond,
+			Timeout:        40 * time.Millisecond,
+			FatalThreshold: 3,
+		},
+		Stats: &PingStats{},
+		Logf:  t.Logf,
+	}
+	var fatalCount atomic.Uint32
+	var firstErr atomic.Value
+	p.SetOnFatal(func(err error) {
+		if firstErr.Load() == nil {
+			firstErr.Store(err)
+		}
+		fatalCount.Add(1)
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	p.Start(ctx)
+	defer p.Stop()
+
+	// 3 failed ticks × (~40ms timeout + ~20ms interval) ≈ 180ms.
+	deadline := time.Now().Add(1 * time.Second)
+	for time.Now().Before(deadline) && fatalCount.Load() == 0 {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := fatalCount.Load(); got != 1 {
+		t.Fatalf("OnFatal fired %d times, want 1", got)
+	}
+	if firstErr.Load() == nil {
+		t.Fatal("OnFatal received nil err")
+	}
+
+	// Additional failing ticks must NOT re-fire OnFatal (sync.Once guard).
+	time.Sleep(200 * time.Millisecond)
+	if got := fatalCount.Load(); got != 1 {
+		t.Fatalf("OnFatal fired %d times after grace, want still 1", got)
+	}
+}
+
+// TestPinger_FatalThresholdZeroDisabled: with FatalThreshold = 0 (default)
+// OnFatal never fires even if every tick fails.
+func TestPinger_FatalThresholdZeroDisabled(t *testing.T) {
+	dir := t.TempDir()
+	base := filepath.Join(dir, "vsock.sock")
+	proxy := newFakeCHProxy(t, base, func(c net.Conn) {
+		_, _ = proto.ReadMessage(c)
+		time.Sleep(500 * time.Millisecond)
+	})
+	defer proxy.close()
+
+	p := &Pinger{
+		Client: &HostClient{BasePath: base},
+		Cfg: PingerConfig{
+			Interval:       20 * time.Millisecond,
+			Timeout:        40 * time.Millisecond,
+			FatalThreshold: 0, // explicitly disabled
+		},
+		Stats: &PingStats{},
+		Logf:  t.Logf,
+	}
+	var fatalCount atomic.Uint32
+	p.SetOnFatal(func(err error) { fatalCount.Add(1) })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 600*time.Millisecond)
+	defer cancel()
+	p.Start(ctx)
+	defer p.Stop()
+
+	<-ctx.Done()
+	if got := fatalCount.Load(); got != 0 {
+		t.Fatalf("OnFatal fired %d times despite FatalThreshold=0", got)
+	}
+}
+
 func TestSendQuiesce_Quiesced(t *testing.T) {
 	dir := t.TempDir()
 	base := filepath.Join(dir, "vsock.sock")
@@ -109,7 +203,7 @@ func TestSendQuiesce_Quiesced(t *testing.T) {
 	}
 }
 
-func TestSendRestore_Restored(t *testing.T) {
+func TestOpenMUXViaRestore(t *testing.T) {
 	dir := t.TempDir()
 	base := filepath.Join(dir, "vsock.sock")
 
@@ -118,12 +212,25 @@ func TestSendRestore_Restored(t *testing.T) {
 		if req.Type != proto.TypeRestore || req.Epoch != 3 {
 			t.Errorf("got %+v", req)
 		}
-		_ = proto.WriteMessage(c, &proto.Message{Type: proto.TypeRestored, Epoch: req.Epoch})
+		_ = proto.WriteMessage(c, &proto.Message{
+			Type:     proto.TypeRestoreAck,
+			Epoch:    req.Epoch,
+			Stdio:    &proto.StdioSpec{Stdout: true, Stderr: true},
+			AppState: proto.AppStateRunning,
+		})
+		// Keep the conn alive (it would become the MUX) until the test
+		// closes its end.
+		_, _ = io.Copy(io.Discard, c)
 	})
 	defer proxy.close()
 
-	if err := SendRestore(&HostClient{BasePath: base}, 3); err != nil {
+	conn, spec, err := OpenMUXViaRestore(&HostClient{BasePath: base}, 3, 2*time.Second)
+	if err != nil {
 		t.Fatal(err)
+	}
+	defer conn.Close()
+	if spec.TTY || !spec.Stdout || !spec.Stderr {
+		t.Errorf("restore_ack stdio mismatch: %+v", spec)
 	}
 }
 

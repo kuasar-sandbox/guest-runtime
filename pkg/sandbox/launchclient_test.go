@@ -124,7 +124,7 @@ func TestHostClient_RestoreEpoch(t *testing.T) {
 		if req.Type != proto.TypeRestore || req.Epoch != 7 {
 			t.Errorf("guest got %+v", req)
 		}
-		_ = proto.WriteMessage(c, &proto.Message{Type: proto.TypeRestored})
+		_ = proto.WriteMessage(c, &proto.Message{Type: proto.TypeRestoreAck})
 	})
 	defer proxy.close()
 
@@ -133,7 +133,7 @@ func TestHostClient_RestoreEpoch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RoundTrip: %v", err)
 	}
-	if resp.Type != proto.TypeRestored {
+	if resp.Type != proto.TypeRestoreAck {
 		t.Errorf("got %+v", resp)
 	}
 }

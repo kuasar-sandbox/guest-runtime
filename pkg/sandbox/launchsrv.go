@@ -58,6 +58,15 @@ type LaunchServer struct {
 	// Optional; nil → just ack.
 	OnMemReport func(memAvailableBytes, memTotalBytes uint64)
 
+	// OnMUXReady, if non-nil, takes ownership of the hello/launch_ack
+	// connection AFTER the final ack is sent: instead of closing it, the
+	// server clears its deadline and hands it to OnMUXReady, which wraps
+	// it in a mux.Session and bridges the app's stdio (the launch conn
+	// becomes the stdio MUX — docs/sandbox-runtime.md §4.5). `established`
+	// is the channel set echoed by the guest in launch_ack. If nil, the
+	// connection is closed as before (used by tests).
+	OnMUXReady func(conn net.Conn, established proto.StdioSpec)
+
 	listener      *net.UnixListener
 	stopOnce      sync.Once
 	stopped       chan struct{}
@@ -98,7 +107,9 @@ func (s *LaunchServer) Listen() error {
 
 // Serve runs the accept loop until ctx is cancelled or Stop is called.
 // Each accepted connection is handled in its own goroutine: read one
-// message, dispatch, write the response, close.
+// message, dispatch, write the response, close — UNLESS it was the
+// hello/launch_ack handshake and OnMUXReady took ownership of the conn
+// (which then lives on as the stdio MUX).
 func (s *LaunchServer) Serve(ctx context.Context) error {
 	defer s.cleanup()
 
@@ -121,8 +132,9 @@ func (s *LaunchServer) Serve(ctx context.Context) error {
 		s.connsWG.Add(1)
 		go func() {
 			defer s.connsWG.Done()
-			defer conn.Close()
-			s.handleConn(conn)
+			if keep := s.handleConn(conn); !keep {
+				_ = conn.Close()
+			}
 		}()
 	}
 }
@@ -137,15 +149,17 @@ func (s *LaunchServer) HelloDone() <-chan struct{} { return s.helloDone }
 // network config (post-boot transient over). Settled gate.
 func (s *LaunchServer) LaunchAckDone() <-chan struct{} { return s.launchAckDone }
 
-func (s *LaunchServer) handleConn(conn *net.UnixConn) {
+// handleConn services one connection. It returns true iff it handed the
+// connection off (to OnMUXReady) and the caller must NOT close it.
+func (s *LaunchServer) handleConn(conn *net.UnixConn) (handedOff bool) {
 	// Bound the per-conn protocol exchange. Keeps a stuck guest from
-	// pinning a goroutine forever.
+	// pinning a goroutine forever. Cleared before hand-off.
 	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
 
 	msg, err := proto.ReadMessage(conn)
 	if err != nil {
 		s.Logf("launch: read: %v", err)
-		return
+		return false
 	}
 
 	switch msg.Type {
@@ -153,7 +167,7 @@ func (s *LaunchServer) handleConn(conn *net.UnixConn) {
 		if s.helloSent.Load() {
 			s.Logf("launch: duplicate hello rejected")
 			_ = proto.WriteMessage(conn, &proto.Message{Type: proto.TypeError, Msg: "hello already served"})
-			return
+			return false
 		}
 		s.Logf("launch: hello received (phase=%q), sending launch spec", msg.Phase)
 		if err := proto.WriteMessage(conn, &proto.Message{
@@ -161,40 +175,60 @@ func (s *LaunchServer) handleConn(conn *net.UnixConn) {
 			Launch: s.Spec,
 		}); err != nil {
 			s.Logf("launch: send launch: %v", err)
-			return
+			return false
 		}
 		s.helloSent.Store(true)
 		s.helloOnce.Do(func() { close(s.helloDone) })
 
-		// Same-connection launch_ack: guest applies network, then sends
-		// launch_ack on this conn. Reading it here (instead of accepting a
-		// fresh conn) makes the post-boot transient boundary unambiguous —
-		// OnLaunchAck fires only after the guest has actually applied the
-		// spec.
+		// Same-connection launch_ack: guest applies network + sets up the
+		// app stdio fds, then sends launch_ack{stdio} on this conn.
+		// Reading it here (instead of accepting a fresh conn) makes the
+		// post-boot transient boundary unambiguous — OnLaunchAck fires
+		// only after the guest has actually applied the spec.
 		ack, err := proto.ReadMessage(conn)
 		if err != nil {
 			s.Logf("launch: read launch_ack: %v", err)
-			return
+			return false
 		}
 		if ack.Type != proto.TypeLaunchAck {
 			s.Logf("launch: expected launch_ack, got %q", ack.Type)
 			_ = proto.WriteMessage(conn, &proto.Message{Type: proto.TypeError, Msg: "expected launch_ack"})
-			return
+			return false
 		}
 		s.Logf("launch: launch_ack received")
 		if s.OnLaunchAck != nil {
 			s.OnLaunchAck()
 		}
 		s.launchAckOnce.Do(func() { close(s.launchAckDone) })
-		_ = proto.WriteMessage(conn, &proto.Message{Type: proto.TypeAck})
+		if err := proto.WriteMessage(conn, &proto.Message{Type: proto.TypeAck}); err != nil {
+			s.Logf("launch: write ack: %v", err)
+			return false
+		}
+		// Hand the connection off as the stdio MUX (docs/sandbox-runtime
+		// .md §4.5). Drop the handshake deadline first.
+		if s.OnMUXReady != nil {
+			_ = conn.SetDeadline(time.Time{})
+			var spec proto.StdioSpec
+			if ack.Stdio != nil {
+				spec = *ack.Stdio
+			} else if s.Spec != nil {
+				spec = s.Spec.Stdio
+			}
+			s.OnMUXReady(conn, spec)
+			return true
+		}
+		return false
 
 	case proto.TypeLaunchAck:
-		s.Logf("launch: launch_ack received")
+		// Legacy fresh-connection launch_ack (sandbox-init now always
+		// sends it on the hello conn). Kept as a defensive fallback.
+		s.Logf("launch: launch_ack received (standalone conn)")
 		if s.OnLaunchAck != nil {
 			s.OnLaunchAck()
 		}
 		s.launchAckOnce.Do(func() { close(s.launchAckDone) })
 		_ = proto.WriteMessage(conn, &proto.Message{Type: proto.TypeAck})
+		return false
 
 	case proto.TypeAppStarted:
 		s.Logf("launch: app_started pid=%d", msg.PID)
@@ -202,23 +236,27 @@ func (s *LaunchServer) handleConn(conn *net.UnixConn) {
 			s.OnAppStarted(msg.PID)
 		}
 		_ = proto.WriteMessage(conn, &proto.Message{Type: proto.TypeAck})
+		return false
 
 	case proto.TypeAppExited:
-		s.Logf("launch: app_exited code=%d", msg.Code)
+		s.Logf("launch: app_exited code=%d term_signal=%d", msg.Code, msg.TermSignal)
 		if s.OnAppExited != nil {
 			s.OnAppExited(msg.Code)
 		}
 		_ = proto.WriteMessage(conn, &proto.Message{Type: proto.TypeAck})
+		return false
 
 	case proto.TypeMemReport:
 		if s.OnMemReport != nil {
 			s.OnMemReport(msg.MemAvailableBytes, msg.MemTotalBytes)
 		}
 		_ = proto.WriteMessage(conn, &proto.Message{Type: proto.TypeMemReportAck})
+		return false
 
 	default:
 		s.Logf("launch: unknown message type %q", msg.Type)
 		_ = proto.WriteMessage(conn, &proto.Message{Type: proto.TypeError, Msg: "unknown type"})
+		return false
 	}
 }
 

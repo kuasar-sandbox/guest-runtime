@@ -9,7 +9,6 @@ import (
 	"os"
 	"sync"
 	"syscall"
-	"time"
 )
 
 // Backend is the per-device abstraction. blk0 (read-only base image)
@@ -86,9 +85,13 @@ type Server struct {
 	stop                   chan struct{}
 	listener               *net.UnixListener
 	// activeConn is the currently-connected master conn. Stop closes it
-	// to unblock any in-flight ReadMessage; otherwise a serve loop
-	// inside Read could wait up to VhostReadIdleTimeout (5 min) before
-	// noticing Stop, leaving sandbox-ctl pinned in backendWG.Wait().
+	// to unblock any in-flight ReadMessage. We do NOT set a read deadline
+	// on the connection: vhost-user has no keepalive and the control
+	// socket is silent for arbitrarily long stretches in steady state,
+	// so treating idle as disconnect produces spurious teardowns
+	// (5-min cycles where memTable is wiped + master reconnects). The
+	// only legitimate "wake the read" trigger is explicit shutdown via
+	// Stop, which closes activeConn here.
 	activeConn *net.UnixConn
 }
 
@@ -211,12 +214,6 @@ func (s *Server) Listen() error {
 	return nil
 }
 
-// VhostReadIdleTimeout bounds how long ReadMessage will block on a
-// connected master. Without this, a stuck CH (vCPU wedged, signal not
-// drained) leaves the vhost server pinned forever. Long enough to
-// dwarf any legitimate inter-message gap during normal operation.
-const VhostReadIdleTimeout = 5 * time.Minute
-
 // Serve accepts master connections in a loop and processes messages
 // for each. When a master disconnects, per-connection state is reset
 // (memtable cleared, virtq workers stopped) and the listener accepts
@@ -265,9 +262,15 @@ func (s *Server) Serve(ctx context.Context) error {
 }
 
 // serveOneMaster runs the vhost-user protocol loop on a single master
-// connection until the master disconnects, the read deadline expires,
-// or Stop fires. Errors are logged; the loop never returns them up to
-// Serve, since a wedged master should not kill the listener.
+// connection until the master disconnects (EOF / socket close) or Stop
+// fires (which closes activeConn to break out of ReadMessage). Errors
+// are logged; the loop never returns them up to Serve, since a wedged
+// master should not kill the listener.
+//
+// No read deadline is set: the vhost-user control socket has no
+// keepalive semantics — it's silent throughout normal steady-state
+// operation (kick/call eventfds carry all the traffic). A per-read
+// deadline misclassifies that silence as disconnect.
 func (s *Server) serveOneMaster(conn *net.UnixConn) {
 	defer conn.Close()
 	for {
@@ -276,10 +279,9 @@ func (s *Server) serveOneMaster(conn *net.UnixConn) {
 			return
 		default:
 		}
-		_ = conn.SetReadDeadline(time.Now().Add(VhostReadIdleTimeout))
 		msg, err := ReadMessage(conn)
 		if err != nil {
-			s.logf("vhost: read: %v (master likely disconnected or idle-timeout)", err)
+			s.logf("vhost: read: %v (master disconnected)", err)
 			return
 		}
 		if err := s.handle(conn, msg); err != nil {
@@ -299,15 +301,28 @@ func (s *Server) serveOneMaster(conn *net.UnixConn) {
 // alone is not enough because the Read won't observe the channel
 // closure. We close the kickFd which makes the read return EBADF and
 // the worker exits. The callFd is also closed for symmetry.
+//
+// Ordering: queues are detached then fully drained BEFORE the memTable
+// is cleared. The opposite order races — a worker that has just popped
+// a desc and is mid-translation would observe an empty memTable and
+// log "UVA … not in any region" on a desc that the next reconnect's
+// worker will re-process anyway. By waiting for stopAndDrainQueues to
+// join every worker first, we guarantee no Translate() call is in
+// flight when memTable.SetRegions(nil) lands.
 func (s *Server) resetConnectionState() {
 	s.mu.Lock()
 	queues := s.queues
 	s.queues = make([]*virtq, NumQueues)
 	s.features = 0
 	s.protocolFeatures = 0
+	s.mu.Unlock()
+	// Drain workers first (joins on q.done). No s.mu held — the workers
+	// don't need it to exit, and holding it across the join could
+	// deadlock if a worker ever takes s.mu mid-iteration.
+	stopAndDrainQueues(queues)
+	s.mu.Lock()
 	s.memTable.SetRegions(nil)
 	s.mu.Unlock()
-	stopAndDrainQueues(queues)
 }
 
 // stopAndDrainQueues signals each queue to stop and unblocks any
@@ -354,10 +369,11 @@ func stopAndDrainQueues(queues []*virtq) {
 // active master connection (so a serveOneMaster blocked in ReadMessage
 // returns immediately) and the kick eventfds (so virtq workers blocked
 // in syscall.Read on the kick fd return immediately with EBADF).
-// Without these explicit closes, sandbox-ctl shutdown could block for
-// up to VhostReadIdleTimeout (5 min) on the master read, or
-// indefinitely on the kick read since the worker only checks q.stop
-// between iterations not during the syscall.
+// Without these explicit closes, sandbox-ctl shutdown would block
+// indefinitely: serveOneMaster has no read deadline (vhost-user is
+// silent in steady state, so a deadline would falsely trigger), and
+// the virtq worker only checks q.stop between iterations not during
+// the syscall.
 func (s *Server) Stop() {
 	s.stopOnce.Do(func() {
 		close(s.stop)

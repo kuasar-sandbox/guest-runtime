@@ -3,7 +3,6 @@ package main
 import (
 	"errors"
 	"fmt"
-	"io"
 	"syscall"
 	"time"
 
@@ -35,13 +34,19 @@ func (c *vsockConn) Close() error                { return syscall.Close(c.fd) }
 
 // SetDeadline applies SO_RCVTIMEO + SO_SNDTIMEO. AF_VSOCK supports both
 // (kernel >= 5.16). Coarse-grained but adequate for our ms-level
-// per-message budgets.
+// per-message budgets. A zero t means "no timeout" (block indefinitely)
+// — used to clear the handshake deadline before handing a conn to a
+// mux.Session, which relies on the conn closing (not a deadline) to
+// unblock its read loop.
 func (c *vsockConn) SetDeadline(t time.Time) error {
-	d := time.Until(t)
-	if d < 0 {
-		d = 1 * time.Microsecond
+	var tv unix.Timeval // {0,0} = no timeout
+	if !t.IsZero() {
+		d := time.Until(t)
+		if d <= 0 {
+			d = 1 * time.Microsecond
+		}
+		tv = unix.NsecToTimeval(d.Nanoseconds())
 	}
-	tv := unix.NsecToTimeval(d.Nanoseconds())
 	if err := unix.SetsockoptTimeval(c.fd, unix.SOL_SOCKET, unix.SO_RCVTIMEO, &tv); err != nil {
 		return fmt.Errorf("SO_RCVTIMEO: %w", err)
 	}
@@ -54,8 +59,11 @@ func (c *vsockConn) SetDeadline(t time.Time) error {
 // dialVsock opens an AF_VSOCK SOCK_STREAM socket and connects to (cid,
 // port). The first attempt fires immediately; on ECONNREFUSED (host
 // listener not yet ready) we exponentially back off from vsockDialStart
-// up to vsockDialMax until vsockDialDeadline elapses.
-func dialVsock(cid, port uint32) (io.ReadWriteCloser, error) {
+// up to vsockDialMax until vsockDialDeadline elapses. Returns a
+// *vsockConn (a deadline-aware net.Conn-ish surface) so callers can
+// SetDeadline both for management exchanges and before handing the conn
+// to a mux.Session.
+func dialVsock(cid, port uint32) (*vsockConn, error) {
 	deadline := time.Now().Add(vsockDialDeadline)
 	delay := vsockDialStart
 	var lastErr error
@@ -106,17 +114,22 @@ func bindVsockListener(port uint32) (int, error) {
 }
 
 // serveReverseChannel accepts host-initiated connections on the bound
-// vsock listener and dispatches each in its own goroutine. The handler
-// reads one request, dispatches by type, writes one response, closes.
+// vsock listener and dispatches each in its own goroutine.
 //
-// Listener fd lives for the entire sandbox lifetime and is **never
+// Most operations are management short-conns: read one request, write one
+// response, close. Two — restore and attach — instead hand the connection
+// off to the stdio MUX after their *_ack (it stays open as a mux.Session);
+// handleReverseConn reports that via its return value so the goroutine
+// doesn't close the conn out from under the session.
+//
+// The listener fd lives for the entire sandbox lifetime and is **never
 // closed by quiesce** (§9.1.5) — closing it would cut off the host's
-// subsequent restore notification.
+// subsequent restore / attach.
 //
-// sup is currently unused but reserved: future restore-side hooks
-// (e.g. re-fork on agent crash) need supervisor state.
-func serveReverseChannel(listenFD int, sup *supervisorState) {
-	_ = sup
+// sup carries the exec registry (exec sessions register their children
+// for reaping + honour the quiesce gate) and is reserved for other
+// restore-side hooks.
+func serveReverseChannel(listenFD int, sup *supervisorState, bridge *consoleBridge) {
 	for {
 		nfd, _, err := unix.Accept(listenFD)
 		if err != nil {
@@ -127,54 +140,106 @@ func serveReverseChannel(listenFD int, sup *supervisorState) {
 			time.Sleep(10 * time.Millisecond)
 			continue
 		}
-		go handleReverseConn(nfd)
+		go func(fd int) {
+			c := &vsockConn{fd: fd}
+			if handedToMUX := handleReverseConn(c, sup, bridge); !handedToMUX {
+				_ = c.Close()
+			}
+		}(nfd)
 	}
 }
 
-// sup currently unused; kept on the goroutine signature to leave room
-// for restore-side hooks that need supervisor state (e.g. re-fork).
-func handleReverseConn(fd int) {
-	c := &vsockConn{fd: fd}
-	defer c.Close()
-
-	// Per-conn deadline tight enough that a stuck host can't pin a
-	// goroutine forever, generous enough for quiesce's drop_caches
-	// path (which can take tens of ms on a busy ext4).
+// handleReverseConn services one host→guest connection. It returns true
+// iff the connection was handed to a mux.Session (restore / attach) and
+// must therefore NOT be closed by the caller; false for management
+// short-conns (ping / quiesce / unknown), which the caller closes.
+func handleReverseConn(c *vsockConn, sup *supervisorState, bridge *consoleBridge) (handedToMUX bool) {
+	// Per-conn handshake deadline: tight enough that a stuck host can't
+	// pin a goroutine forever, generous enough for quiesce (drop_caches +
+	// the MUX-close round-trip can take a few seconds). Cleared before a
+	// conn is handed to a mux.Session (which relies on Close, not a
+	// deadline, to unblock its read loop).
 	_ = c.SetDeadline(time.Now().Add(10 * time.Second))
 
 	req, err := proto.ReadMessage(c)
 	if err != nil {
 		logf("reverse-channel: read: %v", err)
-		return
+		return false
 	}
 	switch req.Type {
 	case proto.TypePing:
 		// Echo id + t_send_ns; host computes RTT.
-		resp := &proto.Message{Type: proto.TypePong, ID: req.ID, TSendNs: req.TSendNs}
-		if err := proto.WriteMessage(c, resp); err != nil {
+		if err := proto.WriteMessage(c, &proto.Message{Type: proto.TypePong, ID: req.ID, TSendNs: req.TSendNs}); err != nil {
 			logf("reverse-channel: write pong: %v", err)
 		}
+		return false
+
+	case proto.TypeExec:
+		// Ad-hoc command inside the running sandbox. runExecSession owns
+		// c for the whole session (it closes it); never closed by the
+		// caller — hence handedToMUX=true.
+		runExecSession(c, req, sup)
+		return true
 
 	case proto.TypeRestore:
-		logf("reverse-channel: restore epoch=%d", req.Epoch)
-		// v1: just ack. Future hooks (re-seed RNG, replay timer, etc.)
-		// fit here.
-		resp := &proto.Message{Type: proto.TypeRestored, Epoch: req.Epoch}
-		if err := proto.WriteMessage(c, resp); err != nil {
-			logf("reverse-channel: write restored: %v", err)
+		logf("reverse-channel: restore epoch=%d — re-establishing stdio MUX", req.Epoch)
+		sup.execReg.endQuiesce() // sandbox live again — allow exec
+		bridge.closeLiveMUX()    // drop any stale session first (normally already gone via quiesce)
+		// CH reloaded the snapshot's CLOCK_REALTIME verbatim, so the
+		// guest wall clock is stale by the whole dormant interval. Jump
+		// it to the host's now before replying / unblocking the app, so
+		// the app never observes the stale clock. Monotonic clocks are
+		// unaffected (Go timers, ping RTT, mem_report ticker keep
+		// running). Best-effort: a failure just leaves the stale clock.
+		if req.WallclockNs > 0 {
+			ts := unix.NsecToTimespec(req.WallclockNs)
+			if err := unix.ClockSettime(unix.CLOCK_REALTIME, &ts); err != nil {
+				logf("reverse-channel: restore clock_settime: %v", err)
+			} else {
+				logf("reverse-channel: restore wall clock set to host now (epoch=%d)", req.Epoch)
+			}
 		}
+		spec := bridge.protoSpec()
+		resp := &proto.Message{Type: proto.TypeRestoreAck, Epoch: req.Epoch, Stdio: &spec, AppState: proto.AppStateRunning}
+		if err := proto.WriteMessage(c, resp); err != nil {
+			logf("reverse-channel: write restore_ack: %v", err)
+			return false
+		}
+		_ = c.SetDeadline(time.Time{})
+		bridge.reattach(c)
+		return true
+
+	case proto.TypeAttach:
+		logf("reverse-channel: attach epoch=%d — re-establishing stdio MUX", req.Epoch)
+		sup.execReg.endQuiesce() // sandbox live again (post-resume) — allow exec
+		bridge.closeLiveMUX()    // gracefully close the old session, then switch
+		spec := bridge.protoSpec()
+		resp := &proto.Message{Type: proto.TypeAttachAck, Epoch: req.Epoch, Stdio: &spec, AppState: proto.AppStateRunning}
+		if err := proto.WriteMessage(c, resp); err != nil {
+			logf("reverse-channel: write attach_ack: %v", err)
+			return false
+		}
+		_ = c.SetDeadline(time.Time{})
+		bridge.reattach(c)
+		return true
 
 	case proto.TypeQuiesce:
-		logf("reverse-channel: quiesce — running pre-snapshot cleanup")
-		runQuiesce()
-		resp := &proto.Message{Type: proto.TypeQuiesced}
-		if err := proto.WriteMessage(c, resp); err != nil {
+		logf("reverse-channel: quiesce — prep + MUX close")
+		// Reject new exec + SIGKILL in-flight exec children so the
+		// snapshot captures no running exec siblings (their sessions
+		// tear down once the reaper delivers).
+		killExecChildren(sup.execReg)
+		runQuiesce()          // step 1: sync + drop_caches
+		bridge.closeLiveMUX() // steps 2-3: stop forwarding app output, then the MUX_CLOSE handshake
+		if err := proto.WriteMessage(c, &proto.Message{Type: proto.TypeQuiesced}); err != nil {
 			logf("reverse-channel: write quiesced: %v", err)
 		}
+		return false
 
 	default:
 		logf("reverse-channel: unknown type %q", req.Type)
 		_ = proto.WriteMessage(c, &proto.Message{Type: proto.TypeError, Msg: "unknown type"})
+		return false
 	}
 }
 
@@ -187,9 +252,7 @@ func notifyAppStarted(pid int) error {
 		return fmt.Errorf("dial: %w", err)
 	}
 	defer conn.Close()
-	if vc, ok := conn.(*vsockConn); ok {
-		_ = vc.SetDeadline(time.Now().Add(proto.DeadlineAppNotify))
-	}
+	_ = conn.SetDeadline(time.Now().Add(proto.DeadlineAppNotify))
 	if err := proto.WriteMessage(conn, &proto.Message{Type: proto.TypeAppStarted, PID: pid}); err != nil {
 		return fmt.Errorf("write: %w", err)
 	}
@@ -213,9 +276,7 @@ func notifyMemReport(memAvailable, memTotal uint64) error {
 		return fmt.Errorf("dial: %w", err)
 	}
 	defer conn.Close()
-	if vc, ok := conn.(*vsockConn); ok {
-		_ = vc.SetDeadline(time.Now().Add(proto.DeadlineAppNotify))
-	}
+	_ = conn.SetDeadline(time.Now().Add(proto.DeadlineAppNotify))
 	if err := proto.WriteMessage(conn, &proto.Message{
 		Type:              proto.TypeMemReport,
 		MemAvailableBytes: memAvailable,
@@ -234,19 +295,18 @@ func notifyMemReport(memAvailable, memTotal uint64) error {
 }
 
 // notifyAppExited dials the host launch UDS and sends a short-conn
-// app_exited notification. Best-effort — guest reboots regardless of
-// outcome (§9.1.6).
-func notifyAppExited(code int) {
+// app_exited notification. sig != 0 means the app was killed by that
+// signal (code is then 128+sig per the shell convention). Best-effort —
+// the guest reboots regardless of outcome (§9.1.6).
+func notifyAppExited(code, sig int) {
 	conn, err := dialVsock(proto.VsockHostCID, proto.LaunchPort)
 	if err != nil {
 		logf("app_exited notify: dial: %v (continuing reboot)", err)
 		return
 	}
 	defer conn.Close()
-	if vc, ok := conn.(*vsockConn); ok {
-		_ = vc.SetDeadline(time.Now().Add(proto.DeadlineAppNotify))
-	}
-	if err := proto.WriteMessage(conn, &proto.Message{Type: proto.TypeAppExited, Code: code}); err != nil {
+	_ = conn.SetDeadline(time.Now().Add(proto.DeadlineAppNotify))
+	if err := proto.WriteMessage(conn, &proto.Message{Type: proto.TypeAppExited, Code: code, TermSignal: sig}); err != nil {
 		logf("app_exited notify: write: %v", err)
 		return
 	}

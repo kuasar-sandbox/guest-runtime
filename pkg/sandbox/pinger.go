@@ -2,6 +2,8 @@ package sandbox
 
 import (
 	"context"
+	"fmt"
+	"net"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -14,6 +16,14 @@ import (
 type PingerConfig struct {
 	Interval time.Duration // default 1 s
 	Timeout  time.Duration // default proto.DeadlinePing (200 ms)
+
+	// FatalThreshold: after this many consecutive failed pings, fire
+	// the Pinger's OnFatal callback (set via SetOnFatal). 0 disables
+	// (the default — sandbox-ctl waits for the user / outer signal).
+	// With Interval=1s, FatalThreshold=30 ≈ 30 s of unreachability;
+	// the lifecycle uses this to SIGTERM CH so cmd.Wait() returns
+	// rather than hanging forever on a wedged-but-alive guest.
+	FatalThreshold int
 }
 
 func (c *PingerConfig) withDefaults() PingerConfig {
@@ -24,6 +34,7 @@ func (c *PingerConfig) withDefaults() PingerConfig {
 	if out.Timeout <= 0 {
 		out.Timeout = proto.DeadlinePing
 	}
+	// FatalThreshold: leave as-is. 0 = disabled.
 	return out
 }
 
@@ -47,12 +58,31 @@ type Pinger struct {
 	Stats  *PingStats
 	Logf   func(string, ...any)
 
-	mu       sync.Mutex
-	running  atomic.Bool
-	paused   atomic.Bool
-	cancel   context.CancelFunc
-	doneCh   chan struct{}
-	nextID   atomic.Uint64
+	mu      sync.Mutex
+	running atomic.Bool
+	paused  atomic.Bool
+	cancel  context.CancelFunc
+	doneCh  chan struct{}
+	nextID  atomic.Uint64
+
+	// FatalThreshold tracking: consecutiveFails counts failures since
+	// the last success; once it reaches Cfg.FatalThreshold (and that's
+	// > 0), onFatal is invoked exactly once via fatalOnce. Reset to 0
+	// on every successful tick. SetOnFatal installs the callback;
+	// safe to call once after the pinger is created and before Start.
+	consecutiveFails atomic.Uint32
+	onFatalMu        sync.Mutex
+	onFatal          func(err error)
+	fatalOnce        sync.Once
+}
+
+// SetOnFatal installs the callback invoked once when FatalThreshold
+// consecutive ping failures accumulate. Pass nil to clear. Safe to call
+// before Start; thread-safe.
+func (p *Pinger) SetOnFatal(fn func(err error)) {
+	p.onFatalMu.Lock()
+	p.onFatal = fn
+	p.onFatalMu.Unlock()
 }
 
 // Start launches the ticker goroutine. ctx cancellation stops the
@@ -155,15 +185,42 @@ func (p *Pinger) tick(timeout time.Duration) {
 			p.Stats.DialError.Add(1)
 		}
 		p.Logf("ping id=%d err=%v", id, err)
+		p.recordFailure(err)
 		return
 	}
 	if resp.Type != proto.TypePong || resp.ID != id {
 		p.Stats.DialError.Add(1)
 		p.Logf("ping id=%d unexpected resp %+v", id, resp)
+		p.recordFailure(fmt.Errorf("unexpected response %q (id=%d)", resp.Type, resp.ID))
 		return
 	}
 	p.Stats.Success.Add(1)
 	p.Stats.observeRTT(time.Since(tSend))
+	p.consecutiveFails.Store(0)
+}
+
+// recordFailure bumps the consecutive-failure counter and fires OnFatal
+// the first time the count reaches FatalThreshold. Threshold == 0
+// disables the mechanism (counter still advances harmlessly).
+func (p *Pinger) recordFailure(err error) {
+	threshold := p.Cfg.FatalThreshold
+	if threshold <= 0 {
+		return
+	}
+	n := p.consecutiveFails.Add(1)
+	if int(n) < threshold {
+		return
+	}
+	p.onFatalMu.Lock()
+	fn := p.onFatal
+	p.onFatalMu.Unlock()
+	if fn == nil {
+		return
+	}
+	p.fatalOnce.Do(func() {
+		p.Logf("ping: %d consecutive failures (last=%v) — invoking OnFatal", n, err)
+		go fn(err)
+	})
 }
 
 func containsAny(s string, subs ...string) bool {
@@ -205,18 +262,70 @@ func SendQuiesce(client *HostClient) error {
 	return nil
 }
 
-// SendRestore notifies the guest that a restore has completed. epoch
-// distinguishes successive restores. Caller (re)starts the ping ticker
-// after this returns nil.
-func SendRestore(client *HostClient, epoch uint32) error {
-	resp, err := client.RoundTrip(&proto.Message{Type: proto.TypeRestore, Epoch: epoch}, proto.DeadlineRestore)
+// OpenMUXViaRestore notifies the guest that a restore has completed and
+// turns that connection into the stdio MUX (docs/sandbox-runtime.md
+// §4.3 / §4.5): it sends `restore{epoch}`, reads `restore_ack{stdio,
+// app_state}`, clears the handshake deadline, and returns the live
+// connection together with the channel set the guest established. The
+// caller wraps the conn in a mux.Session and bridges those streams, then
+// (re)starts the ping ticker. epoch distinguishes successive restores.
+func OpenMUXViaRestore(client *HostClient, epoch uint32, deadline time.Duration) (net.Conn, proto.StdioSpec, error) {
+	// WallclockNs lets the guest jump CLOCK_REALTIME forward by the
+	// dormant interval (CH reloads the snapshot's stale clock verbatim).
+	// Captured here, as close to the send as possible; the residual
+	// host→guest propagation skew is sub-ms (kernel-microsecond dial,
+	// the guest's reverse-channel listener survived the snapshot).
+	return openMUX(client, &proto.Message{
+		Type:        proto.TypeRestore,
+		Epoch:       epoch,
+		WallclockNs: time.Now().UnixNano(),
+	}, proto.TypeRestoreAck, deadline)
+}
+
+// OpenMUXViaAttach re-establishes the stdio MUX after the previous one
+// broke (sandbox-ctl's own reliability fallback — not a hand-off to a
+// different process). Same shape as OpenMUXViaRestore; on receipt the
+// guest gracefully closes any still-live old MUX (or hard-drops it),
+// then ACKs on the new connection.
+func OpenMUXViaAttach(client *HostClient, epoch uint32, deadline time.Duration) (net.Conn, proto.StdioSpec, error) {
+	return openMUX(client, &proto.Message{Type: proto.TypeAttach, Epoch: epoch}, proto.TypeAttachAck, deadline)
+}
+
+// OpenMUXViaExec starts a fresh ad-hoc command inside the running
+// sandbox and turns the reverse-channel connection into that session's
+// stdio MUX. Same shape as OpenMUXViaAttach, but the guest forks+execs
+// the ExecSpec command (a sibling of the user app) and echoes the
+// stdio it established in exec_ack. The returned conn carries the MUX
+// end-to-end; the caller (run process) pipes it to the CLI.
+func OpenMUXViaExec(client *HostClient, spec *proto.ExecSpec, deadline time.Duration) (net.Conn, proto.StdioSpec, error) {
+	return openMUX(client, &proto.Message{Type: proto.TypeExec, Exec: spec}, proto.TypeExecAck, deadline)
+}
+
+func openMUX(client *HostClient, req *proto.Message, wantAck string, deadline time.Duration) (net.Conn, proto.StdioSpec, error) {
+	conn, err := client.DialRaw(deadline)
 	if err != nil {
-		return err
+		return nil, proto.StdioSpec{}, err
 	}
-	if resp.Type != proto.TypeRestored {
-		return &protoMismatchErr{want: proto.TypeRestored, got: resp.Type, msg: resp.Msg}
+	if err := proto.WriteMessage(conn, req); err != nil {
+		_ = conn.Close()
+		return nil, proto.StdioSpec{}, fmt.Errorf("write %s: %w", req.Type, err)
 	}
-	return nil
+	resp, err := proto.ReadMessage(conn)
+	if err != nil {
+		_ = conn.Close()
+		return nil, proto.StdioSpec{}, fmt.Errorf("read %s: %w", wantAck, err)
+	}
+	if resp.Type != wantAck {
+		_ = conn.Close()
+		return nil, proto.StdioSpec{}, &protoMismatchErr{want: wantAck, got: resp.Type, msg: resp.Msg}
+	}
+	// Hand-off: the MUX session manages its own per-frame timing.
+	_ = conn.SetDeadline(time.Time{})
+	var spec proto.StdioSpec
+	if resp.Stdio != nil {
+		spec = *resp.Stdio
+	}
+	return conn, spec, nil
 }
 
 type protoMismatchErr struct {

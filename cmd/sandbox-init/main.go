@@ -9,11 +9,16 @@
 //      ticker that starts firing as soon as `launch` is written, see
 //      docs/sandbox-runtime.md §4.4).
 //   2. Connect over virtio-vsock (CID 2:5000) to sandbox-ctl, send
-//      hello, receive the launch spec, applyNetwork, fork the user app
-//      with CLONE_NEWPID|CLONE_NEWNS, then send `app_started{pid}`.
+//      hello, receive the launch spec; apply network; set up the app's
+//      stdio (a pty or stdin/stdout/stderr pipes per spec.Stdio); send
+//      launch_ack{stdio}; THEN keep that connection — it becomes the
+//      stdio MUX (pkg/sandbox/mux). Fork the user app with
+//      CLONE_NEWPID|CLONE_NEWNS (+ setsid/ctty in tty mode), wire its
+//      0/1/2 to the prepared fds, send app_started{pid}.
 //   3. Supervise: in parallel, the vsock listener goroutine dispatches
-//      host-initiated ping / restore / quiesce; the signal loop reaps
-//      children. On user-app exit we send `app_exited{code}` then reboot.
+//      host-initiated ping / restore / attach / quiesce; the signal loop
+//      reaps children. On user-app exit we drain the stdio MUX, send
+//      app_exited{code,term_signal}, then reboot.
 //
 // All work is done via syscalls; no busybox or external tools are
 // included in sandbox-runtime.erofs.
@@ -30,6 +35,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/fullof-work/mass-sandbox/pkg/sandbox/mux"
 	"github.com/fullof-work/mass-sandbox/pkg/sandbox/proto"
 	"golang.org/x/sys/unix"
 )
@@ -50,7 +56,19 @@ func main() {
 	// Re-entry as the user-app exec helper (after fork+clone in phase 2).
 	// argv: [self, "exec-child", workdir, appPath, args...]
 	if len(os.Args) >= 4 && os.Args[1] == "exec-child" {
-		runExecChild(os.Args[2], os.Args[3], os.Args[4:])
+		runExecChild(os.Args[2], os.Args[3], os.Args[4:], false)
+		return
+	}
+	// Joined exec command (sandbox-ctl exec): forked by the exec-join
+	// helper after it has entered the app's mount + pid namespaces.
+	if len(os.Args) >= 4 && os.Args[1] == "exec-child-joined" {
+		runExecChild(os.Args[2], os.Args[3], os.Args[4:], true)
+		return
+	}
+	// nsenter helper for sandbox-ctl exec.
+	// argv: [self, "exec-join", appPid, tty(0|1), cwd, argv0, args...]
+	if len(os.Args) >= 6 && os.Args[1] == "exec-join" {
+		runExecJoin(os.Args[2], os.Args[3], os.Args[4], os.Args[5], os.Args[6:])
 		return
 	}
 
@@ -73,12 +91,12 @@ func main() {
 		die("phase 1 vsock listen: %v", err)
 	}
 
-	spec, err := phase2HelloAndLaunchAck()
+	spec, cs, bridge, err := phase2Launch()
 	if err != nil {
 		die("phase 2 launch handshake: %v", err)
 	}
 
-	appPid, err := phase2ForkApp(spec)
+	appPid, err := phase2ForkApp(spec, cs)
 	if err != nil {
 		die("phase 2 fork: %v", err)
 	}
@@ -88,10 +106,13 @@ func main() {
 		logf("warn: app_started notify failed (continuing): %v", err)
 	}
 
-	supervisor := &supervisorState{appPid: appPid, restart: spec.Restart}
+	supervisor := &supervisorState{appPid: appPid, restart: spec.Restart, execReg: newExecRegistry()}
 
-	// Reverse-channel dispatch goroutine. Lives until reboot.
-	go serveReverseChannel(revFD, supervisor)
+	// Reverse-channel dispatch goroutine. Lives until reboot. It carries
+	// the consoleBridge so host-initiated restore / attach can swap a
+	// fresh MUX session under the still-running app's stdio pumps, and
+	// the supervisor so exec sessions can register their children.
+	go serveReverseChannel(revFD, supervisor, bridge)
 
 	// Memory reporter: feeds the host-side balloon controller with
 	// /proc/meminfo snapshots so it can drive vm.resize. Replaces
@@ -99,7 +120,7 @@ func main() {
 	// starves this very vsock listener after ~16 s).
 	go runMemReporter(memReportInterval)
 
-	phase3Supervise(supervisor)
+	phase3Supervise(supervisor, bridge)
 	// phase3Supervise does not return.
 }
 
@@ -174,89 +195,144 @@ func phase1MountAndPivot() error {
 		return fmt.Errorf("chdir /: %w", err)
 	}
 
+	// devpts: tty mode (consoleBridge.openPTY) opens /dev/ptmx, whose
+	// open() handler in the kernel resolves to a devpts mount in the
+	// caller's namespace — no mount, no pty. Cheap to mount always;
+	// pipe mode just doesn't use it. Mounted in the post-chroot root
+	// so the MS_MOVE'd /dev stays simple (no child mounts to drag along).
+	// ptmxmode=0666 lets a non-root app open /dev/ptmx if needed.
+	if err := os.MkdirAll("/dev/pts", 0o755); err != nil {
+		return fmt.Errorf("mkdir /dev/pts: %w", err)
+	}
+	if err := unix.Mount("devpts", "/dev/pts", "devpts", 0, "newinstance,ptmxmode=0666"); err != nil {
+		return fmt.Errorf("mount devpts on /dev/pts: %w", err)
+	}
+
 	return nil
 }
 
-// phase2HelloAndLaunchAck opens one vsock connection, runs the full
-// cold-start launch handshake on it, then closes:
+// phase2Launch opens the one cold-start vsock connection, runs the launch
+// handshake on it, sets up the app's stdio per the negotiated StdioSpec,
+// then — instead of closing — keeps the connection and turns it into the
+// stdio MUX (pkg/sandbox/mux):
 //
 //	guest → host: hello
 //	host  → guest: launch{spec}
-//	guest applies network
-//	guest → host: launch_ack
+//	guest applies network; sets up app stdio (pty or pipes)
+//	guest → host: launch_ack{stdio = what we established}
 //	host  → guest: ack
+//	... connection now speaks the framed MUX sub-protocol ...
 //
-// Settled triggers on launch_ack (post-boot transient over). Keeping
-// the exchange on a single connection means the host's OnLaunchAck
-// fires only after the guest has actually applied the spec — no race
-// where a stale second connection arrives before the first closes.
-func phase2HelloAndLaunchAck() (*proto.LaunchSpec, error) {
+// Returns the launch spec, the child's 0/1/2 fds, and the consoleBridge
+// (already attached to the new session and pumping). The bridge's pump
+// goroutines park until the MUX has a session, so starting them before
+// the user app is forked is safe.
+func phase2Launch() (*proto.LaunchSpec, childStdio, *consoleBridge, error) {
+	fail := func(err error) (*proto.LaunchSpec, childStdio, *consoleBridge, error) {
+		return nil, childStdio{}, nil, err
+	}
+
 	conn, err := dialVsock(proto.VsockHostCID, proto.LaunchPort)
 	if err != nil {
-		return nil, fmt.Errorf("vsock dial host:%d: %w", proto.LaunchPort, err)
+		return fail(fmt.Errorf("vsock dial host:%d: %w", proto.LaunchPort, err))
 	}
-	defer conn.Close()
+	// Until the MUX takes ownership, close the conn on any error path.
+	muxOwns := false
+	defer func() {
+		if !muxOwns {
+			_ = conn.Close()
+		}
+	}()
 
-	if err := proto.WriteMessage(conn, &proto.Message{
-		Type:  proto.TypeHello,
-		Phase: "ready",
-	}); err != nil {
-		return nil, fmt.Errorf("send hello: %w", err)
+	if err := proto.WriteMessage(conn, &proto.Message{Type: proto.TypeHello, Phase: "ready"}); err != nil {
+		return fail(fmt.Errorf("send hello: %w", err))
 	}
-
 	msg, err := proto.ReadMessage(conn)
 	if err != nil {
-		return nil, fmt.Errorf("read launch: %w", err)
+		return fail(fmt.Errorf("read launch: %w", err))
 	}
 	if msg.Type != proto.TypeLaunch || msg.Launch == nil {
-		return nil, fmt.Errorf("expected launch message, got %q", msg.Type)
+		return fail(fmt.Errorf("expected launch message, got %q", msg.Type))
 	}
 	if msg.Launch.Exec == "" {
-		return nil, errors.New("launch spec missing exec")
+		return fail(errors.New("launch spec missing exec"))
 	}
 
 	if msg.Launch.Network != nil {
 		if err := applyNetwork(msg.Launch.Network); err != nil {
-			return nil, fmt.Errorf("apply network: %w", err)
+			return fail(fmt.Errorf("apply network: %w", err))
 		}
 	}
 
-	if err := proto.WriteMessage(conn, &proto.Message{Type: proto.TypeLaunchAck}); err != nil {
-		return nil, fmt.Errorf("send launch_ack: %w", err)
+	cs, bridge, err := setupAppStdio(msg.Launch.Stdio)
+	if err != nil {
+		return fail(fmt.Errorf("setup app stdio: %w", err))
+	}
+	// v1: the guest honors whatever the host asked for, so the established
+	// spec is the requested one verbatim.
+	established := msg.Launch.Stdio
+
+	if err := proto.WriteMessage(conn, &proto.Message{Type: proto.TypeLaunchAck, Stdio: &established}); err != nil {
+		return fail(fmt.Errorf("send launch_ack: %w", err))
 	}
 	ack, err := proto.ReadMessage(conn)
 	if err != nil {
-		return nil, fmt.Errorf("read ack: %w", err)
+		return fail(fmt.Errorf("read ack: %w", err))
 	}
 	if ack.Type != proto.TypeAck {
-		return nil, fmt.Errorf("expected ack, got %q", ack.Type)
+		return fail(fmt.Errorf("expected ack, got %q", ack.Type))
 	}
-	return msg.Launch, nil
+
+	// Hand the connection to the MUX. Clear any handshake deadline first —
+	// mux.Session relies on Close (not a deadline) to unblock its read loop.
+	_ = conn.SetDeadline(time.Time{})
+	sess := mux.NewSession(conn, streamSetFor(established), mux.Options{OnSetWinsize: bridge.onSetWinsize})
+	bridge.attach(sess)
+	bridge.start()
+
+	muxOwns = true
+	return msg.Launch, cs, bridge, nil
 }
 
-// phase2ForkApp re-execs ourselves with "exec-child" sentinel argv,
-// in a new PID + Mount namespace. The re-exec'd child remounts /proc
-// and execs the user app per the LaunchSpec.
-func phase2ForkApp(spec *proto.LaunchSpec) (int, error) {
+// phase2ForkApp re-execs ourselves with the "exec-child" sentinel argv in
+// a new PID + mount namespace, wiring the app's 0/1/2 to the fds prepared
+// by setupAppStdio. In tty mode the child also gets a fresh session with
+// the pty slave (its fd 0) as controlling terminal, so the line discipline
+// can deliver SIGINT / SIGWINCH to the app's process group. The re-exec'd
+// child (runExecChild) remounts /proc and execs the user app.
+func phase2ForkApp(spec *proto.LaunchSpec, cs childStdio) (int, error) {
 	self := "/proc/self/exe"
+	args := append([]string{self, "exec-child", spec.Workdir, spec.Exec}, spec.Args...)
 
-	args := []string{self, "exec-child", spec.Workdir, spec.Exec}
-	args = append(args, spec.Args...)
+	sysAttr := &syscall.SysProcAttr{
+		Cloneflags: syscall.CLONE_NEWPID | syscall.CLONE_NEWNS,
+	}
+	if cs.tty {
+		sysAttr.Setsid = true
+		sysAttr.Setctty = true // Ctty defaults to 0 = Stdin = the pty slave
+	}
 
 	cmd := exec.Cmd{
-		Path:   self,
-		Args:   args,
-		Env:    envSliceFromMap(spec.Env),
-		Dir:    "/",
-		Stdin:  os.Stdin,
-		Stdout: os.Stdout,
-		Stderr: os.Stderr,
-		SysProcAttr: &syscall.SysProcAttr{
-			Cloneflags: syscall.CLONE_NEWPID | syscall.CLONE_NEWNS,
-		},
+		Path:        self,
+		Args:        args,
+		Env:         envSliceFromMap(spec.Env),
+		Dir:         "/",
+		Stdin:       cs.stdin,
+		Stdout:      cs.stdout,
+		Stderr:      cs.stderr,
+		SysProcAttr: sysAttr,
 	}
 	if err := cmd.Start(); err != nil {
 		return 0, err
+	}
+	// Drop our copies of the child ends so EOF propagates once the app
+	// closes its fds (the consoleBridge keeps the opposite ends).
+	_ = cs.stdin.Close()
+	if cs.stdout != cs.stdin {
+		_ = cs.stdout.Close()
+	}
+	if cs.stderr != cs.stdin && cs.stderr != cs.stdout {
+		_ = cs.stderr.Close()
 	}
 	return cmd.Process.Pid, nil
 }
@@ -268,10 +344,16 @@ func phase2ForkApp(spec *proto.LaunchSpec) (int, error) {
 // If appPath has no '/', resolve via PATH lookup (image config Cmd
 // often holds bare names like "python3" or "node", expecting standard
 // PATH search semantics like sh/cmd would do).
-func runExecChild(workdir, appPath string, args []string) {
-	if err := unix.Mount("proc", "/proc", "proc", 0, ""); err != nil {
-		if errRemount := unix.Mount("none", "/proc", "", unix.MS_REMOUNT, ""); errRemount != nil {
-			die("exec-child: remount /proc: %v / %v", err, errRemount)
+func runExecChild(workdir, appPath string, args []string, joined bool) {
+	// Independent children (the user app) get a fresh pid namespace and
+	// need their own procfs. A joined exec command already runs in the
+	// app's mount + pid namespace, where /proc is mounted for that pid
+	// ns — remounting it would disrupt the shared view.
+	if !joined {
+		if err := unix.Mount("proc", "/proc", "proc", 0, ""); err != nil {
+			if errRemount := unix.Mount("none", "/proc", "", unix.MS_REMOUNT, ""); errRemount != nil {
+				die("exec-child: remount /proc: %v / %v", err, errRemount)
+			}
 		}
 	}
 
@@ -301,11 +383,12 @@ func runExecChild(workdir, appPath string, args []string) {
 type supervisorState struct {
 	appPid  int
 	restart string
+	execReg *execRegistry // exec-session child reaping + quiesce gating
 }
 
-// phase3Supervise reaps children. On user-app exit, notifies the host
-// (best-effort) then reboots.
-func phase3Supervise(s *supervisorState) {
+// phase3Supervise reaps children. On user-app exit it drains the stdio
+// MUX, notifies the host (best-effort), then reboots.
+func phase3Supervise(s *supervisorState, b *consoleBridge) {
 	sigCh := make(chan os.Signal, 16)
 	signal.Notify(sigCh, syscall.SIGCHLD, syscall.SIGTERM, syscall.SIGINT)
 
@@ -321,25 +404,37 @@ func phase3Supervise(s *supervisorState) {
 				}
 				logf("reaped pid=%d exit=%d signal=%v", pid, status.ExitStatus(), status.Signal())
 				if pid == s.appPid {
-					handleAppExit(status, s)
+					handleAppExit(status, s, b)
 					return
 				}
+				// Non-app child = an exec session's child. Route its
+				// status to the waiting session goroutine (it must not
+				// trigger the app-exit reboot).
+				s.execReg.deliver(pid, status)
 			}
 		case syscall.SIGTERM, syscall.SIGINT:
 			logf("received %v, sending SIGTERM to app pid=%d", sig, s.appPid)
 			_ = syscall.Kill(s.appPid, syscall.SIGTERM)
 			waitOrTimeout(s.appPid, gracefulShutdown)
-			notifyAppExited(0)
+			b.appExited()
+			notifyAppExited(0, 0)
 			doReboot()
 			return
 		}
 	}
 }
 
-func handleAppExit(status syscall.WaitStatus, s *supervisorState) {
-	code := status.ExitStatus()
-	logf("app exited code=%d (restart=%s); notifying host then rebooting", code, s.restart)
-	notifyAppExited(code)
+func handleAppExit(status syscall.WaitStatus, s *supervisorState, b *consoleBridge) {
+	var code, sig int
+	if status.Signaled() {
+		sig = int(status.Signal())
+		code = 128 + sig // shell 128+signo convention
+	} else {
+		code = status.ExitStatus()
+	}
+	logf("app exited code=%d signal=%d (restart=%s); draining MUX, notifying host, rebooting", code, sig, s.restart)
+	b.appExited() // close app fds, flush guest→host streams (bounded)
+	notifyAppExited(code, sig)
 	// v1: all restart policies just reboot. Real in-place restart is v2.
 	doReboot()
 }

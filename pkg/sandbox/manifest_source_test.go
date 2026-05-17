@@ -8,9 +8,9 @@ import (
 	"testing"
 
 	"github.com/fullof-work/mass-sandbox/pkg/cache"
-	"github.com/fullof-work/mass-sandbox/pkg/crypto"
-	"github.com/fullof-work/mass-sandbox/pkg/fetch"
-	"github.com/fullof-work/mass-sandbox/pkg/manifest"
+	"github.com/fullof-work/mass-sandbox/pkg/manifest/crypto"
+	"github.com/fullof-work/mass-sandbox/pkg/manifest/fetch"
+	"github.com/fullof-work/mass-sandbox/pkg/manifest/codec"
 	"github.com/fullof-work/mass-sandbox/pkg/sandbox/uffd"
 	"github.com/fullof-work/mass-sandbox/pkg/store"
 )
@@ -44,10 +44,10 @@ func (e *passEnc) DecryptInPlace(_ [32]byte, _ []byte) ([]byte, error)    { retu
 // buildManifest constructs an in-memory manifest with the given
 // (offset, size, isZero) entries and holes. Used to drive
 // ManifestSnapshotSource without going through ingest.
-func buildManifest(t *testing.T, imageSize uint64, entries []manifest.ChunkEntry, holes []manifest.HoleExtent) *manifest.Manifest {
+func buildManifest(t *testing.T, imageSize uint64, entries []codec.ChunkEntry, holes []codec.HoleExtent) *codec.Manifest {
 	t.Helper()
-	m := &manifest.Manifest{
-		Version:   manifest.Version1,
+	m := &codec.Manifest{
+		Version:   codec.Version1,
 		ImageSize: imageSize,
 		Entries:   entries,
 		Holes:     holes,
@@ -64,14 +64,14 @@ func buildManifest(t *testing.T, imageSize uint64, entries []manifest.ChunkEntry
 func TestManifestSnapshotSource_DataCapAtChunkBoundary(t *testing.T) {
 	const chunkSize = 4 * tPage // 16 KiB per chunk
 	plain := bytes.Repeat([]byte{0xAB}, chunkSize)
-	m := buildManifest(t, 3*chunkSize, []manifest.ChunkEntry{
+	m := buildManifest(t, 3*chunkSize, []codec.ChunkEntry{
 		{Offset: 0, Size: chunkSize, CiphertextHash: store.ContentKey{0xA1}},
 		{Offset: chunkSize, Size: chunkSize, CiphertextHash: store.ContentKey{0xA2}},
 		{Offset: 2 * chunkSize, Size: chunkSize, CiphertextHash: store.ContentKey{0xA3}},
 	}, nil)
 
 	getter := &fixedHashGetter{hash: store.ContentKey{0xA1}, plain: plain}
-	f := fetch.NewFetcher(m, make([][32]byte, 3), getter, &passEnc{plain: plain})
+	f := fetch.NewStream(m, make([][32]byte, 3), getter, &passEnc{plain: plain})
 	src := NewManifestSnapshotSource(context.Background(), f)
 
 	buf := make([]byte, 8*tPage) // ask for two chunks worth
@@ -106,16 +106,16 @@ func TestManifestSnapshotSource_ZeroRunSpansHolesAndZeroChunks(t *testing.T) {
 	//   [4*chunk, 5*chunk): data chunk (non-zero)
 	const chunkSize = 4 * tPage
 	plain := bytes.Repeat([]byte{0xCC}, chunkSize)
-	m := buildManifest(t, 5*chunkSize, []manifest.ChunkEntry{
+	m := buildManifest(t, 5*chunkSize, []codec.ChunkEntry{
 		{Offset: 0, Size: chunkSize, CiphertextHash: store.ContentKey{0xB1}},
 		{Offset: 3 * chunkSize, Size: chunkSize, IsZero: true},
 		{Offset: 4 * chunkSize, Size: chunkSize, CiphertextHash: store.ContentKey{0xB2}},
-	}, []manifest.HoleExtent{
+	}, []codec.HoleExtent{
 		{Offset: chunkSize, Size: 2 * chunkSize},
 	})
 
 	getter := &fixedHashGetter{}
-	f := fetch.NewFetcher(m, make([][32]byte, 3), getter, &passEnc{plain: plain})
+	f := fetch.NewStream(m, make([][32]byte, 3), getter, &passEnc{plain: plain})
 	src := NewManifestSnapshotSource(context.Background(), f)
 
 	// Read starting at the hole — expect the run to extend through
@@ -143,15 +143,15 @@ func TestManifestSnapshotSource_ZeroRunSpansHolesAndZeroChunks(t *testing.T) {
 func TestManifestSnapshotSource_HeadInsideHole(t *testing.T) {
 	const chunkSize = 4 * tPage
 	plain := bytes.Repeat([]byte{0xDD}, chunkSize)
-	m := buildManifest(t, 3*chunkSize, []manifest.ChunkEntry{
+	m := buildManifest(t, 3*chunkSize, []codec.ChunkEntry{
 		{Offset: 0, Size: chunkSize, CiphertextHash: store.ContentKey{0xC1}},
 		{Offset: 2 * chunkSize, Size: chunkSize, CiphertextHash: store.ContentKey{0xC2}},
-	}, []manifest.HoleExtent{
+	}, []codec.HoleExtent{
 		{Offset: chunkSize, Size: chunkSize},
 	})
 
 	getter := &fixedHashGetter{}
-	f := fetch.NewFetcher(m, make([][32]byte, 2), getter, &passEnc{plain: plain})
+	f := fetch.NewStream(m, make([][32]byte, 2), getter, &passEnc{plain: plain})
 	src := NewManifestSnapshotSource(context.Background(), f)
 
 	// Offset chunkSize+1*PageSize: 1 page into the hole.
@@ -174,10 +174,10 @@ func TestManifestSnapshotSource_HeadInsideHole(t *testing.T) {
 // (0, true, io.EOF) so the handler doesn't loop.
 func TestManifestSnapshotSource_EOF(t *testing.T) {
 	const chunkSize = 4 * tPage
-	m := buildManifest(t, chunkSize, []manifest.ChunkEntry{
+	m := buildManifest(t, chunkSize, []codec.ChunkEntry{
 		{Offset: 0, Size: chunkSize, CiphertextHash: store.ContentKey{0xE1}},
 	}, nil)
-	f := fetch.NewFetcher(m, make([][32]byte, 1), &fixedHashGetter{}, &passEnc{})
+	f := fetch.NewStream(m, make([][32]byte, 1), &fixedHashGetter{}, &passEnc{})
 	src := NewManifestSnapshotSource(context.Background(), f)
 
 	buf := make([]byte, tPage)
@@ -195,11 +195,11 @@ func TestManifestSnapshotSource_EOF(t *testing.T) {
 func TestManifestSnapshotSource_BufSmallerThanChunk(t *testing.T) {
 	const chunkSize = 8 * tPage
 	plain := bytes.Repeat([]byte{0xEE}, chunkSize)
-	m := buildManifest(t, chunkSize, []manifest.ChunkEntry{
+	m := buildManifest(t, chunkSize, []codec.ChunkEntry{
 		{Offset: 0, Size: chunkSize, CiphertextHash: store.ContentKey{0xF1}},
 	}, nil)
 	getter := &fixedHashGetter{hash: store.ContentKey{0xF1}, plain: plain}
-	f := fetch.NewFetcher(m, make([][32]byte, 1), getter, &passEnc{plain: plain})
+	f := fetch.NewStream(m, make([][32]byte, 1), getter, &passEnc{plain: plain})
 	src := NewManifestSnapshotSource(context.Background(), f)
 
 	buf := make([]byte, 3*tPage) // smaller than chunk

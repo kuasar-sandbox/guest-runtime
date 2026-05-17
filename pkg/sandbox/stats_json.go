@@ -28,13 +28,13 @@ type statsReport struct {
 // resident-memory share without recomputing. Both file:// and
 // manifest:// snapshot paths surface the same shape.
 type uffdStatsJSON struct {
-	FaultsAbsent     uint64 `json:"faults_absent"`
-	FaultsReleased   uint64 `json:"faults_released"`
-	ZeropageCalls    uint64 `json:"zeropage_calls"`
-	CopyCalls        uint64 `json:"copy_calls"`
-	PagesZeroed      uint64 `json:"pages_zeroed"`
-	PagesCopied      uint64 `json:"pages_copied"`
-	Wakes            uint64 `json:"wakes"`
+	FaultsAbsent        uint64 `json:"faults_absent"`
+	FaultsReleased      uint64 `json:"faults_released"`
+	ZeropageCalls       uint64 `json:"zeropage_calls"`
+	CopyCalls           uint64 `json:"copy_calls"`
+	PagesZeroed         uint64 `json:"pages_zeroed"`
+	PagesCopied         uint64 `json:"pages_copied"`
+	Wakes               uint64 `json:"wakes"`
 	RemoveEvents        uint64 `json:"remove_events"`
 	RemoveQDropped      uint64 `json:"remove_q_dropped"`
 	RemoveEventsBatched uint64 `json:"remove_events_batched"`
@@ -42,17 +42,17 @@ type uffdStatsJSON struct {
 	MadviseBytes        uint64 `json:"madvise_bytes"`
 	BackendLookupMiss   uint64 `json:"backend_lookup_miss"`
 	Errors              uint64 `json:"errors"`
-	BatchCalls       uint64 `json:"batch_calls"`
-	BatchPagesTotal  uint64 `json:"batch_pages_total"`
-	BatchAvgPages    uint64 `json:"batch_avg_pages"`
-	BatchMaxPages    uint64 `json:"batch_max_pages"`
+	BatchCalls          uint64 `json:"batch_calls"`
+	BatchPagesTotal     uint64 `json:"batch_pages_total"`
+	BatchAvgPages       uint64 `json:"batch_avg_pages"`
+	BatchMaxPages       uint64 `json:"batch_max_pages"`
 	// LazyLoadRatio = (pages_zeroed + pages_copied) / total_pages.
 	// total_pages comes from RAMSize/PageSize. Cold-start tracks how
 	// little of declared RAM the guest actually touches; restore tracks
 	// how much of the snapshot was demand-paged before app rebooted.
-	TotalPages     uint64  `json:"total_pages"`
-	ResidentPages  uint64  `json:"resident_pages"`
-	LazyLoadRatio  float64 `json:"lazy_load_ratio"`
+	TotalPages    uint64  `json:"total_pages"`
+	ResidentPages uint64  `json:"resident_pages"`
+	LazyLoadRatio float64 `json:"lazy_load_ratio"`
 }
 
 // runtimeStatsJSON captures Go runtime memory + GC counters at
@@ -129,24 +129,6 @@ type statsBundle struct {
 	EndUnixNs   int64             // sandbox.Run T_exit
 }
 
-// StatsBundle is the public version of statsBundle for use by
-// restore.Run (different package).
-type StatsBundle struct {
-	Servers     []*vhost.Server
-	Uffd        map[string]uint64
-	UffdRAMSize int64
-	Ping        *PingSnapshot
-	StartUnixNs int64
-	EndUnixNs   int64
-}
-
-// WriteStatsJSON renders a StatsBundle as JSON at path. Same wire as
-// the internal writeStatsJSON; exposed so cross-package callers
-// (restore.Run) emit the same shape that perf harnesses parse.
-func WriteStatsJSON(path string, b StatsBundle) error {
-	return writeStatsJSON(path, statsBundle(b))
-}
-
 // writeStatsJSON renders the bundle as a single JSON document at path.
 func writeStatsJSON(path string, b statsBundle) error {
 	report := statsReport{
@@ -209,27 +191,27 @@ func buildUffdJSON(counters map[string]uint64, ramBytes int64) *uffdStatsJSON {
 		}
 	}
 	return &uffdStatsJSON{
-		FaultsAbsent:     counters["faults_absent"],
-		FaultsReleased:   counters["faults_released"],
-		ZeropageCalls:    counters["zeropage_calls"],
-		CopyCalls:        counters["copy_calls"],
-		PagesZeroed:      zeroed,
-		PagesCopied:      copied,
-		Wakes:            counters["wakes"],
+		FaultsAbsent:        counters["faults_absent"],
+		FaultsReleased:      counters["faults_released"],
+		ZeropageCalls:       counters["zeropage_calls"],
+		CopyCalls:           counters["copy_calls"],
+		PagesZeroed:         zeroed,
+		PagesCopied:         copied,
+		Wakes:               counters["wakes"],
 		RemoveEvents:        counters["remove_events"],
 		RemoveQDropped:      counters["remove_q_dropped"],
 		RemoveEventsBatched: counters["remove_events_batched"],
 		MadviseCalls:        counters["madvise_calls"],
 		MadviseBytes:        counters["madvise_bytes"],
 		BackendLookupMiss:   counters["backend_lookup_miss"],
-		Errors:           counters["errors"],
-		BatchCalls:       counters["batch_calls"],
-		BatchPagesTotal:  counters["batch_pages_total"],
-		BatchAvgPages:    counters["batch_avg_pages"],
-		BatchMaxPages:    counters["batch_max_pages"],
-		TotalPages:       totalPages,
-		ResidentPages:    resident,
-		LazyLoadRatio:    ratio,
+		Errors:              counters["errors"],
+		BatchCalls:          counters["batch_calls"],
+		BatchPagesTotal:     counters["batch_pages_total"],
+		BatchAvgPages:       counters["batch_avg_pages"],
+		BatchMaxPages:       counters["batch_max_pages"],
+		TotalPages:          totalPages,
+		ResidentPages:       resident,
+		LazyLoadRatio:       ratio,
 	}
 }
 

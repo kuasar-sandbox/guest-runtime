@@ -24,7 +24,16 @@ import (
 //
 // The memfd fd and uffd fd are inherited via cmd.ExtraFiles; CH sees
 // them at fd=3 and fd=4 respectively, referenced in --memory-zone.
-func CHCommand(cfg *SandboxConfig, blk0Sock, blk1Sock, chSock, vsockSock, kernelPath, runtimePath, uffdSock string) ([]string, error) {
+//
+// consoleArg is the value for CH's `--console` flag, computed by
+// stdio.Mode.SetupCHStdio: "tty" (CH writes the guest kernel console /
+// hvc0 to its own stdout, which sandbox-ctl points at /dev/null, its
+// stderr, or a file) or "off" (CH discards it). CH's stdin is /dev/null,
+// so `--console tty` never raw-izes a controlling terminal. `--serial
+// off` — no 8250 UART; cmdline pins `console=hvc0`. The application's
+// stdin/stdout/stderr do NOT travel via the console — they go over the
+// vsock stdio MUX (pkg/sandbox/mux). See docs/sandbox.md §5.2.
+func CHCommand(cfg *SandboxConfig, blk0Sock, blk1Sock, chSock, vsockSock, kernelPath, runtimePath, uffdSock, consoleArg string) ([]string, error) {
 	capBytes, err := cfg.CapacityMemoryBytes()
 	if err != nil {
 		return nil, err
@@ -56,19 +65,24 @@ func CHCommand(cfg *SandboxConfig, blk0Sock, blk1Sock, chSock, vsockSock, kernel
 		fmt.Sprintf("vhost_user=on,socket=%s,readonly=on", blk0Sock),
 		fmt.Sprintf("vhost_user=on,socket=%s", blk1Sock),
 		"--vsock", fmt.Sprintf("cid=%d,socket=%s", proto.VsockGuestCID, vsockSock),
-		"--console", "tty",
-		"--serial", "null",
+		"--console", consoleArg,
+		"--serial", "off",
 	}
 
 	if allocBytes < capBytes {
-		// size=0 at boot: guest sees full capacity until Settled.
-		// The host-side BalloonController (pkg/sandbox/balloon.go)
-		// drives the actual target via /api/v1/vm.resize after
-		// launch_ack, fed by sandbox-init mem_report samples.
+		// size = capacity − allocatable at boot: balloon device starts
+		// pre-inflated to the static minimum, so the guest sees exactly
+		// `allocatable` MiB visible from the moment it boots. No
+		// post-Settled inflate transition; the host BalloonController
+		// (pkg/sandbox/balloon.go) seeds its in-memory target to the
+		// same value and reconciles a no-op on Start, then handles
+		// runtime adjustments via /api/v1/vm.resize on mem_report
+		// feedback or controller grant/reclaim events.
+		//
 		// free_page_reporting is intentionally OFF — its mmu_notifier
 		// traffic starves the guest vsock kthread (see balloon.go
 		// rationale).
-		balloonOpts := "size=0"
+		balloonOpts := fmt.Sprintf("size=%d", capBytes-allocBytes)
 		if cfg.DeflateOnOOM() {
 			balloonOpts += ",deflate_on_oom=on"
 		}
@@ -86,14 +100,15 @@ func CHCommand(cfg *SandboxConfig, blk0Sock, blk1Sock, chSock, vsockSock, kernel
 // buildCmdline returns the kernel cmdline for guest boot.
 //
 // Layout:
-//   1. Auto-injected fixed boot params (init, root, rootfstype, etc.) —
-//      lock down how sandbox-runtime.erofs is mounted as / via virtio-pmem.
-//   2. User-supplied boot.cmdline extras (console=, ip=, …).
+//  1. Auto-injected fixed boot params (init, root, rootfstype, console)
+//     — lock down how sandbox-runtime.erofs is mounted as / via
+//     virtio-pmem and that kernel dmesg goes to hvc0 (virtio-console).
+//  2. User-supplied boot.cmdline extras (quiet, loglevel=, …; init= /
+//     root= / console= are platform-owned and should not be repeated).
 //
-// The launch spec (exec/args/env/workdir/restart) is **not** in the
-// cmdline anymore — it travels over vsock at runtime via the launch
-// protocol (pkg/sandbox/proto). This avoids cmdline length limits and
-// shell-quoting issues for multi-arg / multi-env launches.
+// The launch spec (exec/args/env/workdir/restart/stdio) is **not** in
+// the cmdline — it travels over vsock at runtime via the launch protocol
+// (pkg/sandbox/proto), which also avoids cmdline length / quoting limits.
 func buildCmdline(cfg *SandboxConfig) string {
 	parts := []string{
 		"init=/sbin/init",
@@ -101,6 +116,16 @@ func buildCmdline(cfg *SandboxConfig) string {
 		"ro",
 		"rootfstype=erofs",
 		"dax=always",
+		"console=hvc0",
+		// panic=-1 → kernel immediately emergency_restart()s on panic
+		// (e.g., "Attempted to kill init!"); on our minimal x86 kernel
+		// with no ACPI / PS2 / EFI the reboot path falls through to a
+		// triple fault → KVM_EXIT_SHUTDOWN → CH exits → sandbox-ctl
+		// returns. Without this, panic=0 leaves the guest spinning
+		// forever and sandbox-ctl hangs. User-supplied boot.cmdline
+		// appears after, so `panic=0` in yaml still wins if you want to
+		// freeze the guest for debugging.
+		"panic=-1",
 	}
 	if cfg.Boot.Cmdline != "" {
 		parts = append(parts, cfg.Boot.Cmdline)

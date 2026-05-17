@@ -39,7 +39,7 @@ func TestCHCommand_HasExpectedFlags(t *testing.T) {
 	cfg := makeMinimalCfg()
 	args, err := CHCommand(cfg,
 		"/run/sb/blk0.sock", "/run/sb/blk1.sock", "/run/sb/ch.sock", "/run/sb/vsock.sock",
-		"/vmlinux", "/sandbox-runtime.erofs", "/run/sb/uffd.sock")
+		"/vmlinux", "/sandbox-runtime.erofs", "/run/sb/uffd.sock", "tty")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -50,11 +50,15 @@ func TestCHCommand_HasExpectedFlags(t *testing.T) {
 		"--kernel /vmlinux",
 		"file=/sandbox-runtime.erofs,discard_writes=on",
 		"size=4096M,shared=on,fd=3,uffd_socket=/run/sb/uffd.sock",
-		"--balloon size=0",
+		// cap = 4 GiB, alloc = 2 GiB → balloon pre-inflated to 2 GiB
+		// (= 2147483648 bytes) so guest sees exactly `alloc` from boot.
+		"--balloon size=2147483648",
 		"boot=2",
 		"--disk vhost_user=on,socket=/run/sb/blk0.sock,readonly=on vhost_user=on,socket=/run/sb/blk1.sock",
 		"tap=tap0",
 		"cid=3,socket=/run/sb/vsock.sock", // vsock device
+		"--console tty",
+		"--serial off",
 		"console=hvc0",
 		"init=/sbin/init",
 		"root=/dev/pmem0",
@@ -75,7 +79,7 @@ func TestCHCommand_HasExpectedFlags(t *testing.T) {
 
 func TestCHCommand_BalloonDeflateOnOOMDefault(t *testing.T) {
 	cfg := makeMinimalCfg()
-	args, err := CHCommand(cfg, "/0", "/1", "/c", "/v", "/k", "/r", "/u")
+	args, err := CHCommand(cfg, "/0", "/1", "/c", "/v", "/k", "/r", "/u", "tty")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -89,7 +93,7 @@ func TestCHCommand_BalloonDeflateOnOOMDisabled(t *testing.T) {
 	cfg := makeMinimalCfg()
 	off := false
 	cfg.Resources.Allocatable.DeflateOnOOM = &off
-	args, err := CHCommand(cfg, "/0", "/1", "/c", "/v", "/k", "/r", "/u")
+	args, err := CHCommand(cfg, "/0", "/1", "/c", "/v", "/k", "/r", "/u", "tty")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -110,7 +114,7 @@ func TestCHCommand_NoBalloonWhenAllocEqualsCapacity(t *testing.T) {
 	cfg.Resources.Allocatable.Memory = cfg.Resources.Capacity.Memory
 	args, err := CHCommand(cfg,
 		"/run/sb/blk0.sock", "/run/sb/blk1.sock", "/run/sb/ch.sock", "/run/sb/vsock.sock",
-		"/vmlinux", "/sandbox-runtime.erofs", "/run/sb/uffd.sock")
+		"/vmlinux", "/sandbox-runtime.erofs", "/run/sb/uffd.sock", "tty")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -149,7 +153,7 @@ func TestCHCommand_MemoryStringsHonored(t *testing.T) {
 	cfg := makeMinimalCfg()
 	cfg.Resources.Capacity.Memory = "512MiB"
 	cfg.Resources.Allocatable.Memory = "256MiB"
-	args, err := CHCommand(cfg, "/0", "/1", "/c", "/v", "/k", "/r", "/u")
+	args, err := CHCommand(cfg, "/0", "/1", "/c", "/v", "/k", "/r", "/u", "tty")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -157,9 +161,10 @@ func TestCHCommand_MemoryStringsHonored(t *testing.T) {
 	if !strings.Contains(joined, "size=512M,shared=on") {
 		t.Errorf("expected 512M memory, got: %s", joined)
 	}
-	// Balloon starts at size=0 and is driven up to (cap-alloc) post-Settled
-	// by the host BalloonController. The cmdline carries size=0 always.
-	if !strings.Contains(joined, "--balloon size=0") {
-		t.Errorf("expected --balloon size=0 (boot value; controller drives to target), got: %s", joined)
+	// Balloon is pre-inflated to (cap-alloc) at boot so guest sees
+	// exactly `alloc` from kernel init — no post-Settled inflate
+	// transition. cap=512M alloc=256M → balloon=256M=268435456.
+	if !strings.Contains(joined, "--balloon size=268435456") {
+		t.Errorf("expected --balloon size=268435456 (cap-alloc pre-inflated), got: %s", joined)
 	}
 }

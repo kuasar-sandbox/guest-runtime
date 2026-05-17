@@ -6,7 +6,7 @@ import (
 	"io"
 	"os"
 
-	"github.com/fullof-work/mass-sandbox/pkg/fetch"
+	"github.com/fullof-work/mass-sandbox/pkg/manifest/fetch"
 )
 
 // BlockReader is the abstract source for read-only block data behind a
@@ -51,7 +51,7 @@ func (r *FileReader) Close() error   { return r.f.Close() }
 // chunks via cache-ctl. Holes in the underlying manifest are transparently
 // zero-filled — the guest sees a flat sparse block device.
 type ManifestReader struct {
-	fetcher *fetch.Fetcher
+	fetcher fetch.Stream
 	size    int64
 	ctx     context.Context
 }
@@ -60,7 +60,7 @@ type ManifestReader struct {
 // total image size. The caller owns the Fetcher's lifecycle (typically
 // the underlying cache/store clients live as long as the sandbox-ctl
 // process).
-func NewManifestReader(ctx context.Context, fetcher *fetch.Fetcher, size int64) *ManifestReader {
+func NewManifestReader(ctx context.Context, fetcher fetch.Stream, size int64) *ManifestReader {
 	return &ManifestReader{fetcher: fetcher, size: size, ctx: ctx}
 }
 

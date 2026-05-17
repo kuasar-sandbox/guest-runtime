@@ -4,23 +4,31 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
 )
 
-// fakeSignaler records signals sent to it; never blocks.
+// fakeSignaler records signals sent to it; never blocks. Goroutine-safe:
+// waitForCHWithSignalEscalation calls Signal from the test goroutine while
+// watcher goroutines poll the recorded list.
 type fakeSignaler struct {
+	mu   sync.Mutex
 	sent []os.Signal
 }
 
 func (f *fakeSignaler) Signal(sig os.Signal) error {
+	f.mu.Lock()
 	f.sent = append(f.sent, sig)
+	f.mu.Unlock()
 	return nil
 }
 
 func (f *fakeSignaler) sentCount(sig os.Signal) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	n := 0
 	for _, s := range f.sent {
 		if s == sig {
@@ -96,15 +104,13 @@ func TestWaitForCH_SIGTERM_EscalatesToSIGKILL(t *testing.T) {
 			time.Sleep(10 * time.Millisecond)
 		}
 	}()
-	// Watch proc.sent for SIGKILL appearance.
+	// Watch for SIGKILL appearance (via the goroutine-safe accessor).
 	go func() {
 		for {
 			time.Sleep(5 * time.Millisecond)
-			for _, s := range proc.sent {
-				if s == syscall.SIGKILL {
-					killSeen.Store(true)
-					return
-				}
+			if proc.sentCount(syscall.SIGKILL) > 0 {
+				killSeen.Store(true)
+				return
 			}
 		}
 	}()
@@ -151,11 +157,9 @@ func TestWaitForCH_DoubleSIGTERM_EscalatesImmediately(t *testing.T) {
 	go func() {
 		for {
 			time.Sleep(2 * time.Millisecond)
-			for _, s := range proc.sent {
-				if s == syscall.SIGKILL {
-					killSeen.Store(true)
-					return
-				}
+			if proc.sentCount(syscall.SIGKILL) > 0 {
+				killSeen.Store(true)
+				return
 			}
 		}
 	}()

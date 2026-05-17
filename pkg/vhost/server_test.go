@@ -104,36 +104,17 @@ func TestServer_AcceptsAfterMasterDisconnect(t *testing.T) {
 	}
 }
 
-// TestServer_ReadDeadlineFires verifies that an idle master connection
-// (one that opens but sends nothing) gets disconnected by the read
-// deadline rather than pinning the server forever. This is the
-// regression test for Issue 2's "vhost worker pinned reading EOF/never"
-// path.
-func TestServer_ReadDeadlineFires(t *testing.T) {
-	// Override timeout to something short for the test.
-	origTimeout := VhostReadIdleTimeout
-	// We can't reassign a const at test time, so use a parallel server
-	// with a wrapper. Instead, this test asserts the *constant* is
-	// reasonable and exercises the path indirectly: connect, send
-	// nothing, then verify Stop is honored quickly. The real-world
-	// timeout is 5 minutes — we don't want to wait that long here.
-	if origTimeout < time.Second {
-		t.Fatalf("VhostReadIdleTimeout suspiciously low: %v", origTimeout)
-	}
-	if origTimeout > 10*time.Minute {
-		t.Fatalf("VhostReadIdleTimeout too high (would mask real hangs): %v", origTimeout)
-	}
-}
-
 // TestServer_StopUnblocksReadMidConnection verifies Stop() closes the
 // active master connection so a serveOneMaster blocked in ReadMessage
-// returns immediately. Without this, Stop must wait up to
-// VhostReadIdleTimeout (5 min) for the per-Read deadline.
+// returns immediately. There is no read deadline (vhost-user has no
+// keepalive — see serveOneMaster), so Stop's conn.Close() is the
+// *only* mechanism that unblocks an idle master read.
 //
 // This is the regression test for the e2e_sandbox_cold timeout caused
-// by my earlier vhost re-acceptable fix: cancelBackends called Stop,
+// by an earlier vhost re-acceptable fix: cancelBackends called Stop,
 // but serveOneMaster was blocked in Read and only noticed after the
-// deadline fired, leaving sandbox-ctl pinned in backendWG.Wait().
+// (now removed) deadline fired, leaving sandbox-ctl pinned in
+// backendWG.Wait().
 func TestServer_StopUnblocksReadMidConnection(t *testing.T) {
 	dir := t.TempDir()
 	sockPath := filepath.Join(dir, "vhost.sock")
@@ -165,11 +146,12 @@ func TestServer_StopUnblocksReadMidConnection(t *testing.T) {
 		}
 		if elapsed > 1*time.Second {
 			t.Fatalf("Stop took too long to unblock serve: %v "+
-				"(would mean Read is waiting for VhostReadIdleTimeout)", elapsed)
+				"(Stop must close activeConn to unblock the otherwise-deadline-less Read)",
+				elapsed)
 		}
-		t.Logf("Stop unblocked Serve in %v (must be << 5min idle deadline)", elapsed)
+		t.Logf("Stop unblocked Serve in %v", elapsed)
 	case <-time.After(3 * time.Second):
-		t.Fatal("Serve did not return within 3s of Stop — Read deadline blocking shutdown")
+		t.Fatal("Serve did not return within 3s of Stop — activeConn close not unblocking Read")
 	}
 }
 

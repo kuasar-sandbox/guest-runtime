@@ -187,3 +187,58 @@ func TestHostConnectLine(t *testing.T) {
 		t.Errorf("HostConnectLine = %q, want %q", HostConnectLine, want)
 	}
 }
+
+func TestRoundTrip_LaunchWithStdio(t *testing.T) {
+	m := &Message{
+		Type: TypeLaunch,
+		Launch: &LaunchSpec{
+			Exec:  "/bin/sh",
+			Stdio: StdioSpec{TTY: true, Winsize: &Winsize{Cols: 132, Rows: 50}},
+		},
+	}
+	var buf bytes.Buffer
+	if err := WriteMessage(&buf, m); err != nil {
+		t.Fatal(err)
+	}
+	got, err := ReadMessage(&buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got.Launch.Stdio, m.Launch.Stdio) {
+		t.Errorf("Stdio mismatch:\n got=%+v\nwant=%+v", got.Launch.Stdio, m.Launch.Stdio)
+	}
+
+	// pipe mode: per-channel flags
+	m2 := &Message{Type: TypeLaunch, Launch: &LaunchSpec{Exec: "/bin/cat", Stdio: StdioSpec{Stdin: true, Stdout: true}}}
+	buf.Reset()
+	if err := WriteMessage(&buf, m2); err != nil {
+		t.Fatal(err)
+	}
+	got2, _ := ReadMessage(&buf)
+	if !got2.Launch.Stdio.Stdin || !got2.Launch.Stdio.Stdout || got2.Launch.Stdio.Stderr || got2.Launch.Stdio.TTY {
+		t.Errorf("pipe-mode Stdio mismatch: %+v", got2.Launch.Stdio)
+	}
+}
+
+func TestRoundTrip_AttachAndAck(t *testing.T) {
+	cases := []*Message{
+		{Type: TypeAttach, Epoch: 3},
+		{Type: TypeAttachAck, Stdio: &StdioSpec{TTY: true}, AppState: AppStateRunning},
+		{Type: TypeRestoreAck, Stdio: &StdioSpec{Stdin: true, Stdout: true, Stderr: true}, AppState: AppStateExited, Code: 137, TermSignal: 9},
+		{Type: TypeLaunchAck, Stdio: &StdioSpec{Stdout: true}},
+		{Type: TypeAppExited, Code: 1, TermSignal: 0},
+	}
+	for _, m := range cases {
+		var buf bytes.Buffer
+		if err := WriteMessage(&buf, m); err != nil {
+			t.Fatalf("write %s: %v", m.Type, err)
+		}
+		got, err := ReadMessage(&buf)
+		if err != nil {
+			t.Fatalf("read %s: %v", m.Type, err)
+		}
+		if !reflect.DeepEqual(got, m) {
+			t.Errorf("%s round-trip mismatch:\n got=%+v\nwant=%+v", m.Type, got, m)
+		}
+	}
+}

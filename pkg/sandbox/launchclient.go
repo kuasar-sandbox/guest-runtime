@@ -79,6 +79,38 @@ func (c *HostClient) RoundTrip(req *proto.Message, deadline time.Duration) (*pro
 	return resp, nil
 }
 
+// DialRaw dials the CH hybrid vsock UDS, writes the "CONNECT 5000\n"
+// preface, and drains CH's "OK <localPort>\n" reply, returning the live
+// connection with `deadline` still set on it (covering the immediately-
+// following request/response). The caller owns the conn — after its
+// handshake it should clear the deadline (conn.SetDeadline(time.Time{}))
+// and may keep the conn open (e.g. wrap it in a mux.Session). On any
+// error the conn is closed.
+func (c *HostClient) DialRaw(deadline time.Duration) (net.Conn, error) {
+	end := time.Now().Add(deadline)
+	remaining := time.Until(end)
+	if remaining <= 0 {
+		return nil, fmt.Errorf("launchclient: deadline already exceeded")
+	}
+	conn, err := net.DialTimeout("unix", c.BasePath, remaining)
+	if err != nil {
+		return nil, fmt.Errorf("launchclient: dial %s: %w", c.BasePath, err)
+	}
+	if err := conn.SetDeadline(end); err != nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("launchclient: set deadline: %w", err)
+	}
+	if _, err := conn.Write(proto.HostConnectLine); err != nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("launchclient: write CONNECT: %w", err)
+	}
+	if err := drainLine(conn); err != nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("launchclient: drain OK line: %w", err)
+	}
+	return conn, nil
+}
+
 // drainLine reads bytes from conn until '\n' or 64 bytes (CH's OK reply
 // is "OK <port>\n" — well under the cap). Used to skip the CH hybrid
 // vsock's CONNECT acknowledgement line.

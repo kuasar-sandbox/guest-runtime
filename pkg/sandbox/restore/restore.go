@@ -15,16 +15,12 @@ import (
 	"net"
 	"os"
 	"os/exec"
-	"os/signal"
 	"path/filepath"
-	"sync"
-	"syscall"
 	"time"
 
-	"github.com/fullof-work/mass-sandbox/pkg/fetch"
+	"github.com/fullof-work/mass-sandbox/pkg/manifest/fetch"
 	"github.com/fullof-work/mass-sandbox/pkg/sandbox"
-	"github.com/fullof-work/mass-sandbox/pkg/sandbox/memory"
-	"github.com/fullof-work/mass-sandbox/pkg/sandbox/snapshot"
+	"github.com/fullof-work/mass-sandbox/pkg/sandbox/proto"
 	"github.com/fullof-work/mass-sandbox/pkg/sandbox/stdio"
 	"github.com/fullof-work/mass-sandbox/pkg/sandbox/uffd"
 	"github.com/fullof-work/mass-sandbox/pkg/vhost"
@@ -33,24 +29,28 @@ import (
 // Options is the restore-specific input.
 //
 // Snapshot can be supplied either as a local file path or as a
-// manifest:// URI. When a manifest:// URI is given, AccelRuntime must
+// manifest:// URI. When a manifest:// URI is given, Fetcher must
 // be non-nil and the bundle is read via fetch.Fetcher (chunk-granular,
 // cache-ctl backed); the uffd source becomes ManifestSnapshotSource
 // instead of SparseSnapshotSource.
 //
 // blk0 / overlay.base in the embedded sandbox.cfg likewise support
-// manifest:// when AccelRuntime is set.
+// manifest:// when Fetcher is set.
 type Options struct {
 	SnapshotPath        string                  // file path; mutually exclusive with SnapshotManifestKey
 	SnapshotManifestKey string                  // hex content key; mutually exclusive with SnapshotPath
 	HostCfg             *sandbox.SandboxConfig  // host yaml: TAP, blk1.diff, etc.
 	ManifestCfg         *sandbox.ManifestConfig // for snapshot --upload from a restored sandbox
-	AccelRuntime        *sandbox.AccelRuntime   // required when any URI is manifest://
+	Fetcher             fetch.Fetcher           // required when any URI is manifest://; caller owns lifecycle
 	SandboxID           string
 	CHBinary            string
 	RuntimeRoot         string
 	StatsJSONPath       string     // if non-empty, dump uffd + per-backend stats here on exit
 	StdioMode           stdio.Mode // CH process stdio wiring; see pkg/sandbox/stdio
+
+	// PingFatalThreshold: same semantics as sandbox.RunOptions —
+	// SIGTERM CH after N consecutive ping failures. 0 disables.
+	PingFatalThreshold int
 }
 
 // Run executes restore. Returns the CH exit code.
@@ -61,8 +61,8 @@ func Run(ctx context.Context, opts Options) (int, error) {
 	if opts.SnapshotPath != "" && opts.SnapshotManifestKey != "" {
 		return -1, errors.New("restore: SnapshotPath and SnapshotManifestKey are mutually exclusive")
 	}
-	if opts.SnapshotManifestKey != "" && opts.AccelRuntime == nil {
-		return -1, errors.New("restore: manifest:// snapshot requires AccelRuntime")
+	if opts.SnapshotManifestKey != "" && opts.Fetcher == nil {
+		return -1, errors.New("restore: manifest:// snapshot requires Fetcher")
 	}
 	if opts.HostCfg == nil {
 		return -1, errors.New("restore: HostCfg required")
@@ -78,6 +78,7 @@ func Run(ctx context.Context, opts Options) (int, error) {
 	}
 
 	logf := func(format string, a ...any) { log.Printf("[sandbox-ctl run --restore] "+format, a...) }
+	startUnixNs := time.Now().UnixNano()
 
 	// cgroup join (same semantics as cold-start lifecycle.go). No-cgroup
 	// mode (no cgroup_path) is a no-op. See docs/sandbox.md §4.1.
@@ -111,9 +112,12 @@ func Run(ctx context.Context, opts Options) (int, error) {
 	// Restore-side controller hooks. Admit happens once we've derived
 	// allocatable_at_snapshot from the bundle's state.json balloon section
 	// (see deriveAllocatableAtSnapshot below).
+	// Balloon is created later (snapCap unknown until snapCfg is parsed),
+	// then late-injected via hooks.SetBalloon. Until then, hooks balloon-
+	// related entry points (SettledRestore, OnAllocatableChanged) treat
+	// Balloon-nil as no-op on the balloon side.
 	hooks, err := sandbox.NewControllerHooks(sandbox.ControllerHookOptions{
 		SocketPath: opts.HostCfg.Resources.Control.Controller,
-		CHSocket:   chSock,
 		CgroupPath: opts.HostCfg.Resources.Control.CgroupPath,
 		Logf:       logf,
 	}, opts.HostCfg)
@@ -128,7 +132,7 @@ func Run(ctx context.Context, opts Options) (int, error) {
 	// the uffd handler.
 	var (
 		snapFile         *os.File
-		snapFetcher      *fetch.Fetcher
+		snapFetcher      fetch.Stream
 		snapReaderAt     io.ReaderAt
 		totalSize        int64
 		manifestSnapshot bool
@@ -147,7 +151,7 @@ func Run(ctx context.Context, opts Options) (int, error) {
 		snapReaderAt = f
 		totalSize = st.Size()
 	} else {
-		fc, sz, err := sandbox.OpenManifestFetcher(ctx, opts.SnapshotManifestKey, opts.AccelRuntime)
+		fc, sz, err := sandbox.OpenManifestStream(ctx, opts.SnapshotManifestKey, opts.Fetcher)
 		if err != nil {
 			return -1, fmt.Errorf("open manifest snapshot: %w", err)
 		}
@@ -211,6 +215,18 @@ func Run(ctx context.Context, opts Options) (int, error) {
 	}
 	allocAtSnap := deriveAllocatableAtSnapshot(snapCap, balTarget, balCurrent, balOk)
 
+	// BalloonController, sole writer of /vm.resize. Created once we know
+	// snapCap and allocAtSnap: target is seeded to `cap - allocAtSnap` so
+	// the in-memory state matches what CH will load from state.json when
+	// it starts with --restore. Subsequent SettledRestore decides whether
+	// a runtime correction is needed (initialAlloc != allocAtSnap).
+	var balloonCtl *sandbox.BalloonController
+	if allocAtSnap < snapCap {
+		balloonCtl = sandbox.NewBalloonController(chSock, snapCap, logf)
+		balloonCtl.SetAllocatable(allocAtSnap)
+		hooks.SetBalloon(balloonCtl)
+	}
+
 	yamlAlloc, err := opts.HostCfg.AllocatableMemoryBytes()
 	if err != nil {
 		return -1, err
@@ -239,13 +255,14 @@ func Run(ctx context.Context, opts Options) (int, error) {
 		logf("static mode: bumping initial allocatable from yaml=%d to snapshot allocatable=%d (balloon target/current=%d/%d)",
 			yamlAlloc, allocAtSnap, balTarget, balCurrent)
 	}
-	// Re-apply cgroup memory.high and (later) balloon target to match
-	// initialAlloc. Balloon is configured via vm.resize after /vm.resume
-	// because restore loads its initial balloon size from state.json.
+	// Record initialAlloc in hooks' in-memory state. No external write
+	// here: cgroup memory.high is deferred to SettledRestore (Issue 4 —
+	// PSI throttling during uffd-driven replay), and balloon already
+	// reflects allocAtSnap from the snapshot (any correction needed
+	// when initialAlloc != allocAtSnap also happens in SettledRestore,
+	// after vm.resume).
 	if hooks != nil {
-		if err := hooks.ApplyInitialAllocatable(initialAlloc); err != nil {
-			logf("apply initial allocatable: %v (continuing)", err)
-		}
+		hooks.SetAllocatableNow(initialAlloc)
 	}
 
 	// Resolve disk reference. file:// is opened directly; manifest://
@@ -260,8 +277,8 @@ func Run(ctx context.Context, opts Options) (int, error) {
 		// Resolve relative to snapshot file (local mode only).
 		diskValue = filepath.Join(filepath.Dir(opts.SnapshotPath), diskValue)
 	}
-	if scheme == "manifest" && opts.AccelRuntime == nil {
-		return -1, fmt.Errorf("restore: manifest:// disk in sandbox.cfg requires AccelRuntime")
+	if scheme == "manifest" && opts.Fetcher == nil {
+		return -1, fmt.Errorf("restore: manifest:// disk in sandbox.cfg requires Fetcher")
 	}
 	logf("disk image: %s://%s", scheme, diskValue)
 
@@ -288,20 +305,14 @@ func Run(ctx context.Context, opts Options) (int, error) {
 		return -1, err
 	}
 
-	// Memory + uffd setup using the SAME path as cold-start, but
-	// SnapshotSource is SparseSnapshotSource pointing at the memory
-	// section [0, ramSize) of the snapshot file.
+	// Memory capacity → memfd size (the memfd itself is owned by
+	// sandbox.ServeAndWait). The uffd SnapshotSource is the only
+	// restore-specific input to the shared uffd handler: Sparse (file)
+	// or Manifest (chunk-granular via cache-ctl) instead of ZeroSource.
 	capBytes, err := snapCfg.CapacityMemoryBytes()
 	if err != nil {
 		return -1, err
 	}
-	memfd, err := memory.Create("sandbox-"+opts.SandboxID+"-ram", int64(capBytes))
-	if err != nil {
-		return -1, fmt.Errorf("memfd create: %w", err)
-	}
-	defer memfd.Close()
-	logf("memfd ready: inode=%d size=%d backendVA=0x%x",
-		memfd.Inode(), memfd.Size(), memfd.Addr())
 
 	var source uffd.SnapshotReader
 	if manifestSnapshot {
@@ -320,65 +331,8 @@ func Run(ctx context.Context, opts Options) (int, error) {
 		logf("snapshot source: file:// (hole bitmap built)")
 	}
 
-	addrMap := uffd.NewAddressMap(uint64(memfd.Size()))
-	if err := addrMap.RegisterVMA(uffd.ProcessBackend, uint64(memfd.Addr()), uint64(memfd.Size()), 0); err != nil {
-		return -1, fmt.Errorf("addrmap register backend: %w", err)
-	}
-	var uffdHandler *uffd.Handler
-	var uffdHandlerMu sync.Mutex
-	defer func() {
-		uffdHandlerMu.Lock()
-		h := uffdHandler
-		uffdHandlerMu.Unlock()
-		if h != nil {
-			_ = h.Close()
-		}
-	}()
-
-	vaSrv := &uffd.VAReportServer{
-		Path:    uffdSock,
-		AddrMap: addrMap,
-		Logf:    logf,
-		OnReady: func(uffdFD int, vaStart, size uint64) error {
-			h, err := uffd.NewWithBackendUffd(uffdFD, addrMap, uffd.Config{
-				MemfdFD:   memfd.FD(),
-				BackendVA: memfd.Addr(),
-				Size:      memfd.Size(),
-				Source:    source,
-				Logf:      logf,
-			})
-			if err != nil {
-				return err
-			}
-			h.Start()
-			uffdHandlerMu.Lock()
-			uffdHandler = h
-			uffdHandlerMu.Unlock()
-			logf("uffd handler: adopted CH uffd region #0 fd=%d size=%d", uffdFD, size)
-			return nil
-		},
-		OnRegister: func(uffdFD int, vaStart, size uint64) error {
-			uffdHandlerMu.Lock()
-			h := uffdHandler
-			uffdHandlerMu.Unlock()
-			if h == nil {
-				return fmt.Errorf("OnRegister called before OnReady")
-			}
-			if err := h.AddUffd(uffdFD); err != nil {
-				return err
-			}
-			logf("uffd handler: attached additional region fd=%d size=%d", uffdFD, size)
-			return nil
-		},
-	}
-	if err := vaSrv.Listen(); err != nil {
-		return -1, fmt.Errorf("va_report listen: %w", err)
-	}
-	defer vaSrv.Stop()
-
-	// Open disk as base+diff:
-	// - disk image (from snapshot) → blk1 base (read-only)
-	// - new diff at host-side path
+	// Open disk as base+diff: disk image (from snapshot) → blk1 base
+	// (read-only); new diff at host-side path.
 	var baseReader vhost.BlockReader
 	switch scheme {
 	case "file":
@@ -389,7 +343,7 @@ func Run(ctx context.Context, opts Options) (int, error) {
 		defer fr.Close()
 		baseReader = fr
 	case "manifest":
-		fc, sz, err := sandbox.OpenManifestFetcher(ctx, diskValue, opts.AccelRuntime)
+		fc, sz, err := sandbox.OpenManifestStream(ctx, diskValue, opts.Fetcher)
 		if err != nil {
 			return -1, fmt.Errorf("open manifest disk base: %w", err)
 		}
@@ -415,10 +369,7 @@ func Run(ctx context.Context, opts Options) (int, error) {
 	defer cow.Close()
 
 	// blk0 — same rootfs as cold-start (from host yaml or snap.cfg).
-	// Same scheme dispatch as overlay base above: file:// → mmap;
-	// manifest:// → fetch.Fetcher via cache-ctl. The OpenFileReader-
-	// only path was a v1 leftover that broke as soon as snapshots
-	// got uploaded with manifest:// blk0.
+	// file:// → mmap; manifest:// → fetch.Fetcher via cache-ctl.
 	blk0Path := snapCfg.Boot.Root.Base
 	if opts.HostCfg.Boot.Root.Base != "" {
 		blk0Path = opts.HostCfg.Boot.Root.Base
@@ -437,10 +388,10 @@ func Run(ctx context.Context, opts Options) (int, error) {
 		defer fr.Close()
 		blk0Reader = fr
 	case "manifest":
-		if opts.AccelRuntime == nil {
-			return -1, fmt.Errorf("restore: manifest:// blk0 requires AccelRuntime")
+		if opts.Fetcher == nil {
+			return -1, fmt.Errorf("restore: manifest:// blk0 requires Fetcher")
 		}
-		fc, sz, err := sandbox.OpenManifestFetcher(ctx, blk0Value, opts.AccelRuntime)
+		fc, sz, err := sandbox.OpenManifestStream(ctx, blk0Value, opts.Fetcher)
 		if err != nil {
 			return -1, fmt.Errorf("open blk0 (manifest): %w", err)
 		}
@@ -449,214 +400,109 @@ func Run(ctx context.Context, opts Options) (int, error) {
 		return -1, fmt.Errorf("restore: unknown blk0 scheme %q", blk0Scheme)
 	}
 
-	srv0 := vhost.NewServer(blk0Sock, &vhost.ReadOnlyBackend{R: blk0Reader}, logf)
-	srv0.EnableStats("blk0", blk0Path)
-	srv0.SetMemfd(memfd.Inode(), memfd.Bytes())
-	if err := srv0.Listen(); err != nil {
-		return -1, err
-	}
-	srv1 := vhost.NewServer(blk1Sock, &vhost.CowBackend{C: cow}, logf)
-	srv1.EnableStats("blk1", snapCfg.Boot.Root.Overlay.Diff)
-	srv1.SetMemfd(memfd.Inode(), memfd.Bytes())
-	if err := srv1.Listen(); err != nil {
-		srv0.Stop()
-		return -1, err
-	}
+	// The shared back-half (memfd, uffd va_report handler, vhost-blk
+	// backends, the launch server — incl. the guest→host mem_report /
+	// app_exited channel that was missing on the restore path — pinger,
+	// ctl.sock, signal escalation, stats) lives in sandbox.ServeAndWait.
+	// Restore supplies: a snapshot uffd Source (not ZeroSource), a
+	// placeholder launch spec (the guest does NOT re-hello after a
+	// restore, so WireLaunchMUX=false — the stdio MUX is re-established
+	// by PostSpawn over the reverse channel), and a settle protocol of
+	// waitAPI → /vm.resume → restore{epoch} → SettledRestore.
+	return sandbox.ServeAndWait(sandbox.VMParams{
+		Ctx:                ctx,
+		SandboxID:          opts.SandboxID,
+		RunDir:             runDir,
+		Logf:               logf,
+		StdioMode:          opts.StdioMode,
+		PingFatalThreshold: opts.PingFatalThreshold,
+		StartUnixNs:        startUnixNs,
+		StatsJSONPath:      opts.StatsJSONPath,
 
-	// Pinger drives the host→guest health probe across the restored
-	// sandbox lifetime (§9.1.4). Started after the restore notification
-	// is acked; paused around any subsequent snapshot quiesce window.
-	pinger := &sandbox.Pinger{
-		Client: &sandbox.HostClient{BasePath: vsockSock, Logf: logf},
-		Stats:  &sandbox.PingStats{},
-		Logf:   logf,
-	}
-	defer pinger.Stop()
+		CapBytes:   int64(capBytes),
+		UffdSource: source,
+		Blk0Reader: blk0Reader,
+		Blk0Label:  "blk0",
+		Blk0Path:   blk0Path,
+		Cow:        cow,
+		Blk1Label:  "blk1",
+		Blk1Path:   snapCfg.Boot.Root.Overlay.Diff,
 
-	// ctl.sock server — same protocol as Run, lets `sandbox-ctl
-	// snapshot --sandbox-id <sid>` work against a restored sandbox.
-	ctlSockPath := filepath.Join(runDir, "ctl.sock")
-	snapHandler := &sandbox.SnapshotHandler{
-		Cfg:         &snapCfg,
-		ManifestCfg: nil, // restore.Run owns AccelRuntime via opts; ManifestCfg only needed for ChunkConfig
-		Memfd:       memfd,
+		LaunchSpec:    &proto.LaunchSpec{},
+		WireLaunchMUX: false,
+		Balloon:       balloonCtl,
+		Hooks:         hooks,
+
+		SnapCfg:     &snapCfg,
+		ManifestCfg: opts.ManifestCfg,
 		DiffPath:    diffPath,
-		Srv0:        srv0,
-		Srv1:        srv1,
-		CHSock:      chSock,
-		RunDir:      runDir,
-		Accel:       opts.AccelRuntime,
-		Pinger:      pinger,
-		Logf:        logf,
-	}
-	// ManifestCfg is needed for chunker config in upload mode. The host
-	// passes it via the option; if absent, --upload from a restored
-	// sandbox will fail with a clear message.
-	if opts.ManifestCfg != nil {
-		snapHandler.ManifestCfg = opts.ManifestCfg
-	}
-	ctlSrv := &snapshot.Server{
-		Path:    ctlSockPath,
-		Logf:    logf,
-		Handler: snapHandler.Handle,
-	}
-	if err := ctlSrv.Listen(); err != nil {
-		srv0.Stop()
-		srv1.Stop()
-		return -1, fmt.Errorf("ctl.sock listen: %w", err)
-	}
-	defer ctlSrv.Stop()
 
-	backendCtx, cancelBackends := context.WithCancel(ctx)
-	defer cancelBackends()
-	var wg sync.WaitGroup
-	wg.Add(4)
-	go func() { defer wg.Done(); _ = srv0.Serve(backendCtx) }()
-	go func() { defer wg.Done(); _ = srv1.Serve(backendCtx) }()
-	go func() { defer wg.Done(); _ = vaSrv.Serve(backendCtx) }()
-	go func() { defer wg.Done(); _ = ctlSrv.Serve(backendCtx) }()
+		BuildCmd: func(e sandbox.CmdEnv) (*exec.Cmd, func(), error) {
+			// CH 51 `--restore source_url=file://<dir>` replaces
+			// --kernel/--vsock; --console/--serial are restored from the
+			// snapshot bundle (taken with `--console tty --serial off`),
+			// so we don't repeat them. consoleArg is unused here.
+			cmd := exec.CommandContext(ctx, opts.CHBinary)
+			_, cleanup, err := opts.StdioMode.SetupCHStdio(cmd)
+			if err != nil {
+				return nil, nil, fmt.Errorf("stdio: %w", err)
+			}
+			cmd.Args = append(cmd.Args, "--api-socket", e.CHSock, "--restore", "source_url=file://"+stateDir)
+			logf("spawning %s --api-socket %s --restore source_url=file://%s",
+				opts.CHBinary, e.CHSock, stateDir)
+			return cmd, cleanup, nil
+		},
 
-	// Build CH cmdline for restore. CH 51 supports
-	// `--restore source_url=file://<dir>` as a separate flag from
-	// --kernel; we use it instead of --kernel/--vsock.
-	args := []string{
-		"--api-socket", chSock,
-		"--restore", "source_url=file://" + stateDir,
-	}
-	logf("spawning %s --api-socket %s --restore source_url=file://%s",
-		opts.CHBinary, chSock, stateDir)
-	cmd := exec.CommandContext(ctx, opts.CHBinary, args...)
-	stdioCleanup, err := opts.StdioMode.Apply(cmd)
-	if err != nil {
-		return -1, fmt.Errorf("stdio: %w", err)
-	}
-	defer stdioCleanup()
-	cmd.ExtraFiles = []*os.File{memfd.File()}
+		// Restore settle (docs/sandbox.md §7 T14-T15): wait for CH's
+		// API, /vm.resume to release the vCPUs from the snapshot point,
+		// then notify the guest (restore{epoch=1}) and turn that
+		// reverse-channel conn into the stdio MUX. Synchronous — a
+		// non-nil return aborts the run (ServeAndWait kills CH); we
+		// don't hand back a sandbox whose guest agent is unreachable.
+		PostSpawn: func(pc sandbox.PostSpawnCtx) error {
+			if err := waitAPI(pc.CHSock, 30*time.Second); err != nil {
+				return fmt.Errorf("ch api not ready: %w", err)
+			}
+			if err := chAPI(pc.CHSock, "PUT", "/api/v1/vm.resume", ""); err != nil {
+				return fmt.Errorf("vm.resume: %w", err)
+			}
+			pc.Logf("VM resumed, vCPU running")
 
-	sigCh := make(chan os.Signal, 4)
-	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
-	defer signal.Stop(sigCh)
-
-	if err := cmd.Start(); err != nil {
-		cancelBackends()
-		wg.Wait()
-		return -1, fmt.Errorf("spawn CH: %w", err)
-	}
-	logf("CH started pid=%d", cmd.Process.Pid)
-
-	// CH /vm.restore needs a preceding /vm.create — actually restore
-	// flow expects: spawn → /vm.create with restore section → /vm.boot
-	// or auto. Wait for api socket to be ready.
-	if err := waitAPI(chSock, 30*time.Second); err != nil {
-		_ = cmd.Process.Kill()
-		return -1, fmt.Errorf("ch api not ready: %w", err)
-	}
-	// `--restore source_url=...` on the CLI causes CH to auto-load
-	// the snapshot bundle into a paused VM at startup. We just need
-	// /vm.resume to release the vCPUs.
-	if err := chAPI(chSock, "PUT", "/api/v1/vm.resume", ""); err != nil {
-		_ = cmd.Process.Kill()
-		return -1, fmt.Errorf("vm.resume: %w", err)
-	}
-	logf("VM resumed, vCPU running")
-	startUnixNs := time.Now().UnixNano()
-
-	// Notify guest agent of the restore (§7.1 T13a). The guest's
-	// reverse-channel listener was preserved across the snapshot
-	// (§9.1.5), so the first dial after vm.resume should land in
-	// kernel-microseconds. Failure here aborts restore — we don't
-	// want to hand back a sandbox whose guest agent is unreachable.
-	tRestore := time.Now()
-	if err := sandbox.SendRestore(pinger.Client, 1); err != nil {
-		_ = cmd.Process.Kill()
-		return -1, fmt.Errorf("notify restore: %w (guest agent unreachable)", err)
-	}
-	logf("restore notify acked in %dµs; starting ping ticker",
-		time.Since(tRestore).Microseconds())
-	pinger.Start(backendCtx)
-	// Restore-path settled trigger (docs/sandbox.md §10.1):
-	// SendRestore returning nil means guest replied `restored` ack,
-	// equivalent to cold-start `hello` from the controller's POV. Unlike
-	// cold start we do NOT shrink balloon — restored allocatable is
-	// preserved as-is. SettledRestore writes memory.high in BOTH static
-	// and dynamic modes (deferred from JoinCgroup; Issue 4 root cause).
-	if hooks != nil {
-		if err := hooks.SettledRestore(); err != nil {
-			logf("settled-restore: %v (continuing)", err)
-		}
-		if hooks.Enabled() {
-			hooks.StartHeartbeat(backendCtx, 5*time.Second)
-			hooks.StartSensor(backendCtx, 64<<20)
-		}
-	}
-
-	doneCh := make(chan error, 1)
-	go func() { doneCh <- cmd.Wait() }()
-	for {
-		select {
-		case sig := <-sigCh:
-			logf("received %v, signalling CH", sig)
-			_ = cmd.Process.Signal(syscall.SIGTERM)
-		case waitErr := <-doneCh:
-			cancelBackends()
-			wg.Wait()
-			exit := 0
-			if waitErr != nil {
-				if exitErr, ok := waitErr.(*exec.ExitError); ok {
-					exit = exitErr.ExitCode()
-				} else {
-					return -1, fmt.Errorf("CH wait: %w", waitErr)
+			tRestore := time.Now()
+			muxConn, muxSpec, err := sandbox.OpenMUXViaRestore(pc.Pinger.Client, 1, proto.DeadlineRestore)
+			if err != nil {
+				return fmt.Errorf("notify restore: %w (guest agent unreachable)", err)
+			}
+			if err := pc.EstablishMUX(muxConn, muxSpec); err != nil {
+				return fmt.Errorf("stdio MUX bridge: %w", err)
+			}
+			pc.Logf("restore notify acked in %dµs (stdio MUX re-established: tty=%v); starting ping ticker",
+				time.Since(tRestore).Microseconds(), muxSpec.TTY)
+			pc.Pinger.Start(pc.Ctx)
+			// Balloon reconcile: idempotent — if initialAlloc ==
+			// allocAtSnap, target matches what CH loaded from state.json.
+			if pc.Balloon != nil {
+				if err := pc.Balloon.Start(pc.Ctx); err != nil {
+					pc.Logf("balloon: start: %v", err)
 				}
 			}
-			logf("CH exited code=%d", exit)
-			_, _ = srv0.WriteStatsTo(os.Stderr)
-			_, _ = srv1.WriteStatsTo(os.Stderr)
-			uffdHandlerMu.Lock()
-			h := uffdHandler
-			uffdHandlerMu.Unlock()
-			if h != nil {
-				dumpUffdStats(os.Stderr, h.Stats())
-			}
-			if opts.StatsJSONPath != "" {
-				bundle := sandbox.StatsBundle{
-					Servers:     []*vhost.Server{srv0, srv1},
-					StartUnixNs: startUnixNs,
-					EndUnixNs:   time.Now().UnixNano(),
+			// Restore-path settled trigger (docs/sandbox.md §10.1):
+			// restore_ack is the controller's equivalent of cold-start
+			// hello. Writes memory.high (deferred from JoinCgroup —
+			// Issue 4) using allocatable_now; corrects balloon only when
+			// initialAlloc != allocAtSnap.
+			if pc.Hooks != nil {
+				if err := pc.Hooks.SettledRestore(allocAtSnap); err != nil {
+					pc.Logf("settled-restore: %v (continuing)", err)
 				}
-				if h != nil {
-					bundle.Uffd = h.Stats()
-					if cap, err := snapCfg.CapacityMemoryBytes(); err == nil {
-						bundle.UffdRAMSize = int64(cap)
-					}
-				}
-				if pinger.Stats != nil {
-					snap := pinger.Stats.Snapshot()
-					bundle.Ping = &snap
-				}
-				if err := sandbox.WriteStatsJSON(opts.StatsJSONPath, bundle); err != nil {
-					logf("stats json write %s: %v", opts.StatsJSONPath, err)
-				} else {
-					logf("stats json written to %s", opts.StatsJSONPath)
+				if pc.Hooks.Enabled() {
+					pc.Hooks.StartHeartbeat(pc.Ctx, 5*time.Second)
+					pc.Hooks.StartSensor(pc.Ctx, 64<<20)
 				}
 			}
-			return exit, nil
-		}
-	}
-}
-
-func dumpUffdStats(w io.Writer, s map[string]uint64) {
-	fmt.Fprintln(w, "[uffd-stats]")
-	keys := []string{
-		"faults_absent", "faults_released",
-		"zeropage_calls", "copy_calls",
-		"pages_zeroed", "pages_copied",
-		"wakes", "remove_events", "remove_q_dropped", "remove_events_batched",
-		"madvise_calls", "madvise_bytes", "backend_lookup_miss", "errors",
-		"batch_calls", "batch_pages_total", "batch_avg_pages", "batch_max_pages",
-	}
-	for _, k := range keys {
-		fmt.Fprintf(w, "  %-20s %d\n", k, s[k])
-	}
+			return nil
+		},
+	})
 }
 
 func waitAPI(sock string, deadline time.Duration) error {
