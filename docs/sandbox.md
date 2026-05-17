@@ -33,8 +33,8 @@ handler、cgroup/balloon 联动(含 host 端 BalloonController)、与 node-ctl
        │   uffd handler  +  va_report UDS server │
        │   resource executor   → node-ctl        │
        │   BalloonController   → CH vm.resize    │
-       │   link: pkg/fetch     → cache-ctl wire  │
-       │   link: pkg/ingest    → store-ctl gRPC  │   (snapshot upload only)
+       │   link: manifest.Fetcher  → cache-ctl   │
+       │   link: manifest.Ingester → store-ctl   │   (snapshot upload only)
        └──────┬────────────┬────────────┬────────┘
               │ vhost      │ vhost      │ CH API UDS
               │ blk0       │ blk1       │
@@ -50,8 +50,9 @@ handler、cgroup/balloon 联动(含 host 端 BalloonController)、与 node-ctl
        /var/lib/sandbox/<sid>/snap/          snapshot / restore staging dir
 ```
 
-sandbox-ctl 是 CH 的父进程。CH 退出 → sandbox-ctl 收 SIGCHLD → 优雅
-cleanup → 自身退出。退出码 = CH 退出码(经映射)。
+sandbox-ctl 是 CH 的父进程。CH 退出 → sandbox-ctl 收 SIGCHLD → 优雅 cleanup →
+自身退出。退出码:优先用 guest 经 vsock 上报的 `app_exited{code, term_signal}`
+(应用退出码 / 128+signal);拿不到时回退 CH 退出码映射。
 
 ### 1.2 设计原则
 
@@ -78,6 +79,7 @@ cleanup → 自身退出。退出码 = CH 退出码(经映射)。
 |------|---------|------------|
 | CH 崩溃 | sandbox-ctl 收 SIGCHLD | 整 sandbox 销毁 |
 | sandbox-ctl 崩溃 | CH 失去父进程 + uffd handler 没了 | vCPU 卡 fault → 上层 supervisor SIGKILL CH |
+| stdio MUX 连接断(vsock 异常) | 应用 stdio 转发中断(应用因反压在 write 上阻塞) | sandbox-ctl 拨新连接 `attach` 重建并续传;`attach` 也失败 → 计入指标,由上层决策 |
 | node-ctl 不可达(动态控制模式) | 长连断 | 退避重连 5×;持续 60s 失败切到无控制器降级模式 |
 | 单沙箱 OOM | guest 内进程被 kill;deflate_on_oom 释放 balloon | 非平台级故障 |
 | 资源开销 | sandbox-ctl Go runtime ~10-15 MiB;CH 自身 ~13 MiB | blk1.diff 是 sparse 文件,实际 = 已写 sectors |
@@ -124,48 +126,70 @@ sandbox-ctl run [flags]
                           = 冷启动模式。restore 模式下 sandbox.yaml 字段语义
                           见 §11.0
 
-  # stdio 模型(冷启动 + 恢复模式都生效)
-  --stdin                 默认关闭。`--stdin` 或 `--stdin=true` 让沙箱继承
-                          sandbox-ctl 进程的 stdin
-  --stdout                默认开启,继承 sandbox-ctl stdout。`--stdout=false` 关闭
-                          (重定向到 /dev/null)
-  --stderr                默认开启,继承 sandbox-ctl stderr。`--stderr=false` 关闭
-  --stdin-from <file>     把 <file> 当作沙箱的 stdin(隐含 `--stdin=true`)
-  --stdout-to <file>      把沙箱 stdout 写到 <file>(隐含 `--stdout=true`)
-  --stderr-to <file>      把沙箱 stderr 写到 <file>(隐含 `--stderr=true`)
-  --tty                   创建一对 pty,slave 同时给 CH 的 stdin/stdout/stderr,
-                          master 桥接到 sandbox-ctl 当前 controlling tty
-                          (适用于交互式调试;终端 Ctrl-C / Ctrl-D 直达 guest)
+  # 应用 stdio(冷启动 + 恢复模式都生效;详见 docs/sandbox-runtime.md §3.5 / §4.5)
+  #
+  # 应用的 stdin/stdout/stderr(或一个伪终端)经 vsock MUX 与 sandbox-ctl 双向
+  # 转发,不与内核 dmesg 混流。CH 进程自身的 stdio:stdin = /dev/null、stdout =
+  # 一根匿名管道(承载内核 dmesg via hvc0)、stderr = sandbox-ctl 的 stderr。
+  --tty                   给应用一个真伪终端(guest 内 openpty;isatty()=true、
+                          有 job control、收 SIGWINCH),并把 sandbox-ctl 的控制
+                          终端切到 raw 模式、与该伪终端逐字节桥接;SIGWINCH 经
+                          MUX control 流推给 guest。默认值 = auto-detect:stdin 和
+                          stdout 都是终端时为 true,否则 false。显式 --tty 但 stdin
+                          或 stdout 不是终端 → 报错退出。raw 模式下键盘 ^C(0x03)
+                          作为字节穿到 guest 伪终端、由 guest 行规程转 SIGINT 给
+                          应用;杀沙箱另走 SIGTERM(kill <pid> / systemctl stop)
+  --stdin                 pipe 模式(--tty=false):默认关闭,应用 fd 0 = /dev/null。
+                          --stdin / --stdin=true 让应用 stdin 接 sandbox-ctl 的 stdin
+  --stdout                pipe 模式:默认开启,应用 stdout → sandbox-ctl stdout。
+                          --stdout=false 关闭(丢弃)
+  --stderr                pipe 模式:默认开启,应用 stderr → sandbox-ctl stderr。
+                          --stderr=false 关闭
+  --stdin-from <file>     pipe 模式:应用 stdin 读自 <file>(隐含 --stdin=true)
+  --stdout-to <file>      pipe 模式:应用 stdout 写到 <file>(隐含 --stdout=true)
+  --stderr-to <file>      pipe 模式:应用 stderr 写到 <file>(隐含 --stderr=true)
+
+  # guest 内核 dmesg(与应用 stdio 完全独立的一条道)
+  --console <mode>        guest 内核控制台(hvc0)的去向。off:给 CH --console off,
+                          丢弃;default(默认):写 sandbox-ctl 的 stderr(--tty raw
+                          模式下做 \n→\r\n 转换);file=<path>:写 <path>
 ```
 
-**行为**:阻塞前台运行,直到 CH 退出或收到 SIGTERM/SIGINT。退出码 = CH exit
-code(0 = 正常 reboot,非 0 = panic/crash)。
+**行为**:阻塞前台运行,直到 CH 退出或收到 SIGTERM/SIGINT。退出码:应用正常退出 →
+应用退出码;应用被信号杀 → 128+signal;guest panic / CH 异常退出 → CH 退出码映射。
+应用退出码来自 guest 经 vsock 发的 `app_exited{code, term_signal}`(见
+[`sandbox-runtime.md`](sandbox-runtime.md) §4.3);拿不到时回退 CH 退出码。
 
-**stdio 决策**:
+**进程组与信号**:sandbox-ctl spawn CH 时给它一个新进程组(`Setpgid`),CH 因此不在
+sandbox-ctl 控制终端的前台进程组——终端产生的 `^C` / `^\` / `^Z` 不会直达 CH。host
+信号(SIGTERM/SIGINT)由 sandbox-ctl 统一处理(只在此一处注册),收到即转发 SIGTERM
+给 CH、宽限后 SIGKILL(与 [`sandbox-runtime.md`](sandbox-runtime.md) §3.3 的退出
+序列衔接)。`--tty` raw 模式下终端是 raw 的、`^C` 不产生 SIGINT(见上);非 raw 模式
+下 `^C` 正常触发上述 SIGTERM 升级链。
 
-| 流 | 默认 | `--tty` | `--xxx=false` | `--xxx-{from,to}=F` |
-|---|---|---|---|---|
-| stdin | /dev/null | pty slave | /dev/null | open(F, O_RDONLY) |
-| stdout | os.Stdout | pty slave | /dev/null | open(F, O_WRONLY\|O_CREATE\|O_APPEND, 0644) |
-| stderr | os.Stderr | pty slave | /dev/null | 同 stdout |
+**stdio 决策表**:
+
+| 模式 | 应用 fd 0/1/2 | MUX 流 |
+|---|---|---|
+| `--tty`(或 auto-detect 命中) | guest 伪终端从端(stdout/stderr 合并) | 1 条 PTY 流 + control 流 |
+| pipe 默认(stdin 关) | 0=/dev/null,1→sandbox-ctl stdout,2→sandbox-ctl stderr | STDOUT + STDERR + control 流 |
+| pipe + `--stdin` / `--stdin-from` | 0 = sandbox-ctl stdin / open(F, O_RDONLY) | + STDIN 流 |
+| pipe + `--stdout=false` / `--stderr=false` | 该流不开,应用对应 fd 由 guest 接 /dev/null | 去掉对应流 |
+| pipe + `--stdout-to` / `--stderr-to` = F | sandbox-ctl 把该流写 open(F, O_WRONLY\|O_CREATE\|O_APPEND, 0644) | 不变 |
 
 互斥规则:
 
 - `--tty` 与 `--stdin` / `--stdout` / `--stderr` / `--stdin-from` / `--stdout-to`
-  / `--stderr-to` 中任一显式赋值互斥(`--tty` 包打全部三流)
-- `--stdin=false` 与 `--stdin-from` 互斥
-- `--stdout=false` 与 `--stdout-to` 互斥
-- `--stderr=false` 与 `--stderr-to` 互斥
+  / `--stderr-to` 中任一显式赋值互斥(`--tty` 是伪终端模式,没有分流概念)
+- 显式 `--tty`(或 `--tty=true`)但 stdin 或 stdout 不是终端 → 报错(host 侧 pty
+  无意义,见 [`sandbox-runtime.md`](sandbox-runtime.md) §3.5)
+- `--stdin=false` 与 `--stdin-from` 互斥;`--stdout=false` 与 `--stdout-to` 互斥;
+  `--stderr=false` 与 `--stderr-to` 互斥
 
-**guest console 行为**:sandbox-ctl 自身的日志写 `os.Stderr`(单行
-`[sandbox-ctl ...]` 前缀)。CH 子进程通过 `cmd.Stdout/Stderr` 继承 sandbox-ctl
-的 stdio(按上面 stdio 决策表选择来源);CH 启动时带 `--console tty --serial null`,
-所以 guest 通过 `/dev/console` 或 hvc0 的写入会随 CH 的 stdio 一并进入选定目的地。
-
-guest 内核启动消息 + 任何写到 hvc0 的内容是否真的出现在选定目的地,取决于
-用户 sandbox.yaml `boot.cmdline` 是否写了 `console=hvc0`(平台不自动注入)。
-静默场景(密度部署、stdout 容量受限)省略 `console=` 即可;此时 guest 没有
-active console 设备,sandbox-ctl 的 stdio 上只剩下自身日志。
+**sandbox-ctl 自身日志**:写 `os.Stderr`,单行 `[sandbox-ctl ...]` 前缀;`--tty` raw
+模式下经 `\n`→`\r\n` 转换后再写(否则在 raw 终端上阶梯状错位)。`--console default`
+透传的内核 dmesg 同样在写 raw 终端前做 `\n`→`\r\n`;应用的 PTY 流原样透传(guest 那侧
+伪终端的 ONLCR 已把 `\r\n` 加好)。
 
 **恢复模式**:`--restore=<file_path|manifest://hex>` 让 sandbox-ctl 走恢复路径
 (详见 §7)。`<ref>` 形式:
@@ -243,7 +267,7 @@ network:
 boot:
   kernel: file:///opt/sandbox/vmlinux              # 仅冷启动需要
   runtime: file:///opt/sandbox/sandbox-runtime.erofs  # 仅 file://
-  cmdline: "console=hvc0"
+  cmdline: ""                                      # 追加项(quiet/loglevel= 等);init=/root=/console=hvc0 平台已自动注入
   root:
     base: file:///container-snapshot.erofs    # 自动挂为 disk0(vhost-user-blk ro)
                                               # flattened image,尾部附加的 zip 内含
@@ -277,20 +301,18 @@ launch:
 **自动注入的 kernel cmdline**(用户不写、不可改):
 
 ```
-init=/sbin/init root=/dev/pmem0 ro rootfstype=erofs dax=always
+init=/sbin/init root=/dev/pmem0 ro rootfstype=erofs dax=always console=hvc0
 ```
 
 锁定 `sandbox-runtime.erofs` 通过 virtio-pmem DAX 挂为 `/`、由 `/sbin/init`
-(sandbox-init 二进制)接管。`boot.cmdline` 的内容追加在后,用户控制 `console=`、
-`quiet` 等。
+(sandbox-init 二进制)接管;`console=hvc0` 让内核 dmesg 走 virtio-console(CH
+`--serial off`,没有 8250 UART)。`boot.cmdline` 的内容追加在后,用户控制 `quiet`
+/ `loglevel=` 等(`console=` 与 `init=` / `root=` 已被平台占用,用户不应再写)。
 
-**`console=hvc0` 的语义**:平台**不**自动注入。CH 启动时已经带
-`--console tty --serial null`(把 hvc0 接到 CH 进程 stdio,8250/virtio-serial
-关掉),`console=hvc0` 是 guest kernel 端"是否绑定 hvc0 作为 active console"
-的开关。用户写了:kernel 启动消息 + 任何对 `/dev/console` / hvc0 的写入都通过
-CH stdio 回传到 sandbox-ctl 选定的目的地(详见 §2.2 stdio 决策)。用户没写:
-guest 没有 active console,sandbox-ctl stdio 上只有 sandbox-ctl 自身日志,
-适合密度部署 / stdout 容量受限场景。
+**guest 内核 dmesg 的去向**:CH 把 hvc0 写到 CH 进程的 stdout = sandbox-ctl 给它
+的一根匿名管道;sandbox-ctl 按 `run --console` 标志决定丢弃(`off`)/ 写 stderr
+(`default`,密度部署 / stdout 容量受限场景照样可以 `off`)/ 写文件(`file=<path>`),
+详见 §2.2。应用的 stdin/stdout/stderr 是另一条道(vsock MUX),不混入内核 dmesg。
 
 **网络配置不进 cmdline**:IP/Gateway/Hostname/Interface 通过 vsock launch 协议
 下发给 sandbox-init;phase 2 由 sandbox-init 用 raw netlink 配置(IFF_UP +
@@ -483,10 +505,13 @@ T13  起 va_report UDS server: listen /run/<sid>/uffd.sock
 T14  起 ctl.sock UDS server: listen /run/<sid>/ctl.sock(snapshot 请求入口)
 T15  构造 CH 命令行(详见 §5.2):
      `--memory-zone size=<ramSize>,shared=on,fd=3,uffd_socket=/run/<sid>/uffd.sock`
-     `--console tty --serial null`(guest hvc0 接 CH 自己的 stdio,8250 关掉)
+     `--console tty --serial off`,cmdline `... console=hvc0`(内核 dmesg 走 hvc0)
      cmd.ExtraFiles = [memfd] 让 fd=3 在 CH 进程中可见
-     cmd.Stdin/Stdout/Stderr 按 §2.2 stdio 决策接线
-T16  fork+exec cloud-hypervisor (patched),捕获 stdout/stderr
+     CH 进程 stdio:stdin = /dev/null(CH 因此不 raw 化任何宿主终端)、
+     stdout = 一根匿名管道(承载 hvc0 dmesg,sandbox-ctl 按 `--console` 决定去向)、
+     stderr = sandbox-ctl 的 stderr;cmd.SysProcAttr.Setpgid = true(CH 不在
+     sandbox-ctl 控制终端的前台进程组)
+T16  fork+exec cloud-hypervisor (patched),读 CH 的 stdout(dmesg 管道)+ 转发 stderr
 T17  CH (patched) 启动:
      T17a 解析 --memory-zone fd=3 → 跳过 memfd_create,mmap 同一 inode → chVA
      T17b userfaultfd() → uffd_C(绑到 CH 的 mm)
@@ -506,8 +531,18 @@ T18  va_report server 收到 sendmsg:
      T18c epoll_create1 → add uffd_C → 起 reader + N worker
      T18d 回 ack 给 CH
 T19  Guest 内 kernel 启动 → mount /dev/pmem0 → exec /sbin/init = sandbox-init
-     sandbox-init 三阶段(详见 sandbox-runtime.md §3)
+     sandbox-init 三阶段(详见 sandbox-runtime.md §3):
+     T19a phase 1 mount + overlay + chroot;AF_VSOCK bind+listen :5000
+     T19b phase 2 dial host:5000 → hello → host 回 launch{spec, stdio} → guest 备好
+          app stdio(tty: openpty / pipe: socketpair)→ launch_ack{stdio} → host 回 ack
+          → **这条连接升级为 stdio MUX**;host 发一次初始 SET_WINSIZE,起 app stdio
+          桥接,ping ticker start;guest fork/exec user app(app fd 0/1/2 = 伪终端从端
+          或 pipe 子端)→ 短连接发 app_started{pid}
+     T19c phase 3 supervisor + 反向 listener(ping/restore/quiesce/attach)+ mem_report
 T20  vCPU 跑过程中:
+     · stdio MUX:STDIN / STDOUT / STDERR(或 PTY)+ WINDOW_UPDATE / SET_WINSIZE
+       帧在 sandbox-ctl ↔ sandbox-init 间双向流动;MUX 因故断 → sandbox-ctl 拨新
+       连接发 attach 重建(详见 sandbox-runtime.md §4.5 / §4.6)
      · vCPU 首次访问页 → uffd_C MISSING fault → handler 走 Absent → ZEROPAGE
      · backend 访问 backendVA → kernel 默认 shmem 缺页:folio 已存在(handler 装的)→
        直接装 sandbox-ctl mm PTE,无 uffd 事件
@@ -521,7 +556,8 @@ T20  vCPU 跑过程中:
 T21  user app 退出 → sandbox-init reboot → CH vCPU shutdown → CH 进程退出
 T22  sandbox-ctl cmd.Wait() 返回
 T23  cleanup:停 backend / 关 uffd / munmap / unlink sockets / 移除 cgroup
-T24  sandbox-ctl 退出,exit code = CH exit code
+T24  sandbox-ctl 退出,exit code = guest 上报的 app_exited{code,term_signal}(应用退出码
+     / 128+signal);拿不到时回退 CH exit code
 ```
 
 **关于冷启动 uffd 开销**:每个首次访问页要走一次 uffd 往返,单次 ~5-10 µs。
@@ -542,9 +578,17 @@ cloud-hypervisor \
   --vsock       cid=3,socket=/run/<sid>/vsock.sock \
   --net         tap=tap0,mac=<auto>,iommu=off \
   --console     tty \
-  --serial      null \
+  --serial      off \
   --cmdline     "init=/sbin/init root=/dev/pmem0 ro rootfstype=erofs dax=always
                  console=hvc0"
+
+# CH 进程的 stdio(sandbox-ctl 设置):
+#   stdin  = /dev/null            ← 关键:CH 的 --console tty 只在 stdin 是终端时才会
+#                                     raw 化那个终端;接 /dev/null 故 CH 不碰任何终端
+#   stdout = 匿名管道(os.Pipe)    ← 承载内核 dmesg(经 hvc0);sandbox-ctl 从读端拿到,
+#                                     按 run --console 决定去向(§2.2)
+#   stderr = sandbox-ctl 的 stderr ← CH 自己的 WARN
+#   ExtraFiles[0] = memfd → CH 见 fd=3(--memory-zone fd=3)
 ```
 
 要点:
@@ -559,14 +603,21 @@ cloud-hypervisor \
   vCPU 跑(详见 [`cloud-hypervisor.md`](cloud-hypervisor.md))
 - `--pmem discard_writes=on` 让 guest 写 pmem 不影响 host 文件
 - blk0 readonly=on 在 vhost-user 协议层告知 guest 这是只读盘
-- `--vsock cid=3,socket=...`:CH 创建 virtio-vsock 设备,guest CID=3,
-  通过 hybrid 代理把 guest port 5000 流量映射到 host UDS
-- `--console tty`:guest 通过 `/dev/console`(或 hvc0,见 cmdline)写出的内容
-  走 CH 进程自身 stdio,sandbox-ctl 通过继承 stdio(`cmd.Stdout/Stderr`)按
-  §2.2 stdio 决策表传到选定目的地。`--serial null` 关掉 8250 / virtio-serial
-  的兜底路径,避免双 console 输出
-- cmdline 中的 `console=hvc0` 是**用户可选**——平台不自动注入。不写则 guest
-  kernel 不绑定 hvc0,sandbox-ctl stdio 上就只有自身日志
+- `--vsock cid=3,socket=...`:CH 创建 virtio-vsock 设备,guest CID=3,通过 hybrid
+  代理把 guest port 5000 流量映射到 host UDS。承载控制面短连接(launch / ping /
+  app_started / app_exited / mem_report / quiesce / restore / attach),以及
+  launch / restore / attach 那条连接握手后升级而成的应用 stdio MUX(详见
+  [`sandbox-runtime.md`](sandbox-runtime.md) §4)
+- `--console tty`:CH 把 guest 的 virtio-console(hvc0)接到 CH 进程自身的 stdout。
+  sandbox-ctl 给 CH 的 stdout 是一根匿名管道,从读端拿到内核 dmesg 流,按
+  `run --console` 决定去向(§2.2)。CH 进程的 **stdin = /dev/null** 是关键——CH 的
+  `--console tty` 只在它自己的 stdin 是终端时才会 raw 化那个终端;stdin=/dev/null
+  故 CH 不碰任何终端(此前 `--tty` 路径下出现的"宿主 ^C 失灵"正是因为终端被 raw 化)。
+  CH 的 stderr = sandbox-ctl 的 stderr(CH 自己的 WARN)
+- `--serial off`:没有 8250 UART;内核控制台的唯一出口是 hvc0。应用的
+  stdin/stdout/stderr 不经此路,走 vsock MUX(详见
+  [`sandbox-runtime.md`](sandbox-runtime.md) §3.5 / §4.5)
+- cmdline 中的 `console=hvc0` 由平台自动注入(§3.1),内核 dmesg 始终走 hvc0
 
 ## 6. snapshot 数据流
 
@@ -608,7 +659,7 @@ cloud-hypervisor \
 **关键**:`<sid>.snapshot` 是**稀疏文件**——`stat.Size() = ramSize + zipSize`,
 但 `st_blocks * 512`(物理占用)= 驻留页数 × 4 KiB + ZIP 字节。一个 8 GiB
 sandbox 实际驻留 200 MiB → 文件物理 ~200 MiB。`tar`、`cp --sparse=auto`、
-`pkg/ingest` 都尊重稀疏(后者把空洞编码进 manifest.HoleExtent)。
+`manifest.Ingester` 都尊重稀疏(后者把空洞编码进 manifest.HoleExtent)。
 
 **单 zone 假设**:v1 限定单 memory zone。多 zone 扩展时格式扩展见 §14。
 
@@ -641,8 +692,13 @@ snapshot 在 overlay 内容不变时**自动写到同名文件**(覆盖,等价�
 T0  sandbox-ctl snapshot --sandbox-id <sid> [--output <out_dir>] [--upload]
 T1  通过 <run-dir>/<sid>/ctl.sock 联系目标 sandbox-ctl run 进程
 T2  目标进程串行:
-    T2a 通过 vsock 短连接发 quiesce 给 sandbox-init,等 quiesced 响应
-        (sandbox-init 完成 sync + drop_caches)
+    T2a 通过 vsock 短连接发 quiesce 给 sandbox-init,等 quiesced 响应。sandbox-init
+        收到后:sync + drop_caches → 停读应用 stdout/stderr(pty master)→ 在 stdio
+        MUX 上发起优雅关闭握手(sandbox-ctl 的 MUX 端响应 MUX_CLOSE_ACK 并读到 EOF
+        确认 MUX 已彻底关闭)→ 回 quiesced。quiesced 一回来即表示"MUX 已关、应用已
+        阻塞、guest 干净态",可继续 T2b;deadline(见 sandbox-runtime.md §4.9)内未
+        收到 quiesced → 视为协议失败,**放弃此次 snapshot**(绝不带半开 MUX 快照),
+        sandbox 继续运行
     T2b CH /vm.pause:vCPU 暂停,virtio 设备 quiesce
     T2c srv0.Quiesce() + srv1.Quiesce()(vhost-user-blk backend 排空 inflight)
 T3  CH /vm.snapshot { destination_url=file://<run-dir>/<sid>/snap-stage/ }
@@ -654,7 +710,7 @@ T4  overlay 处理:
     T4a 第一道扫:stream-hash blk1.diff → digest(SHA256 整字节流,hole=0)
     T4b 若 --output:用 <out_dir>/<digest>.overlay 为目标 sparse copy
         (SEEK_DATA/HOLE 驱动);overlay_ref = file://<digest>.overlay
-        若 --upload:跳过 hash + 写文件,直接走 pkg/ingest 流式喂 manifest store
+        若 --upload:跳过 hash + 写文件,直接走 manifest.Ingester 流式喂 store
         → overlay_manifest_key;overlay_ref = manifest://<overlay_manifest_key>
 T5  生成最终 snapshot.cfg(在内存中,§3.4 schema):
     resources.capacity:        从 sandbox 当前 SandboxConfig
@@ -670,7 +726,10 @@ T6  生成 <sid>.snapshot 内容:
                   stdout 输出 snapshot_manifest_key
     若 --output:写到 <out_dir>/<sid>.snapshot(稀疏文件 + ZIP 尾)
 T7  srv0.Resume() + srv1.Resume()
-T8  resume_after=true:CH /vm.resume,沙箱继续运行
+T8  resume_after=true:CH /vm.resume,沙箱继续运行;quiesce 时 guest 关了
+                  stdio MUX,这里 sandbox-ctl 拨新连接发 attach 重建之
+                  (attach_ack → per-stream window 重协商、winsize 重发、
+                  续传残留 + 应用 stdio;详见 sandbox-runtime.md §4.6)
     resume_after=false(默认):CH /vm.shutdown,等 CH 退出 → sandbox-ctl run
                   进程也退出
 T9  ctl.sock 回 snapshot_done
@@ -758,14 +817,19 @@ T8  state.json 直接写到 <run-dir>/<sid>/snap-state/
     本次 <run-dir>/<sid>/ 下的对应名)
 T9  memory 准备:同冷启动 §5.1 T6,**唯一差别** snapshotReader = SparseSnapshotSource
     或 ManifestSnapshotSource
-T10 blk0 + blk1 backend 起;launch server **不起**(restore 不再 launch);
+T10 blk0 + blk1 backend 起;launch server UDS(<vsock-base>_5000)同样起——restore
+    与冷启动共用同一后半段(memfd/uffd/blk/launch/pinger/ctl/信号/stats),仅 uffd
+    source、CH 命令行、settle 协议不同。**差别**仅在于 restore 不走 hello/launch 握手
+    (应用已在跑,该连接不升级 MUX),但 launch server 仍承接 guest→host 的周期
+    mem_report 与 app_exited 短连接(host 端 BalloonController 据此调 balloon);
     va_report UDS server 起,OnReady 内 adopt CH 送来的 uffd_C
 T11 spawn cloud-hypervisor (patched):
       --api-socket <run-dir>/<sid>/ch.sock
       --memory-zone size=<ramSize>,shared=on,fd=3,uffd_socket=<run-dir>/<sid>/uffd.sock
       --restore source_url=<run-dir>/<sid>/snap-state/
-      --console tty --serial null
-    cmd.Stdin/Stdout/Stderr 按 §2.2 stdio 决策接线
+      --console tty --serial off
+    CH 进程 stdio 同冷启动(§5.2):stdin=/dev/null、stdout=匿名管道(dmesg)、
+    stderr=sandbox-ctl stderr;Setpgid(CH 不在前台进程组)
 T12 CH (patched) 启动:同冷启动 T17a-T17c(创建 uffd_C,sendmsg va_report);
     fill_saved_regions 看到 user_managed zone 不在 ranges 表,自然空操作
     CH 进入 paused 状态
@@ -773,10 +837,17 @@ T13 sandbox-ctl 在 va_report 收到 sendmsg 后:
     addrMap.RegisterVMA(ProcessCH, chVA),起 epoll(uffd_C)+ worker pool,回 ack
 T14 sandbox-ctl 调 PUT /api/v1/vm.resume → vCPU 从 snapshot 时刻继续
     首访 RAM → fault → handler Absent 分支 → snapshotReader.ReadAt → UFFDIO_COPY
-T15 vsock 短连接发 restore{epoch=N} 给 sandbox-init(listener 跨快照保留),
-     等 restored 响应作为 guest agent ready 信号(单次 deadline 5 s);
-     收到 restored 后(re)start ping ticker;
-     deadline 到点未收到 → restore 失败回退:CH /vm.shutdown 并向调用方报错
+T15 vsock 连接发 restore{epoch=N, wallclock_ns} 给 sandbox-init(guest:5000 listener
+     跨快照保留),等 restore_ack{stdio, app_state} 响应作为 guest agent ready 信号
+     (单次 deadline 5 s)。CH 把快照里的 CLOCK_REALTIME 原样载回,guest 墙钟落后
+     整个静置区间;sandbox-init 收到 restore 后先 clock_settime 把 CLOCK_REALTIME
+     跳到 wallclock_ns(host 发送前一刻的墙钟,残留传播偏差亚毫秒),再回 ack——
+     应用解除阻塞前墙钟已纠正。单调时钟不受影响(Go 定时器、ping RTT、mem_report
+     ticker 照常)。restore_ack 是 attach_ack 的超集(含 channel 集合 + 应用状态)
+     外加"恢复完成"信号。**这条连接随后升级为新的 stdio MUX**:host 发一次初始
+     SET_WINSIZE,重建应用 stdio 桥接,per-stream window 重新协商,残留字节回放,
+     应用解除阻塞;然后(re)start ping ticker。deadline 到点未收到 restore_ack →
+     restore 失败回退:CH /vm.shutdown 并向调用方报错
 T16 vCPU 跑,fault 流转见 §8 uffd handler;balloon EVENT_REMOVE 同冷启动
 T17 user app 退出 / 接收外部信号 → 退出流程同冷启动
 ```
@@ -1046,8 +1117,8 @@ startup → settled,不进入 burst / recover;restoring 仅在快照恢复路径
 | **admitted** | 收到 Admit grant | reservation 占用预算,沙箱未启动 | 验证 cgroup_path,准备 socket |
 | **creating** | 开始创建 CH 等 | reservation 持有 | 拉起 CH、handshake |
 | **startup** | CH 已启动,等 launch hello | startup_burst.memory | 等 launch protocol hello |
-| **restoring** | CH /vm.restore + /vm.resume 完成,等 restore-ack | allocatable_at_snapshot 或降级值 | 调用 SendRestore 等 ack |
-| **settled** | hello 收到 / SendRestore 返回 nil | 渐缩到 floor + 工作集余量 | 周期上报 RSS;发 Settled |
+| **restoring** | CH /vm.restore + /vm.resume 完成,等 restore_ack | allocatable_at_snapshot 或降级值 | 发 `restore{epoch}` 等 `restore_ack`(该连接随后升级为新 stdio MUX) |
+| **settled** | hello 收到 / restore_ack 收到 | 渐缩到 floor + 工作集余量 | 周期上报 RSS;发 Settled |
 | **burst** | 检测到压力 | 申请扩展,可达 capacity | resize-balloon、改 memory.high |
 | **recover** | 压力消退 + 冷却 | 不主动收回,等被动回缩 | 继续上报 |
 
@@ -1056,8 +1127,9 @@ startup → settled,不进入 burst / recover;restoring 仅在快照恢复路径
 - **冷启动 startup → settled**:由 sandbox-init phase 2 拨号 launch server
   发 `hello` 消息触发——sandbox-init 在 mount/network 等平台初始化完成、即将
   拿到 launch spec 启动用户进程的时刻
-- **恢复 restoring → settled**:由 `SendRestore(epoch)` 返回 nil 触发
-  (host→guest 反向 channel,sandbox-init 立即 reply restored)
+- **恢复 restoring → settled**:由 host 收到 sandbox-init 的 `restore_ack` 触发
+  (host→guest `restore{epoch}` 短连接,sandbox-init 立即 reply `restore_ack`,
+  该连接随后升级为新的 stdio MUX,见 §7 / sandbox-runtime.md §4.3)
 
 ### 10.2 各阶段的 cgroup 与 balloon
 
@@ -1342,14 +1414,16 @@ snapshot 路径要求 `/vm.pause` 之后内存内容稳定,但 backend worker �
 `deflate_on_oom` 显式写 true(默认值)不报错,记 warn 日志:
 "deflate_on_oom set but balloon not configured"。
 
-### 13.2 stdio flag 互斥(`run --restore` / 冷启动同)
+### 13.2 stdio flag 互斥(`run` 冷启动 / 恢复模式同)
 
 | 规则 | 错误消息 |
 |------|---------|
-| `--tty` 与 `--stdin` / `--stdout` / `--stderr` / `--stdin-from` / `--stdout-to` / `--stderr-to` 任一显式赋值互斥 | "--tty conflicts with explicit stdio flags" |
+| `--tty` 与 `--stdin` / `--stdout` / `--stderr` / `--stdin-from` / `--stdout-to` / `--stderr-to` 任一显式赋值互斥 | "--tty conflicts with explicit pipe-mode stdio flags" |
+| 显式 `--tty`(或 `--tty=true`)但 stdin 或 stdout 不是终端 | "--tty requires stdin and stdout to be a terminal" |
 | `--stdin=false` 与 `--stdin-from` 互斥 | "--stdin=false conflicts with --stdin-from" |
 | `--stdout=false` 与 `--stdout-to` 互斥 | "--stdout=false conflicts with --stdout-to" |
 | `--stderr=false` 与 `--stderr-to` 互斥 | "--stderr=false conflicts with --stderr-to" |
+| `--console` 取值不是 `off` / `default` / `file=<path>` | "--console must be off, default, or file=<path>" |
 
 ### 13.3 snapshot 子命令校验
 
@@ -1413,6 +1487,7 @@ vmlinux 通过 `boot.kernel: file://...` 提供:
 | **memory hotplug / virtio-mem** | 弹性扩缩用例 | uffd 动态 register、状态表扩容 |
 | **incremental snapshot** | 频繁 snapshot 同一 sandbox 的用例 | KVM_GET_DIRTY_LOG 接入 + log-mode CH 协调 |
 | **应用 quiesce hook** | 跨实例去重率超过 PROPOSAL §4 量化的"非确定性 50-70%"上限的用例 | sandbox-runtime quiesce 扩展项表 |
+| **in-place app restart** | `restart: on-failure/always` 真正同进程 refork(不 reboot) | sandbox-runtime §3.3 / §5.3;sandbox-ctl 退出码语义不变 |
 
 ## 15. See Also
 
