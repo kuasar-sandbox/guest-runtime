@@ -255,7 +255,12 @@ CH 暴露给 guest 的设备清单(冷启动):
 virtio-pmem    → sandbox-runtime.erofs (DAX, MAP_SHARED 共享 host page cache)
 virtio-blk × 2 → blk0 (base, ro) + blk1 (overlay COW, rw),vhost-user backend
 virtio-net     → eth0,host TAP 后端
-virtio-vsock   → CID=3,launch + ping/restore/quiesce + mem_report 通道
+virtio-console → hvc0,内核 dmesg;--console tty(写到 CH 进程的 stdout = sandbox-ctl
+                 给的匿名管道),--serial off(无 8250 UART)。CH 进程的 stdin=/dev/null
+                 故 CH 不 raw 化任何宿主终端。应用 stdio 不走此设备(走 vsock MUX)
+virtio-vsock   → CID=3。控制面短连接(launch / ping / app_started / app_exited /
+                 mem_report / quiesce / restore / attach)+ launch/restore/attach 那条
+                 连接握手后升级而成的应用 stdio MUX(详见 sandbox-runtime.md §4)
 virtio-balloon → size=0 [+ deflate_on_oom=on];host BalloonController 通过
                  /vm.resize 推 target(见 sandbox.md §9.3);free_page_reporting
                  不启用(广播 mmu_notifier 会饿死 guest vsock kthread)
@@ -274,12 +279,16 @@ vsock 在 host 端通过 hybrid 代理映射到 UDS:
 
 ```
 guest VM (CID=3) → CID=2 (host) → CH 把流量转发到
-  /run/<sid>/vsock.sock_<port>     guest → host 方向
-  /run/<sid>/vsock.sock + "CONNECT <port>\n" 行    host → guest 方向
+  /run/<sid>/vsock.sock_<port>     guest → host 方向(host 在该 UDS 上 listen)
+  /run/<sid>/vsock.sock + "CONNECT <port>\n" 行    host → guest 方向(guest 在 port 上 listen)
 ```
 
-host → guest 方向需要在第一笔写入发 ASCII `CONNECT <port>\n`,CH 据此选择
-代理目标 port。详细见 [`sandbox.md`](sandbox.md) §vsock 通道。
+host → guest 方向需要在第一笔写入发 ASCII `CONNECT <port>\n`,CH 回一行
+`OK <local_port>\n`(host 须先排空再读后续 payload),之后 CH 把流量代理到 guest
+对应 port 的 listener。两个方向的连接对 CH 而言都是普通字节流——`launch` /
+`restore` / `attach` 这三种连接在应用层握手后由 sandbox-ctl / sandbox-init 自行
+转入帧收发态(stdio MUX),CH 不感知。详细见 [`sandbox.md`](sandbox.md) §5.2 与
+[`sandbox-runtime.md`](sandbox-runtime.md) §4.2。
 
 ## 6. 行为契约总结
 

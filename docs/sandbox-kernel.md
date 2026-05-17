@@ -224,8 +224,15 @@ boot 时间;arm64 EFI stub 略慢(~80 ms)但仍亚百毫秒。
 
 | 项 | x86_64 | aarch64 |
 |---|---|---|
-| 早期控制台 | 8250(I/O port 0x3f8)/ virtio-console | PL011 AMBA UART(MMIO)/ virtio-console |
+| UART 驱动(编入,运行时未必用)| 8250(I/O port 0x3f8) | PL011 AMBA UART(MMIO) |
+| virtio-console(hvc) | `VIRTIO_CONSOLE=y` | `VIRTIO_CONSOLE=y` |
 | Kconfig | (8250 内嵌核心) | `ARM_AMBA=y` + `SERIAL_AMBA_PL011=y` |
+
+**运行时控制台**:平台启动 CH 时带 `--console tty --serial off`,内核 cmdline 自动
+注入 `console=hvc0`——即内核 dmesg 走 virtio-console(hvc0),没有 8250/PL011 UART
+设备。UART 驱动仍编进内核只是为了用户自带场景与调试灵活性。应用的 stdin/stdout/
+stderr 不走任何 console 设备(走 vsock,见 [`sandbox-runtime.md`](sandbox-runtime.md)
+§3.5 / §4.5)。
 
 ### 4.4 RTC
 
