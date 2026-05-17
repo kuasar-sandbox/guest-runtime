@@ -3,12 +3,12 @@
 //
 //	run       — start a sandbox (cold-start; or with --restore=<ref> from a snapshot)
 //	snapshot  — pause + dump to <sid>.snapshot + <sha256>.overlay (or upload)
+//	exec      — run an ad-hoc command inside a running sandbox
 //
 // See docs/sandbox.md for the full design.
 package main
 
 import (
-	"context"
 	"fmt"
 	"log"
 	"os"
@@ -21,6 +21,16 @@ func init() {
 	// vhost handshake delta, vsock launch handshake) is computable
 	// directly from log timestamps.
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
+
+	// Make SIGPIPE non-fatal. Go's default disposition for SIGPIPE on
+	// fd 1/2 is to terminate the process immediately. When sandbox-ctl
+	// is run as `... | tee log`, Ctrl+C delivers SIGINT to the whole
+	// foreground group: tee exits at once, and sandbox-ctl's next log
+	// write to the now-readerless pipe would be killed by SIGPIPE
+	// mid-shutdown — orphaning the CH child (leaked tap/run dir). With
+	// SIGPIPE ignored those writes return EPIPE (dropped by log) and the
+	// SIGINT-driven graceful CH teardown in pkg/sandbox runs to completion.
+	signal.Ignore(syscall.SIGPIPE)
 }
 
 func main() {
@@ -33,6 +43,8 @@ func main() {
 		os.Exit(runCmd(os.Args[2:]))
 	case "snapshot":
 		os.Exit(snapshotCmd(os.Args[2:]))
+	case "exec":
+		os.Exit(execCmd(os.Args[2:]))
 	case "-h", "--help", "help":
 		printUsage(os.Stdout)
 		os.Exit(0)
@@ -52,9 +64,15 @@ Usage:
                         [--restore <file_path|manifest://hex>]
                         [--stdin] [--stdout=false] [--stderr=false]
                         [--stdin-from F] [--stdout-to F] [--stderr-to F]
-                        [--tty]
+                        [--tty] [--console off|default|file=PATH]
+                        [--ping-fatal-threshold N]
   sandbox-ctl snapshot  --sandbox-id <sid> (--output <out_dir> | --upload)
                         [--resume] [--run-dir <dir>] [--timeout <sec>]
+  sandbox-ctl exec      --sandbox-id <sid> [--run-dir <dir>] [--cwd <dir>]
+                        [--env KEY=VAL ...]
+                        [--stdin] [--stdout=false] [--stderr=false]
+                        [--stdin-from F] [--stdout-to F] [--stderr-to F]
+                        [--tty] -- CMD [ARGS...]
 
 --manifest-config (or MANIFEST_CONFIG env) is required for any
 manifest:// resource (boot.root.base, --restore manifest://, --upload).
@@ -70,17 +88,13 @@ to a local directory (--output) or to the manifest store (--upload).
 The two are mutually exclusive. By default the sandbox is destroyed
 after a successful snapshot; use --resume to keep it running.
 
+exec runs an ad-hoc command inside a running sandbox as a sibling of
+the user app (it does not replace it). The command + args follow '--'.
+Stdio works exactly like run (--tty / --stdin / --stdout / --stderr
+and their -from/-to variants). exec exits with the guest command's
+exit code. Rejected while a snapshot is quiescing the sandbox.
+
 See docs/sandbox.md for the full design.
 `)
 }
 
-func signalContext() (context.Context, context.CancelFunc) {
-	ctx, cancel := context.WithCancel(context.Background())
-	sigCh := make(chan os.Signal, 4)
-	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
-	go func() {
-		<-sigCh
-		cancel()
-	}()
-	return ctx, cancel
-}
