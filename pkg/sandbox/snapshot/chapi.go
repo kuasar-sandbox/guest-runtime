@@ -24,6 +24,14 @@ func CHSnapshot(apiSock, destURL string) error {
 	return chAPI(apiSock, "PUT", "/api/v1/vm.snapshot", body)
 }
 
+// CHShutdownVMM issues PUT /api/v1/vmm.shutdown — tears the whole VMM
+// down so the cloud-hypervisor process exits. Used by the "destroy"
+// snapshot path (resume_after=false): after the bundle is written the
+// guest is left paused, and this is what makes `sandbox-ctl run` return.
+func CHShutdownVMM(apiSock string) error {
+	return chAPI(apiSock, "PUT", "/api/v1/vmm.shutdown", "")
+}
+
 // chAPI sends a tiny HTTP/1.1 request over the CH api UDS. CH speaks
 // HTTP/1.1; we hand-roll because the call rate is one-shot per
 // snapshot operation.

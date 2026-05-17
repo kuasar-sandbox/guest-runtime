@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/fullof-work/mass-sandbox/pkg/sandbox/snapshot"
+	"github.com/fullof-work/mass-sandbox/pkg/sandbox/ctl"
 )
 
 // snapshotCmd implements `sandbox-ctl snapshot`. --output and --upload
@@ -23,7 +23,7 @@ func snapshotCmd(args []string) int {
 	upload := fs.Bool("upload", false, "ingest snapshot bundle + overlay into manifest store; stdout = snapshot manifest key")
 	resume := fs.Bool("resume", false, "keep sandbox running after snapshot (default: destroy via /vm.shutdown)")
 	runDir := fs.String("run-dir", "", "host runtime state dir (overrides SANDBOX_RUN_DIR env; default /run)")
-	timeoutS := fs.Int("timeout", 60, "seconds to wait for snapshot_done")
+	timeoutS := fs.Int("timeout", 0, "seconds to wait for snapshot_done (0 = wait indefinitely; upload can take minutes)")
 
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -71,24 +71,31 @@ func snapshotCmd(args []string) int {
 		return 1
 	}
 	defer c.Close()
-	_ = c.SetDeadline(time.Now().Add(time.Duration(*timeoutS) * time.Second))
+	// 0 = no deadline: a real snapshot upload (multi-GiB memory image
+	// through chunk/encrypt/store) routinely takes minutes; the server
+	// only replies once it finishes. A fixed client deadline would
+	// abandon a perfectly healthy in-progress upload. --timeout N is
+	// available to opt back into a bound.
+	if *timeoutS > 0 {
+		_ = c.SetDeadline(time.Now().Add(time.Duration(*timeoutS) * time.Second))
+	}
 
-	req := snapshot.Request{
-		Type:        snapshot.TypeSnapshotRequest,
+	req := ctl.Request{
+		Type:        ctl.TypeSnapshotRequest,
 		OutDir:      *outDir,
 		Upload:      *upload,
 		ResumeAfter: *resume,
 	}
-	if err := snapshot.WriteMessage(c, &req); err != nil {
+	if err := ctl.WriteMessage(c, &req); err != nil {
 		fmt.Fprintf(os.Stderr, "snapshot: send request: %v\n", err)
 		return 1
 	}
-	var resp snapshot.Response
-	if err := snapshot.ReadMessage(c, &resp); err != nil {
+	var resp ctl.Response
+	if err := ctl.ReadMessage(c, &resp); err != nil {
 		fmt.Fprintf(os.Stderr, "snapshot: recv response: %v\n", err)
 		return 1
 	}
-	if resp.Type == snapshot.TypeError {
+	if resp.Type == ctl.TypeError {
 		fmt.Fprintf(os.Stderr, "snapshot: error from sandbox: %s\n", resp.Msg)
 		return 1
 	}

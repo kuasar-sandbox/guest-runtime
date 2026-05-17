@@ -2,41 +2,28 @@ package snapshot
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
 	"time"
 
-	"github.com/fullof-work/mass-sandbox/pkg/chunker"
-	"github.com/fullof-work/mass-sandbox/pkg/crypto"
-	"github.com/fullof-work/mass-sandbox/pkg/ingest"
-	"github.com/fullof-work/mass-sandbox/pkg/manifest"
+	"github.com/fullof-work/mass-sandbox/pkg/manifest/codec"
+	"github.com/fullof-work/mass-sandbox/pkg/manifest/ingest"
 	"github.com/fullof-work/mass-sandbox/pkg/store"
 )
 
-// Storer is the minimal store-ctl client surface upload needs: GetSalt
-// + Put (for chunks) + a Manifest serialization + put-manifest. Mirror
-// of what manifest-ctl's `store --put-manifest` short form uses.
-type Storer interface {
-	GetSalt(ctx context.Context) (generation string, salt [32]byte, err error)
-	Put(ctx context.Context, p store.Partition, key store.ContentKey, data []byte) (isNew bool, err error)
-}
-
 // UploadSources gathers the inputs needed to ingest overlay + snapshot
 // bundle. Both paths point at files already produced or referenced by
-// Take into the staging dir.
+// Take into the staging dir. Ingester is supplied by the caller; one
+// shared instance handles both the overlay and the snapshot ingest so
+// the underlying store connection pool is reused.
 type UploadSources struct {
-	OverlayPath    string                // local blk1.diff (live; quiesce-stable)
-	SnapshotPath   string                // local <sid>.snapshot from Take (memory + ZIP at end)
-	SnapshotHoles  []manifest.HoleExtent // hole extents inside SnapshotPath (memory section only)
-	CustomerKey    [32]byte
-	ChunkConfig    chunker.Config
-	ChunkEncryptor crypto.ChunkEncryptor
-	KTEncryptor    crypto.KeyTableEncryptor
-	Storer         Storer
-	Logf           func(string, ...any)
+	OverlayPath   string             // local blk1.diff (live; quiesce-stable)
+	SnapshotPath  string             // local <sid>.snapshot from Take (memory + ZIP at end)
+	SnapshotHoles []codec.HoleExtent // hole extents inside SnapshotPath (memory section only)
+	Ingester      ingest.Ingester    // write pipeline; supplied by caller
+	Logf          func(string, ...any)
 }
 
 // UploadResult summarises the bytes/dedup metrics for both ingests.
@@ -66,19 +53,13 @@ func Upload(ctx context.Context, src UploadSources) (*UploadResult, error) {
 	if logf == nil {
 		logf = func(string, ...any) {}
 	}
+	if src.Ingester == nil {
+		return nil, fmt.Errorf("upload: Ingester required")
+	}
 	t0 := time.Now()
 
-	// Salt + ingester (shared by both ingests).
-	gen, salt, err := src.Storer.GetSalt(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("upload: GetSalt: %w", err)
-	}
-	logf("upload: store generation=%s", gen)
-	ing := ingest.NewIngester(src.Storer.Put, src.ChunkEncryptor, src.KTEncryptor)
-
 	// 1. Ingest blk1.diff (the live overlay; quiesce-stable).
-	overlayKey, overlayRes, err := ingestFile(ctx, ing, src.OverlayPath, src.CustomerKey, salt,
-		src.ChunkConfig, nil, src.Storer.Put)
+	overlayKey, overlayRes, err := ingestFile(ctx, src.Ingester, src.OverlayPath, nil, "overlay", logf)
 	if err != nil {
 		return nil, fmt.Errorf("upload overlay: %w", err)
 	}
@@ -96,8 +77,7 @@ func Upload(ctx context.Context, src UploadSources) (*UploadResult, error) {
 	logf("upload: snapshot.cfg in bundle patched: overlay.base=%s", overlayRef)
 
 	// 3. Ingest <sid>.snapshot with hole map (memory section's holes).
-	snapKey, snapRes, err := ingestFile(ctx, ing, src.SnapshotPath, src.CustomerKey, salt,
-		src.ChunkConfig, src.SnapshotHoles, src.Storer.Put)
+	snapKey, snapRes, err := ingestFile(ctx, src.Ingester, src.SnapshotPath, src.SnapshotHoles, "memory section", logf)
 	if err != nil {
 		return nil, fmt.Errorf("upload snapshot: %w", err)
 	}
@@ -117,19 +97,21 @@ func Upload(ctx context.Context, src UploadSources) (*UploadResult, error) {
 	}, nil
 }
 
-// ingestFile is a small wrapper around ingest.Ingest that handles file
-// open + size + manifest seal + put-manifest (= ContentKey of manifest
-// bytes written to PartitionManifest). Returns the manifest key.
+// ingestFile is a small wrapper around ingest.Ingester.Ingest that
+// handles file open + size discovery and forwards the resulting
+// ManifestKey from the Result. The Ingester writes the manifest blob
+// internally — callers receive the content key directly.
 func ingestFile(
 	ctx context.Context,
-	ing *ingest.Ingester,
+	ing ingest.Ingester,
 	path string,
-	customerKey [32]byte,
-	salt [32]byte,
-	chunkCfg chunker.Config,
-	holes []manifest.HoleExtent,
-	put func(ctx context.Context, p store.Partition, key store.ContentKey, data []byte) (bool, error),
+	holes []codec.HoleExtent,
+	label string,
+	logf func(string, ...any),
 ) (store.ContentKey, *ingest.Result, error) {
+	if logf == nil {
+		logf = func(string, ...any) {}
+	}
 	f, err := os.Open(path)
 	if err != nil {
 		return store.ContentKey{}, nil, err
@@ -139,32 +121,54 @@ func ingestFile(
 	if err != nil {
 		return store.ContentKey{}, nil, err
 	}
+	size := uint64(st.Size())
 
-	res, err := ing.Ingest(ctx, f, uint64(st.Size()), ingest.Config{
-		CustomerKey: customerKey,
-		Salt:        salt,
-		ChunkConfig: chunkCfg,
-		Holes:       holes,
+	// Effective data = file size minus hole bytes; ingest only chunks
+	// data segments, so OnProgress.processed runs 0 -> effective. Using
+	// it as the denominator makes % and rate reflect real work, not the
+	// (often far larger) sparse logical size.
+	var holeBytes uint64
+	for _, h := range holes {
+		holeBytes += h.Size
+	}
+	effective := size
+	if holeBytes < size {
+		effective = size - holeBytes
+	}
+
+	const mib = 1 << 20
+	start := time.Now()
+	lastT := start
+	var lastProcessed uint64
+	onProgress := func(processed, _ uint64) {
+		now := time.Now()
+		if now.Sub(lastT) < 2*time.Second {
+			return
+		}
+		dt := now.Sub(lastT).Seconds()
+		rate := float64(processed-lastProcessed) / dt / mib
+		pct := uint64(0)
+		if effective > 0 {
+			pct = min(processed*100/effective, 100)
+		}
+		logf("upload: %s %d/%d MiB (%d%%) %.0f MiB/s",
+			label, processed/mib, effective/mib, pct, rate)
+		lastT = now
+		lastProcessed = processed
+	}
+
+	res, err := ing.Ingest(ctx, f, size, ingest.IngestOption{
+		Holes:      holes,
+		OnProgress: onProgress,
 	})
 	if err != nil {
 		return store.ContentKey{}, nil, err
 	}
-	body, err := manifest.Marshal(res.Manifest, res.SealedKeyTable)
-	if err != nil {
-		return store.ContentKey{}, nil, fmt.Errorf("marshal manifest: %w", err)
-	}
-	mkey := contentKey(body)
-	if _, err := put(ctx, store.PartitionManifest, mkey, body); err != nil {
-		return store.ContentKey{}, nil, fmt.Errorf("put manifest: %w", err)
-	}
-	return mkey, res, nil
-}
-
-func contentKey(b []byte) store.ContentKey {
-	var k store.ContentKey
-	h := hashSHA256(b)
-	copy(k[:], h[:])
-	return k
+	elapsed := time.Since(start)
+	avg := float64(effective) / elapsed.Seconds() / mib
+	logf("upload: %s ingest profile: %d MiB data in %.1fs = %.0f MiB/s (stored=%d dedup=%d)",
+		label, effective/mib, elapsed.Seconds(), avg, res.StoredChunks, res.DedupChunks)
+	return res.ManifestKey, res, nil
 }
 
 // HexKey hex-encodes a ContentKey for use in `manifest://<hex>` URIs.
@@ -172,16 +176,11 @@ func HexKey(k store.ContentKey) string {
 	return hex.EncodeToString(k[:])
 }
 
-// hashSHA256 returns the SHA-256 of b.
-func hashSHA256(b []byte) [32]byte {
-	return sha256.Sum256(b)
-}
-
 // SparseHoles scans an existing file for SEEK_DATA / SEEK_HOLE extents
 // and returns a sorted, page-aligned list of holes restricted to the
 // region [0, limit). Used by the upload path to feed the snapshot's
 // memory-section sparseness into ingest.
-func SparseHoles(path string, limit uint64) ([]manifest.HoleExtent, error) {
+func SparseHoles(path string, limit uint64) ([]codec.HoleExtent, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
@@ -189,7 +188,7 @@ func SparseHoles(path string, limit uint64) ([]manifest.HoleExtent, error) {
 	defer f.Close()
 	const seekData = 3
 	const seekHole = 4
-	var holes []manifest.HoleExtent
+	var holes []codec.HoleExtent
 	off := int64(0)
 	end := int64(limit)
 	for off < end {
@@ -197,7 +196,7 @@ func SparseHoles(path string, limit uint64) ([]manifest.HoleExtent, error) {
 		if derr != nil {
 			if e, ok := derr.(*os.PathError); ok && e.Err.Error() == "no such device or address" {
 				if uint64(off) < limit {
-					holes = append(holes, manifest.HoleExtent{
+					holes = append(holes, codec.HoleExtent{
 						Offset: uint64(off),
 						Size:   limit - uint64(off),
 					})
@@ -208,7 +207,7 @@ func SparseHoles(path string, limit uint64) ([]manifest.HoleExtent, error) {
 		}
 		if dataOff >= end {
 			if uint64(off) < limit {
-				holes = append(holes, manifest.HoleExtent{
+				holes = append(holes, codec.HoleExtent{
 					Offset: uint64(off),
 					Size:   limit - uint64(off),
 				})
@@ -216,7 +215,7 @@ func SparseHoles(path string, limit uint64) ([]manifest.HoleExtent, error) {
 			break
 		}
 		if dataOff > off {
-			holes = append(holes, manifest.HoleExtent{
+			holes = append(holes, codec.HoleExtent{
 				Offset: uint64(off),
 				Size:   uint64(dataOff - off),
 			})

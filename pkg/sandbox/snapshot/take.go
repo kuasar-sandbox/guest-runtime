@@ -1,3 +1,12 @@
+// Package snapshot implements the sandbox-ctl snapshot path: CH
+// /vm.snapshot orchestration, sparse memfd copy, ZIP-at-end bundle
+// composition, and manifest-store upload.
+//
+// The ctl.sock wire protocol + listener that carries snapshot_request
+// from `sandbox-ctl snapshot` to the run process lives in
+// pkg/sandbox/ctl (shared with the exec path).
+//
+// See sandbox.md §6 for the file format and timing.
 package snapshot
 
 import (
