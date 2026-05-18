@@ -90,6 +90,13 @@ make ch-patches-format # 反向提取 commits 到 deps/ch-patches/
 make ch-build          # 仅 cargo build,不应用 patch
 make ch-patches        # ch-patches-apply 的别名
 
+make linux-fetch          # 拉 linux 源码 + git tag linux-patches-base(一次性)
+make linux-patches-apply  # git am deps/linux-patches/*.patch
+make linux-patches-format # 反向提取 commits 到 deps/linux-patches/
+make linux-build          # 仅 defconfig + make,不应用 patch
+make linux-patches        # linux-patches-apply 的别名
+                          # (make vmlinux = linux-patches-apply + linux-build)
+
 make test              # 所有 Go 单元测试(CGO 启用)
 make test-e2e          # 所有 e2e + perf + dedup 报告(完整套件)
 make test-e2e-{manifest,cache,cluster,sandbox-cold,sandbox-cold-manifest,
@@ -257,14 +264,30 @@ make cloud-hypervisor
 
 ### 4.4 vmlinux(`make vmlinux`)
 
-构建 guest 内核镜像:
+`make vmlinux` = `linux-patches-apply` + `linux-build`,应用 linux-patches + 编译:
 
 - 上游:`linux 6.1.169`(LTS)
+- patch 范围:`deps/linux-patches/*.patch` —— 平台对 guest 内核的定制补丁,
+  当前一条:virtio_balloon 在不可行 host target 下收敛到可持续大小而非活锁
+  (详见 [`sandbox-kernel.md`](sandbox-kernel.md) §5.6);arch-neutral,两 arch 共用
 - defconfig 来源:`deps/vmlinux/sandbox-common.config` + `sandbox-<arch>.config`
 - 输出:`bin/<arch>/vmlinux`(x86_64 是 ELF,aarch64 是 PE Image)
 - 时间:首次 ~5-10 min(`-j$(nproc)`)
 
-详细配置体系见 [`sandbox-kernel.md`](sandbox-kernel.md)。
+**Patch 开发流**(与 §4.3 的 ch-patches 流对称):
+
+```bash
+make linux-fetch            # 一次性: 拉源码 + git tag linux-patches-base
+cd build/src/linux          # 改源码 + git commit
+make linux-patches-format   # 提取 commits 到 deps/linux-patches/*.patch
+make vmlinux                # 应用 + 重 build,验证可重复
+```
+
+`patches-apply` 的幂等 / sanity 检查语义与 ch-patches 相同(tree 须有
+`linux-patches-base` tag;HEAD==base 时全部应用;已应用则跳过;其他状态报错
+并指引先 `make linux-patches-format` 保 WIP 再 reset),避免静默覆盖开发中改动。
+
+详细配置体系与补丁决策见 [`sandbox-kernel.md`](sandbox-kernel.md)。
 
 **WSL2 注意**:kernel 源树 ~85K 文件。Makefile 自动检测:若 host 在
 `/mnt/<drive>/`(DrvFs)且 `$HOME/linux-build/src` 存在,自动把
@@ -422,8 +445,9 @@ make test-e2e-sandbox-cold
 
 `deps/ch-patches/` 中的三个 patches(memfd 注入、snapshot 跳过 user-managed
 内存、external uffd handler)不依赖 arch-specific 代码,在 x86_64 与 aarch64
-两个 cargo target 上均能编译。运行时验证以 native host 跑
-`e2e_sandbox_cold.sh` 为准。
+两个 cargo target 上均能编译。`deps/linux-patches/`(virtio_balloon 收敛,§4.4)
+同样 arch-neutral,两 arch 共用同一组、各自 defconfig 编译。运行时验证以
+native host 跑 `e2e_sandbox_cold.sh` 为准。
 
 ## 11. See Also
 

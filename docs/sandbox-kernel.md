@@ -39,23 +39,32 @@ bin/aarch64/vmlinux       PE 格式 Image,EFI stub + ACPI 启动,~14 MiB
 
 ## 2. 构建工作流
 
-`make vmlinux` 触发 `deps/build-vmlinux.sh`:
+`make vmlinux` = `linux-patches-apply` + `linux-build`,二者都触发
+`deps/build-vmlinux.sh`(按 `STAGE` 选阶段):
 
 ```
-1. 下载并校验 linux-6.1.169.tar.gz(支持 TARBALL_CACHE 共享缓存)
-2. 解压到 build/src/linux/(跨 arch 共享同一棵源码树)
-3. 把 sandbox-common.config + sandbox-<arch>.config 拼接成
-   arch/<kbuild_arch>/configs/sandbox_defconfig
-4. make sandbox_defconfig + make olddefconfig(关键:让 kbuild 解析依赖
-   闭包并暴露 silent regression)
-5. make -j$(nproc) <kbuild_target>
-   x86_64: vmlinux         (ELF)
-   arm64:  Image           (PE)
-6. cp 到 bin/<arch>/vmlinux
+fetch         下载并校验 linux-6.1.169.tar.gz(支持 TARBALL_CACHE 共享缓存),
+              解压到 build/src/linux/(跨 arch 共享同一棵源码树),git init +
+              提交原始树 + 打 tag linux-patches-base
+patches-apply git am deps/linux-patches/*.patch 到该树(平台对 guest 内核的
+              定制补丁;当前一条:virtio_balloon 在不可行 host target 下收敛
+              到可持续大小而非活锁,见 §5.6)。已应用则幂等跳过
+build         把 sandbox-common.config + sandbox-<arch>.config 拼接成
+              arch/<kbuild_arch>/configs/sandbox_defconfig → make
+              sandbox_defconfig + make olddefconfig(关键:让 kbuild 解析依赖
+              闭包并暴露 silent regression)→ make -j$(nproc) <kbuild_target>
+              (x86_64: vmlinux ELF;arm64: Image PE)→ cp 到 bin/<arch>/vmlinux
 ```
 
 幂等:`bin/<arch>/vmlinux` 存在则跳过(删了重跑或 `make clean-deps && make vmlinux`
 强制重建)。
+
+**Patch 开发流**(与 cloud-hypervisor 的 ch-patches 流对称,见
+[`build.md`](build.md) §4.4):一次性 `make linux-fetch` 拉源码并打
+`linux-patches-base` tag;在 `build/src/linux/` 改代码 + `git commit`;
+`make linux-patches-format` 把 `base..HEAD` 的 commits 导出回
+`deps/linux-patches/*.patch`;`make vmlinux` 自动 apply + 重建。补丁是
+arch-neutral 的,x86_64 / arm64 共用同一组。
 
 ### 2.1 host 构建依赖
 
@@ -317,6 +326,22 @@ CH 在 inflate 处理路径里 `fallocate(PUNCH_HOLE) + madvise(DONTNEED)`。事
 事件粒度大、批量少,适合 NUMA / 横向扩 zone 等场景。当前 v1 不依赖
 virtio-mem 路径,但保留驱动让未来扩展无需重打 vmlinux。
 
+### 5.6 为什么打 virtio_balloon 收敛补丁(`deps/linux-patches/`)
+
+host BalloonController 按反馈推 `vm.resize` target(§5.5),目标值可能一时
+**不可行**——例如启动突发期工作集还很大,host 却把 target 设得超过 guest
+当下能腾出的页。stock virtio_balloon 在这种情况下会**活锁**:inflate 路径分配
+不到页(日志 "Out of puff")→ 不缩 target、下一轮继续猛冲;同时 `deflate_on_oom`
+在内存压力下又把刚充进去的气放掉。两股力来回拉扯,balloon 大小在零和满之间
+震荡、永不收敛,既没真正回收内存,又持续烧 CPU 与 mmu_notifier 流量。
+
+平台补丁改为**收敛**语义:当 inflate 遇到分配失败,driver 把"本轮能达到的
+最大值"作为一个**粘滞上限**记下,后续轮次以该上限为界 AIMD 逼近,而不是
+反复冲击不可行的 host target。效果:在不可行 target 下 balloon 在数秒内停在
+一个**可持续**的稳态(host 仍可在工作集回落后把 target 调高、driver 再爬升),
+不再活锁。这是纯 guest 侧鲁棒性修复,不改 host↔guest 协议,host 端反馈环
+(§5.5、[`sandbox.md`](sandbox.md) §9.3)语义不变。
+
 ## 6. 验证
 
 构建后基本 sanity:
@@ -343,7 +368,10 @@ diff 排查。
 
 - 升级 kernel 主版本(6.1 → 6.x):review `sandbox-common.config` 是否有
   新引入的随机化/调试选项需要禁用;运行 `make olddefconfig` 看 silent
-  regression
+  regression;并把 `deps/linux-patches/*.patch` 在新源码树上 rebase
+  (`make linux-fetch` 重打 base → 在 `build/src/linux/` `git rebase` /
+  重打补丁 → `make linux-patches-format` 回写),解决 virtio_balloon
+  收敛补丁(§5.6)与新版驱动的冲突
 - 升级架构 fragment:review CH 对该 arch 的设备模型是否有新依赖(例如
   GICv4 / 新 RTC 驱动)
 - 不上游化 defconfig:本配置选择跟通用 server distro 取向偏离明显
