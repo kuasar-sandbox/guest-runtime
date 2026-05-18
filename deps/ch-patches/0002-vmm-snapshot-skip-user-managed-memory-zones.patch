@@ -1,7 +1,7 @@
 From ef7b57d8bfcc1f7c6a7c86809fb7d2d5fa49345f Mon Sep 17 00:00:00 2001
 From: Chen Xiaohui <graych@gmail.com>
 Date: Sun, 3 May 2026 22:02:50 +0800
-Subject: [PATCH 2/3] vmm: snapshot: skip user-managed memory zones
+Subject: [PATCH 2/4] vmm: snapshot: skip user-managed memory zones
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit

@@ -31,12 +31,14 @@
 | `vmm/src/config.rs` | ~10 | `MemoryConfig::parse` 增加两个 key 解析 |
 | `vmm/src/memory_manager.rs` | ~355 | fd 注入 + user_managed skip + create_ram_region 内创建 uffd + va_report sendmsg(SCM_RIGHTS) + UFFDIO_REGISTER |
 | `vmm/src/seccomp_filters.rs` | ~17 | allowlist `userfaultfd` syscall + `UFFDIO_API` / `UFFDIO_REGISTER` ioctl |
+| `virtio-devices/src/balloon.rs` | ~40 | balloon release 对 user-managed zone 的空洞 run 跳过 `PUNCH_HOLE`/`MADV_DONTNEED`(`SEEK_DATA` 探测)|
+| `virtio-devices/src/seccomp_filters.rs` | ~8 | balloon 线程 seccomp 放行 `SYS_lseek`(skip-hole 探测所需)|
 
-总计 ~395 行 Rust + 3 个 cohesive commits。基于 cloud-hypervisor `v51.1`。
+总计 ~445 行 Rust + 4 个 cohesive commits。基于 cloud-hypervisor `v51.1`。
 
 ### 1.3 维护策略
 
-- patch 文件位置:`deps/ch-patches/000{1,2,3}-*.patch`
+- patch 文件位置:`deps/ch-patches/000{1,2,3,4}-*.patch`
 - 应用方式:`make ch-patches-apply`(在 `make cloud-hypervisor` 内自动调)
 - 跟 upstream rebase:每个 CH 大版本(~3 月)review 一次,几行 conflict
   人工 fix
@@ -164,6 +166,66 @@ sandbox-ctl mm 的 VMA,不能 register CH mm 的 chVA。所以 uffd 必须在 CH
 创建,然后通过 SCM_RIGHTS 把 fd(而非内核内部对象)传给 sandbox-ctl 让它读
 事件。fd 表是进程级的,但 uffd ctx 的事件路由按创建者 mm 的 VA 解析,
 sandbox-ctl 收到 fd 后读出来的事件 va 就是 CH 视角的 chVA。
+
+### 3.4 0004 — balloon release 跳过 user-managed zone 的空洞 run
+
+主题:**virtio-devices: balloon — skip PUNCH_HOLE/MADV_DONTNEED on already-sparse
+user-managed ranges**
+
+改动文件:`virtio-devices/src/balloon.rs` / `virtio-devices/src/seccomp_filters.rs`
+
+**背景**。guest balloon 驱动充气分配的页**从不被 guest 写入**:
+`balloon_page_alloc` 不带 `__GFP_ZERO`,平台 guest 内核未启用 `init_on_alloc`,
+fill 路径只动 struct page 元数据与 PFN 数组。又因 user-managed zone 从不
+prefault(memfd 稀疏,内容由 uffd handler 按需填),balloon 让出的 offset
+绝大多数(冷启动时**全部**)在 memfd 上本就是空洞——无 inode 页,CH 与
+sandbox-ctl 都无 PTE。
+
+但 CH 的 balloon inflate 处理对每个让出 run 仍调 `release_memory_range`:
+`fallocate(PUNCH_HOLE|KEEP_SIZE)` on memfd + `madvise(MADV_DONTNEED)` on chVA。
+后者落在 uffd 注册的 chVA 上,内核**无条件**(与该 run 是否驻留无关)合成
+一条 `EVENT_REMOVE`,且 `MADV_DONTNEED` **同步阻塞**到外部 handler 消费完
+该事件才返回。冷启动充气覆盖整个 `capacity − allocatable` 区间时,这是一场
+"对从未存在的页"的空 `EVENT_REMOVE` 风暴:压垮 handler 单 reader,并反压
+CH 的 balloon 线程。`EVENT_REMOVE` 的真正来源是 chVA 上的 `MADV_DONTNEED`
+(不是 memfd 的 fallocate)——所以**必须同时跳过两者**才能不发事件。
+
+**要点**:
+
+- `release_memory_range` 对**有 file_offset 的 region**(即 user-managed
+  fd-backed zone)在动作前,用一次 `lseek(fd, file_off, SEEK_DATA)` 探测目标
+  `[file_off, file_off + len)`:
+  - `ENXIO`,或返回的下一数据字节偏移 `≥ file_off + len` ⇒ 整段空洞 ⇒
+    **跳过 fallocate 与 madvise,直接 `Ok(())`**
+  - 段内有数据 ⇒ 维持原逻辑(`PUNCH_HOLE` + `MADV_DONTNEED` 覆盖整 run)
+  - `lseek` 其他错误不吞:落回原路径,不掩盖
+- 仅作用于 `region.file_offset().is_some()` 的 zone。无 fd 的 upstream 匿名
+  zone 无可探测,**行为完全不变**(契约同 §6:不写 `fd=` 等同 upstream)
+- 该 zone 的 memfd fd 在 CH 内仅经 mmap + `fallocate`(显式 offset)使用,
+  无定位读写,故 `lseek` 移动文件位置无副作用
+- **seccomp 放行**:balloon device 线程的 seccomp 仅允许 `fallocate`
+  (madvise 来自 virtio 公共集),新增 `SYS_lseek`;否则首次探测即 `SIGSYS`
+  杀死 balloon 线程,CH 退出(filter 在 `virtio-devices/src/seccomp_filters.rs`,
+  与 §3.3 放行 `userfaultfd` 同理)
+
+**正确性**:跳过只命中真空洞(无可释放物);任何**确需回收**的页必有数据,
+永不被跳过。被抑制的 `EVENT_REMOVE` 本只驱动 handler 对 backendVA 的
+process-level reclaim,而空洞 offset sandbox-ctl 也从未 fault → 那一步本就
+是 no-op。跳过前后 host 内存终态完全一致。
+
+**效果与取舍**:改动前 balloon 充满 `capacity − allocatable` 时,**每个 4K
+页**(`pbp` 在 x86-4K 被旁路)都对 uffd VMA 做 `MADV_DONTNEED`,而该调用
+**同步阻塞**到外部单 reader handler 消费完 `EVENT_REMOVE` 才返回——
+`≈ 充气字节 / 4K` 次串行跨进程往返,正是数十秒收敛(及偶发 boot 软死锁)
+的根因。改动后冷启动充气页**实测 ~99% 是从未触碰的空洞**,`lseek(SEEK_DATA)`
+探测后跳过 (1)(2):无 madvise → 无同步握手 → balloon 线程以内存速度扫过
+→ **收敛近乎瞬时**。剩 ~1% 是 guest 启动期经 vhost-blk / 内核进过 page
+cache 又释放、folio 仍驻留 memfd 的页,`lseek` 见数据**不跳过**,照常回收
+——有界合法,行为同 upstream。guest 退出时整 zone unmap 产生的大
+`EVENT_REMOVE` 与本 patch 无关、不计入充气阶段。x86-4K 下空洞探测退化为每
+页一次 `lseek`——纯 in-kernel xarray 走查,无事件 / 无 handler 握手 / 无
+共享 inode madvise 争用,本地廉价;把连续 PFN 在 inflate 队列合并成 run
+再探测是后续可选优化,不在本 patch 范围。
 
 ## 4. 构建工作流
 
@@ -301,6 +363,7 @@ host → guest 方向需要在第一笔写入发 ASCII `CONNECT <port>\n`,CH 回
 | 命令行写 `fd=` + `uffd_socket=` | ✗ | ✓(创建 uffd + sendmsg + 等 ack)|
 | `/vm.snapshot` 对 user_managed zone | (不适用) | 跳过 dump,memory-ranges 表无此 zone |
 | `/vm.restore` 对 user_managed zone | (不适用) | 跳过 fill;mmap 直接 fault 触发 uffd |
+| balloon release 对 user_managed zone 的空洞 run | (不适用) | 跳过 `PUNCH_HOLE`+`madvise`,不合成 `EVENT_REMOVE`;有数据的 run 同 upstream |
 | balloon `deflate_on_oom=on` | ✓(v51.1 已就绪) | ✓ |
 | `vm.resize` `desired_balloon` | ✓ | ✓(平台周期调用,host BalloonController)|
 | virtio-mem `vm.resize` | ✓ | ✓ |
@@ -309,15 +372,19 @@ host → guest 方向需要在第一笔写入发 ASCII `CONNECT <port>\n`,CH 回
 外部 uffd 模型下,CH `release_memory_range` 对自身 mmap 做
 `madvise(MADV_DONTNEED)` 会广播 mmu_notifier 失效到 KVM EPT,持续 IPI
 shootdown 饿死 guest vsock kthread。改由 host 端 BalloonController 通过
-`/vm.resize` 推 inflate target,事件量被反馈环 `MaxStep` 限速。`deflate_on_oom`
-是 upstream v51.1 原生,无需新 patch。
+`/vm.resize` 推 inflate target,事件量被反馈环 `MaxStep` 限速。host 推
+inflate 时,release 对 user-managed zone 的空洞 run 由 patch 0004(§3.4)
+跳过,因此冷启动充气(覆盖整个稀疏区间)根本不产生该 `madvise` 广播与
+`EVENT_REMOVE`;`MaxStep` 仅对运行时回收**已驻留**工作集页时仍然有意义。
+`deflate_on_oom` 是 upstream v51.1 原生,无需新 patch。
 
 ## 7. 已知限制
 
 - **patch 不向上游**:风格偏差 + 用例特殊,维护成本由本项目承担
 - **CH v52+ 升级窗口**:每次 CH 大版本会有 `vmm/src/memory_manager.rs` 内部
   重构,patch 0001/0002 通常需要小幅 rebase。0003 (uffd ioctl) 改动较大,需要
-  多花时间 review
+  多花时间 review。0004 仅触 `virtio-devices/src/balloon.rs` 单函数
+  (`release_memory_range`),rebase 面最小
 - **多 fd-backed zone**:本设计 v1 限定单 zone(整 8 GiB 一段)。多 zone(NUMA
   / virtio-mem 横向扩展)是扩展点,需要在 patch 0003 处对每 zone 各自 sendmsg
   一次,sandbox-ctl 端各自维护 addrMap
