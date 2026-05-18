@@ -55,7 +55,9 @@ page cache 的密度收益。
 - **无 /etc / /usr**:guest rootfs 由用户镜像(blk0 base)提供;sandbox-runtime
   只提供 /sbin/init 和挂载点
 - **不复用控制面短连接做 stdio**:管理操作各用一条短连接(§4.3);只有 launch /
-  restore / attach 这三种操作的连接在握手后升级为长连接 MUX(§4.5)
+  restore / attach / exec 四种操作的连接在握手后升级为长连接 MUX(§4.5)。应用会话
+  那条 MUX 任一时刻至多一条(launch 生,restore/attach 续);exec 每次会话另起一条
+  独立、短生命的 MUX,可并发多条(§3.6)
 
 ## 2. sandbox-runtime.erofs 镜像结构
 
@@ -282,6 +284,36 @@ host 侧由 CH 把它写到 sandbox-ctl 给 CH 的 stdout(一根匿名管道),sa
 按 `--console` 标志决定丢弃 / 写 stderr / 写文件(详见 [`sandbox.md`](sandbox.md)
 §2.2 / §5.2)。`--serial off`——没有 8250 UART。
 
+### 3.6 exec 会话(`sandbox-ctl exec`)
+
+`sandbox-ctl exec`(host 侧 CLI + ctl.sock 见 [`sandbox.md`](sandbox.md) §2.4 /
+§6.3)在一个**已运行**的沙箱内拉起一条临时命令,它是用户应用的**兄弟进程**,
+既不替换应用、也不重启沙箱。host 经反向通道发 `exec{spec}`(§4.3);sandbox-init
+为这次会话准备 stdio、起进程、回 `exec_ack`,该连接随即成为这条会话**独立**的
+stdio MUX(§4.5)。每条反向 `exec` 连接由各自的 goroutine 服务,多会话并发独立。
+
+**加入应用的命名空间**。命令必须运行在**应用自己的 mount + pid 命名空间**内,
+这样 `ps` / `/proc/<pid>` / 按 pid 发信号都能看见并作用于应用进程树与其文件系统
+视图(语义同 `docker exec`)。但 `setns(CLONE_NEWPID)` 只对调用进程**之后 fork
+的子进程**生效、`setns(CLONE_NEWNS)` 是**线程级**——在长寿、多线程的 sandbox-init
+进程里直接 setns 既不安全也会污染自身。因此用一个**短命的 nsenter 式辅助进程**:
+它先打开应用的 `mnt` / `pid` 命名空间句柄并 setns 加入,再 fork 出真正的命令;
+命令沿用应用命名空间里**已挂载的** `/proc`(不重挂,以免扰动共享视图)。辅助进程
+全程只做"join + 拉起 + 等待回收 + 转述退出码",对 sandbox-init 主进程零副作用。
+
+**退出与回收**。命令退出后,guest 在该会话 MUX 上**先 EOF 全部 stdout/stderr/
+pty**,**再发 `EXIT_STATUS`**(退出码;被信号杀为 128+signo),**再**走 §4.6 的
+`MUX_CLOSE` 握手;host 收到 `EXIT_STATUS` 即得退出码(为何用显式帧而非"连接关掉"
+见 §4.6)。exec 命令退出**不**触发沙箱 reboot——只有**用户应用**退出才 reboot
+(§3.3);supervisor 的子进程回收器把"非应用子进程"的退出态路由给对应 exec 会话,
+不误判为应用退出。
+
+**与 snapshot 的关系**。辅助进程持有父死信号:它被杀即一并带走那条命令。会话
+MUX 中途断(host 侧 `sandbox-ctl exec` 退出 / 失联)→ guest SIGKILL 该命令,命令
+不会比其会话存活更久。snapshot quiesce(§3.4)开始时**拒绝新的 exec 并 SIGKILL
+所有在飞的 exec 辅助进程**(快照不能带运行中的 exec 兄弟进程);沙箱在 resume /
+restore(§4.3 `attach` / `restore`)后解除拒绝、重新受理。
+
 ## 4. vsock 控制面 + console MUX 协议
 
 ### 4.1 两类连接
@@ -289,18 +321,22 @@ host 侧由 CH 把它写到 sandbox-ctl 给 CH 的 stdout(一根匿名管道),sa
 ```
   (1) management short-conn  — one new conn per management op; request/response; close
         │  ops:  hello/launch · app_started · app_exited · ping · mem_report ·
-        │        quiesce · restore · attach                          (§4.3 / §4.4)
+        │        quiesce · restore · attach · exec                    (§4.3 / §4.4)
         │  wire: [4B LE len][JSON]    ·    no multiplexing    ·    no keepalive
 
-  (2) MUX long-conn          — at most one; carries the app's stdin/stdout/stderr (or a pty)
-        │  born from the launch / restore / attach conn, which stays open after
-        │  the *_ack and switches to framed mode                     (§4.5 / §4.6)
+  (2) MUX long-conn          — carries one session's stdin/stdout/stderr (or a pty)
+        │  born from a launch / restore / attach / exec conn, which stays open
+        │  after the *_ack and switches to framed mode                (§4.5 / §4.6)
+        │  the app session: at most one MUX (launch; re-established by restore/attach)
+        │  each exec: its own independent short-lived MUX — 0..N concurrent (§3.6)
         │  wire: [stream:u8][type:u8][len:u16 BE][payload]   ·   per-stream flow control
 ```
 
-管理连接不做帧复用——每条连接就一次请求 + 一次响应。MUX 是唯一带帧多路复用与
-流控的连接,只承载应用的 stdin/stdout/stderr 或伪终端,**不**替代任何管理操作:
-即使 MUX 开着,`quiesce` / `app_exited` 等仍各起各的短连接、并行发生。
+管理连接不做帧复用——每条连接就一次请求 + 一次响应。MUX 是带帧多路复用与流控
+的连接,只承载某条会话的 stdin/stdout/stderr 或伪终端,**不**替代任何管理操作:
+即使 MUX 开着,`quiesce` / `app_exited` 等仍各起各的短连接、并行发生。应用会话
+那条 MUX 任一时刻至多一条;`exec` 每次会话另起一条独立、短生命的 MUX,与应用
+会话及彼此并发互不影响(§3.6)。
 
 ### 4.2 通道与寻址
 
@@ -324,7 +360,8 @@ vsock 端口固定 `5000`,**两个方向都复用同一端口号**,身份按方�
 - **host → guest**:host `connect(<vsock-base>)`,**第一笔写入**为 ASCII
   `CONNECT 5000\n`(CH hybrid vsock 协议头;CH 回一行 `OK <port>\n`,host 须先排空
   再读后续 payload),CH 把其余字节代理到 guest port 5000 listener。承载:`ping` /
-  `quiesce` / `restore`(其连接升级 MUX)/ `attach`(其连接升级 MUX)
+  `quiesce` / `restore`(其连接升级 MUX)/ `attach`(其连接升级 MUX)/ `exec`
+  (其连接升级为该 exec 会话的独立 MUX)
 - 两个方向独立寻址,互不干扰——同一时刻 host→guest `ping` 与 guest→host
   `app_started` 可并行,各用一条新连接
 
@@ -342,6 +379,7 @@ vsock 端口固定 `5000`,**两个方向都复用同一端口号**,身份按方�
 | **快照前** | host→guest | `quiesce` → `quiesced` | 关 | guest 跑 prep + 关闭 MUX(§3.4),`quiesced` ⇒ 可安全 `/vm.pause` |
 | **恢复后** | host→guest | `restore{epoch, wallclock_ns}` → `restore_ack{stdio, app_state}` | **升级 MUX** | 快照恢复 vCPU 起跑后 host 通知 guest;`restore` 携带 host 发送前一刻的墙钟 `wallclock_ns`,guest 收到后先 `clock_settime` 把 `CLOCK_REALTIME` 跳到该值(CH 把快照里的旧钟原样载回,不纠正则落后整个静置区间;单调钟不受影响),再回 `restore_ack`——它是 ATTACH_ACK 的超集(含 channel 集合 + 应用状态)外加"恢复完成"信号(host 据此判定 restore 完成);该连接成为新 MUX |
 | **MUX 重连** | host→guest | `attach{epoch}` → `attach_ack{stdio, app_state}` | **升级 MUX** | 可靠性兜底:MUX 因 vsock 异常断了,host 拨新连接重建;guest 收到先把旧 MUX 优雅关闭(已断则硬丢)再回 ack,该连接成为新 MUX(§4.6) |
+| **执行命令** | host→guest | `exec{spec}` → `exec_ack{stdio}` | **升级 MUX(独立会话)** | guest 为这条 `exec` 起一个兄弟进程并准备其 stdio,回 `exec_ack`,该连接成为这次 exec 会话**独立**的 MUX;并发多条互不影响;命令结束 guest 在 MUX 上发 EXIT_STATUS 再走 §4.6 关闭。详见 §3.6 |
 | `error` | 任意 | (终止) | 关 | 任一端拒绝/出错的兜底响应,`msg` 人类可读 |
 
 `ATTACH` 仅用于 sandbox-ctl 自身的可靠性兜底(同一进程在 MUX 连接坏掉后重建转发),
@@ -357,7 +395,8 @@ JSON 可读、调试友好;消息量极少,无需 protobuf 工具链。
   "type":     "<one of §4.3>",
   "phase":    "ready",                 // hello: optional hint
   "launch":   { ... LaunchSpec ... },  // launch (含 stdio 节,见 §5.1)
-  "stdio":    { ... },                 // launch_ack / restore_ack / attach_ack: 实际启用的 channel 集合
+  "exec":     { "argv":[...], "env":{}, "cwd":"", "stdio":{} },  // exec: ExecSpec(§3.6)
+  "stdio":    { ... },                 // launch_ack / restore_ack / attach_ack / exec_ack: 实际启用的 channel 集合
   "app_state":"running",               // restore_ack / attach_ack: running | exited{code,term_signal}
   "pid":      4711,                    // app_started
   "code":     0, "term_signal": 0,     // app_exited
@@ -371,14 +410,16 @@ JSON 可读、调试友好;消息量极少,无需 protobuf 工具链。
 }
 ```
 
-字段集合的权威定义在 `pkg/sandbox/proto`(stdlib-only,guest sandbox-init 直接 import)。
+字段集合的权威定义即本节 + §4.3 的消息表;wire 是 stdlib-only 的
+长度前缀 JSON,guest sandbox-init 不依赖任何重量级编解码库即可解析。
 
 ### 4.5 MUX 子协议
 
-**升级**:`launch` / `restore` / `attach` 三种操作,在双方交换完 `*_ack` 之后,
-这条 vsock 连接**不关闭**——后续字节进入 MUX 帧收发态。任一时刻系统内至多一条
-MUX 连接(冷启动时由 launch 那条而生;快照恢复后由 restore 那条而生;MUX 因故断了
-由 attach 那条重建)。
+**升级**:`launch` / `restore` / `attach` / `exec` 四种操作,在双方交换完 `*_ack`
+之后,这条 vsock 连接**不关闭**——后续字节进入 MUX 帧收发态。应用会话那条 MUX
+任一时刻至多一条(冷启动由 launch 那条而生;快照恢复后由 restore 那条而生;MUX
+因故断了由 attach 那条重建)。`exec` 每次会话另起一条**独立**的 MUX,与应用会话
+及彼此可并发(§3.6)。下文 stream 集合 / 帧 / 流控 / 关闭握手对所有 MUX 通用。
 
 **帧格式**:
 
@@ -391,8 +432,9 @@ MUX 连接(冷启动时由 launch 那条而生;快照恢复后由 restore 那条
 
  stream:  0 = CONTROL   1 = STDIN   2 = STDOUT   3 = STDERR   4 = PTY
  type (数据流 1..4):  DATA   EOF   RESET
- type (CONTROL 0):    WINDOW_UPDATE   SET_WINSIZE   MUX_CLOSE   MUX_CLOSE_ACK
+ type (CONTROL 0):    WINDOW_UPDATE   SET_WINSIZE   MUX_CLOSE   MUX_CLOSE_ACK   EXIT_STATUS
  len:  payload 长度;DATA 帧 ≤ 16–32 KiB(多路之间公平,也是天然读块大小)
+       EXIT_STATUS payload = u32 BE 退出码(被信号杀为 128+signo);仅 exec 用
 ```
 
 **stream 集合 = pty 模式 XOR pipe 模式**(在 `launch_ack` / `restore_ack` /
@@ -410,7 +452,7 @@ MUX 连接(冷启动时由 launch 那条而生;快照恢复后由 restore 那条
 | STDIN(1) | `DATA`(应用输入)、`EOF`(host stdin 关) | `RESET`(拒收) |
 | STDOUT(2) / STDERR(3) | `RESET`(拒收) | `DATA`、`EOF`(应用退出/关闭其 fd) |
 | PTY(4) | `DATA`(键盘字节,逐字节透传) | `DATA`、`EOF`(应用退出) |
-| CONTROL(0) | `WINDOW_UPDATE`(对 guest→host 流补信用)、`SET_WINSIZE`、`MUX_CLOSE_ACK` | `WINDOW_UPDATE`(对 host→guest 流补信用)、`MUX_CLOSE` |
+| CONTROL(0) | `WINDOW_UPDATE`(对 guest→host 流补信用)、`SET_WINSIZE`、`MUX_CLOSE_ACK` | `WINDOW_UPDATE`(对 host→guest 流补信用)、`MUX_CLOSE`、`EXIT_STATUS`(仅 exec 会话:命令退出码) |
 
 **流控**:每条数据流一个**接收窗口**(= 该方向接收 buffer 容量,例如 64 KiB)。
 发送方维护每流剩余信用,DATA 每发 N 字节扣 N;信用为 0 的流跳过、去发别的流。
@@ -459,10 +501,16 @@ MUX 连接的**有序关闭**是一个两端同步的小协议(相当于应用�
 host 对 MUX 关闭的全部职责:收到 `MUX_CLOSE` → 把要发的发完 → 回 `MUX_CLOSE_ACK`
 → read 到 EOF → close。不需要知道为什么关、什么时候关。
 
-**两个触发点**(同一握手):
+**三个触发点**(同一握手):
 
 1. **quiesce 流程**(§3.4 第 4 步)——guest 在 quiesce 流程靠后一步关闭 MUX。
-2. **ATTACH 流程**——host 拨新连接发 `attach`,guest 在回 `attach_ack` 之前先把
+2. **exec 会话结束**(§3.6)——exec 命令退出后,guest 在该会话 MUX 上**先把
+   stdout/stderr/pty 全部 EOF**,**再发 `EXIT_STATUS`**(payload = 退出码,被信号杀
+   为 128+signo),**然后**走同一套 guest 发起的 `MUX_CLOSE` 握手。host(`sandbox-ctl
+   exec`)收到 `EXIT_STATUS` 即得知命令退出码并据此结束、还原终端——**不依赖底层
+   连接关闭的传播**(经 CH hybrid-vsock 代理时,对端关闭往往要等下一次 I/O 才被
+   察觉,故用显式 `EXIT_STATUS` 帧而非"连接关掉"作为完成信号)。
+3. **ATTACH 流程**——host 拨新连接发 `attach`,guest 在回 `attach_ack` 之前先把
    **旧 MUX 连接**优雅关闭。兜底:旧 MUX 大概率正因 vsock 断了才触发重连,这时对它
    发 `MUX_CLOSE` 直接报错 → guest **降级为硬丢弃**旧连接,不阻塞 attach。统一逻辑:
    收到 `attach` → 尝试优雅关旧 MUX、失败即硬丢 → 回 `attach_ack` 于新连接 → per-stream
@@ -573,6 +621,9 @@ restore 语义干净)。
 - MUX 上协议违规(协商外 stream、EOF 后又 DATA、坏帧)→ 拆 MUX 连接;此后等 host
   来 `attach` 重建
 - `app_exited` 必须在 reboot 前发出;host 未在 timeout 内 ack → guest 仍照常 reboot
+- `exec`:沙箱正在 quiesce 或 argv 为空 / 起进程失败 → 回 `error{msg}` 关连接;
+  会话 MUX 中途断(host 侧 `sandbox-ctl exec` 退出/失联)→ guest SIGKILL 该 exec
+  命令(命令经父死信号绑定到其 nsenter 辅助进程,辅助进程被杀即一并带走,§3.6)
 
 **host 端**(sandbox-ctl):
 
@@ -593,6 +644,7 @@ restore 语义干净)。
 | `ping` | 200 ms | 1 s interval 下足够裕度;到点计入 `ping_timeout_total` |
 | `quiesce` | 8 s | guest 要 drop caches + 停读 app pipe + MUX_CLOSE 一来回;留足头部 |
 | `restore` / `attach` | 5 s | kernel vsock 层在此期间 hold 住连接请求等 vCPU 跑起来 accept;此连接随后转 MUX |
+| `exec` | 10 s | 比 restore/attach 宽:guest 要 fork+exec 子进程并 PATH 解析后才回 `exec_ack`;仅覆盖握手段,连接转 MUX 后 deadline 清除 |
 | `mem_report` | 200 ms | guest 每 5 s 一次,host 失败仅记日志、controller 在下一 tick 用旧 hint |
 
 ## 5. 应用契约

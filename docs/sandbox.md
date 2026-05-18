@@ -92,6 +92,7 @@ sandbox-ctl 是 CH 的父进程。CH 退出 → sandbox-ctl 收 SIGCHLD → 优�
 |--------|------|
 | `run` | 启动一个 sandbox 跑到退出。冷启动 = 不带 `--restore`;恢复 = 带 `--restore=<...>`,与冷启动共用同一进程模型与 stdio 接线 |
 | `snapshot` | 暂停一个运行中的 sandbox 并 dump 到 snapshot |
+| `exec` | 在运行中的 sandbox 内执行一条命令——应用的兄弟进程(不替换应用),加入应用的 mount + pid 命名空间,与 `run` 共用 stdio 模型 |
 
 ### 2.2 `sandbox-ctl run`
 
@@ -118,6 +119,13 @@ sandbox-ctl run [flags]
   --cgroup-path <path>    覆盖 control.cgroup_path
   --controller <path>     覆盖 control.controller;`--controller=disable` 强制清空,
                           即使配置文件给了也不连
+
+  # 可靠性兜底
+  --ping-fatal-threshold N  连续 N 次 host→guest ping 失败后,sandbox-ctl 主动给 CH
+                          发 SIGTERM(随后宽限升级 SIGKILL),让 cmd.Wait 返回而不是
+                          在"还活着但卡死"的 guest 上无限等待。0 = 关闭(默认,等外部
+                          信号)。flag > SANDBOX_PING_FATAL_THRESHOLD env > 0;默认
+                          1 s ping 间隔下 30 ≈ 30 s 不可达
 
   # 恢复模式
   --restore <ref>         恢复模式:从 snapshot bundle (<sid>.snapshot 文件 / 或
@@ -217,8 +225,17 @@ sandbox-ctl snapshot [flags]
                         保留沙箱继续运行
   --run-dir <dir>       与 run 一致;SANDBOX_RUN_DIR env;默认 /run。snapshot 通过
                         <run-dir>/<sid>/ctl.sock 联系运行中的 sandbox-ctl run 进程
-  --timeout <sec>       等 snapshot_done 的超时,默认 60s
+  --timeout <sec>       等 snapshot_done 的客户端超时。默认 0 = 无限期等待:一次真实
+                        的多 GiB 内存 + overlay ingest 上传动辄数分钟,固定客户端
+                        deadline 会误杀一个仍在健康推进的上传。需要兜底时显式
+                        `--timeout N` 重新设上界
 ```
+
+**进度输出**:`--upload` / `--output` 期间,sandbox-ctl run 进程按节流周期(≥2 s)
+向其 stderr 打 ingest 进度——`upload: <段名> <已处理> MiB (<百分比>) <速率> MiB/s`,
+段名为 `overlay` / `memory section`;结束再打一行吞吐 profile(`ingest profile:
+<数据量> MiB in <耗时>s = <速率> MiB/s`)。让长时间的静默上传变得可观测,避免被
+误判为卡死。
 
 **`--output` 与 `--upload` 严格互斥**——必须二选一,两者都给或都不给均报错
 退出。两者代表"持久化目的地"的两种形态(本地 vs manifest 存储),混用会让
@@ -228,6 +245,47 @@ snapshot.cfg 的 overlay.base 引用与实际数据位置脱节。
 通过 CH `/vm.shutdown` 优雅关机(ACPI shutdown → guest sandbox-init 收到事件
 → reboot syscall),等 CH 退出后 sandbox-ctl run 进程自身也退出。`--resume=true`
 则跳过 shutdown,调 `/vm.resume` 让沙箱继续运行,sandbox-ctl run 进程不退出。
+
+### 2.4 `sandbox-ctl exec`
+
+在一个运行中的 sandbox 内执行一条临时命令——它是用户应用的**兄弟进程**,
+不替换应用,不重启沙箱。命令运行在**应用自己的 mount + pid 命名空间**内,
+因此能看见应用的进程树与文件系统、能按 pid 给应用发信号(语义同 `docker exec`
+/ `kubectl exec`)。
+
+```
+sandbox-ctl exec --sandbox-id <sid> [flags] -- CMD [ARGS...]
+
+  --sandbox-id <sid>    必填,目标 sandbox
+  --run-dir <dir>       与 run 一致;SANDBOX_RUN_DIR env;默认 /run。exec 通过
+                        <run-dir>/<sid>/ctl.sock 联系运行中的 sandbox-ctl run 进程
+  --cwd <dir>           命令在 guest 内的工作目录(默认 guest 根)
+  --env KEY=VAL         追加/覆盖一个环境变量,可重复。在一个默认 PATH 基线上叠加
+                        (exec 命令不继承应用的 image env,故 PATH 总是注入,裸命令
+                        名才能 PATH 查找)
+  # 应用 stdio:与 `run` 完全相同的一组 flag 与决策表(§2.2 stdio 决策表 / 互斥
+  # 规则),经各自独立的一条 stdio MUX 双向转发
+  --tty / --stdin / --stdout / --stderr / --stdin-from / --stdout-to / --stderr-to
+                        语义同 §2.2。`--tty` 是无值布尔 flag:关 pipe 模式要写
+                        `--tty=false`,`--tty false` 会把 false 当成命令(Go flag
+                        语义,与 run / snapshot 一致)
+  -- CMD [ARGS...]      `--` 之后是要执行的命令与参数(至少一个)
+```
+
+**退出码**:exec 以 guest 内命令的退出码退出;命令被信号杀则 128+signal。
+命令结束的退出码经 stdio MUX 的 EXIT_STATUS 控制帧回传(在所有 stdout/stderr/
+pty EOF 之后发出),exec 收到即结束并还原终端,不依赖底层连接关闭的传播。
+
+**传输路径**:`sandbox-ctl exec` → `<run-dir>/<sid>/ctl.sock`(§6.3,与 snapshot
+共用该 UDS 协议)→ sandbox-ctl run 进程 → 经反向 vsock 通道发 `exec` 操作给
+sandbox-init → guest 为这次 exec 起一条**独立的 stdio MUX**(详见
+[`sandbox-runtime.md`](sandbox-runtime.md) §3.6 / §4.3)。run 进程在握手后只做
+ctl.sock ↔ guest vsock 的透明字节转发,MUX 端到端跑在 `sandbox-ctl exec` 与
+guest 之间。多个 exec 会话并发互不影响。
+
+**与 snapshot 的关系**:snapshot quiesce 期间拒绝新的 exec,并 SIGKILL 在飞的
+exec 子进程(快照不能带运行中的 exec 兄弟进程);沙箱 resume / restore 后恢复
+受理。详见 §6.2 与 [`sandbox-runtime.md`](sandbox-runtime.md) §3.6。
 
 ## 3. 配置
 
@@ -502,7 +560,7 @@ T11  读 boot.root.base 末尾 ZIP 拿 ImageConfig(缺 ZIP 软失败返回空)
 T12  起 launch server goroutine:listen /run/<sid>/vsock.sock_5000
 T13  起 va_report UDS server: listen /run/<sid>/uffd.sock
      OnReady callback 内将 adopt uffd_C(从 SCM_RIGHTS)+ 起 epoll/worker
-T14  起 ctl.sock UDS server: listen /run/<sid>/ctl.sock(snapshot 请求入口)
+T14  起 ctl.sock UDS server: listen /run/<sid>/ctl.sock(snapshot / exec 请求入口)
 T15  构造 CH 命令行(详见 §5.2):
      `--memory-zone size=<ramSize>,shared=on,fd=3,uffd_socket=/run/<sid>/uffd.sock`
      `--console tty --serial off`,cmdline `... console=hvc0`(内核 dmesg 走 hvc0)
@@ -538,7 +596,7 @@ T19  Guest 内 kernel 启动 → mount /dev/pmem0 → exec /sbin/init = sandbox-
           → **这条连接升级为 stdio MUX**;host 发一次初始 SET_WINSIZE,起 app stdio
           桥接,ping ticker start;guest fork/exec user app(app fd 0/1/2 = 伪终端从端
           或 pipe 子端)→ 短连接发 app_started{pid}
-     T19c phase 3 supervisor + 反向 listener(ping/restore/quiesce/attach)+ mem_report
+     T19c phase 3 supervisor + 反向 listener(ping/restore/quiesce/attach/exec)+ mem_report
 T20  vCPU 跑过程中:
      · stdio MUX:STDIN / STDOUT / STDERR(或 PTY)+ WINDOW_UPDATE / SET_WINSIZE
        帧在 sandbox-ctl ↔ sandbox-init 间双向流动;MUX 因故断 → sandbox-ctl 拨新
@@ -693,7 +751,9 @@ T0  sandbox-ctl snapshot --sandbox-id <sid> [--output <out_dir>] [--upload]
 T1  通过 <run-dir>/<sid>/ctl.sock 联系目标 sandbox-ctl run 进程
 T2  目标进程串行:
     T2a 通过 vsock 短连接发 quiesce 给 sandbox-init,等 quiesced 响应。sandbox-init
-        收到后:sync + drop_caches → 停读应用 stdout/stderr(pty master)→ 在 stdio
+        收到后:拒绝新的 exec 并 SIGKILL 在飞的 exec 子进程(快照不能带运行中的
+        exec 兄弟进程;沙箱 resume/restore 后解除)→ sync + drop_caches → 停读应用
+        stdout/stderr(pty master)→ 在 stdio
         MUX 上发起优雅关闭握手(sandbox-ctl 的 MUX 端响应 MUX_CLOSE_ACK 并读到 EOF
         确认 MUX 已彻底关闭)→ 回 quiesced。quiesced 一回来即表示"MUX 已关、应用已
         阻塞、guest 干净态",可继续 T2b;deadline(见 sandbox-runtime.md §4.9)内未
@@ -749,11 +809,12 @@ T10 sandbox-ctl snapshot(发起方进程)收到 done:
 
 ### 6.3 ctl.sock 协议
 
-`<run-dir>/<sid>/ctl.sock` 是 sandbox-ctl run 进程在 §5 启动时建立的 UDS,
-snapshot 子命令通过它触发快照。请求 / 响应都是 JSON,长度前缀(4 字节 LE
-uint32)+ payload。
+`<run-dir>/<sid>/ctl.sock` 是 sandbox-ctl run 进程在 §5 启动时建立的 host-local
+UDS,承载两类宿主侧控制请求:`snapshot`(一问一答)与 `exec`(握手后该连接升级
+为端到端 stdio MUX)。请求 / 响应都是 JSON,长度前缀(4 字节 LE uint32)+ payload。
+同一 UDS 上多个请求各自独立的连接、可并发(每连接一 goroutine)。
 
-请求(snapshot 子命令 → sandbox-ctl run):
+**snapshot_request**(snapshot 子命令 → sandbox-ctl run):
 
 | 字段 | 类型 | 说明 |
 |---|---|---|
@@ -762,7 +823,7 @@ uint32)+ payload。
 | `upload` | bool | true 时走流式 ingest 到 manifest store;与 `out_dir` 互斥 |
 | `resume_after` | bool | 默认 false(零值即销毁);CLI 默认与之一致。`--resume` 触发 true |
 
-响应:
+响应 `snapshot_done`:
 
 ```json
 {
@@ -776,9 +837,23 @@ uint32)+ payload。
 }
 ```
 
-或 `{"type": "error", "msg": "<reason>"}`。run 进程在收到请求时若处于不可
-snapshot 状态(CH 已退出 / 配置不一致 / out_dir+upload 都给或都没给)直接回
-error。
+**exec_request**(exec 子命令 → sandbox-ctl run):
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `type` | string | `"exec_request"` |
+| `exec` | object | `{ argv:[...], env:{K:V}, cwd, stdio }`——要执行的命令与协商的 stdio(对应 §2.4 的 flag) |
+
+run 进程收到后向 guest 反向通道发 `exec` 操作(见
+[`sandbox-runtime.md`](sandbox-runtime.md) §4.3),拿到 guest 实际建立的 stdio
+规格后回 `exec_ack`(`{ "type":"exec_ack", "stdio":{...} }`),**此后该 ctl.sock
+连接不再收发 JSON,而是被 run 进程透明转发为 `sandbox-ctl exec` ↔ guest 之间
+的端到端 stdio MUX**(含 EXIT_STATUS 帧与优雅 MUX_CLOSE,详见
+[`sandbox-runtime.md`](sandbox-runtime.md) §4.5 / §4.6)。
+
+任一请求出错回 `{"type": "error", "msg": "<reason>"}`:snapshot 不可达状态
+(CH 已退出 / 配置不一致 / out_dir+upload 都给或都没给)、或 exec 被拒
+(沙箱正在 quiesce / argv 为空 / guest 起进程失败)。
 
 ## 7. 恢复数据流(`run --restore=`)
 
@@ -1414,7 +1489,7 @@ snapshot 路径要求 `/vm.pause` 之后内存内容稳定,但 backend worker �
 `deflate_on_oom` 显式写 true(默认值)不报错,记 warn 日志:
 "deflate_on_oom set but balloon not configured"。
 
-### 13.2 stdio flag 互斥(`run` 冷启动 / 恢复模式同)
+### 13.2 stdio flag 互斥(`run` 冷启动 / 恢复模式 / `exec` 同)
 
 | 规则 | 错误消息 |
 |------|---------|
@@ -1425,11 +1500,15 @@ snapshot 路径要求 `/vm.pause` 之后内存内容稳定,但 backend worker �
 | `--stderr=false` 与 `--stderr-to` 互斥 | "--stderr=false conflicts with --stderr-to" |
 | `--console` 取值不是 `off` / `default` / `file=<path>` | "--console must be off, default, or file=<path>" |
 
-### 13.3 snapshot 子命令校验
+### 13.3 snapshot / exec 子命令校验
 
 | 规则 | 错误消息 |
 |------|---------|
-| `--output` 与 `--upload` 必须二选一,不能都给或都不给 | "--output and --upload are mutually exclusive; one is required" |
+| snapshot:`--output` 与 `--upload` 必须二选一,不能都给或都不给 | "--output and --upload are mutually exclusive; one is required" |
+| exec:`--sandbox-id` 必填 | "exec: --sandbox-id required" |
+| exec:`--` 之后必须给出命令 | "exec: missing command" |
+| exec:`--env` 必须是 `KEY=VALUE` 形式 | "--env must be KEY=VALUE" |
+| exec:沙箱正在 quiesce(snapshot 进行中)时拒绝 | "exec: sandbox quiescing (snapshot in progress)" |
 
 ### 13.4 restore 模式校验(`ValidateRestore` + `ApplyRestoreOverrides`)
 
