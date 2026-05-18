@@ -29,6 +29,14 @@ import (
 // ("exec-join", runExecJoin) does the namespace join then ForkExecs the
 // command ("exec-child-joined"). The helper proxies the command's exit
 // status as its own so the SIGCHLD reaper relays a faithful code.
+//
+// The helper is itself a Go process, so re-exec alone is not enough:
+// the Go runtime spawns its threads with CLONE_FS, and the kernel's
+// mntns_install() rejects setns(CLONE_NEWNS) unless the calling
+// thread's fs_struct is unshared (fs->users == 1). runExecJoin
+// therefore LockOSThreads and unshare(CLONE_FS) for that one thread
+// before the join — LockOSThread alone leaves it sharing fs state and
+// setns(mnt) fails EINVAL.
 
 // execRegistry brokers child reaping between the single process-wide
 // SIGCHLD reaper (phase3Supervise) and the per-session exec goroutines.
@@ -294,7 +302,8 @@ func runExecSession(c *vsockConn, req *proto.Message, sup *supervisorState) {
 // joins the app (appPid)'s mount + pid namespaces and then ForkExecs
 // the command. The returned pid is the HELPER's — it is what the
 // SIGCHLD reaper tracks and what quiesce/lost-session kills; the
-// command dies with the helper via Pdeathsig (set in runExecJoin).
+// command dies with the helper via PR_SET_PDEATHSIG armed by the
+// joined child itself (see runExecJoin / runExecChild).
 func forkExecChild(spec *proto.ExecSpec, cs childStdio, appPid int) (int, error) {
 	self := "/proc/self/exe"
 	ttyArg := "0"
@@ -337,13 +346,32 @@ func forkExecChild(spec *proto.ExecSpec, cs childStdio, appPid int) (int, error)
 // of the user app inside its namespaces, and proxies the command's
 // exit status as its own (so the reaper relays a faithful code).
 //
-// Pdeathsig=SIGKILL on the command ties its lifetime to this helper:
-// when the registered helper pid is killed (quiesce / lost session),
-// the command is taken down with it.
+// The command's lifetime is tied to this helper via PR_SET_PDEATHSIG=
+// SIGKILL — but armed by the joined child itself (runExecChild), NOT
+// via syscall.SysProcAttr.Pdeathsig here. Go's ForkExec runs a child-
+// side "is my parent already dead?" self-check that compares getppid()
+// against the parent pid captured before clone; because the child is
+// placed in the app's PID namespace (setns CLONE_NEWPID below), its
+// getppid() resolves in that ns where the helper is invisible (→ 0),
+// never equals the helper's init-ns pid, so the check would SIGKILL
+// the command at startup every time. Arming pdeathsig from the child
+// after it is in the new ns avoids that bogus check; the kernel tracks
+// the real parent task regardless of pid-ns visibility, and
+// PR_SET_PDEATHSIG survives a normal (non-setuid) execve.
 func runExecJoin(appPidStr, ttyStr, cwd, argv0 string, args []string) {
 	// setns(CLONE_NEWNS) is per-thread; pin this goroutine so the join
 	// and the subsequent fork happen on the same (joined) thread.
 	runtime.LockOSThread()
+	// The kernel's mntns_install() rejects setns(CLONE_NEWNS) unless the
+	// calling thread's fs_struct is unshared (fs->users == 1). Go's
+	// runtime threads are clone()d with CLONE_FS, so LockOSThread alone
+	// still leaves this thread sharing root/cwd/umask with its siblings
+	// → setns(mnt) fails EINVAL. Unshare CLONE_FS for just this locked
+	// thread first; the fs values are preserved (private copy), only the
+	// sharing is broken. Must precede the setns below.
+	if err := unix.Unshare(unix.CLONE_FS); err != nil {
+		die("exec-join: unshare fs: %v", err)
+	}
 
 	appPid, err := strconv.Atoi(appPidStr)
 	if err != nil {
@@ -370,7 +398,11 @@ func runExecJoin(appPidStr, ttyStr, cwd, argv0 string, args []string) {
 	_ = unix.Close(mntFD)
 	_ = unix.Close(pidFD)
 
-	sys := &syscall.SysProcAttr{Pdeathsig: syscall.SIGKILL}
+	// No Pdeathsig here: Go's ForkExec child self-check (getppid vs
+	// pre-clone parent pid) misfires across setns(CLONE_NEWPID) and
+	// SIGKILLs the command at startup. The joined child arms
+	// PR_SET_PDEATHSIG itself instead (runExecChild).
+	sys := &syscall.SysProcAttr{}
 	if ttyStr == "1" {
 		sys.Setsid = true
 		sys.Setctty = true // Ctty defaults to 0 = the pty slave

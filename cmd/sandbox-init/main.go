@@ -373,6 +373,20 @@ func runExecChild(workdir, appPath string, args []string, joined bool) {
 		resolved = p
 	}
 
+	// Tie the command's lifetime to the exec-join helper (our parent).
+	// Done here, from inside the app's pid namespace, rather than via
+	// syscall.SysProcAttr.Pdeathsig in runExecJoin — Go's ForkExec
+	// child self-check (getppid vs pre-clone parent pid) misfires across
+	// setns(CLONE_NEWPID) and would SIGKILL us at startup. The kernel
+	// tracks the real parent task regardless of pid-ns visibility, and
+	// PR_SET_PDEATHSIG survives a normal (non-setuid) execve, so it
+	// still fires for the real command when the helper dies.
+	if joined {
+		if err := unix.Prctl(unix.PR_SET_PDEATHSIG, uintptr(syscall.SIGKILL), 0, 0, 0); err != nil {
+			die("exec-child: set pdeathsig: %v", err)
+		}
+	}
+
 	if err := syscall.Exec(resolved, append([]string{appPath}, args...), os.Environ()); err != nil {
 		die("exec-child: exec %s: %v", resolved, err)
 	}
