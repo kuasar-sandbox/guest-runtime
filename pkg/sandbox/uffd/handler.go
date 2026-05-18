@@ -141,23 +141,24 @@ type removeReq struct {
 }
 
 type handlerStats struct {
-	faultsAbsent    atomic.Uint64
-	faultsReleased  atomic.Uint64
-	zeropages       atomic.Uint64 // count of UFFDIO_ZEROPAGE calls
-	copies          atomic.Uint64 // count of UFFDIO_COPY calls
-	pagesZeroed     atomic.Uint64 // total pages installed via ZEROPAGE
-	pagesCopied     atomic.Uint64 // total pages installed via COPY
-	wakes           atomic.Uint64
-	removeEvents    atomic.Uint64
-	errors          atomic.Uint64
-	batchPagesSum   atomic.Uint64 // sum of run lengths (for avg calc)
-	batchCalls      atomic.Uint64 // count of batches (avg = sum/calls)
-	batchMaxPages   atomic.Uint64 // largest single batch observed
-	madviseCalls       atomic.Uint64 // madvise(DONTNEED) syscalls issued on backendVA
-	madviseBytes       atomic.Uint64 // total bytes advised DONTNEED
-	removeQDropped     atomic.Uint64 // events that fell back to sync flush (queue full)
+	faultsAbsent        atomic.Uint64
+	faultsReleased      atomic.Uint64
+	faultsLoaded        atomic.Uint64 // MISSING faults on StateLoaded pages (folio reclaimed by post-settled balloon PUNCH; must re-fill)
+	zeropages           atomic.Uint64 // count of UFFDIO_ZEROPAGE calls
+	copies              atomic.Uint64 // count of UFFDIO_COPY calls
+	pagesZeroed         atomic.Uint64 // total pages installed via ZEROPAGE
+	pagesCopied         atomic.Uint64 // total pages installed via COPY
+	wakes               atomic.Uint64
+	removeEvents        atomic.Uint64
+	errors              atomic.Uint64
+	batchPagesSum       atomic.Uint64 // sum of run lengths (for avg calc)
+	batchCalls          atomic.Uint64 // count of batches (avg = sum/calls)
+	batchMaxPages       atomic.Uint64 // largest single batch observed
+	madviseCalls        atomic.Uint64 // madvise(DONTNEED) syscalls issued on backendVA
+	madviseBytes        atomic.Uint64 // total bytes advised DONTNEED
+	removeQDropped      atomic.Uint64 // events that fell back to sync flush (queue full)
 	removeEventsBatched atomic.Uint64 // events that went through the batch path (avg events/syscall = removeEventsBatched / madviseCalls)
-	backendLookupMiss  atomic.Uint64 // EVENT_REMOVE with no backend VMA covering the offset (registration bug)
+	backendLookupMiss   atomic.Uint64 // EVENT_REMOVE with no backend VMA covering the offset (registration bug)
 }
 
 type faultEvent struct {
@@ -270,7 +271,6 @@ func (h *Handler) AddUffd(uffdFD int) error {
 // ProcessCH on handshake (must happen BEFORE the first uffdC fault,
 // so the handler can translate ev.address → memfd offset).
 func (h *Handler) AddressMap() *AddressMap { return h.addrMap }
-
 
 // Start spawns the reader and worker goroutines.
 func (h *Handler) Start() {
@@ -709,15 +709,18 @@ func (h *Handler) handleFault(ev faultEvent, pageBuf []byte) {
 
 		if isZero {
 			err := ioctlUffdZeropage(ev.uffdFD, pageVA, runBytes)
-			// EAGAIN on a multi-page batch means kernel did a partial
-			// install (some pages overlap existing folios, e.g. vhost
-			// backend memcpy'd into backendVA before this fault). The
-			// per-page install_bytes count isn't currently surfaced by
-			// our ioctl wrapper, so we can't tell which prefix succeeded.
-			// Conservative recovery: drop the batch entirely and retry
-			// the single faulting page. If the single page also EAGAINs
-			// (rare), fall through to EEXIST/error handling below.
-			if errors.Is(err, unix.EAGAIN) && runBytes > PageSize {
+			// EAGAIN or EEXIST on a multi-page batch means the kernel did
+			// only a partial install: some page in the run already has a
+			// folio (vhost backend memcpy, a prior fault, or — common
+			// while the balloon is concurrently PUNCH_HOLE/EVENT_REMOVE-
+			// churning these offsets — a neighbour the balloon left
+			// resident). The wrapper does not surface which prefix
+			// succeeded, and crucially that page need NOT be the faulting
+			// page `pageVA`. Drop the batch and retry the single faulting
+			// page so we never WAKE/mark-Loaded a page we did not resolve
+			// (doing so makes the vCPU re-fault forever — a fault↔WAKE
+			// livelock). Single-page result is handled below.
+			if (errors.Is(err, unix.EAGAIN) || errors.Is(err, unix.EEXIST)) && runBytes > PageSize {
 				err = ioctlUffdZeropage(ev.uffdFD, pageVA, PageSize)
 				runBytes = PageSize
 				runPages = 1
@@ -749,10 +752,14 @@ func (h *Handler) handleFault(ev faultEvent, pageBuf []byte) {
 		} else {
 			src := uint64(uintptr(unsafe.Pointer(&pageBuf[0])))
 			err := ioctlUffdCopy(ev.uffdFD, pageVA, src, runBytes)
-			if errors.Is(err, unix.EAGAIN) && runBytes > PageSize {
-				// Same partial-install fallback as ZEROPAGE: retry the
-				// faulting page only; pageBuf[0:PageSize] is already
-				// populated with the first page of source data.
+			if (errors.Is(err, unix.EAGAIN) || errors.Is(err, unix.EEXIST)) && runBytes > PageSize {
+				// Same partial-install fallback as ZEROPAGE: a batched
+				// EAGAIN/EEXIST means some page in the run already has a
+				// folio and need not be the faulting page. Retry the
+				// faulting page only (pageBuf[0:PageSize] already holds
+				// its source bytes) so we never mark a page Loaded that
+				// we did not resolve — otherwise the vCPU re-faults
+				// forever (fault↔WAKE livelock).
 				err = ioctlUffdCopy(ev.uffdFD, pageVA, src, PageSize)
 				runBytes = PageSize
 				runPages = 1
@@ -784,10 +791,30 @@ func (h *Handler) handleFault(ev faultEvent, pageBuf []byte) {
 		h.stats.faultsReleased.Add(1)
 		runPages := h.extendReleasedBatch(pageIdx)
 		runBytes := runPages * PageSize
-		if err := ioctlUffdZeropage(ev.uffdFD, pageVA, runBytes); err != nil {
-			if errors.Is(err, unix.EEXIST) || errors.Is(err, unix.EAGAIN) {
-				_ = ioctlUffdWake(ev.uffdFD, pageVA, runBytes)
+		err := ioctlUffdZeropage(ev.uffdFD, pageVA, runBytes)
+		// Batched EAGAIN/EEXIST: some page in the run already has a
+		// folio and need not be the faulting page. Narrow to pageVA so
+		// we never mark a page Loaded we did not resolve — otherwise the
+		// vCPU re-faults forever (fault↔WAKE livelock).
+		if (errors.Is(err, unix.EAGAIN) || errors.Is(err, unix.EEXIST)) && runBytes > PageSize {
+			err = ioctlUffdZeropage(ev.uffdFD, pageVA, PageSize)
+			runBytes = PageSize
+			runPages = 1
+		}
+		if err != nil {
+			if errors.Is(err, unix.EEXIST) {
+				// Faulting page itself already has a folio: WAKE; the
+				// kernel re-fault (MISSING-only registration) installs
+				// its PTE. Mark Loaded below.
+				_ = ioctlUffdWake(ev.uffdFD, pageVA, PageSize)
 				h.stats.wakes.Add(1)
+			} else if errors.Is(err, unix.EAGAIN) {
+				// Transient single-page EAGAIN: WAKE so the vCPU
+				// retries; do NOT mark Loaded — next fault re-enters
+				// and resolves this page.
+				_ = ioctlUffdWake(ev.uffdFD, pageVA, PageSize)
+				h.stats.wakes.Add(1)
+				return
 			} else {
 				h.logf("uffd: ZEROPAGE(released) va=0x%x len=%d: %v",
 					pageVA, runBytes, err)
@@ -803,11 +830,44 @@ func (h *Handler) handleFault(ev faultEvent, pageBuf []byte) {
 		h.recordBatch(runPages)
 
 	case StateLoaded:
-		// MISSING-only registration: kernel installs PTE automatically
-		// when folio exists. A userfault arriving here is a transient
-		// race; just wake — kernel re-fault path auto-installs.
-		_ = ioctlUffdWake(ev.uffdFD, pageVA, PageSize)
-		h.stats.wakes.Add(1)
+		h.stats.faultsLoaded.Add(1)
+		// uffd MISSING fires only when NO folio backs the page. Reaching
+		// here with StateLoaded therefore proves the folio was reclaimed
+		// out from under us: the post-settled aggressive balloon inflate
+		// PUNCH_HOLE'd this resident page and the synthetic EVENT_REMOVE
+		// has not (yet) been reflected in state. It is the StateReleased
+		// situation under a stale label — WAKE-only cannot make progress
+		// (no folio for the kernel re-fault to install), so the page MUST
+		// be re-filled or the vCPU re-faults forever (fault↔WAKE
+		// livelock). A punched page is guest-freed by the balloon
+		// contract, so the guest expects a fresh zero page; replaying
+		// Source content would reincarnate stale data into a reused page.
+		// Single page only — neighbouring Loaded pages may still be
+		// resident, so there is no safe run to batch.
+		err := ioctlUffdZeropage(ev.uffdFD, pageVA, PageSize)
+		if err != nil {
+			if errors.Is(err, unix.EEXIST) {
+				// Folio actually present: a genuine transient race (it
+				// got installed between EVENT_REMOVE generation and now).
+				// WAKE; the kernel re-fault installs the PTE. Page stays
+				// Loaded.
+				_ = ioctlUffdWake(ev.uffdFD, pageVA, PageSize)
+				h.stats.wakes.Add(1)
+				return
+			} else if errors.Is(err, unix.EAGAIN) {
+				// Transient kernel state: WAKE so the vCPU retries; the
+				// next fault re-enters this path and re-fills.
+				_ = ioctlUffdWake(ev.uffdFD, pageVA, PageSize)
+				h.stats.wakes.Add(1)
+				return
+			}
+			h.logf("uffd: ZEROPAGE(loaded) va=0x%x: %v", pageVA, err)
+			h.stats.errors.Add(1)
+			return
+		}
+		h.stats.zeropages.Add(1)
+		h.stats.pagesZeroed.Add(1)
+		h.recordBatch(1)
 	}
 }
 
@@ -832,6 +892,7 @@ func (h *Handler) Stats() map[string]uint64 {
 	return map[string]uint64{
 		"faults_absent":         h.stats.faultsAbsent.Load(),
 		"faults_released":       h.stats.faultsReleased.Load(),
+		"faults_loaded":         h.stats.faultsLoaded.Load(),
 		"zeropage_calls":        h.stats.zeropages.Load(),
 		"copy_calls":            h.stats.copies.Load(),
 		"pages_zeroed":          h.stats.pagesZeroed.Load(),

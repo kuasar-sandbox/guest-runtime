@@ -30,6 +30,7 @@ type statsReport struct {
 type uffdStatsJSON struct {
 	FaultsAbsent        uint64 `json:"faults_absent"`
 	FaultsReleased      uint64 `json:"faults_released"`
+	FaultsLoaded        uint64 `json:"faults_loaded"`
 	ZeropageCalls       uint64 `json:"zeropage_calls"`
 	CopyCalls           uint64 `json:"copy_calls"`
 	PagesZeroed         uint64 `json:"pages_zeroed"`
@@ -193,6 +194,7 @@ func buildUffdJSON(counters map[string]uint64, ramBytes int64) *uffdStatsJSON {
 	return &uffdStatsJSON{
 		FaultsAbsent:        counters["faults_absent"],
 		FaultsReleased:      counters["faults_released"],
+		FaultsLoaded:        counters["faults_loaded"],
 		ZeropageCalls:       counters["zeropage_calls"],
 		CopyCalls:           counters["copy_calls"],
 		PagesZeroed:         zeroed,

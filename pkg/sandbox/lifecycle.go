@@ -403,6 +403,7 @@ func writeUffdStats(w io.Writer, s map[string]uint64) {
 	keys := []string{
 		"faults_absent",
 		"faults_released",
+		"faults_loaded",
 		"zeropage_calls",
 		"copy_calls",
 		"pages_zeroed",

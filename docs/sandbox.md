@@ -1018,7 +1018,7 @@ PageState 用 `[]uint8`,size = ramSize / pageSize。每 4 GiB RAM = 1 MiB 状态
 |------|------|------|------|
 | Absent | uffd_C PAGEFAULT | OverrideMap 命中 → buf 装入 → UFFDIO_COPY;否则 source.ReadAt → ZERO 段 ZEROPAGE / 数据段 COPY | Loaded |
 | Released | uffd_C PAGEFAULT | UFFDIO_ZEROPAGE | Loaded |
-| Loaded | uffd_C PAGEFAULT | 正常路径不应出现;UFFDIO_WAKE 兜底 | Loaded |
+| Loaded | uffd_C PAGEFAULT | folio 已被 balloon PUNCH 回收、`EVENT_REMOVE` 尚未落到状态表:单页 `UFFDIO_ZEROPAGE` 重填(`EEXIST`/`EAGAIN` → WAKE 重试)。**不可 WAKE-only**,否则 fault↔WAKE 活锁 | Loaded |
 | 任意 | EVENT_REMOVE on uffd_C | pageStates[range] = Released(同步,fault 路径要看);push 到 removeQ;flusher 异步 batch+merge → madvise(DONTNEED, backendVA);OverrideMap.Drop(pageIdx) | Released |
 
 ### 8.4 worker pool
@@ -1037,36 +1037,72 @@ PageState 用 `[]uint8`,size = ramSize / pageSize。每 4 GiB RAM = 1 MiB 状态
 
 ### 8.5 EVENT_REMOVE 处理
 
-CH 的 balloon inflate 路径(消费 virtio-balloon inflate vq 的页号)对每个
-被让出的页同时做两件事:
+CH 的 balloon inflate 处理对每个让出 run 调一次 release:
 
 1. 在 memfd 上 `fallocate(FALLOC_FL_PUNCH_HOLE | KEEP_SIZE)` —— 释放 inode 页
-2. 在 chVA 上 `madvise(DONTNEED)` —— 清自己进程的 PTE
+2. 在 chVA 上 `madvise(MADV_DONTNEED)` —— 清 CH 自己进程的 PTE
 
-其中 (1) 触发 kernel 通过 `unmap_mapping_range` 向所有 mapping 该 inode 的
-VMA 投放 PTE 失效,在 chVA 上则合成一条 `EVENT_REMOVE` 投递到 uffd_C 的事件
-队列。
+`EVENT_REMOVE` 的**唯一来源是 (2)**:chVA 是 uffd_C 注册的 VMA,内核在其上
+处理 `MADV_DONTNEED` 时**无条件**合成一条 `EVENT_REMOVE`(覆盖整个 madvise
+区间,**与该区间是否驻留无关**),并且 `MADV_DONTNEED` 会**同步阻塞**到外部
+handler 消费完该事件才返回。(1) 的 fallocate 只丢 inode 页,**不**经此路径
+产生 chVA 上的 `EVENT_REMOVE`——所以要止住事件必须同时跳过 (1)(2)。
 
 handler 收到 `EVENT_REMOVE` 后做 **process-level reclaim**:对 sandbox-ctl
-自己的 backendVA mmap 做 `madvise(DONTNEED)`,把进程级 PTE/RSS 份额也清掉。
+自己的 backendVA mmap 做 `madvise(MADV_DONTNEED)`,把进程级 PTE/RSS 份额清掉。
 
-**双端职责划分**:
+**为什么冷启动收敛从数十秒降到近乎瞬时**。`release_memory_range` 在 x86-4K
+下**逐 4K 页**调用(`pbp` 合并被旁路)。改动前,把 balloon 充到 `capacity −
+allocatable_now`(1.5 GiB 量级)时**每个 4K 页**都走 (1)(2),而 (2) 的
+`MADV_DONTNEED` 在 uffd VMA 上**同步阻塞**到单 reader handler 消费完该
+`EVENT_REMOVE` 才返回——balloon 线程要做 `≈ 充气字节 / 4K`(1.5 GiB ≈ 40 万)
+次**串行的跨进程同步往返**。这串行握手(而非回收真实内存本身)就是数十秒
+收敛、以及之前偶发 boot 期软死锁的根因。
+
+guest balloon 驱动充气分配的页**从不被 guest 写入**(`balloon_page_alloc` 无
+`__GFP_ZERO`,平台 guest 内核未启用 `init_on_alloc`,fill 路径只动元数据),
+且 user-managed zone 从不 prefault。因此 balloon 让出的 offset **压倒性多数**
+(实测冷启动 ~99%)在 memfd 上是从未触碰的空洞——无 inode 页、无 PTE、无可
+释放物。CH 的 release 用一次 `lseek(SEEK_DATA)` 探测该 run 是否整段空洞,
+空洞则**跳过 (1)(2)**(平台 patch,见
+[`cloud-hypervisor.md`](cloud-hypervisor.md) §3.4):无 madvise → 无同步握手,
+balloon 线程以内存速度扫过这 ~99% 的页 → **收敛近乎瞬时**。
+
+剩下少量(实测 ~1%)是 guest 启动期经 vhost-blk 后端 / 内核拉进 page cache
+又释放、但 folio 仍驻留 memfd 的页:`lseek` 正确发现有数据,**不跳过**,照常
+PUNCH+madvise 回收——这是**有界的合法回收**,非浪费。另外 guest 退出时整个
+zone 被 unmap,会有一条覆盖整 zone 的大 `EVENT_REMOVE`/`EVENT_UNMAP`,与本
+patch 无关、也不属于充气阶段(勿与充气期事件混计)。
+
+**双端职责划分**(仅运行时回收已驻留页时发生):
 
 | 端 | 动作 | 释放对象 | 触发时机 |
 |---|---|---|---|
-| CH(balloon inflate 处理) | `fallocate(PUNCH_HOLE)` on memfd + `madvise(DONTNEED)` on chVA | inode 页 + CH 自己的 PTE | guest balloon 驱动把页交还(host 通过 `/vm.resize` 推 target → guest inflate) |
-| sandbox-ctl handler | `madvise(DONTNEED)` on backendVA | sandbox-ctl 自己的 PTE/RSS | 收到 `EVENT_REMOVE` |
+| CH(balloon inflate 处理) | run 段内有数据:`fallocate(PUNCH_HOLE)` on memfd + `madvise(MADV_DONTNEED)` on chVA;**整段空洞:跳过两者** | inode 页 + CH 自己的 PTE | host 通过 `/vm.resize` 推高 target → guest inflate 让出**已用过**的页(运行时回收 / node-ctl reclaim)|
+| sandbox-ctl handler | `madvise(MADV_DONTNEED)` on backendVA | sandbox-ctl 自己的 PTE/RSS | 收到 `EVENT_REMOVE`(仅 CH 未跳过、即段内有数据时)|
 
-**触发节奏**:平台**不**使用 `free_page_reporting`——其连续 mmu_notifier 广播
-会饿死 guest vsock kthread(详见 §9.3)。改用 host 端 BalloonController 按
-mem_report 反馈周期(默认 5 s,单步 ≤ 256 MiB)推 inflate target,EVENT_REMOVE
-因此呈"周期性小批量"而非"持续高频",对 fault 派发的挤压可控。
+**关键不变量**:
 
-**关键不变量**:CH 的 fallocate(PUNCH_HOLE) 与 sandbox-ctl 的
-madvise(DONTNEED) 是**互补**的,不是 redundant。前者管 file pages,后者管
-process PTE,缺任一边都泄漏。EVENT_REMOVE 路径仍然异步化(reader 只更新
-pageStates + push removeQ;flusher batch + merge + sort 后批量 madvise),
-保留 cold-start 早期 boot 阶段大批量事件的吞吐能力。
+- CH 的 fallocate(PUNCH_HOLE) 与 sandbox-ctl 的 madvise(DONTNEED) 是**互补**
+  的,不是 redundant:前者管 file pages,后者管 process PTE,缺任一边都泄漏。
+  此不变量只在"段内有数据、确需回收"时才进入——空洞 run 两边都无可释放。
+- 跳过只命中真空洞:任何**确需回收**的页必有数据,永不被跳过;被抑制的
+  `EVENT_REMOVE` 本只驱动 handler 对 backendVA 的 reclaim,而空洞 offset
+  sandbox-ctl 也从未 fault → 那一步本就 no-op。跳过前后 host 内存终态一致。
+- `EVENT_REMOVE` 路径仍异步化(reader 只更新 pageStates + push removeQ;
+  flusher batch+merge 后批量 madvise),该吞吐能力**服务运行时回收**已驻留
+  工作集页与少量 boot 残留;冷启动 ~99% 的空洞充气页在 CH 源头被跳过,
+  不进入此路径(故不再是收敛瓶颈)。
+- `EVENT_REMOVE → pageStates=Released` 的状态写入与 guest 对同一页的再
+  fault 之间存在竞态:PUNCH 已回收 folio,但状态表尚未置 Released 时,fault
+  以 **StateLoaded** 进入 handler。uffd MISSING **仅在无 folio 时触发**,故
+  Loaded 上的 fault **证明** folio 已被 balloon 回收,与 Released 等价——
+  handler 按单页 `UFFDIO_ZEROPAGE` 重填(让出页对 guest 即新页,`balloon_
+  page_alloc` 无 `__GFP_ZERO`,零页即正确语义;回放 source 内容会把旧数据
+  复活到复用页,是 bug)。此处 **WAKE-only 必然 fault↔WAKE 活锁**:无 folio
+  可供内核重 fault 装回,guest 永久重 fault。这是 post-settled aggressive
+  inflate(§9.3 BalloonController 推高 target,回收已用过的工作集页)下的
+  必经路径,非异常兜底。
 
 ## 9. cgroup 与 balloon 联动
 
@@ -1126,7 +1162,11 @@ CH 命令行(三种模式都用,跟 cgroup 解耦):
 
 - `size=0` boot 期 guest 看到 capacity 等额内存,balloon 尚未持有页。host 端
   BalloonController 在 settled 之后(launch 握手完成)接管 target,把 balloon
-  推到 `capacity − allocatable_now`
+  推到 `capacity − allocatable_now`。这批让出的页 ~99%(实测)是从未写过的
+  空洞(memfd 稀疏未 prefault),CH 的 release 对空洞 run 跳过 PUNCH/madvise
+  →省去同步 `EVENT_REMOVE` 握手,**收敛从数十秒降到近乎瞬时**;少量确驻留的
+  瞬态 page cache 仍合法回收(机制见 §8.5 与
+  [`cloud-hypervisor.md`](cloud-hypervisor.md) §3.4)
 - **不**启用 `free_page_reporting`。FPR 让 guest 在每轮 page reclaim 中把空闲
   页号高频推到 host,CH 的 `release_memory_range` 对自身 mmap 做
   `madvise(MADV_DONTNEED)` 广播 mmu_notifier 失效到 KVM EPT,持续的 IPI
@@ -1149,8 +1189,9 @@ guest sandbox-init  ─ mem_report (vsock, 5 s) ─►  Controller.Hint
   `delta = MemAvailable − TargetFreeBuffer` 调整 target,把 guest 的自由内存
   锚定在该值附近
 - **anti-hunting**:`|delta| < Slack`(默认 32 MiB)的样本直接丢弃
-- **MaxStep 限速**:单次 Hint 调整 ≤ `MaxStep`(默认 256 MiB),把每个 tick 的
-  mmu_notifier 突发量盖住
+- **MaxStep 限速**:单次 Hint 调整 ≤ `MaxStep`(默认 256 MiB)。boot 充气
+  ~99% 走空洞跳过(无同步握手),故此限速实质作用于**运行时回收已驻留
+  工作集页**时的 mmu_notifier / `EVENT_REMOVE` 突发量
 - **stale 防护**:刚推过一次 inflate,guest MemTotal 还没收到本次让出量的反映,
   此时 MemAvailable 偏大。若 `MemAvailable > (Capacity − max(target, actual)) +
   64 MiB`(visible slack)判为 stale,跳过该样本,避免反馈环正反馈失控
