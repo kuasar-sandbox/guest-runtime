@@ -101,6 +101,13 @@ func main() {
 		die("phase 2 fork: %v", err)
 	}
 
+	// Move the app tree into the `app` cgroup so quiesce can freeze it.
+	// Fatal on failure: a pid left in the root cgroup would not freeze,
+	// silently defeating the snapshot freeze (§3.4).
+	if err := cgroupPlaceApp(appPid); err != nil {
+		die("cgroup place app pid=%d: %v", appPid, err)
+	}
+
 	// Notify host before entering supervisor — best-effort short conn.
 	if err := notifyAppStarted(appPid); err != nil {
 		logf("warn: app_started notify failed (continuing): %v", err)
@@ -206,6 +213,13 @@ func phase1MountAndPivot() error {
 	}
 	if err := unix.Mount("devpts", "/dev/pts", "devpts", 0, "newinstance,ptmxmode=0666"); err != nil {
 		return fmt.Errorf("mount devpts on /dev/pts: %w", err)
+	}
+
+	// cgroup v2 freezer: the freeze domain for the user-app process
+	// tree (snapshot freeze/thaw, §3.4). Mounted post-chroot so the
+	// path is stable; no controllers enabled.
+	if err := cgroupMount(); err != nil {
+		return fmt.Errorf("cgroup setup: %w", err)
 	}
 
 	return nil

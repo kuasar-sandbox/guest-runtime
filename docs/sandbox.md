@@ -752,13 +752,14 @@ T1  通过 <run-dir>/<sid>/ctl.sock 联系目标 sandbox-ctl run 进程
 T2  目标进程串行:
     T2a 通过 vsock 短连接发 quiesce 给 sandbox-init,等 quiesced 响应。sandbox-init
         收到后:拒绝新的 exec 并 SIGKILL 在飞的 exec 子进程(快照不能带运行中的
-        exec 兄弟进程;沙箱 resume/restore 后解除)→ sync + drop_caches → 停读应用
-        stdout/stderr(pty master)→ 在 stdio
+        exec 兄弟进程;沙箱 resume/restore 后解除)→ **freeze 应用进程树**
+        (cgroup.freeze=1,等 cgroup.events 至 frozen 1)→ sync + drop_caches →
+        停读应用 stdout/stderr(pty master)→ 在 stdio
         MUX 上发起优雅关闭握手(sandbox-ctl 的 MUX 端响应 MUX_CLOSE_ACK 并读到 EOF
-        确认 MUX 已彻底关闭)→ 回 quiesced。quiesced 一回来即表示"MUX 已关、应用已
-        阻塞、guest 干净态",可继续 T2b;deadline(见 sandbox-runtime.md §4.9)内未
-        收到 quiesced → 视为协议失败,**放弃此次 snapshot**(绝不带半开 MUX 快照),
-        sandbox 继续运行
+        确认 MUX 已彻底关闭)→ 回 quiesced。quiesced 一回来即表示"应用已冻结、MUX
+        已关、guest 干净态",可继续 T2b;deadline(见 sandbox-runtime.md §4.9)内未
+        收到 quiesced(含 freeze 在有界等待内未确认 frozen)→ 视为协议失败,**放弃
+        此次 snapshot**(绝不带半冻结/半开 MUX 快照),sandbox 继续运行
     T2b CH /vm.pause:vCPU 暂停,virtio 设备 quiesce
     T2c srv0.Quiesce() + srv1.Quiesce()(vhost-user-blk backend 排空 inflight)
 T3  CH /vm.snapshot { destination_url=file://<run-dir>/<sid>/snap-stage/ }
@@ -786,10 +787,13 @@ T6  生成 <sid>.snapshot 内容:
                   stdout 输出 snapshot_manifest_key
     若 --output:写到 <out_dir>/<sid>.snapshot(稀疏文件 + ZIP 尾)
 T7  srv0.Resume() + srv1.Resume()
-T8  resume_after=true:CH /vm.resume,沙箱继续运行;quiesce 时 guest 关了
-                  stdio MUX,这里 sandbox-ctl 拨新连接发 attach 重建之
-                  (attach_ack → per-stream window 重协商、winsize 重发、
-                  续传残留 + 应用 stdio;详见 sandbox-runtime.md §4.6)
+T8  resume_after=true:CH /vm.resume,沙箱原地续跑;quiesce 时 guest 冻结了
+                  应用并关了 stdio MUX,这里 sandbox-ctl 拨新连接发 attach 重建
+                  MUX(attach_ack → per-stream window 重协商、winsize 重发、续传
+                  残留 + 应用 stdio)。attach 只管 MUX 传输、不等同"快照后 resume";
+                  guest 因仍处 quiesce 冻结态(attach 是其首个 post-resume 接触)
+                  据自身冻结状态补做 thaw——属 quiesce 生命周期而非 attach 语义,
+                  见 sandbox-runtime.md §4.3 / §4.6
     resume_after=false(默认):CH /vm.shutdown,等 CH 退出 → sandbox-ctl run
                   进程也退出
 T9  ctl.sock 回 snapshot_done

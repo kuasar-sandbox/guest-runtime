@@ -187,8 +187,8 @@ func handleReverseConn(c *vsockConn, sup *supervisorState, bridge *consoleBridge
 		bridge.closeLiveMUX()    // drop any stale session first (normally already gone via quiesce)
 		// CH reloaded the snapshot's CLOCK_REALTIME verbatim, so the
 		// guest wall clock is stale by the whole dormant interval. Jump
-		// it to the host's now before replying / unblocking the app, so
-		// the app never observes the stale clock. Monotonic clocks are
+		// it to the host's now before the post-reattach thaw, so the
+		// thawed app never observes the stale clock. Monotonic clocks are
 		// unaffected (Go timers, ping RTT, mem_report ticker keep
 		// running). Best-effort: a failure just leaves the stale clock.
 		if req.WallclockNs > 0 {
@@ -207,6 +207,13 @@ func handleReverseConn(c *vsockConn, sup *supervisorState, bridge *consoleBridge
 		}
 		_ = c.SetDeadline(time.Time{})
 		bridge.reattach(c)
+		// Env rebuilt (wall clock fixed, MUX reattached) — thaw the app
+		// LAST so it resumes only into a wired env, never observing the
+		// stale clock / missing MUX (the freeze rode the snapshot from
+		// quiesce). Idempotent.
+		if err := cgroupThaw(); err != nil {
+			logf("reverse-channel: restore thaw: %v", err)
+		}
 		return true
 
 	case proto.TypeAttach:
@@ -221,16 +228,42 @@ func handleReverseConn(c *vsockConn, sup *supervisorState, bridge *consoleBridge
 		}
 		_ = c.SetDeadline(time.Time{})
 		bridge.reattach(c)
+		// attach itself is only MUX-transport reconnect — NOT
+		// "post-snapshot resume" (it also serves plain live-VM MUX
+		// breaks where nothing was ever quiesced). Thaw belongs to the
+		// quiesce lifecycle and is state-driven: thaw iff the app is
+		// still frozen, which only holds for the resume_after=true path
+		// (VM resumed in place; this attach is just its first
+		// post-resume contact). Plain reconnect → not frozen → skipped
+		// (docs/sandbox-runtime.md §4.3, sandbox.md §6.2 T8).
+		if frozen, err := cgroupFrozen(); err != nil {
+			logf("reverse-channel: attach cgroupFrozen: %v", err)
+		} else if frozen {
+			if err := cgroupThaw(); err != nil {
+				logf("reverse-channel: attach thaw: %v", err)
+			}
+		}
 		return true
 
 	case proto.TypeQuiesce:
-		logf("reverse-channel: quiesce — prep + MUX close")
+		logf("reverse-channel: quiesce — freeze + prep + MUX close")
 		// Reject new exec + SIGKILL in-flight exec children so the
 		// snapshot captures no running exec siblings (their sessions
 		// tear down once the reaper delivers).
 		killExecChildren(sup.execReg)
-		runQuiesce()          // step 1: sync + drop_caches
-		bridge.closeLiveMUX() // steps 2-3: stop forwarding app output, then the MUX_CLOSE handshake
+		// Freeze the app tree BEFORE sync: no new dirty pages after
+		// sync (cleaner deterministic image) and the snapshot captures
+		// the app stopped. NOT best-effort — an unconfirmed freeze is a
+		// half-frozen snapshot, exactly the resume-vs-env race we
+		// eliminate — so on failure skip `quiesced`; the host deadline
+		// lapses and it abandons this snapshot (docs/sandbox-runtime.md
+		// §3.4 错误处理).
+		if err := cgroupFreeze(); err != nil {
+			logf("reverse-channel: quiesce freeze failed, NOT sending quiesced: %v", err)
+			return false
+		}
+		runQuiesce()          // sync + drop_caches
+		bridge.closeLiveMUX() // stop forwarding app output, then the MUX_CLOSE handshake
 		if err := proto.WriteMessage(c, &proto.Message{Type: proto.TypeQuiesced}); err != nil {
 			logf("reverse-channel: write quiesced: %v", err)
 		}

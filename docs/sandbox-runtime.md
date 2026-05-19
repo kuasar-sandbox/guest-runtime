@@ -96,7 +96,11 @@ sandbox-init 通过 Go syscall 实现。
                                  upperdir=/mnt/upper/upperdir,
                                  workdir=/mnt/upper/workdir  /mnt/newroot
 9. MS_MOVE /proc /sys /dev 到 newroot 下;chdir(newroot) → MS_MOVE . / → chroot(.) → 进入阶段 2
-10. AF_VSOCK bind+listen :5000   ← 反向通道(host→guest)早于阶段 2 的 hello 开门
+10. mount -t cgroup2 cgroup2 /sys/fs/cgroup;mkdir /sys/fs/cgroup/app
+                                 ← cgroup v2 freezer:应用进程树的冻结域
+                                   (quiesce 前冻结、restore 后解冻,§3.4);
+                                   不在 subtree_control 开任何控制器
+11. AF_VSOCK bind+listen :5000   ← 反向通道(host→guest)早于阶段 2 的 hello 开门
 ```
 
 全部通过 `golang.org/x/sys/unix.Mount` / `unix.Chroot` 等 syscall 完成,
@@ -147,6 +151,8 @@ ping ticker,如果 listener 没起会落空。vsock 不依赖 IP 配置,阶段 1
 9. 子进程在新 ns 内:mount -t proc proc /proc → chdir(workdir) → syscall.Exec(exec, args...)
 
 10. 父进程(sandbox-init pid=1):
+     - 把子进程 pid 写入 /sys/fs/cgroup/app/cgroup.procs(其派生的整棵进程树
+       随之归入该 cgroup;sandbox-init 自身留在 root cgroup,冻结时不被停)
      - 启动 stdio 桥接 goroutine:app 端 fd ↔ MUX 流(§3.5)
      - 短连接 dial host:5000 发 app_started{pid} → 等 ack → close
      - 进入阶段 3 supervisor
@@ -211,11 +217,15 @@ quiesce 是 host `/vm.pause` 之前的最后一次清理机会,目标两件事:
 **quiesce 流程**:
 
 ```
+0. (先按 §3.6 拒绝新 exec 并 SIGKILL 在飞 exec 辅助进程)freeze 应用:
+   write /sys/fs/cgroup/app/cgroup.freeze = 1,轮询 cgroup.events 至 frozen 1
+   (有界等待)。在 sync 前冻结 ⇒ sync 之后应用不再产生新脏页,镜像更确定;
+   freezer 原子覆盖整棵子树,含冻结期 fork 出的子进程
 1. [prep] sync(2)                                  // ~ms,把 ext4 upperdir 全部 dirty 落地
 2. [prep] open("/proc/sys/vm/drop_caches", O_WRONLY) → write("3\n")
                                                     // 同时丢 page cache + dentry/inode cache
-3. 停止读应用的 stdout/stderr pipe(或 pty master) // 应用很快在下一次 write 阻塞,残留有界
-   (停读是 MUX 关闭的前置动作,不提前做,缩短应用阻塞窗口)
+3. 停止读应用的 stdout/stderr pipe(或 pty master) // 应用已冻结,残留有界
+   (停读是 MUX 关闭的前置动作)
 4. 在 MUX 连接上发起优雅关闭握手(§4.6):MUX_CLOSE → 收 MUX_CLOSE_ACK → close(MUX);
    连接已断则降级硬丢
 5. WriteMessage(quiesced) 于 quiesce 短连接
@@ -242,20 +252,24 @@ quiesce 是 host `/vm.pause` 之前的最后一次清理机会,目标两件事:
 **不做项**:
 
 - **不**关闭 vsock listener(后续 `restore`/`attach` 依赖它)
-- **不**调用 user app 终止——quiesce 不是 sigterm;应用是被"停读其输出"自然反压
-  而阻塞,不是被信号
-- **不**重置 RNG / 熵池——熵池重新播种是 restore 路径的事
+- **不**终止 user app、**不**向其发信号——quiesce 不是 sigterm;应用是被 cgroup
+  v2 freezer **冻结**(step 0,对应用透明,非信号、非终止),不再依赖"停读输出"
+  的自然反压
+- **不**重置 RNG / 熵池——熵池重新播种属 restore 路径职责(本轮未实现,见
+  §4.3 `restore` 行的 deferred 注)
 - **不**清理 /var/log 等运行时日志——应用职责
 
 **错误处理**:
 
 - prep 的 sync / drop_caches 任一失败 → stderr 记录,继续后续步骤(best-effort,
   质量不到位反映在 dedup 率指标上,**不**阻塞快照)
-- **MUX_CLOSE 握手与 `quiesced` 不是 best-effort**:`quiesced` 写出意味着"MUX
-  已关、应用已阻塞、guest 处于干净态"。若 MUX_CLOSE 握手因连接已断而走不通 →
-  按硬丢处理(对端也看到了断链),仍可发 `quiesced`;若 `quiesced` 写不出去(host
-  侧不可达)→ host 在 deadline 内拿不到响应 → host 视为协议失败、放弃此次 snapshot,
-  sandbox 继续运行(详见 §4.9 与 [`sandbox.md`](sandbox.md) §6.2)
+- **freeze 确认、MUX_CLOSE 握手与 `quiesced` 不是 best-effort**:`quiesced` 写出
+  意味着"应用已冻结、MUX 已关、guest 处于干净态"。若 cgroup.events 在有界等待
+  内未到 `frozen 1` → **不发 `quiesced`**(半冻结的快照恰是要消除的 resume-vs-
+  env 竞态源)。若 MUX_CLOSE 握手因连接已断而走不通 → 按硬丢处理(对端也看到了
+  断链),仍可发 `quiesced`;若 `quiesced` 未发或写不出去(host 侧不可达)→ host
+  在 deadline 内拿不到响应 → host 视为协议失败、放弃此次 snapshot,sandbox 继续
+  运行(详见 §4.9 与 [`sandbox.md`](sandbox.md) §6.2)
 
 ### 3.5 应用 stdio / console 接线
 
@@ -376,9 +390,9 @@ vsock 端口固定 `5000`,**两个方向都复用同一端口号**,身份按方�
 | **应用退出通知** | guest→host | `app_exited{code, term_signal}` → `ack` | 关 | 用户进程退出;guest 收 ack 后再 reboot;host 用作自身退出码 |
 | **健康探测** | host→guest | `ping{id, t_send_ns}` → `pong{id, t_send_ns}` | 关 | host 计 RTT / 超时 / 失败数(§4.8) |
 | **mem 报告** | guest→host | `mem_report{mem_avail, mem_total}` → `mem_report_ack` | 关 | guest 周期上报 `/proc/meminfo`,喂 host BalloonController |
-| **快照前** | host→guest | `quiesce` → `quiesced` | 关 | guest 跑 prep + 关闭 MUX(§3.4),`quiesced` ⇒ 可安全 `/vm.pause` |
-| **恢复后** | host→guest | `restore{epoch, wallclock_ns}` → `restore_ack{stdio, app_state}` | **升级 MUX** | 快照恢复 vCPU 起跑后 host 通知 guest;`restore` 携带 host 发送前一刻的墙钟 `wallclock_ns`,guest 收到后先 `clock_settime` 把 `CLOCK_REALTIME` 跳到该值(CH 把快照里的旧钟原样载回,不纠正则落后整个静置区间;单调钟不受影响),再回 `restore_ack`——它是 ATTACH_ACK 的超集(含 channel 集合 + 应用状态)外加"恢复完成"信号(host 据此判定 restore 完成);该连接成为新 MUX |
-| **MUX 重连** | host→guest | `attach{epoch}` → `attach_ack{stdio, app_state}` | **升级 MUX** | 可靠性兜底:MUX 因 vsock 异常断了,host 拨新连接重建;guest 收到先把旧 MUX 优雅关闭(已断则硬丢)再回 ack,该连接成为新 MUX(§4.6) |
+| **快照前** | host→guest | `quiesce` → `quiesced` | 关 | guest 冻结应用进程树 + 跑 prep + 关闭 MUX(§3.4),`quiesced` ⇒ 应用已冻结、可安全 `/vm.pause` |
+| **恢复后** | host→guest | `restore{epoch, wallclock_ns}` → `restore_ack{stdio, app_state}` | **升级 MUX** | 快照恢复 vCPU 起跑后 host 通知 guest;应用此时仍处 freezer 冻结态(冻结态随快照保存,`/vm.resume` 不解冻);`restore` 携带 host 发送前一刻的墙钟 `wallclock_ns`,guest 收到后先 `clock_settime` 把 `CLOCK_REALTIME` 跳到该值(CH 把快照里的旧钟原样载回,不纠正则落后整个静置区间;单调钟不受影响),回 `restore_ack`(ATTACH_ACK 的超集 + "恢复完成"信号,host 据此判定 restore 完成)、重连 MUX,**最后 thaw 应用**(write `cgroup.freeze=0`)——故应用绝不会观察到旧墙钟或未重连的 MUX。**本轮 restore 期 env 重建仅墙钟;RNG 重播种、网络身份重置 deferred(未实现)**;该连接成为新 MUX |
+| **MUX 重连** | host→guest | `attach{epoch}` → `attach_ack{stdio, app_state}` | **升级 MUX** | 纯 stdio-MUX 传输重连:MUX 因 vsock 异常断了,host 拨新连接重建;guest 优雅关旧 MUX(已断则硬丢)、回 ack,该连接成为新 MUX(§4.6)。**attach ≠ 快照后 resume**——活 VM 上从未 quiesce 的断线兜底也走它。thaw 不属 attach 语义,而属 quiesce 生命周期(freeze 的逆),**由 guest 自身冻结状态驱动**:仍冻结才补 thaw(仅 `resume_after=true` 同进程续跑路径——VM 原地 resume,attach 恰为首个 post-resume 接触),活 VM 重连本未冻结即跳过 |
 | **执行命令** | host→guest | `exec{spec}` → `exec_ack{stdio}` | **升级 MUX(独立会话)** | guest 为这条 `exec` 起一个兄弟进程并准备其 stdio,回 `exec_ack`,该连接成为这次 exec 会话**独立**的 MUX;并发多条互不影响;命令结束 guest 在 MUX 上发 EXIT_STATUS 再走 §4.6 关闭。详见 §3.6 |
 | `error` | 任意 | (终止) | 关 | 任一端拒绝/出错的兜底响应,`msg` 人类可读 |
 
@@ -495,7 +509,7 @@ MUX 连接的**有序关闭**是一个两端同步的小协议(相当于应用�
     │ ◄── MUX_CLOSE_ACK (CONTROL frame) ──────────────      host: flush pending → ACK → no more MUX frames
     │     on ACK → close(MUX)                                host: read → EOF → close(MUX)
     ▼
-    back to:  listener up  ·  app session alive (app blocked on write)  ·  no MUX
+    back to:  listener up  ·  app session alive (app blocked on write — or frozen, if quiesce §3.4)  ·  no MUX
 ```
 
 host 对 MUX 关闭的全部职责:收到 `MUX_CLOSE` → 把要发的发完 → 回 `MUX_CLOSE_ACK`
@@ -554,6 +568,7 @@ host 对 MUX 关闭的全部职责:收到 `MUX_CLOSE` → 把要发的发完 →
   dial CID=2:5000 ── attach{epoch} ─────────────────────►  try graceful MUX_CLOSE on old conn (err → hard-drop)
                        ◄── attach_ack{stdio, app_state} ──  reply on this new conn
   send SET_WINSIZE  ════════════════════════════════════►  (this conn ⇒ MUX);  resume reading app pipes; replay residual
+                                                           thaw iff still quiesce-frozen: cgroup.freeze=0  (else no-op — attach≠resume)
   resume normal MUX flow                                   resume normal MUX flow
 ```
 
@@ -563,13 +578,14 @@ host 对 MUX 关闭的全部职责:收到 `MUX_CLOSE` → 把要发的发完 →
   sandbox-ctl                                              sandbox-init
   ───────────                                              ────────────
   ping ticker stop
-  dial CID=2:5000 ── quiesce ───────────────────────────►  prep: sync ; echo 3 > drop_caches
+  dial CID=2:5000 ── quiesce ───────────────────────────►  freeze app: cgroup.freeze=1, await frozen
+                                                           prep: sync ; echo 3 > drop_caches
                                                            stop reading app stdout/stderr (pty master)
                        ◄══ MUX: MUX_CLOSE ════════════════  on the (separate) MUX conn: send MUX_CLOSE
   ══ MUX: MUX_CLOSE_ACK ════════════════════════════════►  recv ACK → close(MUX);  host: read → EOF → close(MUX)
                        ◄── quiesced ─────────────────────  reply on the quiesce conn; close it
   ✓ MUX closed + quiesced received  →  /vm.pause  /vm.snapshot
-  snapshot state:  listener up · app session alive (app blocked) · no MUX · no active mgmt conn
+  snapshot state:  listener up · app session alive (app frozen) · no MUX · no active mgmt conn
 ```
 
 **restore**:
@@ -577,10 +593,11 @@ host 对 MUX 关闭的全部职责:收到 `MUX_CLOSE` → 把要发的发完 →
 ```
   sandbox-ctl                                              sandbox-init
   ───────────                                              ────────────
-  /vm.resume OK
-  dial CID=2:5000 ── restore{epoch} ────────────────────►  sees "session already exists"
+  /vm.resume OK   (app still frozen — freeze state rode the snapshot)
+  dial CID=2:5000 ── restore{epoch,wallclock} ──────────►  clock_settime(CLOCK_REALTIME, wallclock_ns)
                        ◄── restore_ack{stdio, app_state} ─  reply on this conn
   send SET_WINSIZE  ════════════════════════════════════►  (this conn ⇒ MUX);  resume reading app pipes; replay residual
+                                                           thaw app: cgroup.freeze=0  ← last, env ready
   ping ticker (re)start                                    (listener unchanged across the snapshot)
 ```
 
@@ -719,7 +736,7 @@ restore 的 sandbox-init 仍在原 supervisor 循环内。
 | 应用 quiesce hook | 跨实例去重率超过 PROPOSAL §4 量化的"非确定性 50-70%" 上限的用例 | §3.4 quiesce 扩展项表 |
 | in-place app restart | `restart: on-failure/always` 真正同进程 refork(不 reboot) | §3.3 / §5.3 |
 | 应用 stderr 旁路 | 需要 host 侧 stdout 与 stderr 分流(终端模式天然无此区分,pipe 模式可加一条 vsock 旁路) | §3.5 / §4.5 |
-| 自带 vmlinux | 用户需要 cgroup-in-guest / nested userfaultfd / 别的 kernel 特性 | sandbox-ctl `boot.kernel: file://...` |
+| 自带 vmlinux | 用户需要 cgroup 资源控制器(平台 kernel 仅带 v2 freezer)/ nested userfaultfd / 别的 kernel 特性 | sandbox-ctl `boot.kernel: file://...` |
 | 自带 sandbox-runtime | 用户应用对 PID 1 / supervisor 有特殊要求(罕见) | 平台不阻止,但失去 DAX 共享收益 |
 
 ## 7. See Also
