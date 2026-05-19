@@ -101,6 +101,35 @@ func (m *AddressMap) Locate(faultVA uint64) (uint64, bool) {
 	return 0, false
 }
 
+// CHRegionRemaining returns how many bytes, starting at memfdOffset,
+// stay within the single CH-side uffd region (VMA) that contains
+// memfdOffset, capped at reqLen. A uffd fill ioctl is issued on one
+// region's fd and must never run past that region's VA mapping: when
+// CH splits the zone across the x86 PCI hole the regions sit at
+// distinct, non-contiguous VAs, so a batch crossing the boundary
+// resolves to no compatible userfaultfd VMA and the ioctl returns
+// ENOENT for the out-of-region tail. Returns (reqLen, false) if no CH
+// region covers the offset (caller proceeds unclamped; Locate already
+// validated the faulting page itself).
+func (m *AddressMap) CHRegionRemaining(memfdOffset, reqLen uint64) (uint64, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for i := range m.vmas {
+		v := &m.vmas[i]
+		if v.process != ProcessCH {
+			continue
+		}
+		size := v.end - v.start
+		if memfdOffset >= v.memfdOffset && memfdOffset < v.memfdOffset+size {
+			if avail := v.memfdOffset + size - memfdOffset; avail < reqLen {
+				return avail, true
+			}
+			return reqLen, true
+		}
+	}
+	return reqLen, false
+}
+
 // BackendVAFor returns the backendVA address that corresponds to the
 // given memfd offset (for issuing a reciprocal madvise(DONTNEED) on
 // backend mm in response to EVENT_REMOVE on a CH-side VMA). Returns

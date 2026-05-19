@@ -681,6 +681,15 @@ func (h *Handler) handleFault(ev faultEvent, pageBuf []byte) {
 		// transition for sparse).
 		capPages := h.absentRunFrom(pageIdx)
 		capBytes := capPages * PageSize
+		// Clamp to the CH region containing pageOffset: a fill ioctl
+		// runs on one region's uffd fd and must not cross into the next
+		// region's non-contiguous VA (x86 PCI-hole split), or the
+		// kernel returns ENOENT for the out-of-region tail. The
+		// PageStateMap is contiguous over the whole memfd, so an Absent
+		// run can otherwise straddle the region boundary.
+		if rem, ok := h.addrMap.CHRegionRemaining(pageOffset, capBytes); ok {
+			capBytes = rem
+		}
 
 		n, isZero, err := h.cfg.Source.ReadAt(pageBuf[:capBytes], pageOffset)
 		if err != nil && !errors.Is(err, io.EOF) {
@@ -719,8 +728,10 @@ func (h *Handler) handleFault(ev faultEvent, pageBuf []byte) {
 			// page `pageVA`. Drop the batch and retry the single faulting
 			// page so we never WAKE/mark-Loaded a page we did not resolve
 			// (doing so makes the vCPU re-fault forever — a fault↔WAKE
-			// livelock). Single-page result is handled below.
-			if (errors.Is(err, unix.EAGAIN) || errors.Is(err, unix.EEXIST)) && runBytes > PageSize {
+			// livelock). ENOENT (a batch that ran off the region — should
+			// not happen post region-clamp, kept as a safety net) narrows
+			// the same way: the faulting page is in-region and resolves.
+			if (errors.Is(err, unix.EAGAIN) || errors.Is(err, unix.EEXIST) || errors.Is(err, unix.ENOENT)) && runBytes > PageSize {
 				err = ioctlUffdZeropage(ev.uffdFD, pageVA, PageSize)
 				runBytes = PageSize
 				runPages = 1
@@ -733,8 +744,9 @@ func (h *Handler) handleFault(ev faultEvent, pageBuf []byte) {
 					// round-trip. Mark Loaded below.
 					_ = ioctlUffdWake(ev.uffdFD, pageVA, runBytes)
 					h.stats.wakes.Add(1)
-				} else if errors.Is(err, unix.EAGAIN) {
-					// Even single-page EAGAIN — transient kernel state.
+				} else if errors.Is(err, unix.EAGAIN) || errors.Is(err, unix.ENOENT) {
+					// Single-page EAGAIN (transient) or ENOENT (no
+					// compatible VMA — should not occur post region-clamp).
 					// Wake the faulting page so vCPU retries; do NOT
 					// mark Loaded (folio not installed). Next fault on
 					// this page re-enters the handler.
@@ -752,10 +764,11 @@ func (h *Handler) handleFault(ev faultEvent, pageBuf []byte) {
 		} else {
 			src := uint64(uintptr(unsafe.Pointer(&pageBuf[0])))
 			err := ioctlUffdCopy(ev.uffdFD, pageVA, src, runBytes)
-			if (errors.Is(err, unix.EAGAIN) || errors.Is(err, unix.EEXIST)) && runBytes > PageSize {
+			if (errors.Is(err, unix.EAGAIN) || errors.Is(err, unix.EEXIST) || errors.Is(err, unix.ENOENT)) && runBytes > PageSize {
 				// Same partial-install fallback as ZEROPAGE: a batched
-				// EAGAIN/EEXIST means some page in the run already has a
-				// folio and need not be the faulting page. Retry the
+				// EAGAIN/EEXIST/ENOENT means some page in the run already
+				// has a folio (or ran off the region — safety net post
+				// clamp) and need not be the faulting page. Retry the
 				// faulting page only (pageBuf[0:PageSize] already holds
 				// its source bytes) so we never mark a page Loaded that
 				// we did not resolve — otherwise the vCPU re-faults
@@ -768,7 +781,7 @@ func (h *Handler) handleFault(ev faultEvent, pageBuf []byte) {
 				if errors.Is(err, unix.EEXIST) {
 					_ = ioctlUffdWake(ev.uffdFD, pageVA, runBytes)
 					h.stats.wakes.Add(1)
-				} else if errors.Is(err, unix.EAGAIN) {
+				} else if errors.Is(err, unix.EAGAIN) || errors.Is(err, unix.ENOENT) {
 					_ = ioctlUffdWake(ev.uffdFD, pageVA, PageSize)
 					h.stats.wakes.Add(1)
 					return
@@ -791,12 +804,20 @@ func (h *Handler) handleFault(ev faultEvent, pageBuf []byte) {
 		h.stats.faultsReleased.Add(1)
 		runPages := h.extendReleasedBatch(pageIdx)
 		runBytes := runPages * PageSize
+		// Clamp to the CH region (see StateAbsent): a Released run is
+		// also state-map contiguous and can straddle the PCI-hole split,
+		// which would ENOENT on the single region fd.
+		if rem, ok := h.addrMap.CHRegionRemaining(pageOffset, runBytes); ok && rem < runBytes {
+			runBytes = rem
+			runPages = runBytes / PageSize
+		}
 		err := ioctlUffdZeropage(ev.uffdFD, pageVA, runBytes)
 		// Batched EAGAIN/EEXIST: some page in the run already has a
-		// folio and need not be the faulting page. Narrow to pageVA so
-		// we never mark a page Loaded we did not resolve — otherwise the
-		// vCPU re-faults forever (fault↔WAKE livelock).
-		if (errors.Is(err, unix.EAGAIN) || errors.Is(err, unix.EEXIST)) && runBytes > PageSize {
+		// folio and need not be the faulting page. ENOENT: the batch
+		// ran off the region (safety net post region-clamp). Narrow to
+		// pageVA so we never mark a page Loaded we did not resolve —
+		// otherwise the vCPU re-faults forever (fault↔WAKE livelock).
+		if (errors.Is(err, unix.EAGAIN) || errors.Is(err, unix.EEXIST) || errors.Is(err, unix.ENOENT)) && runBytes > PageSize {
 			err = ioctlUffdZeropage(ev.uffdFD, pageVA, PageSize)
 			runBytes = PageSize
 			runPages = 1
@@ -808,9 +829,10 @@ func (h *Handler) handleFault(ev faultEvent, pageBuf []byte) {
 				// its PTE. Mark Loaded below.
 				_ = ioctlUffdWake(ev.uffdFD, pageVA, PageSize)
 				h.stats.wakes.Add(1)
-			} else if errors.Is(err, unix.EAGAIN) {
-				// Transient single-page EAGAIN: WAKE so the vCPU
-				// retries; do NOT mark Loaded — next fault re-enters
+			} else if errors.Is(err, unix.EAGAIN) || errors.Is(err, unix.ENOENT) {
+				// Single-page EAGAIN (transient) or ENOENT (no compatible
+				// VMA — should not occur post region-clamp): WAKE so the
+				// vCPU retries; do NOT mark Loaded — next fault re-enters
 				// and resolves this page.
 				_ = ioctlUffdWake(ev.uffdFD, pageVA, PageSize)
 				h.stats.wakes.Add(1)
