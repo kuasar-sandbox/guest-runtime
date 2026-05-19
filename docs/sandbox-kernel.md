@@ -16,7 +16,7 @@ vmlinux 是平台资产,**不**对外暴露内核版本/配置接口给租户。
 |---|---|
 | 镜像小、启动快 | allnoconfig 起步;仅启用沙箱必需的子系统;HZ=100;TTY 单端口 |
 | 跨实例可去重 | 关闭所有运行时随机化(KASLR、SLAB freelist、页面 shuffle);固定 LOCALVERSION |
-| 单 VM = 单 app 模型 | 关闭 cgroups、user/net/uts/ipc/time namespace、in-guest userfaultfd |
+| 单 VM = 单 app 模型 | 关闭 user/net/uts/ipc/time namespace、in-guest userfaultfd;cgroup 仅留 v2 freezer 核心(快照 freeze/thaw),不开任何资源控制器 |
 | host 控制 guest 内存 | 启用 virtio-balloon(host-driven inflate via vm.resize)+ virtio-mem |
 | 单一 rootfs 路径 | virtio-pmem + DAX + EROFS(只读) + ext4(可写) + overlayfs |
 
@@ -133,6 +133,21 @@ NAMESPACES=y, PID_NS=y          sandbox-init clone(NEWPID|NEWNS) 使用户 app
 # USER_NS, NET_NS not set
 ```
 
+cgroup(仅 v2 freezer 核心,服务快照 freeze/thaw):
+
+```
+CGROUPS=y                       仅为 cgroup v2 freezer:sandbox-init 在 quiesce
+                                前原子冻结应用进程树、restore 环境就绪后解冻,
+                                消除 resume-vs-env-init 竞态(机制见
+                                sandbox-runtime.md §3.4;为何只开核心见 §5.2)
+# MEMCG / CPUSETS / CGROUP_SCHED 所有资源控制器全关——guest 内不做资源记账或
+# CFS_BANDWIDTH / BLK_CGROUP /   限制,资源边界仍由 host cgroup v2 限 CH +
+# CGROUP_PIDS / CGROUP_DEVICE /  balloon 独占;CGROUP_FREEZER 是 v1 旧冻结器,
+# CGROUP_PERF / CGROUP_BPF /     用 v2 故不需要
+# CGROUP_HUGETLB / CGROUP_MISC /
+# NET_CLS_CGROUP / NET_PRIO not set
+```
+
 ### 3.2 关键禁用项(收敛闭口)
 
 去重 / 确定性敏感(任一启用都会让跨实例 RAM 内容差异化):
@@ -170,9 +185,9 @@ NAMESPACES=y, PID_NS=y          sandbox-init clone(NEWPID|NEWNS) 使用户 app
 平台契约边界(关闭 = guest app 看不到这些功能):
 
 ```
-# CGROUPS not set                 guest 不切子 cgroup;host cgroup v2 限 CH
-                                  即足够。systemd-style 资源管理 / nested
-                                  容器运行时不支持
+# cgroup 资源控制器全 not set       仅 v2 freezer 核心开(§3.1、§5.2);guest
+                                  app 看不到资源 cgroup,systemd-style 资源
+                                  管理 / nested 容器运行时不支持
 # USERFAULTFD not set             userfaultfd() 是 host 能力(sandbox-ctl
                                   在 memfd 上注册);guest 调用返回 ENOSYS
 # UTS_NS / TIME_NS / IPC_NS /     1-VM = 1-app 模型不需要 nested 隔离
@@ -281,17 +296,28 @@ x86_64 页大小固定 4 KiB,无此问题。
 需要在 guest 内做用户态 uffd 的应用(罕见——多是数据库自己管 page cache 的
 场景)走"自带 vmlinux"路径。
 
-### 5.2 为什么默认关 cgroups
+### 5.2 为什么只启用 cgroup v2 freezer 核心
 
-平台模型是"一 VM 一 app",host cgroup v2 限制 CH 进程已经把资源边界划定。
-guest 内再切 cgroup 没有意义,反而:
+`CONFIG_CGROUPS=y` 只为 **cgroup v2 freezer** 一项能力:快照前 sandbox-init 要
+**原子冻结应用进程树**,restore 环境(墙钟等)就绪后再解冻,否则 `/vm.resume`
+先于 guest 处理 `restore` 解冻 vCPU,应用会带着旧墙钟 / 未重连的 MUX 抢跑一段
+(resume-vs-env-init 竞态;机制见 [`sandbox-runtime.md`](sandbox-runtime.md)
+§3.4)。v2 freezer(`cgroup.freeze`,内核 ≥5.2)是 cgroup 核心的一部分,
+`CONFIG_CGROUPS=y` 即得,无独立 Kconfig;`CGROUP_FREEZER` 是 v1 旧冻结器,
+不需要。
 
-- 多一层资源记账,跨实例 systemd-cgroup 路径差异化
-- guest 内 OOM 可能在 cgroup 边界先触发,触发链路与 host 期待的
-  `deflate_on_oom` 不一致
+**所有资源控制器(`MEMCG` / CPU 带宽 / `BLK_CGROUP` / `CGROUP_PIDS` /
+`CGROUP_DEVICE` / …)仍全关**,因此旧设计担心的两点都不发生:
 
-systemd-style 服务管理或 nested 容器(podman / docker-in-docker)在沙箱模型下
-不是支持目标——它们的工作流跟"短生命周期 + 快照恢复"模式正交。
+- 无 memcg/cpuacct 记账层——guest 内不做任何资源记账
+- app cgroup 不设 memory limit → 无 guest 内 cgroup 内存边界,不会早于 host
+  期待的 `deflate_on_oom` 触发;资源边界仍由 host cgroup v2 限 CH + balloon
+  独占,与启用前完全一致
+
+sandbox-init 建唯一固定 `/sys/fs/cgroup/app`,路径与结构每实例一致,不引入
+systemd 那种动态 cgroup 树的跨实例路径非确定性。systemd-style 服务管理或
+nested 容器(podman / docker-in-docker)在沙箱模型下仍不是支持目标——无任何
+控制器,且其工作流跟"短生命周期 + 快照恢复"模式正交。
 
 ### 5.3 为什么 IP_PNP 关闭
 
@@ -375,7 +401,8 @@ diff 排查。
 - 升级架构 fragment:review CH 对该 arch 的设备模型是否有新依赖(例如
   GICv4 / 新 RTC 驱动)
 - 不上游化 defconfig:本配置选择跟通用 server distro 取向偏离明显
-  (关闭 cgroups / userfaultfd / namespace 等),不寻求合并到 upstream
+  (cgroup 裁剪至仅 v2 freezer / 关闭 userfaultfd / namespace 等),不寻求
+  合并到 upstream
 
 ## 8. See Also
 
