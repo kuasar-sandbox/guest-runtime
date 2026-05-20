@@ -1,4 +1,4 @@
-# sandbox — 沙箱运行时控制工具
+# sandbox — 沙箱控制工具
 
 `sandbox-ctl` 是平台沙箱的 host 端控制平面,管理一个 microVM 的完整生命周期
 (冷启动、快照、恢复)。每个沙箱由一组 `sandbox-ctl + cloud-hypervisor` 双
