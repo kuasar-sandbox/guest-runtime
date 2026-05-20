@@ -156,7 +156,7 @@ func Run(ctx context.Context, opts Options) (int, error) {
 			return -1, fmt.Errorf("open manifest snapshot: %w", err)
 		}
 		snapFetcher = fc
-		snapReaderAt = &fetcherReaderAt{ctx: ctx, fetcher: fc, size: sz}
+		snapReaderAt = fetch.NewReaderAt(ctx, fc, sz)
 		totalSize = sz
 		manifestSnapshot = true
 		logf("manifest snapshot: key=%s bundle_size=%d", opts.SnapshotManifestKey, sz)
