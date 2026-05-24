@@ -66,6 +66,7 @@ type Session struct {
 	peerClosedCh   chan struct{} // closed when MUX_CLOSE received from peer
 	closeAcked     bool
 	peerClosed     bool
+	respClosed     bool // responder closed conn after MUX_CLOSE_ACK (read err expected)
 
 	onSetWinsize func(cols, rows uint16)
 
@@ -253,7 +254,10 @@ func (s *Session) readLoop() {
 	for {
 		f, err := ReadFrame(s.conn)
 		if err != nil {
-			if err != io.EOF {
+			s.mu.Lock()
+			respClosed := s.respClosed
+			s.mu.Unlock()
+			if err != io.EOF && !respClosed {
 				s.setErr(err)
 			}
 			return
@@ -317,6 +321,7 @@ func (s *Session) dispatch(f Frame) error {
 			s.peerClosed = true
 			close(s.peerClosedCh)
 		}
+		s.respClosed = true
 		s.mu.Unlock()
 		// We're the responder: reply ACK. (The doc lets the responder
 		// flush pending first; in our flows the responder — always the
@@ -324,6 +329,15 @@ func (s *Session) dispatch(f Frame) error {
 		if err := s.writeFrame(Frame{Stream: StreamControl, Type: FrameMuxCloseAck}); err != nil {
 			return err
 		}
+		// Complete the teardown: close our conn so the initiator (guest)
+		// receives the RST and its SO_LINGER close returns with the vsock
+		// socket actually removed — not left in virtio-vsock's 8s deferred
+		// window where a snapshot would capture it as a half-closed
+		// remnant (which a later restore's reused muxer local port
+		// collides with). The next readLoop ReadFrame fails on the closed
+		// conn; respClosed marks that error expected (clean teardown, not
+		// a session fault).
+		_ = s.conn.Close()
 	case FrameMuxCloseAck:
 		if f.Stream != StreamControl {
 			return ErrProtocol

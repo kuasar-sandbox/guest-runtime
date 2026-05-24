@@ -300,6 +300,12 @@ func phase2Launch() (*proto.LaunchSpec, childStdio, *consoleBridge, error) {
 	// Hand the connection to the MUX. Clear any handshake deadline first —
 	// mux.Session relies on Close (not a deadline) to unblock its read loop.
 	_ = conn.SetDeadline(time.Time{})
+	// Arm SO_LINGER so this MUX's close at quiesce blocks until the vsock
+	// teardown completes (same rationale as reattach) — quiesce reaches a
+	// confirmed steady state before acking.
+	if err := conn.SetLinger(muxCloseLingerSec); err != nil {
+		logf("launch: SO_LINGER: %v (continuing)", err)
+	}
 	sess := mux.NewSession(conn, streamSetFor(established), mux.Options{OnSetWinsize: bridge.onSetWinsize})
 	bridge.attach(sess)
 	bridge.start()

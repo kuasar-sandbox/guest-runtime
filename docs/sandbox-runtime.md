@@ -226,7 +226,10 @@ quiesce 是 host `/vm.pause` 之前的最后一次清理机会,目标两件事:
                                                     // 同时丢 page cache + dentry/inode cache
 3. 停止读应用的 stdout/stderr pipe(或 pty master) // 应用已冻结,残留有界
    (停读是 MUX 关闭的前置动作)
-4. 在 MUX 连接上发起优雅关闭握手(§4.6):MUX_CLOSE → 收 MUX_CLOSE_ACK → close(MUX);
+4. 在 MUX 连接上发起优雅关闭握手(§4.6):MUX_CLOSE → 收 MUX_CLOSE_ACK → close(MUX)。
+   close 带 SO_LINGER,**阻塞至该 vsock socket 真正从内核移除**(host 响应方回 ACK
+   后立即关闭其连接,RST 回到 guest → 这端 socket 移除),而非"发起关闭即返回"——
+   保证 `quiesced` 时连接已彻底拆除,不留半关闭残留(§4.6 详述其必要性)。
    连接已断则降级硬丢
 5. WriteMessage(quiesced) 于 quiesce 短连接
 6. close(quiesce 短连接)
@@ -264,7 +267,8 @@ quiesce 是 host `/vm.pause` 之前的最后一次清理机会,目标两件事:
 - prep 的 sync / drop_caches 任一失败 → stderr 记录,继续后续步骤(best-effort,
   质量不到位反映在 dedup 率指标上,**不**阻塞快照)
 - **freeze 确认、MUX_CLOSE 握手与 `quiesced` 不是 best-effort**:`quiesced` 写出
-  意味着"应用已冻结、MUX 已关、guest 处于干净态"。若 cgroup.events 在有界等待
+  意味着"应用已冻结、MUX 连接已确认彻底拆除(socket 移除,非仅发起关闭)、guest
+  处于稳态"——发起动作不等于完成,quiesce ack 时刻必须已进入稳态。若 cgroup.events 在有界等待
   内未到 `frozen 1` → **不发 `quiesced`**(半冻结的快照恰是要消除的 resume-vs-
   env 竞态源)。若 MUX_CLOSE 握手因连接已断而走不通 → 按硬丢处理(对端也看到了
   断链),仍可发 `quiesced`;若 `quiesced` 未发或写不出去(host 侧不可达)→ host
@@ -498,22 +502,32 @@ attach),没有对端给信用 → sandbox-init 那侧停止排空 → 内核 pip
 ### 4.6 MUX 优雅关闭握手
 
 MUX 连接的**有序关闭**是一个两端同步的小协议(相当于应用层的 FIN / FIN-ACK),
-之后接标准 socket orderly close。**永远 guest 发起、host 响应、guest 收到响应才
-真正 close;发起到收响应之间到达的帧照常处理。**
+之后接标准 socket orderly close。**永远 guest 发起、host 响应;发起到收响应之间
+到达的帧照常处理。两端都关闭各自的 socket——host 回 ACK 后立即 close 其连接(RST
+回 guest),guest 的 close 带 SO_LINGER 阻塞至本端 socket 真正从内核移除。**
 
 ```
   guest (sandbox-init)                                     host (sandbox-ctl)
     │
     │ ── MUX_CLOSE (CONTROL frame) ────────────────────►    (guest sends no more data frames after this)
     │ ◄── may still receive WINDOW_UPDATE / leftover STDIN DATA   (guest processes these normally)
-    │ ◄── MUX_CLOSE_ACK (CONTROL frame) ──────────────      host: flush pending → ACK → no more MUX frames
-    │     on ACK → close(MUX)                                host: read → EOF → close(MUX)
-    ▼
+    │ ◄── MUX_CLOSE_ACK (CONTROL frame) ──────────────      host: flush pending → ACK → close(MUX)
+    │     on ACK → close(MUX) [SO_LINGER]                    host close → RST ─┐
+    │ ◄── RST ────────────────────────────────────────────────────────────────┘
+    ▼     RST removes the vsock socket → guest close returns (teardown confirmed)
     back to:  listener up  ·  app session alive (app blocked on write — or frozen, if quiesce §3.4)  ·  no MUX
 ```
 
 host 对 MUX 关闭的全部职责:收到 `MUX_CLOSE` → 把要发的发完 → 回 `MUX_CLOSE_ACK`
-→ read 到 EOF → close。不需要知道为什么关、什么时候关。
+→ **立即 close 其连接**。不需要知道为什么关、什么时候关。
+
+**为什么 host 必须主动 close、guest 必须 SO_LINGER**:virtio-vsock 对 guest 单方
+关闭的连接不立即回收——内核挂起延迟移除(默认 8s),等对端 RST 或超时。若快照在此
+窗口内拍下,会捕获到一个半关闭的残留连接。后续 restore(尤其 snapshot-of-restored
+链)时,host 侧 vsock 代理对首个 host 发起连接(restore-notify)确定性复用同一
+local port,与残留连接的四元组相撞 → guest 静默丢弃 restore-notify → 卡在握手超时。
+故 host 回 ACK 后立即 close(RST 令 guest 端连接进入移除),guest 的 close 用
+SO_LINGER 阻塞至移除完成——`quiesced`(§3.4)时连接确已彻底拆除,无残留。
 
 **三个触发点**(同一握手):
 

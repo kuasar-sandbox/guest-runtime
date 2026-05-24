@@ -126,41 +126,38 @@ func Run(ctx context.Context, opts Options) (int, error) {
 	}
 	defer hooks.Release("normal")
 
-	// Source dispatch: file:// → mmap-style local file; manifest:// →
-	// fetch.Fetcher random-access via cache-ctl. Both expose the same
-	// io.ReaderAt to archive/zip and a corresponding SnapshotReader to
-	// the uffd handler.
+	// Open the snapshot bundle as a single fetch.Stream — file:// is a
+	// sparse-aware local stream, manifest:// is chunk-granular via cache-ctl.
+	// The same Stream feeds the ZIP reader (via NewReaderAt) and, layered with
+	// from_refs (§3.5), the uffd SnapshotReader. selfRef is this bundle's
+	// content-addressed identity, recorded into a child snapshot's from_refs.
 	var (
-		snapFile         *os.File
-		snapFetcher      fetch.Stream
-		snapReaderAt     io.ReaderAt
-		totalSize        int64
-		manifestSnapshot bool
+		selfStream   fetch.Stream
+		snapReaderAt io.ReaderAt
+		totalSize    int64
+		selfRef      string
 	)
 	if opts.SnapshotPath != "" {
-		f, err := os.OpenFile(opts.SnapshotPath, os.O_RDONLY, 0)
+		fs, err := fetch.OpenFileStream(opts.SnapshotPath)
 		if err != nil {
 			return -1, fmt.Errorf("open snapshot: %w", err)
 		}
-		defer f.Close()
-		st, err := f.Stat()
-		if err != nil {
-			return -1, err
-		}
-		snapFile = f
-		snapReaderAt = f
-		totalSize = st.Size()
+		defer fs.Close()
+		selfStream = fs
+		totalSize = int64(fs.Size())
+		selfRef = fileSnapshotRef(opts.SnapshotPath) // §3.5: follows symlink → file://<sha256>.snapshot
 	} else {
 		fc, sz, err := sandbox.OpenManifestStream(ctx, opts.SnapshotManifestKey, opts.Fetcher)
 		if err != nil {
 			return -1, fmt.Errorf("open manifest snapshot: %w", err)
 		}
-		snapFetcher = fc
-		snapReaderAt = fetch.NewReaderAt(ctx, fc, sz)
+		defer fc.Close()
+		selfStream = fc
 		totalSize = sz
-		manifestSnapshot = true
+		selfRef = "manifest://" + opts.SnapshotManifestKey
 		logf("manifest snapshot: key=%s bundle_size=%d", opts.SnapshotManifestKey, sz)
 	}
+	snapReaderAt = fetch.NewReaderAt(ctx, selfStream, totalSize)
 
 	zipReader, err := zip.NewReader(snapReaderAt, totalSize)
 	if err != nil {
@@ -199,6 +196,26 @@ func Run(ctx context.Context, opts Options) (int, error) {
 		return -1, err
 	}
 	snapCfg := *merged
+
+	// Carry the runtime/base refs forward so a snapshot taken by this restored
+	// run records them (the cold path hashes them via populateSnapshotRefs;
+	// here they're already known + verified from the parent snapshot.cfg, so a
+	// re-hash is unnecessary). Without this, snapshots from a restored sandbox
+	// would have empty runtime_ref/base_ref and could not themselves be restored.
+	snapCfg.SnapshotRefs = sandbox.SnapshotRefs{
+		RuntimeRef: parsedSnap.Boot.RuntimeRef,
+		BaseRef:    parsedSnap.Boot.Root.BaseRef,
+	}
+
+	// Record provenance so a snapshot taken by this restored run prepends this
+	// bundle and extends the chain (§3.5): child.from_refs = [selfRef] ++
+	// this.from_refs; child.base_from_refs = [this.overlay.base] ++ this.base_from_refs.
+	snapCfg.SnapshotProvenance = sandbox.SnapshotProvenance{
+		ParentSnapshotRef:  selfRef,
+		ParentFromRefs:     parsedSnap.FromRefs,
+		ParentOverlayBase:  parsedSnap.Boot.Root.Overlay.Base,
+		ParentBaseFromRefs: parsedSnap.Boot.Root.Overlay.BaseFromRefs,
+	}
 
 	// Derive allocatable_at_snapshot from CH state.json's balloon section
 	// (no separate resource-state.json file — see §13). When the bundle
@@ -314,43 +331,45 @@ func Run(ctx context.Context, opts Options) (int, error) {
 		return -1, err
 	}
 
-	var source uffd.SnapshotReader
-	if manifestSnapshot {
-		ms, err := uffd.NewManifestSnapshotSource(ctx, snapFetcher, capBytes)
+	// Build the layered memory source: [self bundle] ++ from_refs (§3.5). A
+	// non-resident page (hole) in an upper layer falls through to a lower
+	// layer; a page hole in every layer (merged hole) → ZEROPAGE. Single layer
+	// (no from_refs) degenerates to today's behaviour. The from_refs streams
+	// live until the run exits (closed below); selfStream is closed at open.
+	memLayers := []fetch.Stream{selfStream}
+	for i, ref := range parsedSnap.FromRefs {
+		s, err := openRefStream(ctx, ref, opts)
 		if err != nil {
-			return -1, fmt.Errorf("manifest snapshot source: %w", err)
+			return -1, fmt.Errorf("from_refs[%d] %q: %w", i, ref, err)
 		}
-		source = ms
-		logf("snapshot source: manifest:// (chunk-granular fetch via cache-ctl)")
-	} else {
-		ss, err := uffd.NewSparseSnapshotSource(int(snapFile.Fd()), 0, capBytes)
-		if err != nil {
-			return -1, fmt.Errorf("snapshot source: %w", err)
-		}
-		source = ss
-		logf("snapshot source: file:// (hole bitmap built)")
+		defer s.Close()
+		memLayers = append(memLayers, s)
 	}
+	source, err := uffd.NewStreamSnapshotSource(ctx, fetch.NewLayered(memLayers...), capBytes)
+	if err != nil {
+		return -1, fmt.Errorf("snapshot source: %w", err)
+	}
+	logf("snapshot source: %d memory layer(s)", len(memLayers))
 
-	// Open disk as base+diff: disk image (from snapshot) → blk1 base
-	// (read-only); new diff at host-side path.
-	var baseReader vhost.BlockReader
-	switch scheme {
-	case "file":
-		fr, err := vhost.OpenFileReader(diskValue)
-		if err != nil {
-			return -1, fmt.Errorf("open disk base: %w", err)
-		}
-		defer fr.Close()
-		baseReader = fr
-	case "manifest":
-		fc, sz, err := sandbox.OpenManifestStream(ctx, diskValue, opts.Fetcher)
-		if err != nil {
-			return -1, fmt.Errorf("open manifest disk base: %w", err)
-		}
-		baseReader = vhost.NewManifestReader(ctx, fc, sz)
-	default:
-		return -1, fmt.Errorf("restore: unknown disk scheme %q", scheme)
+	// Open disk as base+diff: the read-only base is [overlay.base] ++
+	// base_from_refs (§3.5) layered into one Stream, the new diff CoW'd on top.
+	// baseReader.Close (deferred) closes the layered base and all its layers.
+	diskLayers := []fetch.Stream{}
+	topDisk, _, err := sandbox.OpenDiskStream(ctx, scheme+"://"+diskValue, opts.Fetcher)
+	if err != nil {
+		return -1, fmt.Errorf("open disk base: %w", err)
 	}
+	diskLayers = append(diskLayers, topDisk)
+	for i, ref := range parsedSnap.Boot.Root.Overlay.BaseFromRefs {
+		s, err := openRefStream(ctx, ref, opts)
+		if err != nil {
+			return -1, fmt.Errorf("base_from_refs[%d] %q: %w", i, ref, err)
+		}
+		diskLayers = append(diskLayers, s)
+	}
+	baseStream := fetch.NewLayered(diskLayers...)
+	baseReader := vhost.NewStreamReader(ctx, baseStream, int64(baseStream.Size()))
+	defer baseReader.Close()
 	_, diffPath, ok := sandbox.SchemeAndPath(snapCfg.Boot.Root.Overlay.Diff)
 	if !ok {
 		return -1, fmt.Errorf("bad overlay.diff: %s", snapCfg.Boot.Root.Overlay.Diff)
@@ -369,36 +388,16 @@ func Run(ctx context.Context, opts Options) (int, error) {
 	defer cow.Close()
 
 	// blk0 — same rootfs as cold-start (from host yaml or snap.cfg).
-	// file:// → mmap; manifest:// → fetch.Fetcher via cache-ctl.
+	// file:// → local stream; manifest:// → fetch.Fetcher via cache-ctl.
 	blk0Path := snapCfg.Boot.Root.Base
 	if opts.HostCfg.Boot.Root.Base != "" {
 		blk0Path = opts.HostCfg.Boot.Root.Base
 	}
-	blk0Scheme, blk0Value, ok := sandbox.SchemeAndPath(blk0Path)
-	if !ok {
-		return -1, fmt.Errorf("invalid blk0 URI: %s", blk0Path)
+	blk0Reader, _, err := sandbox.OpenBlockReader(ctx, blk0Path, opts.Fetcher)
+	if err != nil {
+		return -1, fmt.Errorf("open blk0: %w", err)
 	}
-	var blk0Reader vhost.BlockReader
-	switch blk0Scheme {
-	case "file":
-		fr, err := vhost.OpenFileReader(blk0Value)
-		if err != nil {
-			return -1, fmt.Errorf("open blk0 (file): %w", err)
-		}
-		defer fr.Close()
-		blk0Reader = fr
-	case "manifest":
-		if opts.Fetcher == nil {
-			return -1, fmt.Errorf("restore: manifest:// blk0 requires Fetcher")
-		}
-		fc, sz, err := sandbox.OpenManifestStream(ctx, blk0Value, opts.Fetcher)
-		if err != nil {
-			return -1, fmt.Errorf("open blk0 (manifest): %w", err)
-		}
-		blk0Reader = vhost.NewManifestReader(ctx, fc, sz)
-	default:
-		return -1, fmt.Errorf("restore: unknown blk0 scheme %q", blk0Scheme)
-	}
+	defer blk0Reader.Close()
 
 	// The shared back-half (memfd, uffd va_report handler, vhost-blk
 	// backends, the launch server — incl. the guest→host mem_report /
@@ -503,6 +502,33 @@ func Run(ctx context.Context, opts Options) (int, error) {
 			return nil
 		},
 	})
+}
+
+// openRefStream resolves a from_refs / base_from_refs entry (§3.5) into a
+// fetch.Stream. file:// refs are content-addressed basenames located relative
+// to the snapshot bundle dir (local mode); manifest:// refs go through the
+// fetcher. Shared by the memory and disk layered chains.
+func openRefStream(ctx context.Context, ref string, opts Options) (fetch.Stream, error) {
+	scheme, value, ok := sandbox.SchemeAndPath(ref)
+	if !ok {
+		return nil, fmt.Errorf("invalid ref %q", ref)
+	}
+	if scheme == "file" && !filepath.IsAbs(value) && opts.SnapshotPath != "" {
+		value = filepath.Join(filepath.Dir(opts.SnapshotPath), value)
+	}
+	s, _, err := sandbox.OpenDiskStream(ctx, scheme+"://"+value, opts.Fetcher)
+	return s, err
+}
+
+// fileSnapshotRef returns the content-addressed ref for a file-mode snapshot
+// bundle: it follows a <sid>.snapshot symlink to the real <sha256>.snapshot
+// and returns file://<basename>. Recorded into a child snapshot's from_refs.
+func fileSnapshotRef(path string) string {
+	real := path
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		real = resolved
+	}
+	return "file://" + filepath.Base(real)
 }
 
 func waitAPI(sock string, deadline time.Duration) error {

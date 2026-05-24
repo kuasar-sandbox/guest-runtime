@@ -205,6 +205,18 @@ func (b *consoleBridge) protoSpec() proto.StdioSpec {
 // returns it. Used by the restore / attach handlers after writing their
 // *_ack. The caller must NOT close conn afterward — the session owns it.
 func (b *consoleBridge) reattach(conn *vsockConn) *mux.Session {
+	// Arm SO_LINGER so the eventual Close — notably closeLiveMUX during
+	// quiesce — blocks until the peer RST has fully removed the socket,
+	// instead of leaving the guest-closed connection in virtio-vsock's
+	// 8s deferred-removal window. A snapshot taken in that window would
+	// capture the half-closed remnant; on a later restore CH's muxer
+	// reuses the same local port (0x40000000) for the first host
+	// connection, collides with the remnant's 4-tuple, and the guest
+	// silently drops the restore-notify. Lingering here makes the MUX
+	// teardown confirmed-complete before quiesce acks.
+	if err := conn.SetLinger(muxCloseLingerSec); err != nil {
+		logf("reattach: SO_LINGER: %v (continuing)", err)
+	}
 	sess := mux.NewSession(conn, streamSetFor(b.protoSpec()), mux.Options{OnSetWinsize: b.onSetWinsize})
 	b.attach(sess)
 	return sess
@@ -215,6 +227,13 @@ func (b *consoleBridge) reattach(conn *vsockConn) *mux.Session {
 // host-side DeadlineQuiesce so a wedged host fails the snapshot rather
 // than hanging the guest's quiesce handler.
 const muxCloseTimeout = 5 * time.Second
+
+// muxCloseLingerSec is the SO_LINGER bound (seconds) armed on the MUX
+// conn so closeLiveMUX's Close blocks until the vsock teardown completes.
+// The peer (the run process's MUX reader) RSTs within ms, so this is only
+// a safety net; kept small so muxCloseTimeout + this stays under
+// DeadlineQuiesce.
+const muxCloseLingerSec = 2
 
 // closeLiveMUX gracefully tears down the current MUX session if any:
 // initiate MUX_CLOSE (which immediately stops the app→host pumps), wait

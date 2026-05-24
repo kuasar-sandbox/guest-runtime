@@ -58,8 +58,18 @@ func Upload(ctx context.Context, src UploadSources) (*UploadResult, error) {
 	}
 	t0 := time.Now()
 
-	// 1. Ingest blk1.diff (the live overlay; quiesce-stable).
-	overlayKey, overlayRes, err := ingestFile(ctx, src.Ingester, src.OverlayPath, nil, "overlay", logf)
+	// 1. Ingest blk1.diff (the live overlay; quiesce-stable) WITH its sparse
+	//    hole map. The diff is a CoW upper: written blocks are data, unwritten
+	//    blocks are file holes. Recording those holes in the manifest is what
+	//    lets a chained restore fall through to a lower overlay layer
+	//    (docs/sandbox.md §3.5) — without it the unwritten regions ingest as
+	//    IsZero chunks, which the layered read serves as zeros (opaque, no
+	//    fall-through) instead of the parent's blocks, corrupting blk1.
+	overlayHoles, err := fileHoleMap(src.OverlayPath)
+	if err != nil {
+		return nil, fmt.Errorf("upload overlay hole map: %w", err)
+	}
+	overlayKey, overlayRes, err := ingestFile(ctx, src.Ingester, src.OverlayPath, overlayHoles, "overlay", logf)
 	if err != nil {
 		return nil, fmt.Errorf("upload overlay: %w", err)
 	}
@@ -174,6 +184,18 @@ func ingestFile(
 // HexKey hex-encodes a ContentKey for use in `manifest://<hex>` URIs.
 func HexKey(k store.ContentKey) string {
 	return hex.EncodeToString(k[:])
+}
+
+// fileHoleMap returns the sparse hole extents over the whole file at path.
+// Used to feed an overlay diff's sparseness into ingest so unwritten blocks
+// become manifest holes (which fall through across overlay layers) rather
+// than IsZero chunks (which do not).
+func fileHoleMap(path string) ([]codec.HoleExtent, error) {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return nil, err
+	}
+	return SparseHoles(path, uint64(fi.Size()))
 }
 
 // SparseHoles scans an existing file for SEEK_DATA / SEEK_HOLE extents

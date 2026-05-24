@@ -25,12 +25,14 @@ type SnapshotCfg struct {
 			Memory string `yaml:"memory"`
 		} `yaml:"capacity"`
 	} `yaml:"resources"`
-	Boot struct {
+	FromRefs []string `yaml:"from_refs"` // memory chain below this bundle (§3.5)
+	Boot     struct {
 		RuntimeRef string `yaml:"runtime_ref"`
 		Root       struct {
 			BaseRef string `yaml:"base_ref"`
 			Overlay struct {
-				Base string `yaml:"base"`
+				Base         string   `yaml:"base"`
+				BaseFromRefs []string `yaml:"base_from_refs"` // disk chain below base (§3.5)
 			} `yaml:"overlay"`
 		} `yaml:"root"`
 	} `yaml:"boot"`

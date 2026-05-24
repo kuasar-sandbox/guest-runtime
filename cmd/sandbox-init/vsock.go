@@ -56,6 +56,18 @@ func (c *vsockConn) SetDeadline(t time.Time) error {
 	return nil
 }
 
+// SetLinger arms SO_LINGER so that Close blocks (up to sec seconds) until
+// the connection is fully torn down rather than returning while the
+// kernel defers removal. Without it, virtio-vsock keeps a guest-closed
+// connection alive for VSOCK_CLOSE_TIMEOUT (8s) waiting for the peer's
+// RST — which a snapshot taken in that window captures as a half-closed
+// remnant. With it, Close returns only once the peer RST has removed the
+// socket (virtio_transport_wait_close), so the MUX teardown is confirmed
+// complete before quiesce acks (deterministic steady state, §3.4).
+func (c *vsockConn) SetLinger(sec int) error {
+	return unix.SetsockoptLinger(c.fd, unix.SOL_SOCKET, unix.SO_LINGER, &unix.Linger{Onoff: 1, Linger: int32(sec)})
+}
+
 // dialVsock opens an AF_VSOCK SOCK_STREAM socket and connects to (cid,
 // port). The first attempt fires immediately; on ECONNREFUSED (host
 // listener not yet ready) we exponentially back off from vsockDialStart

@@ -11,11 +11,14 @@ package snapshot
 
 import (
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"syscall"
 	"time"
 )
 
@@ -59,9 +62,10 @@ type Sources struct {
 //   - OverlaySha256 is the hex-encoded SHA256 of the overlay (also embedded
 //     in OverlayPath as basename)
 type Outputs struct {
-	SnapshotPath  string
-	OverlayPath   string
-	OverlaySha256 string
+	SnapshotPath   string
+	SnapshotSha256 string // --output mode: content digest naming <sha256>.snapshot
+	OverlayPath    string
+	OverlaySha256  string
 
 	MemorySize       uint64
 	MemoryResident   uint64
@@ -141,9 +145,9 @@ func Take(s Sources, outDir string, resumeAfter bool) (*Outputs, error) {
 	overlayRef := ""
 	if outDir != s.StagingDir {
 		// --output mode: materialize overlay locally with sha256 name.
-		digest, err := streamHash(s.DiffPath)
+		digest, err := hashSparseFile(s.DiffPath)
 		if err != nil {
-			return nil, fmt.Errorf("stream-hash blk1.diff: %w", err)
+			return nil, fmt.Errorf("hash blk1.diff: %w", err)
 		}
 		out.OverlaySha256 = digest
 		out.OverlayPath = filepath.Join(outDir, digest+".overlay")
@@ -167,15 +171,23 @@ func Take(s Sources, outDir string, resumeAfter bool) (*Outputs, error) {
 		return nil, fmt.Errorf("build snapshot.cfg: %w", err)
 	}
 
-	// T6: sparse copy memory + ZIP append → <sid>.snapshot
-	out.SnapshotPath = filepath.Join(outDir, s.SandboxID+".snapshot")
-	snapOut, err := os.Create(out.SnapshotPath)
-	if err != nil {
-		return nil, fmt.Errorf("create %s.snapshot: %w", s.SandboxID, err)
+	// T6: sparse copy memory + ZIP append. Write to a working path first; in
+	// --output mode finalize to <sha256>.snapshot + a <sid>.snapshot symlink so
+	// file-mode from_refs chains reference an immutable, content-addressed name
+	// (docs/sandbox.md §6.1). --upload writes <sid>.snapshot in StagingDir and
+	// Upload() ingests it (named by manifest key), so no rename there.
+	isOutput := outDir != s.StagingDir
+	workPath := filepath.Join(outDir, s.SandboxID+".snapshot")
+	if isOutput {
+		workPath = filepath.Join(outDir, s.SandboxID+".snapshot.partial")
 	}
-	defer snapOut.Close()
+	snapOut, err := os.Create(workPath)
+	if err != nil {
+		return nil, fmt.Errorf("create snapshot: %w", err)
+	}
 	memCopied, err := SparseCopy(snapOut, s.MemfdFD, s.MemfdSize)
 	if err != nil {
+		snapOut.Close()
 		return nil, fmt.Errorf("sparse copy memory: %w", err)
 	}
 	out.MemoryResident = uint64(memCopied)
@@ -186,13 +198,38 @@ func Take(s Sources, outDir string, resumeAfter bool) (*Outputs, error) {
 		"state.json":   stateJSON,
 		"snapshot.cfg": snapshotCfg,
 	}); err != nil {
+		snapOut.Close()
 		return nil, fmt.Errorf("append ZIP: %w", err)
 	}
 	if err := snapOut.Sync(); err != nil {
+		snapOut.Close()
 		return nil, fmt.Errorf("fsync snapshot: %w", err)
 	}
+	snapOut.Close()
+	out.SnapshotPath = workPath
+
+	if isOutput {
+		// Content-addressed name (skip-holes digest) + <sid>.snapshot symlink.
+		digest, err := hashSparseFile(workPath)
+		if err != nil {
+			return nil, fmt.Errorf("hash snapshot: %w", err)
+		}
+		finalPath := filepath.Join(outDir, digest+".snapshot")
+		if err := os.Rename(workPath, finalPath); err != nil {
+			return nil, fmt.Errorf("rename snapshot: %w", err)
+		}
+		linkPath := filepath.Join(outDir, s.SandboxID+".snapshot")
+		_ = os.Remove(linkPath)
+		if err := os.Symlink(digest+".snapshot", linkPath); err != nil {
+			return nil, fmt.Errorf("symlink %s.snapshot: %w", s.SandboxID, err)
+		}
+		out.SnapshotPath = finalPath
+		out.SnapshotSha256 = digest
+		logf("snapshot: %s.snapshot → %s.snapshot, memory_resident=%d", s.SandboxID, digest[:12], memCopied)
+	} else {
+		logf("snapshot: %s.snapshot written, memory_resident=%d", s.SandboxID, memCopied)
+	}
 	dumpEnd := time.Now()
-	logf("snapshot: %s.snapshot written, memory_resident=%d", s.SandboxID, memCopied)
 
 	// T8: resume (only when caller asked; destroy path handled by caller)
 	if resumeAfter {
@@ -207,20 +244,60 @@ func Take(s Sources, outDir string, resumeAfter bool) (*Outputs, error) {
 	return out, nil
 }
 
-// streamHash returns hex(SHA256(file bytes including sparse holes as 0)).
-// Reads sequentially with default OS buffering — kernel zero-fills holes
-// so the resulting hash is invariant to sparse representation (two
-// dense/sparse copies of the same logical content hash identically).
-func streamHash(path string) (string, error) {
+// hashSparseFile computes a content digest over the data extents of path,
+// skipping holes: each data extent's (offset, length) framing plus its bytes
+// are folded into SHA256, and the file's logical size is folded at the end.
+// This is fast (reads only resident data, not the zero pages of a multi-GiB
+// sparse image) and layout-sensitive (different hole distributions → different
+// digest). It is NOT equal to the SHA256 of the full logical (hole=0) byte
+// stream — sparse/dense representation invariance is intentionally traded for
+// speed; the snapshot pipeline only ever emits canonical-sparse files. See
+// docs/sandbox.md §6.1.
+func hashSparseFile(path string) (string, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return "", err
 	}
 	defer f.Close()
-	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
+	st, err := f.Stat()
+	if err != nil {
 		return "", err
 	}
+	size := st.Size()
+	fd := int(f.Fd())
+	h := sha256.New()
+	var hdr [16]byte
+	var off int64
+	for off < size {
+		dataOff, err := syscall.Seek(fd, off, seekData)
+		if err != nil {
+			if errors.Is(err, syscall.ENXIO) {
+				break // no more data; remainder is a trailing hole
+			}
+			return "", fmt.Errorf("SEEK_DATA at %d: %w", off, err)
+		}
+		holeOff, err := syscall.Seek(fd, dataOff, seekHole)
+		if err != nil {
+			return "", fmt.Errorf("SEEK_HOLE at %d: %w", dataOff, err)
+		}
+		if holeOff > size {
+			holeOff = size
+		}
+		if holeOff <= dataOff {
+			off = holeOff
+			continue
+		}
+		binary.LittleEndian.PutUint64(hdr[0:8], uint64(dataOff))
+		binary.LittleEndian.PutUint64(hdr[8:16], uint64(holeOff-dataOff))
+		h.Write(hdr[:])
+		if _, err := io.Copy(h, io.NewSectionReader(f, dataOff, holeOff-dataOff)); err != nil {
+			return "", fmt.Errorf("hash data [%d,%d): %w", dataOff, holeOff, err)
+		}
+		off = holeOff
+	}
+	// Fold logical size so the trailing-hole length is part of the identity.
+	binary.LittleEndian.PutUint64(hdr[0:8], uint64(size))
+	h.Write(hdr[:8])
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 

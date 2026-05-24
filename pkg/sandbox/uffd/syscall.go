@@ -7,7 +7,7 @@
 //
 // The same handler runs in cold-start mode (snapshotReader = ZeroSource,
 // every Absent fault becomes ZEROPAGE) and restore mode (snapshotReader
-// = SparseSnapshotSource, Absent → COPY from snapshot bytes).
+// = StreamSnapshotSource, Absent → COPY from snapshot bytes).
 //
 // See sandbox.md §8 for the full contract.
 package uffd

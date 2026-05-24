@@ -11,65 +11,71 @@ import (
 	"github.com/fullof-work/mass-sandbox/pkg/vhost"
 )
 
-// openBlockReader resolves a file:// or manifest:// disk URI into a
-// vhost.BlockReader plus the total disk size.
+// OpenBlockReader resolves a file:// or manifest:// disk URI into a
+// vhost.BlockReader plus the total disk size, via a fetch.Stream. file://
+// opens a sparse-aware local stream; manifest:// (one key, or ':'-joined keys
+// that overlay as layers) resolves through the fetcher. Both wrap in a
+// StreamReader whose Close releases the stream (the file's fd; a manifest
+// stream's cache/store client is owned by the Fetcher and closed separately).
 //
-// For manifest:// the fetcher parameter must be non-nil — it carries
-// the cache-ctl / store-ctl client and the per-process decryptor.
-// Cold-start lifecycle and restore both construct the fetcher up front
-// (only when manifest:// resources are referenced) and share it across
-// every disk URI.
+// For manifest:// the fetcher must be non-nil — it carries the cache-ctl /
+// store-ctl client and the per-process decryptor. Cold-start lifecycle and
+// restore both construct the fetcher up front (only when manifest:// resources
+// are referenced) and share it across every disk URI.
 //
-// ctx scopes the lifetime of asynchronous chunk fetches kicked off by
-// later ReadAt calls; cancelling it makes pending vhost-user-blk reads
-// fail promptly during sandbox shutdown.
-func openBlockReader(ctx context.Context, uri string, fetcher fetch.Fetcher) (vhost.BlockReader, int64, error) {
+// ctx scopes asynchronous chunk fetches kicked off by later ReadAt calls;
+// cancelling it makes pending vhost-user-blk reads fail promptly at shutdown.
+func OpenBlockReader(ctx context.Context, uri string, fetcher fetch.Fetcher) (vhost.BlockReader, int64, error) {
+	stream, size, err := OpenDiskStream(ctx, uri, fetcher)
+	if err != nil {
+		return nil, 0, err
+	}
+	return vhost.NewStreamReader(ctx, stream, size), size, nil
+}
+
+// OpenDiskStream resolves a file:// or manifest:// disk URI into a fetch.Stream
+// and its size. Exported so callers outside this package (notably
+// pkg/sandbox/restore) can share the same code path. The caller owns the
+// returned stream and must Close it (directly or via a StreamReader).
+func OpenDiskStream(ctx context.Context, uri string, fetcher fetch.Fetcher) (fetch.Stream, int64, error) {
 	scheme, value, ok := SchemeAndPath(uri)
 	if !ok {
 		return nil, 0, fmt.Errorf("invalid disk URI: %s", uri)
 	}
 	switch scheme {
 	case "file":
-		fr, err := vhost.OpenFileReader(value)
+		s, err := fetch.OpenFileStream(value)
 		if err != nil {
 			return nil, 0, err
 		}
-		return fr, fr.Size(), nil
+		return s, int64(s.Size()), nil
 	case "manifest":
-		if fetcher == nil {
-			return nil, 0, errors.New("manifest:// disk URI requires manifest config (run sandbox-ctl with --manifest-config or set MANIFEST_CONFIG)")
-		}
-		stream, size, err := OpenManifestStream(ctx, value, fetcher)
-		if err != nil {
-			return nil, 0, err
-		}
-		return vhost.NewManifestReader(ctx, stream, size), size, nil
+		return OpenManifestStream(ctx, value, fetcher)
 	default:
 		return nil, 0, fmt.Errorf("unknown disk URI scheme: %s", scheme)
 	}
 }
 
-// OpenManifestStream resolves a manifest:// hex content key into a
-// fetch.Stream and its image size. Exported so callers outside this
-// package (notably pkg/sandbox/restore for snapshot bundles) can share
-// the same code path.
+// OpenManifestStream resolves a manifest:// key reference (one key, or
+// several ':'-joined keys that overlay as layers) into a fetch.Stream and its
+// image size. Exported so callers (notably pkg/sandbox/restore for snapshot
+// memory bundles) can share the code path.
 //
 // fetcher's underlying store/cache client is shared with every read it
-// produces; callers are responsible for closing it when the sandbox
-// lifecycle ends.
-func OpenManifestStream(ctx context.Context, hexKey string, fetcher fetch.Fetcher) (fetch.Stream, int64, error) {
+// produces; callers close it when the sandbox lifecycle ends.
+func OpenManifestStream(ctx context.Context, keyRef string, fetcher fetch.Fetcher) (fetch.Stream, int64, error) {
 	if fetcher == nil {
 		return nil, 0, errors.New("manifest:// requires a fetch.Fetcher")
 	}
-	key, err := manifest.ParseHexKey(hexKey)
+	keys, err := manifest.ParseKeyRefs(keyRef)
 	if err != nil {
 		return nil, 0, err
 	}
-	stream, err := fetcher.Fetch(ctx, key)
+	stream, err := fetcher.Fetch(ctx, keys...)
 	if err != nil {
 		return nil, 0, err
 	}
-	return stream, int64(stream.ImageSize()), nil
+	return stream, int64(stream.Size()), nil
 }
 
 // needsManifestFetcher returns true if any disk URI in cfg uses the

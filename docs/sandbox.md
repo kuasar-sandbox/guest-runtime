@@ -202,10 +202,10 @@ sandbox-ctl 控制终端的前台进程组——终端产生的 `^C` / `^\` / `^
 **恢复模式**:`--restore=<file_path|manifest://hex>` 让 sandbox-ctl 走恢复路径
 (详见 §7)。`<ref>` 形式:
 
-- 本地 file path — 从 disk 读 ZIP + memfd 写 SparseSnapshotSource
-- `manifest://<hex>` — 经 cache-ctl + store-ctl 拉 chunk,memfd 写
-  ManifestSnapshotSource;snapshot.cfg 内 base_ref / overlay.base 若是 manifest://
-  也按 chunk 粒度 lazy fetch
+- 本地 file path / `manifest://<hex>` — 统一经 `StreamSnapshotSource`:file 解析为
+  稀疏文件流,manifest 经 cache-ctl + store-ctl 按 chunk 粒度 lazy fetch,再按
+  snapshot.cfg 的 `from_refs` 叠成分层流(§3.5)写入 memfd。snapshot.cfg 内
+  base_ref / overlay.base(+ base_from_refs)同理
 
 迁移说明:**`sandbox-ctl restore` 子命令已删除**。原 `sandbox-ctl restore --snapshot=<x> --config=y.yaml`
 的语义对应于 `sandbox-ctl run --restore=<x> --config=y.yaml`,行为完全等价
@@ -217,7 +217,8 @@ sandbox-ctl 控制终端的前台进程组——终端产生的 `^C` / `^\` / `^
 sandbox-ctl snapshot [flags]
 
   --sandbox-id <sid>    必填,目标 sandbox
-  --output <out_dir>    本地输出目录,产出 <sid>.snapshot + <sha256>.overlay 两个文件
+  --output <out_dir>    本地输出目录,产出 <sha256>.snapshot(+ <sid>.snapshot 符号链接)
+                        + <sha256>.overlay
   --upload              上传至 manifest 存储:overlay 流式 ingest 拿 manifest key,
                         <sid>.snapshot 内嵌 snapshot.cfg 的 overlay.base 写为
                         manifest://<key>;stdout 输出 snapshot manifest key
@@ -425,6 +426,13 @@ resources:
     cpu: 2
     memory: 8GiB
 
+# 内存快照链(增量分层):本快照的内存段是链顶,from_refs 是其下各层
+# (自顶向下,不含自身)。冷启动产生的首个快照 = [];从 s1 恢复再存的 s2 =
+# [s1.snapshot];从 s2 恢复再存的 s3 = [s2.snapshot, s1.snapshot]。
+from_refs: []
+  # - manifest://<key-of-parent.snapshot>
+  # - file://<sha256>.snapshot          # 内容寻址名,basename 即摘要(无 @sha256: 后缀)
+
 # Guest 启动 + rootfs
 boot:
   runtime_ref: file://sandbox-runtime.erofs@sha256:<digest>
@@ -435,7 +443,10 @@ boot:
                  # 或 manifest://<key>(原引用是 manifest:// 时原样保留)
     overlay:
       base:      file://<sha256>.overlay
-                 # 或 manifest://<key>(--upload 模式)
+                 # 或 manifest://<key>(--upload 模式)。本快照捕获的 diff = 链顶
+      base_from_refs: []
+                 # 磁盘 diff 链(base 之下,自顶向下,不含 base)。与 from_refs 对称:
+                 # s1 = [];s2 = [s1.ext4];s3 = [s2.ext4, s1.ext4]
 ```
 
 **字段说明**:
@@ -452,6 +463,10 @@ boot:
 - `overlay.base`(file:// 类):指向 snapshot 输出目录中那个 `<sha256>.overlay`
   文件,basename 自带 sha256 摘要,无需额外 `@sha256:` 后缀
 - `overlay.base`(manifest:// 类):上传后的 overlay manifest key
+- `from_refs` / `overlay.base_from_refs`:增量分层链(见 §3.5)。每项是
+  `manifest://<key>` 或内容寻址的 `file://<sha256>.snapshot` /
+  `file://<sha256>.overlay`(basename 即摘要,无 `@sha256:` 后缀,与 overlay.base
+  同约定),可在一条链内混用(如 s1 本地文件、s2 已上传)。顺序严格自顶向下(新→旧)
 
 **故意不存的字段**:
 
@@ -471,6 +486,36 @@ boot:
 失败时报清晰错误"snapshot.cfg not found in <file>; produced by old sandbox-ctl?"。
 
 restore 时 host sandbox.yaml 与 snapshot.cfg 的字段语义合并规则详见 §11.0。
+
+### 3.5 增量分层快照
+
+恢复时用的是**全新、惰性填充的 memfd**:运行期只有被缺页加载或写入的页才常驻。
+因此再次保存时,`SparseCopy(memfd)` **天然**只捕获本次运行触碰过的页,其余是
+空洞——**增量是惰性加载的副产物,无需脏页跟踪**。磁盘同理:blk1.diff 是稀疏
+CoW diff,只有写过的块是数据。
+
+代价是:这样产生的 s2.snapshot / s2.ext4 **不能独立提供完整数据**——未触碰区是
+空洞,需穿透到父快照。这正是 `from_refs`(内存链)与 `overlay.base_from_refs`
+(磁盘链)的用途:恢复时把本快照与其祖先叠加为一个分层视图。
+
+```
+                      offset →
+   s3.snap(本快照) │ data │··· hole ···│ data │·· hole ··│   本次增量
+   s2.snapshot      │ hole │ data │·· hole ··········│ data │   ↓ 穿透
+   s1.snapshot      │ data │ data │ data │·· hole ···│ data │   ↓ 穿透
+   ──────────────────────────────────────────────────────────
+   有效内存          │ s3   │ s2   │ s1   │ ZEROPAGE │ s3/.. │   合并空洞→零页
+```
+
+叠加语义(自顶向下,顶层优先):某层有数据则用该层;**声明空洞穿透**到下层;
+某层是零页(IsZero,内存为非常驻区、磁盘为未写块)亦视作该位置无内容、继续穿透;
+**每层皆空洞 = 合并空洞**,内存恢复为 ZEROPAGE、磁盘读为零块。正确性:某页本次
+运行未触碰 ⇒ 其内容 = 恢复起点内容 = 父快照内容(或零),故穿透严格正确。
+
+**链的取舍**:不实现祖先 pin——某层缺失(被删/损坏)即视该快照**整体失效**,清晰
+报错而非部分恢复。不提供折叠(compaction)手段:链能长到多深就多深,深链恢复时
+每次缺页逐层查空洞(纯内存,无 RPC)直到命中层发一次取数;浅链(典型 s1→s3)
+无感,长链自行承担读放大。平台若在意代次深度,自行控制再保存的次数。
 
 ## 4. 资源模型
 
@@ -685,15 +730,25 @@ cloud-hypervisor \
 
 ```
 <out_dir>/
-├── <sid>.snapshot          # 内存稀疏拷贝 + 末尾 ZIP
-└── <sha256>.overlay        # ext4 sparse 文件,sha256 = SHA256(整字节流, hole=0)
+├── <sha256>.snapshot                     # 内存稀疏拷贝 + 末尾 ZIP;按内容摘要命名
+├── <sid>.snapshot → <sha256>.snapshot    # 符号链接:按 sid 寻址的"最新"指针
+└── <sha256>.overlay                      # ext4 sparse 文件;按内容摘要命名
 ```
 
-`<sid>` = sandbox id(`sandbox-ctl run --sandbox-id` 设的或 yaml 里的);
-`<sha256>` = `<sha256>.overlay` 文件**整字节流**(物理读取顺序,sparse hole
-读到 0)的 SHA256,full hex(64 字符)。
+snapshot 与 overlay 都**按内容摘要命名**(content-addressed),彼此不覆盖,故可作为
+`from_refs` / `overlay.base_from_refs` 链里**稳定、可校验**的父引用(file 模式)——
+同一 sid 的 s1/s2/s3 名字各异,链才能成立。`<sid>.snapshot` 符号链接指向本次产出的
+`<sha256>.snapshot`,给人和工具一个按 sid 寻址的"最新"入口
+(`<sid>` = `sandbox-ctl run --sandbox-id` 设的或 yaml 里的)。
 
-**`<sid>.snapshot` 字节布局**(物理稀疏 + 末尾 ZIP):
+**内容摘要 `<sha256>`(跳空洞)**:对文件**数据区**算 SHA256,**跳过空洞**——按
+SEEK_DATA/HOLE 提取数据 extent,把每个 extent 的 `(offset, length)` framing 连同其
+字节一起喂入哈希(空洞只贡献 framing,不读 0 字节)。既快(只读驻留数据,不读
+8 GiB 里的零页)又正确(布局敏感:空洞分布不同 → 摘要不同)。代价:摘要不等于
+"整逻辑字节流的 SHA256",失去稀疏/稠密表示无关性;因本管线始终产出规范稀疏形式,
+此性质无损。snapshot 摘要覆盖整个文件(稀疏内存段跳空洞 + ZIP 段全哈希)。
+
+**`<sha256>.snapshot` 字节布局**(物理稀疏 + 末尾 ZIP):
 
 ```
 逻辑偏移 [0, ramSize)        memfd 内容(SEEK_DATA/HOLE 稀疏化:零页是文件空洞,
@@ -714,7 +769,7 @@ cloud-hypervisor \
 - 因此 prefix 长度(`ramSize`)不影响 ZIP 解析;memory 区域 + ZIP 共存于一个
   文件
 
-**关键**:`<sid>.snapshot` 是**稀疏文件**——`stat.Size() = ramSize + zipSize`,
+**关键**:`<sha256>.snapshot` 是**稀疏文件**——`stat.Size() = ramSize + zipSize`,
 但 `st_blocks * 512`(物理占用)= 驻留页数 × 4 KiB + ZIP 字节。一个 8 GiB
 sandbox 实际驻留 200 MiB → 文件物理 ~200 MiB。`tar`、`cp --sparse=auto`、
 `manifest.Ingester` 都尊重稀疏(后者把空洞编码进 manifest.HoleExtent)。
@@ -724,7 +779,8 @@ sandbox 实际驻留 200 MiB → 文件物理 ~200 MiB。`tar`、`cp --sparse=au
 **`<sha256>.overlay` 写入路径**(hash-then-copy):
 
 1. snapshot 完成 srv1.Quiesce() 后,blk1.diff 内容稳定
-2. 第一道扫:stream-hash blk1.diff(`io.Copy(sha256.New(), blk1.diff)`)→ digest
+2. 第一道扫:跳空洞算摘要(SEEK_DATA/HOLE 提取数据 extent,(offset,length)+字节
+   喂入 SHA256;见 §6.1"内容摘要")→ digest
 3. 第二道扫:用最终文件名 `<out_dir>/<digest>.overlay` 一次 sparse copy
    (`SEEK_DATA/HOLE` 驱动,空洞保留)
 
@@ -732,8 +788,8 @@ sandbox 实际驻留 200 MiB → 文件物理 ~200 MiB。`tar`、`cp --sparse=au
 snapshot 在 overlay 内容不变时**自动写到同名文件**(覆盖,等价于无 op,
 天然内容寻址)。
 
-代价是对 blk1.diff 的两次读;但 quiesce 后 blk1.diff 通常驻 page cache(沙箱
-刚跑过的写层),第二道读 ≈ 内存读,可忽略。
+代价是对 blk1.diff 的两次读,但两道都只触数据 extent(跳空洞);且 quiesce 后
+blk1.diff 通常驻 page cache(沙箱刚跑过的写层),第二道读 ≈ 内存读,可忽略。
 
 ### 6.2 snapshot 时序
 
@@ -778,14 +834,21 @@ T5  生成最终 snapshot.cfg(在内存中,§3.4 schema):
     boot.runtime_ref:           file://<basename>@sha256:<digest>(file 模式 host
                                 启动时已扫过)或 manifest://<key>(原引用)
     boot.root.base_ref:         同上规则
-    boot.root.overlay.base:     T4b 的 overlay_ref
-T6  生成 <sid>.snapshot 内容:
+    boot.root.overlay.base:     T4b 的 overlay_ref(本次 diff = 磁盘链顶)
+    from_refs / overlay.base_from_refs:  增量分层链(§3.5)。冷启动 = [];否则按
+                                运行进程持有的 provenance(恢复时记下的"从何而来")
+                                计算:from_refs = [父快照 ref] ++ 父.from_refs;
+                                base_from_refs = [父.overlay.base] ++ 父.base_from_refs。
+                                子快照只引用父(其 ref 在恢复时已知),无鸡生蛋
+T6  生成 snapshot 内容:
     [memory 段]  ramSize 字节,SEEK_DATA/HOLE 驱动的稀疏数据
     [ZIP 段]     从 T3/T5 内存副本一次性写出 config.json / state.json /
                   snapshot.cfg(三个 entries)
     若 --upload:走流式构造,直接 io.Reader 喂 ingest,不落盘;
-                  stdout 输出 snapshot_manifest_key
-    若 --output:写到 <out_dir>/<sid>.snapshot(稀疏文件 + ZIP 尾)
+                  stdout 输出 snapshot_manifest_key(= 链中本快照的内容寻址名)
+    若 --output:先写到临时文件 → 跳空洞算摘要(§6.1)→ 落定为
+                  <out_dir>/<sha256>.snapshot,再建/更新符号链接
+                  <out_dir>/<sid>.snapshot → <sha256>.snapshot
 T7  srv0.Resume() + srv1.Resume()
 T8  resume_after=true:CH /vm.resume,沙箱原地续跑;quiesce 时 guest 冻结了
                   应用并关了 stdio MUX,这里 sandbox-ctl 拨新连接发 attach 重建
@@ -799,7 +862,7 @@ T8  resume_after=true:CH /vm.resume,沙箱原地续跑;quiesce 时 guest 冻结�
 T9  ctl.sock 回 snapshot_done
 T10 sandbox-ctl snapshot(发起方进程)收到 done:
     若 --upload:stdout 输出 snapshot_manifest_key
-    否则:本地产物在 <out_dir>/(<sid>.snapshot + <sha256>.overlay)
+    否则:本地产物在 <out_dir>/(<sha256>.snapshot + <sid>.snapshot 符号链接 + <sha256>.overlay)
 ```
 
 **关键差异 vs 一般 VMM 快照**:
@@ -823,7 +886,7 @@ UDS,承载两类宿主侧控制请求:`snapshot`(一问一答)与 `exec`(握手�
 | 字段 | 类型 | 说明 |
 |---|---|---|
 | `type` | string | `"snapshot_request"` |
-| `out_dir` | string | `--output` 目录;snapshot 在该目录写 `<sid>.snapshot` + `<sha256>.overlay`;与 `upload` 互斥 |
+| `out_dir` | string | `--output` 目录;snapshot 在该目录写 `<sha256>.snapshot`(+ `<sid>.snapshot` 符号链接)+ `<sha256>.overlay`;与 `upload` 互斥 |
 | `upload` | bool | true 时走流式 ingest 到 manifest store;与 `out_dir` 互斥 |
 | `resume_after` | bool | 默认 false(零值即销毁);CLI 默认与之一致。`--resume` 触发 true |
 
@@ -867,8 +930,10 @@ va_report → uffd_C 就绪);区别:
 
 1. 配置来源是 `<sid>.snapshot` 末尾 ZIP 内嵌的 config.json / state.json /
    snapshot.cfg,与 host sandbox.yaml 按 §11.0 规则合并
-2. snapshotReader 是 `SparseSnapshotSource`(file:// 时)或 `ManifestSnapshotSource`
-   (manifest:// 时),不是 `ZeroSource`
+2. snapshotReader 是 `StreamSnapshotSource`(统一形态,不是 `ZeroSource`):它包裹一个
+   读取层 `Stream`——file:// 与 manifest:// 都先解析为 `Stream`(分别是稀疏文件流、
+   chunk 粒度的 manifest 流),再按 `from_refs` 叠成分层流(§3.5)。本快照内存段是
+   链顶,空洞穿透到祖先,合并空洞才 ZEROPAGE
 3. CH 命令行带 `--restore source_url=...`,不带 `--kernel` / `--vsock`
 4. config.json 内捕获了原 run 的 paths(uffd_socket / blk0.sock / blk1.sock /
    vsock.sock),restore 前必须**重写为本次 run 的 paths**(基于 host
@@ -881,7 +946,11 @@ T2  打开 <ref>:
     file path: os.Open + Stat → ReaderAt
     manifest://: 通过 store + cache 客户端取 manifest → 解封 → fetch.Fetcher 包成 ReaderAt
 T3  archive/zip.NewReader(ReaderAt, totalSize) → 解出 config.json / state.json /
-    snapshot.cfg
+    snapshot.cfg。解析 from_refs / overlay.base_from_refs(§3.5),逐项解析为
+    Stream(file:// 校验摘要、manifest:// 内容自校验),校验全链 capacity 一致。
+    file 模式:若 <ref> 是 <sid>.snapshot 符号链接,follow 解析出真实
+    <sha256>.snapshot 名,作为本次的内容寻址名(供将来再保存时写入子快照
+    from_refs);from_refs 各项在该 .snapshot 同目录定位
 T4  ApplyRestoreOverrides(host sandbox.yaml, snapshot.cfg, snapshotPath):
     - 验证 capacity 一致(host 提供时)
     - 验证 boot.runtime / boot.root.base 协议 + basename + digest 匹配(host 提供时)
@@ -894,8 +963,11 @@ T7  cgroup setup + TAP 验证 + blk1.diff(全新)准备
 T8  state.json 直接写到 <run-dir>/<sid>/snap-state/
     config.json 经路径重写后写入(uffd_socket / blk0/1.sock / vsock.sock 都改为
     本次 <run-dir>/<sid>/ 下的对应名)
-T9  memory 准备:同冷启动 §5.1 T6,**唯一差别** snapshotReader = SparseSnapshotSource
-    或 ManifestSnapshotSource
+T9  memory 准备:同冷启动 §5.1 T6,**唯一差别** snapshotReader =
+    StreamSnapshotSource(包裹 [本快照内存段] ++ from_refs 叠成的分层流)。
+    blk0 / blk1 base 同理:overlay.base 与 base_from_refs 叠成分层只读基座,
+    其上新建本次 blk1.diff(CoW)。provenance(父 ref + 两条链)前向传给本运行
+    进程,供其将来再保存时算链(T5)
 T10 blk0 + blk1 backend 起;launch server UDS(<vsock-base>_5000)同样起——restore
     与冷启动共用同一后半段(memfd/uffd/blk/launch/pinger/ctl/信号/stats),仅 uffd
     source、CH 命令行、settle 协议不同。**差别**仅在于 restore 不走 hello/launch 握手
@@ -915,7 +987,8 @@ T12 CH (patched) 启动:同冷启动 T17a-T17c(创建 uffd_C,sendmsg va_report);
 T13 sandbox-ctl 在 va_report 收到 sendmsg 后:
     addrMap.RegisterVMA(ProcessCH, chVA),起 epoll(uffd_C)+ worker pool,回 ack
 T14 sandbox-ctl 调 PUT /api/v1/vm.resume → vCPU 从 snapshot 时刻继续
-    首访 RAM → fault → handler Absent 分支 → snapshotReader.ReadAt → UFFDIO_COPY
+    首访 RAM → fault → handler Absent 分支 → snapshotReader.ReadAt → UFFDIO_COPY。
+    分层流内部:命中本快照 / 某祖先则取该层数据;合并空洞 → UFFDIO_ZEROPAGE(无取数)
 T15 vsock 连接发 restore{epoch=N, wallclock_ns} 给 sandbox-init(guest:5000 listener
      跨快照保留),等 restore_ack{stdio, app_state} 响应作为 guest agent ready 信号
      (单次 deadline 5 s)。CH 把快照里的 CLOCK_REALTIME 原样载回,guest 墙钟落后
@@ -992,13 +1065,11 @@ type SnapshotReader interface {
 冷启动:    ZeroSource{}
               ReadAt → 永远 (len(buf), true, nil)
 
-file:// 恢复:  SparseSnapshotSource{fd, baseOff, ramSize, holeMap}
-              holeMap 启动时一次 SEEK_DATA/HOLE 扫得,每页一 bit
-              ReadAt 用 bits.TrailingZeros64 word-level 扫 run,然后 pread 数据段
-
-manifest:// 恢复: ManifestSnapshotSource{fetcher, ctx}
-              data run cap 在 chunk 末尾(一次 ReadAt 至多一次 chunk fetch + 解密)
-              zero run 跨 hole 和 IsZero chunk 合并(全部走 UFFDIO_ZEROPAGE 不读 store)
+恢复:      StreamSnapshotSource{stream}
+              stream = 分层读取层(§3.5):[本快照内存段] ++ from_refs。
+              file 层为稀疏文件流(SEEK_DATA/HOLE),manifest 层为 chunk 流
+              (一次 ReadAt 至多一次 chunk fetch + 解密);data run 命中某层取数,
+              合并空洞(每层皆空洞)跨 hole / IsZero 合并 → UFFDIO_ZEROPAGE 不读 store
 ```
 
 handler 主逻辑一份代码,模式差异隐藏在 source 实现里。
@@ -1325,6 +1396,7 @@ allocatable 初值必须够大才能避免 PSI 节流 / sensor 反复 burst。
 | `boot.root.base`(file://) | 协议 + basename + digest 与 snapshot.cfg.base_ref 一致才允许 | 用 snapshot.cfg.base_ref:basename 解析为 `<sid>.snapshot` 同目录文件 |
 | `boot.root.base`(manifest://) | manifest key 与 snapshot.cfg.base_ref 一致才允许 | 用 snapshot.cfg.base_ref 原值 |
 | `boot.root.overlay.base` | **静默忽略** | 用 snapshot.cfg.overlay.base |
+| `from_refs` / `boot.root.overlay.base_from_refs` | 无此 yaml 字段(增量分层链纯由 snapshot.cfg 提供,§3.5) | 用 snapshot.cfg 原值 |
 | `boot.root.overlay.diff` | 必须 file:// 绝对路径;沙箱写层 | error: missing |
 | `boot.root.overlay.size` | 与冷启动一致(默认 10 GiB) | 默认 10 GiB |
 | `boot.cmdline` | 静默忽略(restore 不 boot) | 同 |
@@ -1460,15 +1532,19 @@ BlockReader:
   Close() error
 ```
 
-实现:
-- **FileReader**:本地 `pread(2)`;Size 来自 stat
-- **ManifestReader**:从 store-ctl + cache-ctl 拿 manifest blob → 解码 + 解封
-  keys → `fetch.Fetcher` → ReadAt 时零填充 hole 区段;Size 来自 manifest
-  元数据。manifest hole 在块设备语义下等价于零页,Fetcher 内部直接 memset
-  不再走 store
+所有只读块来源统一为一个读取层抽象 `Stream`(本地文件、manifest、或多层叠加),
+由一个适配器包装为 `BlockReader`,Close 时释放底层 `Stream`(文件句柄;manifest
+形态的 store/cache 客户端归 Fetcher 所有,另行释放)。`Stream` 形态:
 
-blk0 backend:写请求(IN/DISCARD/FLUSH)拒绝,返回 IO_ERR;读请求经
-BlockReader 拿数据,写到 guest buffer (HVA)。
+- **本地文件**:`pread(2)`;经 `SEEK_DATA`/`SEEK_HOLE` 探测稀疏空洞,空洞由内核读为零。
+- **manifest**:从 store-ctl + cache-ctl 拿 manifest blob → 解码 + 解封 keys →
+  按需取块解密;ReadAt 时零填充 hole 与 IsZero 区段(块设备语义下等价于零页,
+  不走 store)。Size 来自 manifest 元数据。
+- **多层叠加**:上述任意 `Stream` 自顶向下叠加——顶层数据优先,声明空洞穿透到下层,
+  IsZero 为顶层拥有的真实零数据不穿透,越界等同空洞,Size 取各层最大。
+
+blk0 backend:写请求(IN/DISCARD/FLUSH)拒绝,返回 IO_ERR;读请求经 BlockReader
+拿数据,写到 guest buffer (HVA)。
 
 manifest:// 路径需要 sandbox-ctl 持有 store + cache 客户端 + chunk + key-table
 加密器 + customer key —— 整套从清单配置在 sandbox 启动时一次性建立,

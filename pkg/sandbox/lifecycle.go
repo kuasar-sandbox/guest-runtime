@@ -179,7 +179,7 @@ func Run(ctx context.Context, opts RunOptions) (int, error) {
 
 	// Resolve disk URIs. blk0 (boot.root.base) is read-only base;
 	// blk1 (boot.root.overlay) is the writable layer.
-	blk0Reader, _, err := openBlockReader(ctx, opts.Cfg.Boot.Root.Base, fetcher)
+	blk0Reader, _, err := OpenBlockReader(ctx, opts.Cfg.Boot.Root.Base, fetcher)
 	if err != nil {
 		return -1, fmt.Errorf("blk0 base: %w", err)
 	}
@@ -223,7 +223,7 @@ func Run(ctx context.Context, opts RunOptions) (int, error) {
 
 	var overlayBase vhost.BlockReader
 	if opts.Cfg.Boot.Root.Overlay.Base != "" {
-		r, _, err := openBlockReader(ctx, opts.Cfg.Boot.Root.Overlay.Base, fetcher)
+		r, _, err := OpenBlockReader(ctx, opts.Cfg.Boot.Root.Overlay.Base, fetcher)
 		if err != nil {
 			return -1, fmt.Errorf("blk1 overlay base: %w", err)
 		}
@@ -668,7 +668,23 @@ func buildSnapshotCfg(cfg *SandboxConfig, overlayRef string) ([]byte, error) {
 	doc.Boot.RuntimeRef = cfg.SnapshotRefs.RuntimeRef
 	doc.Boot.Root.BaseRef = cfg.SnapshotRefs.BaseRef
 	doc.Boot.Root.Overlay.Base = overlayRef
+	// Incremental layered chain (docs/sandbox.md §3.5): prepend the parent
+	// this run was restored from. Cold start ⇒ empty provenance ⇒ empty chains.
+	doc.FromRefs = prependRef(cfg.SnapshotProvenance.ParentSnapshotRef, cfg.SnapshotProvenance.ParentFromRefs)
+	doc.Boot.Root.Overlay.BaseFromRefs = prependRef(cfg.SnapshotProvenance.ParentOverlayBase, cfg.SnapshotProvenance.ParentBaseFromRefs)
 	return yaml.Marshal(&doc)
+}
+
+// prependRef returns [ref] ++ rest when ref is non-empty, else nil. Used to
+// extend a layered chain by the parent's top layer.
+func prependRef(ref string, rest []string) []string {
+	if ref == "" {
+		return nil
+	}
+	out := make([]string, 0, 1+len(rest))
+	out = append(out, ref)
+	out = append(out, rest...)
+	return out
 }
 
 // snapshotCfgYAML mirrors the on-disk snapshot.cfg schema. Extracted
@@ -680,12 +696,14 @@ type snapshotCfgYAML struct {
 			Memory string `yaml:"memory"`
 		} `yaml:"capacity"`
 	} `yaml:"resources"`
-	Boot struct {
+	FromRefs []string `yaml:"from_refs,omitempty"`
+	Boot     struct {
 		RuntimeRef string `yaml:"runtime_ref"`
 		Root       struct {
 			BaseRef string `yaml:"base_ref"`
 			Overlay struct {
-				Base string `yaml:"base"`
+				Base         string   `yaml:"base"`
+				BaseFromRefs []string `yaml:"base_from_refs,omitempty"`
 			} `yaml:"overlay"`
 		} `yaml:"root"`
 	} `yaml:"boot"`

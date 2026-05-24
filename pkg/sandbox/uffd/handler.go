@@ -48,7 +48,7 @@ type Config struct {
 	Size      int
 
 	// Source of truth for Absent-page contents. ZeroSource for cold
-	// start; SparseSnapshotSource for restore.
+	// start; StreamSnapshotSource for restore.
 	Source SnapshotReader
 
 	// Number of worker goroutines. 0 → runtime.NumCPU(); minimum 2.

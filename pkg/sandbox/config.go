@@ -33,6 +33,12 @@ type SandboxConfig struct {
 	// before snapshot is possible) and not part of the YAML schema.
 	// Exposed publicly so snapshot.cfg builder + applyrules can read.
 	SnapshotRefs SnapshotRefs `yaml:"-"`
+
+	// SnapshotProvenance records what this run was restored from, so a
+	// subsequent snapshot can record the incremental layered chain
+	// (from_refs / overlay.base_from_refs; see docs/sandbox.md §3.5). Zero
+	// value on cold start ⇒ empty chains. Not part of the YAML schema.
+	SnapshotProvenance SnapshotProvenance `yaml:"-"`
 }
 
 // SnapshotRefs holds the precomputed `file://<basename>@sha256:<digest>`
@@ -41,6 +47,16 @@ type SandboxConfig struct {
 type SnapshotRefs struct {
 	RuntimeRef string // file://<basename>@sha256:<digest>
 	BaseRef    string // file://<basename>@sha256:<digest> or manifest://<key>
+}
+
+// SnapshotProvenance carries the parent (restored-from) snapshot's identity
+// and chains so the next snapshot taken by this run can prepend the parent
+// and record the full incremental layered chain. Empty on cold start.
+type SnapshotProvenance struct {
+	ParentSnapshotRef  string   // manifest://<key> or file://<sha256>.snapshot; "" on cold start
+	ParentFromRefs     []string // parent's from_refs (memory chain below the parent)
+	ParentOverlayBase  string   // parent's overlay.base (top disk diff); "" on cold start
+	ParentBaseFromRefs []string // parent's overlay.base_from_refs (disk chain below it)
 }
 
 // ResourcesConfig follows Kubernetes-style capacity / allocatable split:
