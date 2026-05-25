@@ -135,9 +135,12 @@ func ApplyRules(host *sandbox.SandboxConfig, snap *SnapshotCfg, snapshotPath str
 		out.Resources.Capacity.Memory = snap.Resources.Capacity.Memory
 	}
 
-	// 2. network: required.
-	if host.Network.TAP == "" {
-		return nil, errors.New("network.tap is required in restore mode")
+	// 2. network: exactly one source required (same rule as cold start).
+	if (host.Network.TAP == "") == (host.Network.TapFD == nil) {
+		return nil, errors.New("network: exactly one of `tap` or `tapfd` is required in restore mode")
+	}
+	if host.Network.TapFD != nil && len(host.Network.TapFD.Exec) == 0 {
+		return nil, errors.New("network.tapfd.exec is required")
 	}
 
 	// 3. boot.runtime: file:// only (cold + restore alike).

@@ -4,22 +4,22 @@
 //
 // Two kinds of connections (docs/sandbox-runtime.md §4):
 //
-//   (1) Management short connections — one request + one response per
-//       connection, then close. Both directions reuse port 5000:
-//         - guest → host: sandbox-init dial(CID=2, port=5000); CH hybrid
-//           vsock proxies to "<vsock-base>_5000" UDS that sandbox-ctl
-//           listens on. Carries: hello/launch handshake, app_started,
-//           app_exited, mem_report.
-//         - host → guest: sandbox-ctl dial(<vsock-base>) UDS, write
-//           "CONNECT 5000\n" first; CH proxies the rest to guest port
-//           5000 listener. Carries: ping, quiesce, restore, attach.
-//       Wire: [4 bytes LE length][JSON Message].
+//	(1) Management short connections — one request + one response per
+//	    connection, then close. Both directions reuse port 5000:
+//	      - guest → host: sandbox-init dial(CID=2, port=5000); CH hybrid
+//	        vsock proxies to "<vsock-base>_5000" UDS that sandbox-ctl
+//	        listens on. Carries: hello/launch handshake, app_started,
+//	        app_exited, mem_report.
+//	      - host → guest: sandbox-ctl dial(<vsock-base>) UDS, write
+//	        "CONNECT 5000\n" first; CH proxies the rest to guest port
+//	        5000 listener. Carries: ping, quiesce, restore, attach.
+//	    Wire: [4 bytes LE length][JSON Message].
 //
-//   (2) The MUX long connection — at most one. The launch / restore /
-//       attach operations DON'T close their connection after the *_ack:
-//       it stays open and switches to the framed MUX sub-protocol
-//       (pkg/sandbox/mux) which carries the app's stdin/stdout/stderr
-//       (or a pty). See StdioSpec for what's negotiated in the *_ack.
+//	(2) The MUX long connection — at most one. The launch / restore /
+//	    attach operations DON'T close their connection after the *_ack:
+//	    it stays open and switches to the framed MUX sub-protocol
+//	    (pkg/sandbox/mux) which carries the app's stdin/stdout/stderr
+//	    (or a pty). See StdioSpec for what's negotiated in the *_ack.
 //
 // This package is dependency-light (stdlib only) so the guest
 // sandbox-init binary can import it without dragging in YAML or other
@@ -83,12 +83,15 @@ type LaunchSpec struct {
 }
 
 // NetworkSpec is the resolved guest IP-layer config sandbox-init applies
-// via netlink before forking the user app. Empty fields fall back to
-// "skip that step" (e.g. empty Gateway → no default route).
+// via netlink. Cold start applies it to a fresh iface (LaunchSpec.Network);
+// restore re-applies it flush-and-replace (Message.Network on the restore
+// notify) so a clone takes a fresh identity. Empty fields fall back to "skip
+// that step" (empty Nexthop → no default route, MTU 0 → leave kernel default).
 type NetworkSpec struct {
 	Interface string `json:"interface,omitempty"`
 	IPCIDR    string `json:"ip_cidr,omitempty"`
-	Gateway   string `json:"gateway,omitempty"`
+	Nexthop   string `json:"nexthop,omitempty"`
+	MTU       int    `json:"mtu,omitempty"`
 	Hostname  string `json:"hostname,omitempty"`
 }
 
@@ -194,6 +197,12 @@ type Message struct {
 	// restore. Unset (0) on attach — a live VM's clock is fine.
 	WallclockNs int64 `json:"wallclock_ns,omitempty"`
 
+	// restore: optional new guest IP-layer config. When set, the guest
+	// re-applies it flush-and-replace before thawing, so a clone restored
+	// from a golden snapshot takes a fresh network identity. nil → keep the
+	// snapshot's network as-is. (Cold start carries network via LaunchSpec.)
+	Network *NetworkSpec `json:"network,omitempty"`
+
 	// mem_report: guest → host periodic /proc/meminfo snapshot used by
 	// the host-side balloon controller to drive vm.resize.
 	MemAvailableBytes uint64 `json:"mem_avail_bytes,omitempty"`
@@ -207,25 +216,25 @@ type Message struct {
 // directions, the request/response pairs, and which connections upgrade
 // to the MUX after their *_ack.
 const (
-	TypeHello      = "hello"
-	TypeLaunch     = "launch"
-	TypeLaunchAck  = "launch_ack"
-	TypeAppStarted = "app_started"
-	TypeAppExited  = "app_exited"
-	TypePing       = "ping"
-	TypePong       = "pong"
-	TypeRestore    = "restore"
-	TypeRestoreAck = "restore_ack"
-	TypeAttach     = "attach"
-	TypeAttachAck  = "attach_ack"
-	TypeQuiesce    = "quiesce"
-	TypeQuiesced   = "quiesced"
-	TypeExec       = "exec"
-	TypeExecAck    = "exec_ack"
+	TypeHello        = "hello"
+	TypeLaunch       = "launch"
+	TypeLaunchAck    = "launch_ack"
+	TypeAppStarted   = "app_started"
+	TypeAppExited    = "app_exited"
+	TypePing         = "ping"
+	TypePong         = "pong"
+	TypeRestore      = "restore"
+	TypeRestoreAck   = "restore_ack"
+	TypeAttach       = "attach"
+	TypeAttachAck    = "attach_ack"
+	TypeQuiesce      = "quiesce"
+	TypeQuiesced     = "quiesced"
+	TypeExec         = "exec"
+	TypeExecAck      = "exec_ack"
 	TypeMemReport    = "mem_report"
 	TypeMemReportAck = "mem_report_ack"
-	TypeAck   = "ack"
-	TypeError = "error"
+	TypeAck          = "ack"
+	TypeError        = "error"
 )
 
 // Default per-message deadlines (docs/sandbox-runtime.md §4.9). Callers

@@ -269,7 +269,11 @@ func SendQuiesce(client *HostClient) error {
 // connection together with the channel set the guest established. The
 // caller wraps the conn in a mux.Session and bridges those streams, then
 // (re)starts the ping ticker. epoch distinguishes successive restores.
-func OpenMUXViaRestore(client *HostClient, epoch uint32, deadline time.Duration) (net.Conn, proto.StdioSpec, error) {
+//
+// network (optional) carries a fresh guest IP-layer config the guest
+// re-applies flush-and-replace before thawing, so a clone restored from a
+// golden snapshot takes a new network identity. nil → keep the snapshot's.
+func OpenMUXViaRestore(client *HostClient, epoch uint32, network *proto.NetworkSpec, deadline time.Duration) (net.Conn, proto.StdioSpec, error) {
 	// WallclockNs lets the guest jump CLOCK_REALTIME forward by the
 	// dormant interval (CH reloads the snapshot's stale clock verbatim).
 	// Captured here, as close to the send as possible; the residual
@@ -279,6 +283,7 @@ func OpenMUXViaRestore(client *HostClient, epoch uint32, deadline time.Duration)
 		Type:        proto.TypeRestore,
 		Epoch:       epoch,
 		WallclockNs: time.Now().UnixNano(),
+		Network:     network,
 	}, proto.TypeRestoreAck, deadline)
 }
 

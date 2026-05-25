@@ -143,7 +143,14 @@ func TestValidateCold_MissingFields(t *testing.T) {
 		{"no root.base", func(c *SandboxConfig) { c.Boot.Root.Base = "" }, "boot.root.base"},
 		{"no overlay.diff", func(c *SandboxConfig) { c.Boot.Root.Overlay.Diff = "" }, "boot.root.overlay.diff"},
 		{"manifest overlay.diff", func(c *SandboxConfig) { c.Boot.Root.Overlay.Diff = "manifest://abc" }, "must be file"},
-		{"no tap", func(c *SandboxConfig) { c.Network.TAP = "" }, "network.tap"},
+		{"no network source", func(c *SandboxConfig) { c.Network.TAP = "" }, "exactly one of"},
+		{"both tap and tapfd", func(c *SandboxConfig) {
+			c.Network.TapFD = &TapFDConfig{Exec: []string{"helper"}}
+		}, "exactly one of"},
+		{"tapfd without exec", func(c *SandboxConfig) {
+			c.Network.TAP = ""
+			c.Network.TapFD = &TapFDConfig{}
+		}, "tapfd.exec is required"},
 		{"alloc mem > capacity", func(c *SandboxConfig) {
 			c.Resources.Allocatable.Memory = "16GiB"
 		}, "allocatable.memory must be ≤"},
@@ -376,11 +383,11 @@ func TestCPUWeight_Mapping(t *testing.T) {
 		alloc float64
 		want  uint64
 	}{
-		{0.001, 1},   // clamp lower
-		{0.1, 10},    // 0.1 core
-		{1.0, 100},   // 1 core (kernel default)
-		{2.0, 200},   // 2 cores
-		{50.0, 5000}, // mid-range
+		{0.001, 1},     // clamp lower
+		{0.1, 10},      // 0.1 core
+		{1.0, 100},     // 1 core (kernel default)
+		{2.0, 200},     // 2 cores
+		{50.0, 5000},   // mid-range
 		{200.0, 10000}, // clamp upper
 	}
 	for _, tc := range cases {

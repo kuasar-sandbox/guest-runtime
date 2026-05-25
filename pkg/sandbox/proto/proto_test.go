@@ -50,7 +50,7 @@ func TestRoundTrip_LaunchWithNetwork(t *testing.T) {
 			Network: &NetworkSpec{
 				Interface: "eth0",
 				IPCIDR:    "169.254.1.1/31",
-				Gateway:   "169.254.1.0",
+				Nexthop:   "169.254.1.0",
 				Hostname:  "test-sandbox",
 			},
 		},

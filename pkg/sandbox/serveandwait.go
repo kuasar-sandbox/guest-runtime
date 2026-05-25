@@ -13,8 +13,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/fullof-work/mass-sandbox/pkg/sandbox/memory"
 	"github.com/fullof-work/mass-sandbox/pkg/sandbox/ctl"
+	"github.com/fullof-work/mass-sandbox/pkg/sandbox/memory"
 	"github.com/fullof-work/mass-sandbox/pkg/sandbox/mux"
 	"github.com/fullof-work/mass-sandbox/pkg/sandbox/proto"
 	"github.com/fullof-work/mass-sandbox/pkg/sandbox/stdio"
@@ -35,6 +35,13 @@ type CmdEnv struct {
 	VsockBase string
 	UffdSock  string
 	RunDir    string
+
+	// TapFDNum is the CH-visible fd of the inherited tap queue (cmd.ExtraFiles
+	// after memfd → 4), or 0 when there is no fd-handoff network (tap-name or
+	// no network). NetMAC is the effective virtio-net MAC the cmd builder puts
+	// in CH's --net mac= (tapfd metadata override or config). See docs/sandbox.md.
+	TapFDNum int
+	NetMAC   string
 }
 
 // PostSpawnCtx is handed to a caller's PostSpawn closure right after CH
@@ -86,6 +93,13 @@ type VMParams struct {
 	WireLaunchMUX bool              // cold: true (launch conn → MUX); restore: false (MUX via PostSpawn)
 	Balloon       *BalloonController
 	Hooks         *ControllerHooks
+
+	// TapFile, when non-nil, is a tap queue fd acquired via the tapfd handoff
+	// (docs/tapfd.md). ServeAndWait inherits it into CH after the memfd (CH
+	// fd 4) and surfaces CmdEnv.TapFDNum=4; the caller closes it after the run.
+	// NetMAC is the effective virtio-net MAC, surfaced as CmdEnv.NetMAC.
+	TapFile *os.File
+	NetMAC  string
 
 	SnapCfg     *SandboxConfig // ctl.sock SnapshotHandler.Cfg
 	ManifestCfg *ManifestConfig
@@ -322,6 +336,12 @@ func ServeAndWait(p VMParams) (int, error) {
 		}
 	}()
 
+	// memfd is cmd.ExtraFiles[0] → CH fd 3; an optional tapfd-handoff queue
+	// fd is appended next → CH fd 4 (referenced by --net fd= / restore net_fds).
+	tapFDNum := 0
+	if p.TapFile != nil {
+		tapFDNum = 4
+	}
 	cmd, chStdioCleanup, err := p.BuildCmd(CmdEnv{
 		Memfd:     memfd,
 		CHSock:    chSock,
@@ -330,6 +350,8 @@ func ServeAndWait(p VMParams) (int, error) {
 		VsockBase: vsockBase,
 		UffdSock:  uffdSockPath,
 		RunDir:    runDir,
+		TapFDNum:  tapFDNum,
+		NetMAC:    p.NetMAC,
 	})
 	if err != nil {
 		cancelBackends()
@@ -342,6 +364,9 @@ func ServeAndWait(p VMParams) (int, error) {
 	// terminal-generated ^C/^\/^Z don't hit CH directly — sandbox-ctl
 	// owns signal handling (below).
 	cmd.ExtraFiles = []*os.File{memfd.File()}
+	if p.TapFile != nil {
+		cmd.ExtraFiles = append(cmd.ExtraFiles, p.TapFile) // CH fd 4
+	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	sigCh := make(chan os.Signal, 4)

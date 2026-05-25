@@ -44,11 +44,11 @@ func TestParseRef(t *testing.T) {
 	}{
 		{"file://runtime.erofs@sha256:abcd", "file", "runtime.erofs", "abcd", "", false},
 		{"manifest://deadbeef", "manifest", "", "", "deadbeef", false},
-		{"file://runtime.erofs", "", "", "", "", true},   // missing @sha256:
-		{"manifest://", "", "", "", "", true},            // empty key
-		{"http://example.com", "", "", "", "", true},     // unsupported
-		{"file://@sha256:abcd", "", "", "", "", true},    // empty basename
-		{"file://name@sha256:", "", "", "", "", true},    // empty digest
+		{"file://runtime.erofs", "", "", "", "", true}, // missing @sha256:
+		{"manifest://", "", "", "", "", true},          // empty key
+		{"http://example.com", "", "", "", "", true},   // unsupported
+		{"file://@sha256:abcd", "", "", "", "", true},  // empty basename
+		{"file://name@sha256:", "", "", "", "", true},  // empty digest
 	} {
 		got, err := ParseRef(tc.in)
 		if tc.err {
@@ -124,8 +124,8 @@ func TestApplyRules_NetworkTAPRequired(t *testing.T) {
 	host := &sandbox.SandboxConfig{}
 	host.Boot.Root.Overlay.Diff = "file:///tmp/diff"
 
-	if _, err := ApplyRules(host, snap, filepath.Join(dir, "x.snapshot")); err == nil || !strings.Contains(err.Error(), "network.tap") {
-		t.Fatalf("expected network.tap required error, got %v", err)
+	if _, err := ApplyRules(host, snap, filepath.Join(dir, "x.snapshot")); err == nil || !strings.Contains(err.Error(), "exactly one of") {
+		t.Fatalf("expected network source required error, got %v", err)
 	}
 }
 

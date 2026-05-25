@@ -30,9 +30,22 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// applyNetwork executes hostname + bring-iface-up + assign-IP + default-route
-// in order. Any step's failure aborts subsequent steps and returns the error.
-func applyNetwork(spec *proto.NetworkSpec) error {
+// applyNetwork configures the guest IP layer on cold start: a fresh iface,
+// additive (RTM_NEWADDR with NLM_F_EXCL, route with NLM_F_EXCL).
+func applyNetwork(spec *proto.NetworkSpec) error { return applyNetworkMode(spec, false) }
+
+// applyNetworkReplace re-applies the IP layer on restore. The iface is already
+// configured from the snapshot, so it flushes the iface's existing global
+// addresses first and uses REPLACE semantics for the new address + default
+// route — letting a clone restored from a golden snapshot take a fresh
+// network identity without inheriting the snapshot's IP.
+func applyNetworkReplace(spec *proto.NetworkSpec) error { return applyNetworkMode(spec, true) }
+
+// applyNetworkMode executes hostname + bring-iface-up(+MTU) + assign-IP +
+// default-route in order. When replace is true it flushes existing global
+// addresses before assigning and uses REPLACE instead of EXCL. Any step's
+// failure aborts subsequent steps and returns the error.
+func applyNetworkMode(spec *proto.NetworkSpec, replace bool) error {
 	if spec == nil {
 		return nil
 	}
@@ -74,26 +87,33 @@ func applyNetwork(spec *proto.NetworkSpec) error {
 
 	seq := uint32(1)
 
-	if err := nlSendLinkUp(fd, seq, ifindex); err != nil {
+	if err := nlSendLinkUp(fd, seq, ifindex, spec.MTU); err != nil {
 		return fmt.Errorf("link up %s: %w", iface, err)
 	}
 	seq++
-	if err := nlSendAddrAdd(fd, seq, ifindex, family, ip, prefixLen); err != nil {
+
+	if replace {
+		if err := flushAddrs(fd, &seq, ifindex, family); err != nil {
+			return fmt.Errorf("flush addrs on %s: %w", iface, err)
+		}
+	}
+
+	if err := nlSendAddrAdd(fd, seq, ifindex, family, ip, prefixLen, replace); err != nil {
 		return fmt.Errorf("addr add %s on %s: %w", spec.IPCIDR, iface, err)
 	}
 	seq++
 
-	if spec.Gateway != "" {
-		gw := net.ParseIP(spec.Gateway)
+	if spec.Nexthop != "" {
+		gw := net.ParseIP(spec.Nexthop)
 		if gw == nil {
-			return fmt.Errorf("parse gateway %q: invalid IP", spec.Gateway)
+			return fmt.Errorf("parse nexthop %q: invalid IP", spec.Nexthop)
 		}
 		gwFamily := unix.AF_INET
 		if gw.To4() == nil {
 			gwFamily = unix.AF_INET6
 		}
-		if err := nlSendDefaultRoute(fd, seq, ifindex, gwFamily, gw); err != nil {
-			return fmt.Errorf("default route via %s: %w", spec.Gateway, err)
+		if err := nlSendDefaultRoute(fd, seq, ifindex, gwFamily, gw, replace); err != nil {
+			return fmt.Errorf("default route via %s: %w", spec.Nexthop, err)
 		}
 	}
 	return nil
@@ -176,19 +196,34 @@ func nlSend(fd int, msgType uint16, flags uint16, seq uint32, body []byte) error
 	}
 }
 
-// nlSendLinkUp issues RTM_NEWLINK with IFF_UP/IFF_UP set on ifindex.
-func nlSendLinkUp(fd int, seq uint32, ifindex int32) error {
+// nlSendLinkUp issues RTM_NEWLINK setting IFF_UP on ifindex, and — when
+// mtu > 0 — an IFLA_MTU attribute to set the interface MTU.
+func nlSendLinkUp(fd int, seq uint32, ifindex int32, mtu int) error {
 	body := make([]byte, unix.SizeofIfInfomsg)
 	ifi := (*unix.IfInfomsg)(unsafe.Pointer(&body[0]))
 	ifi.Family = unix.AF_UNSPEC
 	ifi.Index = ifindex
 	ifi.Flags = unix.IFF_UP
 	ifi.Change = unix.IFF_UP
+	if mtu > 0 {
+		raw := make([]byte, 4)
+		binary.LittleEndian.PutUint32(raw, uint32(mtu))
+		body = nlAttr(body, unix.IFLA_MTU, raw)
+	}
 	return nlSend(fd, unix.RTM_NEWLINK, 0, seq, body)
 }
 
+// addFlags returns the create flags for RTM_NEW* ops: REPLACE when replacing
+// (restore), EXCL otherwise (cold; fail if it already exists).
+func addFlags(replace bool) uint16 {
+	if replace {
+		return unix.NLM_F_CREATE | unix.NLM_F_REPLACE
+	}
+	return unix.NLM_F_CREATE | unix.NLM_F_EXCL
+}
+
 // nlSendAddrAdd issues RTM_NEWADDR with IFA_LOCAL + IFA_ADDRESS.
-func nlSendAddrAdd(fd int, seq uint32, ifindex int32, family int, ip net.IP, prefix int) error {
+func nlSendAddrAdd(fd int, seq uint32, ifindex int32, family int, ip net.IP, prefix int, replace bool) error {
 	body := make([]byte, unix.SizeofIfAddrmsg)
 	ifa := (*unix.IfAddrmsg)(unsafe.Pointer(&body[0]))
 	ifa.Family = uint8(family)
@@ -196,20 +231,15 @@ func nlSendAddrAdd(fd int, seq uint32, ifindex int32, family int, ip net.IP, pre
 	ifa.Index = uint32(ifindex)
 	ifa.Scope = unix.RT_SCOPE_UNIVERSE
 
-	var raw []byte
-	if family == unix.AF_INET {
-		raw = ip.To4()
-	} else {
-		raw = ip.To16()
-	}
+	raw := addrBytes(family, ip)
 	body = nlAttr(body, unix.IFA_LOCAL, raw)
 	body = nlAttr(body, unix.IFA_ADDRESS, raw)
 
-	return nlSend(fd, unix.RTM_NEWADDR, unix.NLM_F_CREATE|unix.NLM_F_EXCL, seq, body)
+	return nlSend(fd, unix.RTM_NEWADDR, addFlags(replace), seq, body)
 }
 
 // nlSendDefaultRoute issues RTM_NEWROUTE for 0.0.0.0/0 (or ::/0) via gw on ifindex.
-func nlSendDefaultRoute(fd int, seq uint32, ifindex int32, family int, gw net.IP) error {
+func nlSendDefaultRoute(fd int, seq uint32, ifindex int32, family int, gw net.IP, replace bool) error {
 	body := make([]byte, unix.SizeofRtMsg)
 	rt := (*unix.RtMsg)(unsafe.Pointer(&body[0]))
 	rt.Family = uint8(family)
@@ -222,20 +252,143 @@ func nlSendDefaultRoute(fd int, seq uint32, ifindex int32, family int, gw net.IP
 	rt.Type = unix.RTN_UNICAST
 	rt.Flags = 0
 
-	var raw []byte
-	if family == unix.AF_INET {
-		raw = gw.To4()
-	} else {
-		raw = gw.To16()
-	}
-	body = nlAttr(body, unix.RTA_GATEWAY, raw)
+	body = nlAttr(body, unix.RTA_GATEWAY, addrBytes(family, gw))
 
 	// OIF (output interface) — 4 bytes LE int32 in NlAttr
 	oifBytes := make([]byte, 4)
 	binary.LittleEndian.PutUint32(oifBytes, uint32(ifindex))
 	body = nlAttr(body, unix.RTA_OIF, oifBytes)
 
-	return nlSend(fd, unix.RTM_NEWROUTE, unix.NLM_F_CREATE|unix.NLM_F_EXCL, seq, body)
+	return nlSend(fd, unix.RTM_NEWROUTE, addFlags(replace), seq, body)
+}
+
+// addrBytes returns the 4- or 16-byte wire form of ip for the family.
+func addrBytes(family int, ip net.IP) []byte {
+	if family == unix.AF_INET {
+		return ip.To4()
+	}
+	return ip.To16()
+}
+
+// flushAddrs removes every global-scope address of `family` on ifindex
+// (RTM_GETADDR dump → RTM_DELADDR each). Used on restore so a re-identified
+// clone does not keep the golden snapshot's IP. Link/host-scope addresses
+// (e.g. IPv6 link-local) are left untouched. *seq is advanced per message.
+func flushAddrs(fd int, seq *uint32, ifindex int32, family int) error {
+	addrs, err := nlDumpAddrs(fd, *seq, ifindex, family)
+	*seq++
+	if err != nil {
+		return err
+	}
+	for _, a := range addrs {
+		if err := nlSendAddrDel(fd, *seq, ifindex, family, a.ip, a.prefix); err != nil {
+			return fmt.Errorf("del %s/%d: %w", a.ip, a.prefix, err)
+		}
+		*seq++
+	}
+	return nil
+}
+
+type addrEntry struct {
+	ip     net.IP
+	prefix int
+}
+
+// nlDumpAddrs sends an RTM_GETADDR dump and collects the global-scope
+// addresses of `family` on ifindex from the multipart reply.
+func nlDumpAddrs(fd int, seq uint32, ifindex int32, family int) ([]addrEntry, error) {
+	const hdrSize = unix.SizeofNlMsghdr
+	body := make([]byte, unix.SizeofIfAddrmsg)
+	ifa := (*unix.IfAddrmsg)(unsafe.Pointer(&body[0]))
+	ifa.Family = uint8(family)
+
+	buf := make([]byte, hdrSize+len(body))
+	h := (*unix.NlMsghdr)(unsafe.Pointer(&buf[0]))
+	h.Len = uint32(len(buf))
+	h.Type = unix.RTM_GETADDR
+	h.Flags = unix.NLM_F_REQUEST | unix.NLM_F_DUMP
+	h.Seq = seq
+	copy(buf[hdrSize:], body)
+	if err := unix.Sendto(fd, buf, 0, &unix.SockaddrNetlink{Family: unix.AF_NETLINK}); err != nil {
+		return nil, fmt.Errorf("sendto getaddr: %w", err)
+	}
+
+	var out []addrEntry
+	rbuf := make([]byte, 8192)
+	for {
+		n, _, err := unix.Recvfrom(fd, rbuf, 0)
+		if err != nil {
+			return nil, fmt.Errorf("recvfrom getaddr: %w", err)
+		}
+		data := rbuf[:n]
+		for len(data) >= hdrSize {
+			mh := (*unix.NlMsghdr)(unsafe.Pointer(&data[0]))
+			l := int(mh.Len)
+			if l < hdrSize || l > len(data) {
+				return out, nil // truncated/malformed — stop with what we have
+			}
+			switch mh.Type {
+			case unix.NLMSG_DONE:
+				return out, nil
+			case unix.NLMSG_ERROR:
+				errno := int32(binary.LittleEndian.Uint32(data[hdrSize : hdrSize+4]))
+				if errno != 0 {
+					return out, fmt.Errorf("getaddr dump: netlink error %d", -errno)
+				}
+				return out, nil
+			case unix.RTM_NEWADDR:
+				if e, ok := parseAddrEntry(data[hdrSize:l], ifindex, family); ok {
+					out = append(out, e)
+				}
+			}
+			data = data[nlAlign(l):]
+		}
+	}
+}
+
+// parseAddrEntry extracts (ip, prefix) from an RTM_NEWADDR payload iff it is a
+// global-scope address of the given family on ifindex.
+func parseAddrEntry(p []byte, ifindex int32, family int) (addrEntry, bool) {
+	if len(p) < unix.SizeofIfAddrmsg {
+		return addrEntry{}, false
+	}
+	ifa := (*unix.IfAddrmsg)(unsafe.Pointer(&p[0]))
+	if int32(ifa.Index) != ifindex || int(ifa.Family) != family || ifa.Scope != unix.RT_SCOPE_UNIVERSE {
+		return addrEntry{}, false
+	}
+	attrs := p[unix.SizeofIfAddrmsg:]
+	var ip net.IP
+	for len(attrs) >= 4 {
+		alen := int(binary.LittleEndian.Uint16(attrs[0:2]))
+		atype := binary.LittleEndian.Uint16(attrs[2:4])
+		if alen < 4 || alen > len(attrs) {
+			break
+		}
+		val := attrs[4:alen]
+		if atype == unix.IFA_LOCAL || (atype == unix.IFA_ADDRESS && ip == nil) {
+			ip = append(net.IP(nil), val...)
+		}
+		attrs = attrs[nlAlign(alen):]
+	}
+	if ip == nil {
+		return addrEntry{}, false
+	}
+	return addrEntry{ip: ip, prefix: int(ifa.Prefixlen)}, true
+}
+
+// nlSendAddrDel issues RTM_DELADDR for ip/prefix on ifindex.
+func nlSendAddrDel(fd int, seq uint32, ifindex int32, family int, ip net.IP, prefix int) error {
+	body := make([]byte, unix.SizeofIfAddrmsg)
+	ifa := (*unix.IfAddrmsg)(unsafe.Pointer(&body[0]))
+	ifa.Family = uint8(family)
+	ifa.Prefixlen = uint8(prefix)
+	ifa.Index = uint32(ifindex)
+
+	raw := addrBytes(family, ip)
+	body = nlAttr(body, unix.IFA_LOCAL, raw)
+	body = nlAttr(body, unix.IFA_ADDRESS, raw)
+
+	return nlSend(fd, unix.RTM_DELADDR, 0, seq, body)
 }
 
 // _ keeps the syscall import live in case future revisions need raw fcntls.

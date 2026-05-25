@@ -129,10 +129,12 @@ ping ticker,如果 listener 没起会落空。vsock 不依赖 IP 配置,阶段 1
 2. write  hello{phase:"ready"}
 3. read   launch{spec}                  ← LaunchSpec: exec/args/env/workdir/restart,
                                            network, stdio{tty? / which channels}
-4. 若 spec.Network 非空,applyNetwork:
+4. 若 spec.Network 非空,applyNetwork(冷启动:全新网卡,additive):
      - Sethostname(network.hostname)
-     - raw netlink RTM_NEWLINK(interface UP) / RTM_NEWADDR(IP/CIDR) / RTM_NEWROUTE(gateway)
+     - raw netlink RTM_NEWLINK(interface UP[+IFLA_MTU]) / RTM_NEWADDR(IP/CIDR) /
+       可选 RTM_NEWROUTE(nexthop)
    失败 fast-fail —— 一次性沙箱模型下"网络配置失败"必须立刻 die
+   (restore 出来时若带 network,改走 flush-and-replace 重配,见 §4.3 restore)
 5. 按 spec.stdio 准备应用的 stdio fd(§3.5):
      - tty 模式:openpty(); 记下 master fd 与 slave fd; 初始 winsize 来自 spec
      - pipe 模式:为每个声明的通道(stdin/stdout/stderr)建一对 pipe / socketpair
@@ -395,7 +397,7 @@ vsock 端口固定 `5000`,**两个方向都复用同一端口号**,身份按方�
 | **健康探测** | host→guest | `ping{id, t_send_ns}` → `pong{id, t_send_ns}` | 关 | host 计 RTT / 超时 / 失败数(§4.8) |
 | **mem 报告** | guest→host | `mem_report{mem_avail, mem_total}` → `mem_report_ack` | 关 | guest 周期上报 `/proc/meminfo`,喂 host BalloonController |
 | **快照前** | host→guest | `quiesce` → `quiesced` | 关 | guest 冻结应用进程树 + 跑 prep + 关闭 MUX(§3.4),`quiesced` ⇒ 应用已冻结、可安全 `/vm.pause` |
-| **恢复后** | host→guest | `restore{epoch, wallclock_ns}` → `restore_ack{stdio, app_state}` | **升级 MUX** | 快照恢复 vCPU 起跑后 host 通知 guest;应用此时仍处 freezer 冻结态(冻结态随快照保存,`/vm.resume` 不解冻);`restore` 携带 host 发送前一刻的墙钟 `wallclock_ns`,guest 收到后先 `clock_settime` 把 `CLOCK_REALTIME` 跳到该值(CH 把快照里的旧钟原样载回,不纠正则落后整个静置区间;单调钟不受影响),回 `restore_ack`(ATTACH_ACK 的超集 + "恢复完成"信号,host 据此判定 restore 完成)、重连 MUX,**最后 thaw 应用**(write `cgroup.freeze=0`)——故应用绝不会观察到旧墙钟或未重连的 MUX。**本轮 restore 期 env 重建仅墙钟;RNG 重播种、网络身份重置 deferred(未实现)**;该连接成为新 MUX |
+| **恢复后** | host→guest | `restore{epoch, wallclock_ns, network?}` → `restore_ack{stdio, app_state}` | **升级 MUX** | 快照恢复 vCPU 起跑后 host 通知 guest;应用此时仍处 freezer 冻结态(冻结态随快照保存,`/vm.resume` 不解冻);`restore` 携带 host 发送前一刻的墙钟 `wallclock_ns`,guest 收到后先 `clock_settime` 把 `CLOCK_REALTIME` 跳到该值(CH 把快照里的旧钟原样载回,不纠正则落后整个静置区间;单调钟不受影响);若带 `network`,再以 **flush-and-replace** 重配 L3(克隆取新 IP/MTU/nexthop/hostname;MAC 沿用快照设备状态不变),best-effort + 记日志,thaw 前完成;回 `restore_ack`(ATTACH_ACK 的超集 + "恢复完成"信号,host 据此判定 restore 完成)、重连 MUX,**最后 thaw 应用**(write `cgroup.freeze=0`)——故应用绝不会观察到旧墙钟、错误网络或未重连的 MUX。**RNG 重播种仍 deferred(未实现)**;该连接成为新 MUX |
 | **MUX 重连** | host→guest | `attach{epoch}` → `attach_ack{stdio, app_state}` | **升级 MUX** | 纯 stdio-MUX 传输重连:MUX 因 vsock 异常断了,host 拨新连接重建;guest 优雅关旧 MUX(已断则硬丢)、回 ack,该连接成为新 MUX(§4.6)。**attach ≠ 快照后 resume**——活 VM 上从未 quiesce 的断线兜底也走它。thaw 不属 attach 语义,而属 quiesce 生命周期(freeze 的逆),**由 guest 自身冻结状态驱动**:仍冻结才补 thaw(仅 `resume_after=true` 同进程续跑路径——VM 原地 resume,attach 恰为首个 post-resume 接触),活 VM 重连本未冻结即跳过 |
 | **执行命令** | host→guest | `exec{spec}` → `exec_ack{stdio}` | **升级 MUX(独立会话)** | guest 为这条 `exec` 起一个兄弟进程并准备其 stdio,回 `exec_ack`,该连接成为这次 exec 会话**独立**的 MUX;并发多条互不影响;命令结束 guest 在 MUX 上发 EXIT_STATUS 再走 §4.6 关闭。详见 §3.6 |
 | `error` | 任意 | (终止) | 关 | 任一端拒绝/出错的兜底响应,`msg` 人类可读 |
@@ -422,6 +424,7 @@ JSON 可读、调试友好;消息量极少,无需 protobuf 工具链。
   "t_send_ns":1715000000000000000,     // ping: host 单调时钟 ns;guest 原样回填到 pong
   "epoch":    3,                       // restore / attach: 第 N 次;每次 +1,用于去重 in-flight
   "wallclock_ns":1715000000000000000,  // restore: host 墙钟,guest 落 CLOCK_REALTIME(attach 不带)
+  "network": { "ip": "169.254.4.1/31", "mtu": 1450, "nexthop": "", "hostname": "c1", "interface": "eth0" }, // restore 可选:重配 L3(flush-and-replace);省略则保留快照网络
   "mem_avail_bytes": 4294967296,       // mem_report
   "mem_total_bytes": 8589934592,       // mem_report
   "msg":      "<reason>"               // error
@@ -695,7 +698,7 @@ sandbox.yaml `launch:` 节(yaml override 优先,Env merge),host sandbox-ctl 合�
   "env":     {"PATH": "...", "HOME": "/root"},
   "workdir": "/",
   "restart": "never",                    // never | on-failure | always
-  "network": { "interface": "eth0", "ip": "169.254.1.1/31", "gateway": "", "hostname": "my-sandbox" },
+  "network": { "interface": "eth0", "ip": "169.254.1.1/31", "mtu": 1500, "nexthop": "", "hostname": "my-sandbox" },
   "stdio":   {
     "tty":     true,                     // true: 给应用一个伪终端(pty 模式);false: pipe 模式
     "winsize": {"cols": 80, "rows": 24}, // tty 模式的初始窗口大小

@@ -8,11 +8,14 @@ package sandbox
 import (
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/fullof-work/mass-sandbox/pkg/manifest"
+	"github.com/fullof-work/mass-sandbox/pkg/sandbox/proto"
 	"github.com/fullof-work/mass-sandbox/pkg/util"
 	"gopkg.in/yaml.v3"
 )
@@ -137,17 +140,122 @@ type StartupBurstConfig struct {
 	Memory string `yaml:"memory"`
 }
 
-// NetworkConfig declares both the host-side TAP attachment and the
-// guest-side IP layer config. The IP/Gateway/Hostname/Interface fields
-// are propagated to sandbox-init via the launch protocol; sandbox-init
-// applies them via netlink before forking the user app. Replaces the
-// kernel's `ip=...` cmdline + CONFIG_IP_PNP path.
+// NetworkConfig declares the host-side network source (one of TAP / TapFD)
+// plus the guest-side IP layer config. The IP/Nexthop/MTU/Hostname/Interface
+// fields are propagated to sandbox-init via the launch protocol (and re-applied
+// on restore); sandbox-init applies them via netlink. Replaces the kernel's
+// `ip=...` cmdline + CONFIG_IP_PNP path.
+//
+// Source modes (exactly one, see ValidateCold):
+//   - TAP: a pre-existing host tap; CH opens it by name (dev/e2e, no provider).
+//   - TapFD: tapfd handoff (docs/tapfd.md §5) — sandbox-ctl execs a helper that
+//     hands over a tap queue fd (with virtio-net header) + metadata.
+//
+// In TapFD mode the handoff metadata OVERRIDES the static attributes:
+// meta.mac→MAC, meta.ip→IP (address replaces, configured mask preserved),
+// meta.mtu→MTU. See NetworkConfig.Effective.
 type NetworkConfig struct {
-	TAP       string `yaml:"tap"`                 // pre-existing host TAP name (sandbox-ctl attaches, doesn't create)
-	Interface string `yaml:"interface,omitempty"` // guest iface name; defaults to "eth0"
-	IP        string `yaml:"ip,omitempty"`        // CIDR (IPv4 or IPv6), e.g. "169.254.1.1/31". Empty → no IP config.
-	Gateway   string `yaml:"gateway,omitempty"`   // default route next-hop; empty → no default route
+	TAP   string       `yaml:"tap,omitempty"`   // host tap name; CH opens it (attach, don't create)
+	TapFD *TapFDConfig `yaml:"tapfd,omitempty"` // tapfd handoff helper (docs/tapfd.md §5)
+
+	MAC       string `yaml:"mac,omitempty"`       // virtio-net MAC (CH --net mac=); empty + TAP mode → CH auto-assigns
+	IP        string `yaml:"ip,omitempty"`        // guest CIDR (IPv4/IPv6), e.g. "169.254.1.1/31". Empty → no IP config.
+	MTU       int    `yaml:"mtu,omitempty"`       // guest iface MTU; 0 → leave kernel default
+	Nexthop   string `yaml:"nexthop,omitempty"`   // default route next-hop; empty → no default route
 	Hostname  string `yaml:"hostname,omitempty"`  // guest hostname (sethostname)
+	Interface string `yaml:"interface,omitempty"` // guest iface name; defaults to "eth0"
+}
+
+// TapFDConfig configures tapfd-handoff acquisition (docs/tapfd.md §5).
+// sandbox-ctl execs Exec with TAPFD_SOCKET pointing at an inherited
+// socketpair end, then receives one tap queue fd + metadata over it.
+type TapFDConfig struct {
+	Exec    []string `yaml:"exec"`              // helper argv, e.g. ["vswitch-ctl","open-port","sw0","--port=3"]
+	Timeout string   `yaml:"timeout,omitempty"` // handoff timeout (Go duration); empty → default
+}
+
+// TimeoutDuration parses Timeout; 0 (empty/invalid) lets the handoff apply its
+// own default.
+func (t *TapFDConfig) TimeoutDuration() time.Duration {
+	if t == nil || t.Timeout == "" {
+		return 0
+	}
+	d, err := time.ParseDuration(t.Timeout)
+	if err != nil || d <= 0 {
+		return 0
+	}
+	return d
+}
+
+// ResolvedExec returns the helper argv with argv[0] resolved via
+// util.LocateBinary — the same lookup rule cloud-hypervisor / mkfs.erofs use:
+// a bare name prefers a copy next to the running sandbox-ctl binary, then
+// $PATH; a name with a path separator is used as-is. argv[1:] is unchanged.
+// Keeps path resolution (a deployment concern) out of tapfd.Acquire, which
+// stays a pure exec-the-argv protocol consumer.
+func (t *TapFDConfig) ResolvedExec() ([]string, error) {
+	if t == nil || len(t.Exec) == 0 {
+		return nil, errors.New("tapfd: empty exec argv")
+	}
+	bin, err := util.LocateBinary(t.Exec[0])
+	if err != nil {
+		return nil, fmt.Errorf("tapfd helper: %w", err)
+	}
+	return append([]string{bin}, t.Exec[1:]...), nil
+}
+
+// Effective merges the static network attributes with optional handoff
+// metadata (metaMAC/metaIP/metaMTU; empty/zero = no override) and returns the
+// MAC for CH (--net mac=) plus the guest NetworkSpec to push. The IP override
+// replaces the address while preserving the configured mask when the override
+// carries none. spec is nil when there is no IP to configure (matches the
+// "no IP → skip guest network" cold-start behavior).
+func (n NetworkConfig) Effective(metaMAC, metaIP string, metaMTU int) (mac string, spec *proto.NetworkSpec) {
+	mac = n.MAC
+	if metaMAC != "" {
+		mac = metaMAC
+	}
+	ip := n.IP
+	if metaIP != "" {
+		ip = mergeIPMask(metaIP, n.IP)
+	}
+	mtu := n.MTU
+	if metaMTU > 0 {
+		mtu = metaMTU
+	}
+	if ip == "" {
+		return mac, nil
+	}
+	return mac, &proto.NetworkSpec{
+		Interface: n.Interface,
+		IPCIDR:    ip,
+		Nexthop:   n.Nexthop,
+		MTU:       mtu,
+		Hostname:  n.Hostname,
+	}
+}
+
+// mergeIPMask returns metaIP unchanged if it already carries a prefix;
+// otherwise it appends the configured CIDR's mask (preserving the operator's
+// prefix), falling back to /32 (IPv4) or /128 (IPv6) when none is available.
+func mergeIPMask(metaIP, cfgIP string) string {
+	if strings.Contains(metaIP, "/") {
+		return metaIP
+	}
+	addr := net.ParseIP(metaIP)
+	if addr == nil {
+		return metaIP // malformed; let the guest-side parse surface it
+	}
+	if cfgIP != "" {
+		if _, ipnet, err := net.ParseCIDR(cfgIP); err == nil {
+			ones, _ := ipnet.Mask.Size()
+			return fmt.Sprintf("%s/%d", metaIP, ones)
+		}
+	}
+	if addr.To4() != nil {
+		return metaIP + "/32"
+	}
+	return metaIP + "/128"
 }
 
 // BootConfig is everything the kernel needs to start: kernel image,
@@ -165,7 +273,7 @@ type BootConfig struct {
 type RootConfig struct {
 	// Base is the read-only container image (flattened erofs).
 	// Auto-mounted as disk0 (vhost-user-blk readonly).
-	Base    string        `yaml:"base"`
+	Base string `yaml:"base"`
 	// Overlay is the writable upper layer (ext4 base + sparse diff).
 	// Auto-mounted as disk1 (vhost-user-blk read-write).
 	Overlay OverlayConfig `yaml:"overlay"`
@@ -468,8 +576,11 @@ func (c *SandboxConfig) ValidateCold() error {
 		return err
 	}
 
-	if c.Network.TAP == "" {
-		return errors.New("network.tap is required")
+	if (c.Network.TAP == "") == (c.Network.TapFD == nil) {
+		return errors.New("network: exactly one of `tap` or `tapfd` is required")
+	}
+	if c.Network.TapFD != nil && len(c.Network.TapFD.Exec) == 0 {
+		return errors.New("network.tapfd.exec is required")
 	}
 
 	// launch.exec is no longer required: if the rootfs erofs has an

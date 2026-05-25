@@ -211,6 +211,18 @@ func handleReverseConn(c *vsockConn, sup *supervisorState, bridge *consoleBridge
 				logf("reverse-channel: restore wall clock set to host now (epoch=%d)", req.Epoch)
 			}
 		}
+		// Re-apply the IP layer flush-and-replace when the host supplies a
+		// fresh NetworkSpec (clone from a golden snapshot taking a new
+		// identity). Best-effort + logged, like clock_settime: applied before
+		// the thaw so the app resumes onto the new identity. nil → keep the
+		// snapshot's network.
+		if req.Network != nil {
+			if err := applyNetworkReplace(req.Network); err != nil {
+				logf("reverse-channel: restore applyNetwork: %v", err)
+			} else {
+				logf("reverse-channel: restore network re-applied (epoch=%d)", req.Epoch)
+			}
+		}
 		spec := bridge.protoSpec()
 		resp := &proto.Message{Type: proto.TypeRestoreAck, Epoch: req.Epoch, Stdio: &spec, AppState: proto.AppStateRunning}
 		if err := proto.WriteMessage(c, resp); err != nil {

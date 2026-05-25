@@ -22,6 +22,7 @@ import (
 	"github.com/fullof-work/mass-sandbox/pkg/sandbox"
 	"github.com/fullof-work/mass-sandbox/pkg/sandbox/proto"
 	"github.com/fullof-work/mass-sandbox/pkg/sandbox/stdio"
+	"github.com/fullof-work/mass-sandbox/pkg/sandbox/tapfd"
 	"github.com/fullof-work/mass-sandbox/pkg/sandbox/uffd"
 	"github.com/fullof-work/mass-sandbox/pkg/vhost"
 )
@@ -399,6 +400,32 @@ func Run(ctx context.Context, opts Options) (int, error) {
 	}
 	defer blk0Reader.Close()
 
+	// Network: re-acquire the host side for this restore. tapfd mode re-runs
+	// the handoff (docs/tapfd.md §6, idempotent) for a fresh queue fd, passed
+	// to CH via --restore net_fds; tap-name mode lets CH reopen the named tap
+	// from the restored config. The merged metadata also yields the NetworkSpec
+	// the guest re-applies flush-and-replace (clone takes a fresh L3 identity;
+	// the MAC stays the snapshot's, so the provider must use a stable per-port
+	// MAC — see docs/tapfd.md §7).
+	var tapFile *os.File
+	var metaMAC, metaIP string
+	var metaMTU int
+	if snapCfg.Network.TapFD != nil {
+		argv, err := snapCfg.Network.TapFD.ResolvedExec()
+		if err != nil {
+			return -1, err
+		}
+		f, meta, err := tapfd.Acquire(ctx, argv, snapCfg.Network.TapFD.TimeoutDuration())
+		if err != nil {
+			return -1, fmt.Errorf("tapfd handoff: %w", err)
+		}
+		tapFile = f
+		defer tapFile.Close()
+		metaMAC, metaIP, metaMTU = meta.MAC, meta.IP, meta.MTU
+		logf("tapfd: received tap fd for restore (mac=%s ip=%s mtu=%d)", meta.MAC, meta.IP, meta.MTU)
+	}
+	netMAC, netSpec := snapCfg.Network.Effective(metaMAC, metaIP, metaMTU)
+
 	// The shared back-half (memfd, uffd va_report handler, vhost-blk
 	// backends, the launch server — incl. the guest→host mem_report /
 	// app_exited channel that was missing on the restore path — pinger,
@@ -432,6 +459,9 @@ func Run(ctx context.Context, opts Options) (int, error) {
 		Balloon:       balloonCtl,
 		Hooks:         hooks,
 
+		TapFile: tapFile, // nil in tap-name mode; CH inherits it at fd 4
+		NetMAC:  netMAC,
+
 		SnapCfg:     &snapCfg,
 		ManifestCfg: opts.ManifestCfg,
 		DiffPath:    diffPath,
@@ -446,9 +476,18 @@ func Run(ctx context.Context, opts Options) (int, error) {
 			if err != nil {
 				return nil, nil, fmt.Errorf("stdio: %w", err)
 			}
-			cmd.Args = append(cmd.Args, "--api-socket", e.CHSock, "--restore", "source_url=file://"+stateDir)
-			logf("spawning %s --api-socket %s --restore source_url=file://%s",
-				opts.CHBinary, e.CHSock, stateDir)
+			restoreArg := "source_url=file://" + stateDir
+			if e.TapFDNum > 0 {
+				// CH can't serialize fds, so the snapshot's net fd is dead;
+				// re-bind the fresh tap queue fd (CH fd 4) to the restored net
+				// device named _net0 at cold boot via net_fds.
+				// net_fds is a CH Tuple<String,Vec<u64>>: the whole value is
+				// bracket-wrapped, each entry is <net-id>@<fd-list>. Single
+				// net _net0 with one fd → [_net0@[N]].
+				restoreArg += fmt.Sprintf(",net_fds=[_net0@[%d]]", e.TapFDNum)
+			}
+			cmd.Args = append(cmd.Args, "--api-socket", e.CHSock, "--restore", restoreArg)
+			logf("spawning %s --api-socket %s --restore %s", opts.CHBinary, e.CHSock, restoreArg)
 			return cmd, cleanup, nil
 		},
 
@@ -468,7 +507,7 @@ func Run(ctx context.Context, opts Options) (int, error) {
 			pc.Logf("VM resumed, vCPU running")
 
 			tRestore := time.Now()
-			muxConn, muxSpec, err := sandbox.OpenMUXViaRestore(pc.Pinger.Client, 1, proto.DeadlineRestore)
+			muxConn, muxSpec, err := sandbox.OpenMUXViaRestore(pc.Pinger.Client, 1, netSpec, proto.DeadlineRestore)
 			if err != nil {
 				return fmt.Errorf("notify restore: %w (guest agent unreachable)", err)
 			}

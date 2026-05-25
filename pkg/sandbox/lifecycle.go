@@ -22,6 +22,7 @@ import (
 	"github.com/fullof-work/mass-sandbox/pkg/sandbox/proto"
 	"github.com/fullof-work/mass-sandbox/pkg/sandbox/snapshot"
 	"github.com/fullof-work/mass-sandbox/pkg/sandbox/stdio"
+	"github.com/fullof-work/mass-sandbox/pkg/sandbox/tapfd"
 	"github.com/fullof-work/mass-sandbox/pkg/sandbox/uffd"
 	"github.com/fullof-work/mass-sandbox/pkg/vhost"
 )
@@ -64,8 +65,13 @@ func Run(ctx context.Context, opts RunOptions) (int, error) {
 	if err := opts.Cfg.ValidateCold(); err != nil {
 		return -1, fmt.Errorf("config: %w", err)
 	}
-	if err := VerifyTAP(opts.Cfg.Network.TAP); err != nil {
-		return -1, err
+	// tap-name mode: CH opens the host tap, so verify it exists now.
+	// tapfd mode: the fd comes from the provider handoff below (no host tap
+	// to verify here).
+	if opts.Cfg.Network.TAP != "" {
+		if err := VerifyTAP(opts.Cfg.Network.TAP); err != nil {
+			return -1, err
+		}
 	}
 	if err := populateSnapshotRefs(opts.Cfg); err != nil {
 		return -1, fmt.Errorf("snapshot refs: %w", err)
@@ -201,17 +207,30 @@ func Run(ctx context.Context, opts RunOptions) (int, error) {
 		return -1, fmt.Errorf("launch spec: %w", err)
 	}
 
-	// Network config travels through the same launch handshake. Only
-	// populate when the user actually declared an IP — otherwise nil
-	// signals "no IP configuration" to sandbox-init.
-	if opts.Cfg.Network.IP != "" {
-		launchSpec.Network = &proto.NetworkSpec{
-			Interface: opts.Cfg.Network.Interface,
-			IPCIDR:    opts.Cfg.Network.IP,
-			Gateway:   opts.Cfg.Network.Gateway,
-			Hostname:  opts.Cfg.Network.Hostname,
+	// Network acquisition. tapfd mode (docs/tapfd.md §5) execs the provider
+	// helper to receive a tap queue fd + metadata; tap-name mode was verified
+	// above and CH opens it. The handoff metadata overrides the static attrs
+	// (mac/ip/mtu). The resolved spec travels through the launch handshake;
+	// nil → "no IP configuration" to sandbox-init.
+	var tapFile *os.File
+	var metaMAC, metaIP string
+	var metaMTU int
+	if opts.Cfg.Network.TapFD != nil {
+		argv, err := opts.Cfg.Network.TapFD.ResolvedExec()
+		if err != nil {
+			return -1, err
 		}
+		f, meta, err := tapfd.Acquire(ctx, argv, opts.Cfg.Network.TapFD.TimeoutDuration())
+		if err != nil {
+			return -1, fmt.Errorf("tapfd handoff: %w", err)
+		}
+		tapFile = f
+		defer tapFile.Close()
+		metaMAC, metaIP, metaMTU = meta.MAC, meta.IP, meta.MTU
+		logf("tapfd: received tap fd (mac=%s ip=%s mtu=%d)", meta.MAC, meta.IP, meta.MTU)
 	}
+	netMAC, netSpec := opts.Cfg.Network.Effective(metaMAC, metaIP, metaMTU)
+	launchSpec.Network = netSpec
 
 	// App stdio: tell sandbox-init what to wire (pty vs pipe channels);
 	// the launch-handshake connection becomes the stdio MUX after
@@ -277,6 +296,9 @@ func Run(ctx context.Context, opts RunOptions) (int, error) {
 		Balloon:       balloonCtl,
 		Hooks:         hooks,
 
+		TapFile: tapFile, // nil in tap-name mode; CH inherits it at fd 4
+		NetMAC:  netMAC,
+
 		SnapCfg:     opts.Cfg,
 		ManifestCfg: opts.ManifestCfg,
 		DiffPath:    diffPath,
@@ -293,7 +315,7 @@ func Run(ctx context.Context, opts RunOptions) (int, error) {
 			if err != nil {
 				return nil, nil, fmt.Errorf("stdio: %w", err)
 			}
-			args, err := CHCommand(opts.Cfg, e.Blk0Sock, e.Blk1Sock, e.CHSock, e.VsockBase, kernelPath, runtimePath, e.UffdSock, consoleArg)
+			args, err := CHCommand(opts.Cfg, e.Blk0Sock, e.Blk1Sock, e.CHSock, e.VsockBase, kernelPath, runtimePath, e.UffdSock, consoleArg, e.TapFDNum, e.NetMAC)
 			if err != nil {
 				cleanup()
 				return nil, nil, fmt.Errorf("CH cmdline: %w", err)

@@ -314,13 +314,22 @@ resources:
   startup_burst:               # 仅 controller 已设时允许;默认 = allocatable.memory
     memory: 256MiB             # 启动期 allocatable_now;约束 floor ≤ 此 ≤ capacity
 
-# 网络
+# 网络:源二选一(tap 名 / tapfd 交接);属性在 tapfd 模式下被交接元数据覆盖
 network:
-  tap: tap0                    # 预创建的 TAP 名,sandbox-ctl 不创建只 attach
-  interface: eth0              # guest 内网卡名,默认 eth0
-  ip: 169.254.1.1/31           # CIDR(IPv4 或 IPv6);空则不配 IP
-  gateway: ""                  # 默认路由下一跳;空则不配默认路由
+  # 源(二选一):
+  tap: tap0                    # 预创建的 host TAP 名;CH 按名打开(dev/e2e,无 provider)
+  tapfd:                       # tapfd 交接(docs/tapfd.md §5):exec provider helper 取 tap 队列 fd
+    exec: ["vswitch-ctl", "open-port", "sw0", "--port=3"]
+    # timeout: 5s            # 交接超时(Go duration);默认 5s
+
+  # 属性:tap 模式按下值生效;tapfd 模式下被交接元数据覆盖——
+  #   meta.mac→mac、meta.ip→ip(仅替换地址,保留下方掩码)、meta.mtu→mtu
+  mac: ""                      # virtio-net MAC(CH --net mac=);空 + tap 模式 → CH 自动分配
+  ip: 169.254.1.1/31           # guest CIDR(IPv4 或 IPv6);空则不配 IP
+  mtu: 1500                    # guest 网卡 MTU;0 用内核默认
+  nexthop: ""                  # 默认路由下一跳;空则不配默认路由
   hostname: my-sandbox         # guest hostname(sethostname)
+  interface: eth0              # guest 内网卡名,默认 eth0
 
 # Guest 启动 + rootfs
 boot:
@@ -373,9 +382,11 @@ init=/sbin/init root=/dev/pmem0 ro rootfstype=erofs dax=always console=hvc0
 (`default`,密度部署 / stdout 容量受限场景照样可以 `off`)/ 写文件(`file=<path>`),
 详见 §2.2。应用的 stdin/stdout/stderr 是另一条道(vsock MUX),不混入内核 dmesg。
 
-**网络配置不进 cmdline**:IP/Gateway/Hostname/Interface 通过 vsock launch 协议
-下发给 sandbox-init;phase 2 由 sandbox-init 用 raw netlink 配置(IFF_UP +
-RTM_NEWADDR + 可选 RTM_NEWROUTE)。kernel 已删 `CONFIG_IP_PNP*`,不再支持
+**网络配置不进 cmdline**:IP/MTU/Nexthop/Hostname/Interface 通过 vsock launch 协议
+下发给 sandbox-init;phase 2 由 sandbox-init 用 raw netlink 配置(IFF_UP[+IFLA_MTU] +
+RTM_NEWADDR + 可选 RTM_NEWROUTE)。restore 时同一组字段可经 restore 通知重新下发,
+sandbox-init 以 flush-and-replace 重配网卡(克隆取新 L3 身份,见 §恢复)。kernel 已删
+`CONFIG_IP_PNP*`,不再支持
 `ip=...` cmdline 形式。
 
 **`launch.*` 不进 cmdline**:容器启动配置(exec/args/env/workdir/restart)通过
@@ -473,7 +484,7 @@ boot:
 | 字段 | 为什么不存 |
 |---|---|
 | `sandbox.id` | 由 host 传入(`run --sandbox-id` 或 yaml) |
-| `network.{tap,ip,gateway,hostname,interface}` | host-localized,restore 时由 sandbox.yaml 提供 |
+| `network.{tap\|tapfd,mac,ip,mtu,nexthop,hostname,interface}` | host-localized,restore 时由 sandbox.yaml 提供;源二选一,tapfd 元数据覆盖 mac/ip/mtu |
 | `launch.{exec,args,env,workdir,restart}` | 应用启动配置在 guest 内存里已经反映为运行中进程,restore 后不再走 launch 协议 |
 | `control.{cgroup_path,controller}` | host-localized 资源策略 |
 | `overhead` / `watermark_high` / `startup_burst` / `allocatable` | 同上,host 资源策略 |
@@ -679,12 +690,14 @@ cloud-hypervisor \
   --disk        vhost_user=on,socket=/run/<sid>/blk0.sock,readonly=on \
   --disk        vhost_user=on,socket=/run/<sid>/blk1.sock \
   --vsock       cid=3,socket=/run/<sid>/vsock.sock \
-  --net         tap=tap0,mac=<auto>,iommu=off \
+  --net         fd=4,mac=<from tapfd>,id=_net0,iommu=off \
   --console     tty \
   --serial      off \
   --cmdline     "init=/sbin/init root=/dev/pmem0 ro rootfstype=erofs dax=always
                  console=hvc0"
 
+# --net: tapfd 模式用 fd=<N>(memfd 之后继承的 fd,通常 fd=4)+ mac=<交接元数据>,
+#        id=_net0 供 restore 经 net_fds 重新绑定该网卡;tap 名模式则 --net tap=<name>。
 # CH 进程的 stdio(sandbox-ctl 设置):
 #   stdin  = /dev/null            ← 关键:CH 的 --console tty 只在 stdin 是终端时才会
 #                                     raw 化那个终端;接 /dev/null 故 CH 不碰任何终端
@@ -1389,8 +1402,8 @@ allocatable 初值必须够大才能避免 PSI 节流 / sensor 反复 burst。
 |---|---|---|
 | `resources.capacity.{cpu,memory}` | 与 snapshot.cfg 严格相等才允许;不一致拒绝启动(error: "capacity mismatch") | 直接用 snapshot.cfg.resources.capacity |
 | `resources.allocatable.*` | 与冷启动语义相同(host 资源策略) | 沿用冷启动默认(等于 capacity) |
-| `network.tap` | 必须;沙箱挂到该 TAP | error: missing(restore 不能没网络配置) |
-| `network.{ip,gateway,hostname,interface}` | 用作本次恢复的网络配置 | 跳过 IP / hostname 配置,沙箱起来后自行处理 |
+| `network.{tap\|tapfd}` | 必须(源二选一);tapfd 模式重新交接(§6 幂等)取新 fd,经 `--restore net_fds=[_net0@[4]]` 注入 CH;tap 名模式 CH 按名重开 | error: missing(restore 不能没网络源) |
+| `network.{ip,mtu,nexthop,hostname,interface}` | 经 restore 通知重新下发,guest flush-and-replace 重配(克隆取新 L3 身份);MAC 不变(沿用快照设备状态,故 provider 须用稳定 per-port MAC) | 保留快照网络不变 |
 | `boot.kernel` | 静默忽略(restore 不 boot) | 同 |
 | `boot.runtime`(仅 file://) | basename + sha256 digest 与 snapshot.cfg.runtime_ref 全部匹配才允许;否则拒绝 | 用 snapshot.cfg.runtime_ref:basename 解析为 `<sid>.snapshot` 同目录文件 |
 | `boot.root.base`(file://) | 协议 + basename + digest 与 snapshot.cfg.base_ref 一致才允许 | 用 snapshot.cfg.base_ref:basename 解析为 `<sid>.snapshot` 同目录文件 |

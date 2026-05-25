@@ -39,7 +39,7 @@ func TestCHCommand_HasExpectedFlags(t *testing.T) {
 	cfg := makeMinimalCfg()
 	args, err := CHCommand(cfg,
 		"/run/sb/blk0.sock", "/run/sb/blk1.sock", "/run/sb/ch.sock", "/run/sb/vsock.sock",
-		"/vmlinux", "/sandbox-runtime.erofs", "/run/sb/uffd.sock", "tty")
+		"/vmlinux", "/sandbox-runtime.erofs", "/run/sb/uffd.sock", "tty", 0, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -77,9 +77,40 @@ func TestCHCommand_HasExpectedFlags(t *testing.T) {
 	}
 }
 
+func TestCHCommand_TapFDMode(t *testing.T) {
+	cfg := makeMinimalCfg()
+	cfg.Network = NetworkConfig{TapFD: &TapFDConfig{Exec: []string{"helper"}}}
+	args, err := CHCommand(cfg,
+		"/run/sb/blk0.sock", "/run/sb/blk1.sock", "/run/sb/ch.sock", "/run/sb/vsock.sock",
+		"/vmlinux", "/sandbox-runtime.erofs", "/run/sb/uffd.sock", "tty",
+		4, "02:00:00:00:80:01") // CH fd 4 (memfd=3 + tap), effective mac from handoff
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(args, " ")
+	if !strings.Contains(joined, "--net fd=4,mac=02:00:00:00:80:01,id=_net0,iommu=off") {
+		t.Errorf("fd-mode --net wrong\n  got: %s", joined)
+	}
+	if strings.Contains(joined, "tap=") {
+		t.Errorf("fd-mode must not emit tap=, got: %s", joined)
+	}
+}
+
+func TestCHCommand_TapNameModeMirrorsMAC(t *testing.T) {
+	cfg := makeMinimalCfg() // Network.TAP = "tap0"
+	args, err := CHCommand(cfg, "/0", "/1", "/c", "/v", "/k", "/r", "/u", "tty",
+		0, "02:00:00:00:80:01") // no fd; effective mac mirrored
+	if err != nil {
+		t.Fatal(err)
+	}
+	if joined := strings.Join(args, " "); !strings.Contains(joined, "--net tap=tap0,mac=02:00:00:00:80:01,iommu=off") {
+		t.Errorf("tap-mode --net should carry mac, got: %s", joined)
+	}
+}
+
 func TestCHCommand_BalloonDeflateOnOOMDefault(t *testing.T) {
 	cfg := makeMinimalCfg()
-	args, err := CHCommand(cfg, "/0", "/1", "/c", "/v", "/k", "/r", "/u", "tty")
+	args, err := CHCommand(cfg, "/0", "/1", "/c", "/v", "/k", "/r", "/u", "tty", 0, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,7 +124,7 @@ func TestCHCommand_BalloonDeflateOnOOMDisabled(t *testing.T) {
 	cfg := makeMinimalCfg()
 	off := false
 	cfg.Resources.Allocatable.DeflateOnOOM = &off
-	args, err := CHCommand(cfg, "/0", "/1", "/c", "/v", "/k", "/r", "/u", "tty")
+	args, err := CHCommand(cfg, "/0", "/1", "/c", "/v", "/k", "/r", "/u", "tty", 0, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -114,7 +145,7 @@ func TestCHCommand_NoBalloonWhenAllocEqualsCapacity(t *testing.T) {
 	cfg.Resources.Allocatable.Memory = cfg.Resources.Capacity.Memory
 	args, err := CHCommand(cfg,
 		"/run/sb/blk0.sock", "/run/sb/blk1.sock", "/run/sb/ch.sock", "/run/sb/vsock.sock",
-		"/vmlinux", "/sandbox-runtime.erofs", "/run/sb/uffd.sock", "tty")
+		"/vmlinux", "/sandbox-runtime.erofs", "/run/sb/uffd.sock", "tty", 0, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -153,7 +184,7 @@ func TestCHCommand_MemoryStringsHonored(t *testing.T) {
 	cfg := makeMinimalCfg()
 	cfg.Resources.Capacity.Memory = "512MiB"
 	cfg.Resources.Allocatable.Memory = "256MiB"
-	args, err := CHCommand(cfg, "/0", "/1", "/c", "/v", "/k", "/r", "/u", "tty")
+	args, err := CHCommand(cfg, "/0", "/1", "/c", "/v", "/k", "/r", "/u", "tty", 0, "")
 	if err != nil {
 		t.Fatal(err)
 	}

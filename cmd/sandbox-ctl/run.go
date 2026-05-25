@@ -6,8 +6,6 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"os/exec"
-	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -15,6 +13,7 @@ import (
 	"github.com/fullof-work/mass-sandbox/pkg/sandbox"
 	"github.com/fullof-work/mass-sandbox/pkg/sandbox/restore"
 	"github.com/fullof-work/mass-sandbox/pkg/sandbox/stdio"
+	"github.com/fullof-work/mass-sandbox/pkg/util"
 )
 
 // runCmd implements `sandbox-ctl run`. With --restore=<ref> it switches
@@ -252,14 +251,9 @@ func locateCH() (string, error) {
 	if p := os.Getenv("SANDBOX_CH_PATH"); p != "" {
 		return p, nil
 	}
-	if exe, err := os.Executable(); err == nil {
-		candidate := filepath.Join(filepath.Dir(exe), "cloud-hypervisor")
-		if _, err := os.Stat(candidate); err == nil {
-			return candidate, nil
-		}
+	p, err := util.LocateBinary("cloud-hypervisor")
+	if err != nil {
+		return "", fmt.Errorf("%w; or set $SANDBOX_CH_PATH", err)
 	}
-	if p, err := exec.LookPath("cloud-hypervisor"); err == nil {
-		return p, nil
-	}
-	return "", fmt.Errorf("cloud-hypervisor: not found (tried $SANDBOX_CH_PATH, exe-dir, $PATH)")
+	return p, nil
 }

@@ -33,7 +33,7 @@ import (
 // off` — no 8250 UART; cmdline pins `console=hvc0`. The application's
 // stdin/stdout/stderr do NOT travel via the console — they go over the
 // vsock stdio MUX (pkg/sandbox/mux). See docs/sandbox.md §5.2.
-func CHCommand(cfg *SandboxConfig, blk0Sock, blk1Sock, chSock, vsockSock, kernelPath, runtimePath, uffdSock, consoleArg string) ([]string, error) {
+func CHCommand(cfg *SandboxConfig, blk0Sock, blk1Sock, chSock, vsockSock, kernelPath, runtimePath, uffdSock, consoleArg string, tapFDNum int, netMAC string) ([]string, error) {
 	capBytes, err := cfg.CapacityMemoryBytes()
 	if err != nil {
 		return nil, err
@@ -89,12 +89,33 @@ func CHCommand(cfg *SandboxConfig, blk0Sock, blk1Sock, chSock, vsockSock, kernel
 		args = append(args, "--balloon", balloonOpts)
 	}
 
-	if cfg.Network.TAP != "" {
-		args = append(args, "--net", fmt.Sprintf("tap=%s,iommu=off", cfg.Network.TAP))
+	if netArg := chNetArg(cfg.Network.TAP, tapFDNum, netMAC); netArg != "" {
+		args = append(args, "--net", netArg)
 	}
 
 	args = append(args, "--cmdline", buildCmdline(cfg))
 	return args, nil
+}
+
+// chNetArg builds CH's --net value. tapfd handoff (tapFDNum>0) drives
+// virtio-net off a pre-opened tap queue fd inherited by CH (vnet_hdr framing,
+// docs/tapfd.md §4.5); otherwise CH opens a named host tap. A non-empty mac is
+// mirrored onto virtio-net so the provider's data plane accepts the guest
+// (docs/tapfd.md §7); empty → CH auto-assigns. id=_net0 names the device so
+// restore can re-bind a fresh fd via --restore net_fds (see restore path).
+func chNetArg(tapName string, tapFDNum int, mac string) string {
+	macPart := ""
+	if mac != "" {
+		macPart = ",mac=" + mac
+	}
+	switch {
+	case tapFDNum > 0:
+		return fmt.Sprintf("fd=%d%s,id=_net0,iommu=off", tapFDNum, macPart)
+	case tapName != "":
+		return fmt.Sprintf("tap=%s%s,iommu=off", tapName, macPart)
+	default:
+		return ""
+	}
 }
 
 // buildCmdline returns the kernel cmdline for guest boot.
