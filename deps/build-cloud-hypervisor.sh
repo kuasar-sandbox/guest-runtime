@@ -211,6 +211,16 @@ do_build() {
         fi
     fi
 
+    # Strip the builder's absolute paths from the binary's embedded source
+    # references (panic messages + DWARF debug info): our source tree becomes
+    # relative ("./vmm/src/...") and registry deps map to a stable "/cargo"
+    # prefix, instead of baking in $CH_SRC and $CARGO_HOME. Any inherited
+    # RUSTFLAGS is preserved. (Changing RUSTFLAGS invalidates the incremental
+    # cache, so the next build is a one-off full recompile — required for the
+    # remap to reach every crate.)
+    local cargo_home="${CARGO_HOME:-$HOME/.cargo}"
+    cargo_env+=("RUSTFLAGS=${RUSTFLAGS:+$RUSTFLAGS }--remap-path-prefix=$CH_SRC=. --remap-path-prefix=$cargo_home=/cargo")
+
     log "cargo build --release --bin cloud-hypervisor (cache hot ≈ seconds; cold ≈ 5-10 min)"
     env "${cargo_env[@]}" CARGO_TARGET_DIR="$CH_BUILD_OUT" cargo build --release --locked \
         "${cargo_target_args[@]}" \

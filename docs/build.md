@@ -235,6 +235,8 @@ erofs-utils 不支持 out-of-source 构建(autotools),源树拷贝到
 - 上游:`cloud-hypervisor/cloud-hypervisor v51.1`
 - 输出:`bin/<arch>/cloud-hypervisor`(已 patched)
 - 时间:冷构建 ~10 min,热(cargo cache)~秒级
+- 路径:`--remap-path-prefix` 剥离构建机绝对路径(panic 消息 + DWARF)——源码树相对
+  (`./vmm/src/…`)、registry deps 映射到 `/cargo`,不泄漏 `$CH_SRC` / `$CARGO_HOME`
 - patch 范围:外部托管 memfd backing + skip user-managed zone snapshot/restore +
   in-process uffd handler(详见 [`cloud-hypervisor.md`](cloud-hypervisor.md))
 
