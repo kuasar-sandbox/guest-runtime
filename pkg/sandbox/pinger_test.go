@@ -224,7 +224,7 @@ func TestOpenMUXViaRestore(t *testing.T) {
 	})
 	defer proxy.close()
 
-	conn, spec, err := OpenMUXViaRestore(&HostClient{BasePath: base}, 3, nil, 2*time.Second)
+	conn, spec, err := OpenMUXViaRestore(&HostClient{BasePath: base}, 3, nil, nil, 2*time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}

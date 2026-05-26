@@ -30,6 +30,61 @@ func TestRoundTrip_Launch(t *testing.T) {
 	}
 }
 
+func TestRoundTrip_LaunchPodSpec(t *testing.T) {
+	m := &Message{
+		Type: TypeLaunch,
+		Launch: &LaunchSpec{
+			Exec:         "/usr/bin/foo",
+			User:         "app:app",
+			StopSignal:   15,
+			StopGraceSec: 30,
+			Mounts: []MountSpec{
+				{Target: "/tmp", Type: "tmpfs", Options: "nosuid,nodev,mode=1777"},
+				{Target: "/var/log", Type: "empty"},
+			},
+			Files: []FileSpec{
+				{Path: "/etc/resolv.conf", Content: "nameserver 1.2.3.4\n", Mode: "0644", Owner: "0:0", ReadOnly: true},
+			},
+			Init: []InitSpec{
+				{Exec: "/bin/sh", Args: []string{"-c", "echo hi"}, User: "0:0"},
+			},
+		},
+	}
+	var buf bytes.Buffer
+	if err := WriteMessage(&buf, m); err != nil {
+		t.Fatal(err)
+	}
+	got, err := ReadMessage(&buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, m) {
+		t.Errorf("roundtrip mismatch:\n got=%+v\nwant=%+v", got, m)
+	}
+}
+
+func TestRoundTrip_RestoreFiles(t *testing.T) {
+	m := &Message{
+		Type:        TypeRestore,
+		Epoch:       2,
+		WallclockNs: 123456789,
+		Files: []FileSpec{
+			{Path: "/run/secrets/token", Content: "s3cr3t", Mode: "0400"},
+		},
+	}
+	var buf bytes.Buffer
+	if err := WriteMessage(&buf, m); err != nil {
+		t.Fatal(err)
+	}
+	got, err := ReadMessage(&buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, m) {
+		t.Errorf("roundtrip mismatch:\n got=%+v\nwant=%+v", got, m)
+	}
+}
+
 func TestRoundTrip_Hello(t *testing.T) {
 	m := &Message{Type: TypeHello, Phase: "ready"}
 	var buf bytes.Buffer

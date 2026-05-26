@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"syscall"
 	"time"
@@ -20,6 +21,7 @@ import (
 	"github.com/fullof-work/mass-sandbox/pkg/sandbox/stdio"
 	"github.com/fullof-work/mass-sandbox/pkg/sandbox/uffd"
 	"github.com/fullof-work/mass-sandbox/pkg/vhost"
+	"golang.org/x/sys/unix"
 )
 
 // CmdEnv carries the resolved per-sandbox socket paths + the memfd to a
@@ -91,6 +93,7 @@ type VMParams struct {
 
 	LaunchSpec    *proto.LaunchSpec // cold: real spec; restore: &proto.LaunchSpec{} placeholder
 	WireLaunchMUX bool              // cold: true (launch conn → MUX); restore: false (MUX via PostSpawn)
+	StartTimeout  time.Duration     // host wait for launch_ack (covers guest init); 0 = indefinite
 	Balloon       *BalloonController
 	Hooks         *ControllerHooks
 
@@ -100,6 +103,12 @@ type VMParams struct {
 	// NetMAC is the effective virtio-net MAC, surfaced as CmdEnv.NetMAC.
 	TapFile *os.File
 	NetMAC  string
+
+	// NetnsFile, when non-nil, is the tap's network-namespace fd from the same
+	// handoff (docs/tapfd.md §4.6). ServeAndWait fork/execs CH on a thread that
+	// setns()'d into it, so CH runs inside the tap's netns. CH does NOT inherit
+	// this fd (it's not an ExtraFile); the caller closes it after the run.
+	NetnsFile *os.File
 
 	SnapCfg     *SandboxConfig // ctl.sock SnapshotHandler.Cfg
 	ManifestCfg *ManifestConfig
@@ -251,6 +260,7 @@ func ServeAndWait(p VMParams) (int, error) {
 	launch := &LaunchServer{
 		Path:         launchSock,
 		Spec:         p.LaunchSpec,
+		StartTimeout: p.StartTimeout,
 		Logf:         logf,
 		OnAppStarted: func(pid int) { logf("guest reports user app pid=%d", pid) },
 		OnAppExited:  func(code int) { logf("guest reports user app exited code=%d", code) },
@@ -373,7 +383,7 @@ func ServeAndWait(p VMParams) (int, error) {
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
 	defer signal.Stop(sigCh)
 
-	if err := cmd.Start(); err != nil {
+	if err := startCH(cmd, p.NetnsFile); err != nil {
 		cancelBackends()
 		backendWG.Wait()
 		return -1, fmt.Errorf("spawn CH: %w", err)
@@ -456,4 +466,31 @@ func ServeAndWait(p VMParams) (int, error) {
 		}
 	}
 	return exit, nil
+}
+
+// startCH starts cmd. When netnsFile is non-nil the fork/exec runs on a thread
+// moved into that network namespace (docs/tapfd.md §4.6), so CH — and thus the
+// guest's virtio-net — lives inside the tap's netns; otherwise CH starts in the
+// host netns. cmd.Process is populated by the time this returns.
+func startCH(cmd *exec.Cmd, netnsFile *os.File) error {
+	if netnsFile == nil {
+		return cmd.Start()
+	}
+	errCh := make(chan error, 1)
+	go func() {
+		// setns(CLONE_NEWNET) changes only the calling thread's netns, so lock
+		// the goroutine to its OS thread: the scheduler must not migrate us and
+		// the change must not leak to other goroutines. We deliberately never
+		// UnlockOSThread — this thread now sits in the tap's netns, so let the
+		// runtime retire it when the goroutine returns rather than reuse it for
+		// host-netns work.
+		runtime.LockOSThread()
+		if err := unix.Setns(int(netnsFile.Fd()), unix.CLONE_NEWNET); err != nil {
+			errCh <- fmt.Errorf("setns(CLONE_NEWNET): %w", err)
+			return
+		}
+		// fork/exec inherits this thread's netns → CH lands in the tap's netns.
+		errCh <- cmd.Start()
+	}()
+	return <-errCh
 }

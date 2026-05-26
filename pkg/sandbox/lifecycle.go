@@ -212,7 +212,7 @@ func Run(ctx context.Context, opts RunOptions) (int, error) {
 	// above and CH opens it. The handoff metadata overrides the static attrs
 	// (mac/ip/mtu). The resolved spec travels through the launch handshake;
 	// nil → "no IP configuration" to sandbox-init.
-	var tapFile *os.File
+	var tapFile, netnsFile *os.File
 	var metaMAC, metaIP string
 	var metaMTU int
 	if opts.Cfg.Network.TapFD != nil {
@@ -220,17 +220,29 @@ func Run(ctx context.Context, opts RunOptions) (int, error) {
 		if err != nil {
 			return -1, err
 		}
-		f, meta, err := tapfd.Acquire(ctx, argv, opts.Cfg.Network.TapFD.TimeoutDuration())
+		f, nsf, meta, err := tapfd.Acquire(ctx, argv, opts.Cfg.Network.TapFD.TimeoutDuration())
 		if err != nil {
 			return -1, fmt.Errorf("tapfd handoff: %w", err)
 		}
 		tapFile = f
 		defer tapFile.Close()
+		netnsFile = nsf // non-nil only if the provider's tap is netns-isolated
+		if netnsFile != nil {
+			defer netnsFile.Close()
+		}
 		metaMAC, metaIP, metaMTU = meta.MAC, meta.IP, meta.MTU
-		logf("tapfd: received tap fd (mac=%s ip=%s mtu=%d)", meta.MAC, meta.IP, meta.MTU)
+		logf("tapfd: received tap fd (mac=%s ip=%s mtu=%d netns=%t)", meta.MAC, meta.IP, meta.MTU, netnsFile != nil)
 	}
 	netMAC, netSpec := opts.Cfg.Network.Effective(metaMAC, metaIP, metaMTU)
 	launchSpec.Network = netSpec
+
+	// Environment setup carried in the launch spec (applied guest-side
+	// before the app forks): mounts (incl. image Volumes → empty mounts),
+	// injected files, one-shot init, and the shutdown grace.
+	launchSpec.Mounts = effectiveMounts(opts.Cfg.Mounts, imageCfg.Volumes)
+	launchSpec.Files = toProtoFiles(opts.Cfg.Files)
+	launchSpec.Init = toProtoInit(opts.Cfg.Init)
+	launchSpec.StopGraceSec = opts.Cfg.StopGraceSeconds()
 
 	// App stdio: tell sandbox-init what to wire (pty vs pipe channels);
 	// the launch-handshake connection becomes the stdio MUX after
@@ -293,11 +305,13 @@ func Run(ctx context.Context, opts RunOptions) (int, error) {
 
 		LaunchSpec:    launchSpec,
 		WireLaunchMUX: true,
+		StartTimeout:  opts.Cfg.StartTimeoutDuration(),
 		Balloon:       balloonCtl,
 		Hooks:         hooks,
 
-		TapFile: tapFile, // nil in tap-name mode; CH inherits it at fd 4
-		NetMAC:  netMAC,
+		TapFile:   tapFile, // nil in tap-name mode; CH inherits it at fd 4
+		NetMAC:    netMAC,
+		NetnsFile: netnsFile, // non-nil → launch CH inside the tap's netns
 
 		SnapCfg:     opts.Cfg,
 		ManifestCfg: opts.ManifestCfg,
@@ -566,19 +580,37 @@ func handleSnapshotRequest(
 	}
 	defer os.RemoveAll(stagingDir)
 
-	// Build snapshot.cfg builder closure. Take() invokes it with the
-	// final overlay_ref (file://<sha256>.overlay in --output mode, or
-	// the placeholder in --upload mode which Upload() patches afterward
-	// with manifest://<key>).
+	// Build snapshot.cfg builder closure. Take() invokes it with the final
+	// overlay_ref the sink produced (file://<sha256>.overlay in --output mode,
+	// manifest://<key> in --upload mode) so snapshot.cfg's overlay.base is
+	// final on first write — no post-hoc ZIP rewrite.
 	cfg := opts.Cfg
 	snapCfgBuilder := func(overlayRef string) ([]byte, error) {
 		return buildSnapshotCfg(cfg, overlayRef)
 	}
 
-	takeOutDir := req.OutDir
-	sandboxID := opts.SandboxID
-	// opts.SandboxID is always populated by the run path (generated when
+	// opts.SandboxID is always populated by the run path (generated when the
 	// CLI didn't pass one); see Run() in this file.
+	sandboxID := opts.SandboxID
+
+	// Pick the sink. --output writes sparse, content-addressed local files;
+	// --upload streams to a fresh Ingester (its own store client, never shared
+	// with the long-lived read-side fetcher). Either way Take streams the
+	// multi-GiB memory + overlay straight to the sink — only CH's tiny
+	// config.json/state.json transit the /run tmpfs staging dir.
+	var sink snapshot.SnapshotSink
+	var ingestSink *snapshot.IngestSink
+	if req.Upload {
+		ing, ierr := opts.ManifestCfg.NewIngester(opts.ManifestCfg.IngestKeyFunc(), nil)
+		if ierr != nil {
+			return ctl.Response{}, fmt.Errorf("snapshot ingester: %w", ierr)
+		}
+		defer ing.Close()
+		ingestSink = snapshot.NewIngestSink(ing, logf)
+		sink = ingestSink
+	} else {
+		sink = snapshot.NewFileSink(req.OutDir, sandboxID, logf)
+	}
 
 	src := snapshot.Sources{
 		SandboxID:   sandboxID,
@@ -591,7 +623,7 @@ func handleSnapshotRequest(
 		Quiescer:    &pairQuiescer{a: srv0, b: srv1},
 		Logf:        logf,
 	}
-	out, err := snapshot.Take(src, takeOutDir, req.ResumeAfter)
+	out, err := snapshot.Take(src, sink, req.ResumeAfter)
 	if err != nil {
 		return ctl.Response{}, err
 	}
@@ -609,53 +641,31 @@ func handleSnapshotRequest(
 		}
 	}
 
+	resp = ctl.Response{
+		MemorySize:       out.MemorySize,
+		MemoryResident:   out.MemoryResident,
+		WallclockPauseMs: out.WallclockPauseMs,
+		WallclockDumpMs:  out.WallclockDumpMs,
+	}
 	if !req.Upload {
-		return ctl.Response{
-			MemorySize:       out.MemorySize,
-			MemoryResident:   out.MemoryResident,
-			WallclockPauseMs: out.WallclockPauseMs,
-			WallclockDumpMs:  out.WallclockDumpMs,
-			SnapshotPath:     out.SnapshotPath,
-			OverlayPath:      out.OverlayPath,
-			OverlayRef:       "file://" + out.OverlaySha256 + ".overlay",
-		}, nil
+		resp.SnapshotPath = out.SnapshotPath
+		resp.OverlayPath = out.OverlayPath
+		resp.OverlayRef = out.OverlayRef
+		return resp, nil
 	}
 
-	// Upload mode: open a fresh Ingester (own store client, not shared
-	// with the read-side fetcher) and stream blk1.diff + snapshot bundle
-	// through it. Closing happens before this function returns.
-	holes, err := snapshot.SparseHoles(out.SnapshotPath, out.MemorySize)
-	if err != nil {
-		return ctl.Response{}, fmt.Errorf("scan snapshot holes: %w", err)
-	}
-	logf("snapshot upload: hole extents=%d (memory section)", len(holes))
-
-	ing, err := opts.ManifestCfg.NewIngester(opts.ManifestCfg.IngestKeyFunc(), nil)
-	if err != nil {
-		return ctl.Response{}, fmt.Errorf("snapshot ingester: %w", err)
-	}
-	defer ing.Close()
-
-	upRes, err := snapshot.Upload(context.Background(), snapshot.UploadSources{
-		OverlayPath:   diffPath,
-		SnapshotPath:  out.SnapshotPath,
-		SnapshotHoles: holes,
-		Ingester:      ing,
-		Logf:          logf,
-	})
-	if err != nil {
-		return ctl.Response{}, err
-	}
-	return ctl.Response{
-		MemorySize:          out.MemorySize,
-		MemoryResident:      out.MemoryResident,
-		WallclockPauseMs:    out.WallclockPauseMs,
-		WallclockDumpMs:     out.WallclockDumpMs,
-		SnapshotManifestKey: snapshot.HexKey(upRes.SnapshotKey),
-		OverlayManifestKey:  snapshot.HexKey(upRes.OverlayKey),
-		OverlayRef:          "manifest://" + snapshot.HexKey(upRes.OverlayKey),
-		Msg:                 fmt.Sprintf("upload OK in %d ms; overlay total=%d dedup=%d, snapshot total=%d dedup=%d", upRes.WallclockUploadMs, upRes.OverlayTotalChunks, upRes.OverlayDedupChunks, upRes.SnapshotTotalChunks, upRes.SnapshotDedupChunks),
-	}, nil
+	// Upload mode: the IngestSink already streamed the overlay + bundle to the
+	// store during Take (resident pages only). Report the manifest keys it
+	// produced (out.*Ref are manifest://<key>) plus per-artifact dedup stats.
+	// OverlayRef stays scheme-tagged — it is the snapshot bundle's overlay.base,
+	// used for from_refs chaining.
+	overlayRes, bundleRes := ingestSink.Results()
+	resp.SnapshotManifestKey = strings.TrimPrefix(out.SnapshotRef, "manifest://")
+	resp.OverlayManifestKey = strings.TrimPrefix(out.OverlayRef, "manifest://")
+	resp.OverlayRef = out.OverlayRef
+	resp.Msg = fmt.Sprintf("upload OK; overlay stored=%d dedup=%d, snapshot stored=%d dedup=%d",
+		overlayRes.StoredChunks, overlayRes.DedupChunks, bundleRes.StoredChunks, bundleRes.DedupChunks)
+	return resp, nil
 }
 
 // destroyAfterSnapshotDelay is how long destroyAfterSnapshot waits before

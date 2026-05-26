@@ -50,7 +50,10 @@ const VsockGuestCID = 3
 const LaunchPort = 5000
 
 // MaxMessageBytes bounds the JSON payload size for one management message.
-const MaxMessageBytes = 64 * 1024
+// 1 MiB leaves headroom for launch / restore specs that carry inline file
+// content (FileSpec.Content) and mount/init lists; larger per-instance data
+// belongs on a device, not the control channel.
+const MaxMessageBytes = 1 << 20
 
 // HostConnectLine is the ASCII prefix sandbox-ctl writes as the first
 // bytes of a host→guest connection, telling CH's hybrid vsock proxy
@@ -80,6 +83,58 @@ type LaunchSpec struct {
 	Restart string            `json:"restart,omitempty"` // never|on-failure|always
 	Network *NetworkSpec      `json:"network,omitempty"`
 	Stdio   StdioSpec         `json:"stdio,omitempty"`
+
+	// User is the run-as identity for the app process: "uid:gid" or
+	// "name:group" (named forms resolved guest-side against the rootfs
+	// /etc/passwd). Empty → root.
+	User string `json:"user,omitempty"`
+	// StopSignal is the signal number sandbox-init forwards to the app on
+	// shutdown (host already resolved any signal name → number). 0 → SIGTERM.
+	StopSignal int `json:"stop_signal,omitempty"`
+	// StopGraceSec is how long to wait after StopSignal before SIGKILL.
+	// 0 → guest default (10 s).
+	StopGraceSec int `json:"stop_grace_sec,omitempty"`
+
+	// Mounts / Files / Init drive guest environment setup before the app
+	// is forked (docs/sandbox-runtime.md §3.1-§3.2). Mounts: tmpfs + empty
+	// (volume) mounts. Files: content injected via tmpfs+bind (memory-only).
+	// Init: one-shot commands run sequentially (initContainers semantics).
+	Mounts []MountSpec `json:"mounts,omitempty"`
+	Files  []FileSpec  `json:"files,omitempty"`
+	Init   []InitSpec  `json:"init,omitempty"`
+}
+
+// MountSpec is one declarative guest mount. Type is "tmpfs" or "empty"
+// (volume dir masking image content); empty → "empty". Options is a
+// mount option string (e.g. "nosuid,nodev,mode=1777"); Source is reserved
+// for future types (nfs).
+type MountSpec struct {
+	Target  string `json:"target"`
+	Type    string `json:"type,omitempty"`
+	Source  string `json:"source,omitempty"`
+	Options string `json:"options,omitempty"`
+}
+
+// FileSpec is one file injected into the guest rootfs at Path. Content is
+// inline (text). Mode is an octal string ("0644"; empty → 0644). Owner is
+// "uid:gid" or "name:group" (empty → 0:0). ReadOnly makes the bind
+// read-only. Injection is tmpfs-backed + bind, so content never lands on
+// the writable disk (suitable for secrets).
+type FileSpec struct {
+	Path     string `json:"path"`
+	Content  string `json:"content,omitempty"`
+	Mode     string `json:"mode,omitempty"`
+	Owner    string `json:"owner,omitempty"`
+	ReadOnly bool   `json:"read_only,omitempty"`
+}
+
+// InitSpec is one one-shot init command run (in order, to completion)
+// before the app is forked. User is an optional run-as identity (same
+// form as LaunchSpec.User). A non-zero exit aborts sandbox startup.
+type InitSpec struct {
+	Exec string   `json:"exec"`
+	Args []string `json:"args,omitempty"`
+	User string   `json:"user,omitempty"`
 }
 
 // NetworkSpec is the resolved guest IP-layer config sandbox-init applies
@@ -202,6 +257,12 @@ type Message struct {
 	// from a golden snapshot takes a fresh network identity. nil → keep the
 	// snapshot's network as-is. (Cold start carries network via LaunchSpec.)
 	Network *NetworkSpec `json:"network,omitempty"`
+
+	// restore: optional per-instance files. When set, the guest injects
+	// them (same tmpfs+bind mechanism as cold start) before thawing, so a
+	// clone gets instance-specific secrets / resolv.conf that were never
+	// baked into the golden snapshot. nil → no per-instance file injection.
+	Files []FileSpec `json:"files,omitempty"`
 
 	// mem_report: guest → host periodic /proc/meminfo snapshot used by
 	// the host-side balloon controller to drive vm.resize.

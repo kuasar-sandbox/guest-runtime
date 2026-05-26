@@ -407,7 +407,7 @@ func Run(ctx context.Context, opts Options) (int, error) {
 	// the guest re-applies flush-and-replace (clone takes a fresh L3 identity;
 	// the MAC stays the snapshot's, so the provider must use a stable per-port
 	// MAC — see docs/tapfd.md §7).
-	var tapFile *os.File
+	var tapFile, netnsFile *os.File
 	var metaMAC, metaIP string
 	var metaMTU int
 	if snapCfg.Network.TapFD != nil {
@@ -415,14 +415,18 @@ func Run(ctx context.Context, opts Options) (int, error) {
 		if err != nil {
 			return -1, err
 		}
-		f, meta, err := tapfd.Acquire(ctx, argv, snapCfg.Network.TapFD.TimeoutDuration())
+		f, nsf, meta, err := tapfd.Acquire(ctx, argv, snapCfg.Network.TapFD.TimeoutDuration())
 		if err != nil {
 			return -1, fmt.Errorf("tapfd handoff: %w", err)
 		}
 		tapFile = f
 		defer tapFile.Close()
+		netnsFile = nsf // non-nil only if the provider's tap is netns-isolated
+		if netnsFile != nil {
+			defer netnsFile.Close()
+		}
 		metaMAC, metaIP, metaMTU = meta.MAC, meta.IP, meta.MTU
-		logf("tapfd: received tap fd for restore (mac=%s ip=%s mtu=%d)", meta.MAC, meta.IP, meta.MTU)
+		logf("tapfd: received tap fd for restore (mac=%s ip=%s mtu=%d netns=%t)", meta.MAC, meta.IP, meta.MTU, netnsFile != nil)
 	}
 	netMAC, netSpec := snapCfg.Network.Effective(metaMAC, metaIP, metaMTU)
 
@@ -459,8 +463,9 @@ func Run(ctx context.Context, opts Options) (int, error) {
 		Balloon:       balloonCtl,
 		Hooks:         hooks,
 
-		TapFile: tapFile, // nil in tap-name mode; CH inherits it at fd 4
-		NetMAC:  netMAC,
+		TapFile:   tapFile, // nil in tap-name mode; CH inherits it at fd 4
+		NetMAC:    netMAC,
+		NetnsFile: netnsFile, // non-nil → launch CH inside the tap's netns
 
 		SnapCfg:     &snapCfg,
 		ManifestCfg: opts.ManifestCfg,
@@ -507,7 +512,7 @@ func Run(ctx context.Context, opts Options) (int, error) {
 			pc.Logf("VM resumed, vCPU running")
 
 			tRestore := time.Now()
-			muxConn, muxSpec, err := sandbox.OpenMUXViaRestore(pc.Pinger.Client, 1, netSpec, proto.DeadlineRestore)
+			muxConn, muxSpec, err := sandbox.OpenMUXViaRestore(pc.Pinger.Client, 1, netSpec, snapCfg.ProtoFiles(), proto.DeadlineRestore)
 			if err != nil {
 				return fmt.Errorf("notify restore: %w (guest agent unreachable)", err)
 			}

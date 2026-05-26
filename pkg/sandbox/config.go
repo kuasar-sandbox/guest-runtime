@@ -11,6 +11,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -31,6 +32,12 @@ type SandboxConfig struct {
 	Network   NetworkConfig   `yaml:"network"`
 	Boot      BootConfig      `yaml:"boot"`
 	Launch    LaunchConfig    `yaml:"launch"`
+
+	// Mounts / Files / Init drive guest environment setup (applied before
+	// the app is forked). See docs/sandbox.md §3.1.
+	Mounts []MountConfig `yaml:"mounts,omitempty"`
+	Files  []FileConfig  `yaml:"files,omitempty"`
+	Init   []InitConfig  `yaml:"init,omitempty"`
 
 	// SnapshotRefs is computed at sandbox boot (lifecycle.go fills it
 	// before snapshot is possible) and not part of the YAML schema.
@@ -300,6 +307,45 @@ type LaunchConfig struct {
 	Env     map[string]string `yaml:"env"`
 	Workdir string            `yaml:"workdir"`
 	Restart string            `yaml:"restart"` // never|on-failure|always
+
+	// User is the run-as identity ("uid:gid" or "name:group"); overrides
+	// image config User. Empty → image User else root.
+	User string `yaml:"user,omitempty"`
+	// StopSignal is the shutdown signal name or number ("SIGTERM"/"15");
+	// overrides image config StopSignal. Empty → image StopSignal else SIGTERM.
+	StopSignal string `yaml:"stop_signal,omitempty"`
+	// StopGracePeriod is the grace before SIGKILL after StopSignal (Go
+	// duration). Empty → 10s.
+	StopGracePeriod string `yaml:"stop_grace_period,omitempty"`
+	// StartTimeout bounds the host's wait for launch_ack (which the guest
+	// sends only after applying the whole spec incl. init). Go duration;
+	// empty / "0" → wait indefinitely. Host-side only; not sent to guest.
+	StartTimeout string `yaml:"start_timeout,omitempty"`
+}
+
+// FileConfig declares a file injected into the guest rootfs. Mirrors
+// proto.FileSpec; content is inline text.
+type FileConfig struct {
+	Path     string `yaml:"path"`
+	Content  string `yaml:"content,omitempty"`
+	Mode     string `yaml:"mode,omitempty"`
+	Owner    string `yaml:"owner,omitempty"`
+	ReadOnly bool   `yaml:"read_only,omitempty"`
+}
+
+// MountConfig declares a guest mount. Type is tmpfs|empty (empty → empty).
+type MountConfig struct {
+	Target  string `yaml:"target"`
+	Type    string `yaml:"type,omitempty"`
+	Source  string `yaml:"source,omitempty"`
+	Options string `yaml:"options,omitempty"`
+}
+
+// InitConfig declares a one-shot init command.
+type InitConfig struct {
+	Exec string   `yaml:"exec"`
+	Args []string `yaml:"args,omitempty"`
+	User string   `yaml:"user,omitempty"`
 }
 
 // Load reads sandbox.yaml at the given path and applies defaults.
@@ -335,6 +381,37 @@ func (c *SandboxConfig) applyDefaults() {
 	if c.Network.Interface == "" {
 		c.Network.Interface = "eth0"
 	}
+	for i := range c.Mounts {
+		if c.Mounts[i].Type == "" {
+			c.Mounts[i].Type = "empty"
+		}
+	}
+}
+
+// StopGraceSeconds parses launch.stop_grace_period to whole seconds,
+// defaulting to 10 when unset/invalid. Used to fill LaunchSpec.StopGraceSec.
+func (c *SandboxConfig) StopGraceSeconds() int {
+	if c.Launch.StopGracePeriod == "" {
+		return 10
+	}
+	d, err := time.ParseDuration(c.Launch.StopGracePeriod)
+	if err != nil || d <= 0 {
+		return 10
+	}
+	return int(d.Seconds())
+}
+
+// StartTimeoutDuration parses launch.start_timeout. Empty / "0" / invalid
+// → 0, meaning the host waits for launch_ack indefinitely.
+func (c *SandboxConfig) StartTimeoutDuration() time.Duration {
+	if c.Launch.StartTimeout == "" {
+		return 0
+	}
+	d, err := time.ParseDuration(c.Launch.StartTimeout)
+	if err != nil || d < 0 {
+		return 0
+	}
+	return d
 }
 
 // CapacityMemoryBytes returns the parsed capacity memory in bytes.
@@ -581,6 +658,53 @@ func (c *SandboxConfig) ValidateCold() error {
 	}
 	if c.Network.TapFD != nil && len(c.Network.TapFD.Exec) == 0 {
 		return errors.New("network.tapfd.exec is required")
+	}
+
+	// mounts: target absolute; type ∈ {tmpfs, empty}; nfs deferred.
+	for i, m := range c.Mounts {
+		if !filepath.IsAbs(m.Target) {
+			return fmt.Errorf("mounts[%d].target must be absolute (got %q)", i, m.Target)
+		}
+		switch m.Type {
+		case "tmpfs", "empty":
+		case "nfs":
+			return fmt.Errorf("mounts[%d].type %q not yet implemented", i, m.Type)
+		default:
+			return fmt.Errorf("mounts[%d].type %q unknown (want tmpfs|empty)", i, m.Type)
+		}
+	}
+	// files: path absolute; mode valid octal if set.
+	for i, f := range c.Files {
+		if !filepath.IsAbs(f.Path) {
+			return fmt.Errorf("files[%d].path must be absolute (got %q)", i, f.Path)
+		}
+		if f.Mode != "" {
+			if _, err := strconv.ParseUint(f.Mode, 8, 32); err != nil {
+				return fmt.Errorf("files[%d].mode %q invalid octal", i, f.Mode)
+			}
+		}
+	}
+	// init: exec required.
+	for i, it := range c.Init {
+		if it.Exec == "" {
+			return fmt.Errorf("init[%d].exec is required", i)
+		}
+	}
+	// launch.stop_signal parseable; durations parseable.
+	if c.Launch.StopSignal != "" {
+		if _, err := ParseStopSignal(c.Launch.StopSignal); err != nil {
+			return fmt.Errorf("launch.stop_signal: %w", err)
+		}
+	}
+	if c.Launch.StopGracePeriod != "" {
+		if _, err := time.ParseDuration(c.Launch.StopGracePeriod); err != nil {
+			return fmt.Errorf("launch.stop_grace_period: %w", err)
+		}
+	}
+	if c.Launch.StartTimeout != "" {
+		if _, err := time.ParseDuration(c.Launch.StartTimeout); err != nil {
+			return fmt.Errorf("launch.start_timeout: %w", err)
+		}
 	}
 
 	// launch.exec is no longer required: if the rootfs erofs has an

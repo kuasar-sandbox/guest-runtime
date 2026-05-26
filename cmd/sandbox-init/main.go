@@ -1,24 +1,25 @@
 // sandbox-init is the guest PID 1 binary inside the sandbox VM.
 //
-// It runs three phases:
-//   1. Mount /proc /sys /dev, wait for /dev/vda + /dev/vdb, mount
-//      overlay (lower=blk0 erofs ro, upper=blk1 ext4 rw) at
-//      /mnt/newroot, then MS_MOVE + chroot. **Then** bind+listen
-//      AF_VSOCK :5000 — the host→guest reverse channel must be open
-//      before we dial host:5000 (avoids the race with the host's ping
-//      ticker that starts firing as soon as `launch` is written, see
-//      docs/sandbox-runtime.md §4.4).
-//   2. Connect over virtio-vsock (CID 2:5000) to sandbox-ctl, send
-//      hello, receive the launch spec; apply network; set up the app's
-//      stdio (a pty or stdin/stdout/stderr pipes per spec.Stdio); send
-//      launch_ack{stdio}; THEN keep that connection — it becomes the
-//      stdio MUX (pkg/sandbox/mux). Fork the user app with
-//      CLONE_NEWPID|CLONE_NEWNS (+ setsid/ctty in tty mode), wire its
-//      0/1/2 to the prepared fds, send app_started{pid}.
-//   3. Supervise: in parallel, the vsock listener goroutine dispatches
-//      host-initiated ping / restore / attach / quiesce; the signal loop
-//      reaps children. On user-app exit we drain the stdio MUX, send
-//      app_exited{code,term_signal}, then reboot.
+// It runs three phases (docs/sandbox-runtime.md §3):
+//  1. Bring up loopback + bind AF_VSOCK :5000 (socket-only, before hello;
+//     the host→guest reverse channel must exist before the host's ping
+//     ticker fires). Then run the launch handshake (dial CID 2:5000 → hello
+//     → recv launch spec) in a goroutine CONCURRENT with the spec-independent
+//     overlay assembly (mount /proc /sys /dev, wait vda/vdb, mount overlay →
+//     /mnt/newroot). The handshake touches no path, so it is safe alongside
+//     the mount chain and the later chroot. After the join: set up volume
+//     (empty) mounts on the raw ext4 pre-switch, then MS_MOVE + chroot into
+//     the overlay and mount the post-switch base filesystems (devpts, cgroup
+//     freezer, /run, /run/shm).
+//  2. Apply the launch spec on the post-switch rootfs: network, tmpfs mounts,
+//     file injection, one-shot init — then set up the app's stdio and send
+//     launch_ack{stdio} (its connection becomes the stdio MUX). Fork the user
+//     app with CLONE_NEWPID|CLONE_NEWNS, dropping to launch.user just before
+//     execve, and send app_started{pid}.
+//  3. Supervise: in parallel, the vsock listener goroutine dispatches
+//     host-initiated ping / restore / attach / quiesce; the signal loop
+//     reaps children. On user-app exit we drain the stdio MUX, send
+//     app_exited{code,term_signal}, then reboot.
 //
 // All work is done via syscalls; no busybox or external tools are
 // included in sandbox-runtime.erofs.
@@ -54,15 +55,17 @@ const (
 
 func main() {
 	// Re-entry as the user-app exec helper (after fork+clone in phase 2).
-	// argv: [self, "exec-child", workdir, appPath, args...]
-	if len(os.Args) >= 4 && os.Args[1] == "exec-child" {
-		runExecChild(os.Args[2], os.Args[3], os.Args[4:], false)
+	// argv: [self, "exec-child", cred, workdir, appPath, args...]
+	// cred ("uid:gid:sg,..." or "-") is dropped just before execve.
+	if len(os.Args) >= 5 && os.Args[1] == "exec-child" {
+		runExecChild(os.Args[2], os.Args[3], os.Args[4], os.Args[5:], false)
 		return
 	}
 	// Joined exec command (sandbox-ctl exec): forked by the exec-join
-	// helper after it has entered the app's mount + pid namespaces.
+	// helper after it has entered the app's mount + pid namespaces. No
+	// run-as drop here (exec sessions keep the app's identity).
 	if len(os.Args) >= 4 && os.Args[1] == "exec-child-joined" {
-		runExecChild(os.Args[2], os.Args[3], os.Args[4:], true)
+		runExecChild("-", os.Args[2], os.Args[3], os.Args[4:], true)
 		return
 	}
 	// nsenter helper for sandbox-ctl exec.
@@ -77,29 +80,71 @@ func main() {
 		die("must run as PID 1, got %d", os.Getpid())
 	}
 
-	if err := phase1MountAndPivot(); err != nil {
-		die("phase 1 failed: %v", err)
-	}
-
-	// Reverse-channel listener is brought up **before** hello (§9.1.3).
-	// The fd lives for the entire sandbox lifetime — listener goroutine
-	// is spawned in phase 3 once we have the app pid; the bound socket
-	// itself is created here so host ping that starts as soon as `launch`
-	// is written never hits ECONNREFUSED.
+	// The reverse-channel listener is socket-only (no rootfs dependency) and
+	// MUST be bound before hello — the host starts its ping ticker the moment
+	// it writes `launch`, so the bound socket has to exist or that ping hits
+	// ECONNREFUSED. Bind it first so the launch handshake can run concurrently
+	// with overlay assembly. (Loopback comes later — it reads sysfs.)
 	revFD, err := bindVsockListener(proto.LaunchPort)
 	if err != nil {
-		die("phase 1 vsock listen: %v", err)
+		die("vsock listen: %v", err)
 	}
 
-	spec, cs, bridge, err := phase2Launch()
-	if err != nil {
-		die("phase 2 launch handshake: %v", err)
+	// Launch handshake (dial → hello → recv launch) runs in a goroutine
+	// concurrent with overlay assembly. It is pure-socket — it resolves no
+	// filesystem path — so it is safe alongside the mount chain and the
+	// later chroot (which runs single-threaded after the join). This hides
+	// the hello→launch round-trip under the disk/overlay setup. The spec
+	// drives the spec-dependent setup below; the conn is reused for
+	// launch_ack and then the stdio MUX.
+	hsCh := make(chan handshakeResult, 1)
+	go runHandshake(hsCh)
+
+	// Spec-independent overlay assembly (base mounts + overlay → newroot).
+	if err := phase1aAssembleOverlay(); err != nil {
+		die("phase 1a overlay assembly: %v", err)
 	}
+
+	hr := <-hsCh
+	if hr.err != nil {
+		die("launch handshake: %v", hr.err)
+	}
+	spec, conn := hr.spec, hr.conn
+	logf("phase1: launch spec received; switching root")
+
+	// Volume (empty) mounts are set up BEFORE switch-root: their source is a
+	// fresh dir on the raw ext4 (/mnt/upper/volumes), bound onto the target
+	// inside /mnt/newroot so the switch-root MS_MOVE carries them into /.
+	if err := applyVolumeMounts(spec.Mounts); err != nil {
+		die("apply volume mounts: %v", err)
+	}
+
+	// switch-root into the assembled overlay + post-switch base mounts.
+	if err := phase1bSwitchRoot(); err != nil {
+		die("phase 1b switch-root: %v", err)
+	}
+
+	// Loopback reads /sys/class/net (sysfs), so it runs after switch-root.
+	// Config-independent; only the app cares about localhost, so bringing it
+	// up here (rather than before the handshake) is fine. Fatal: a guest that
+	// can't bring up lo is broken.
+	if err := bringUpLoopback(); err != nil {
+		die("bring up loopback: %v", err)
+	}
+
+	// Apply the spec on the post-switch rootfs and finish the handshake
+	// (launch_ack → MUX). applyNetwork needs /sys, available after chroot.
+	cs, bridge, err := phase2Apply(spec, conn)
+	if err != nil {
+		die("phase 2 apply: %v", err)
+	}
+	logf("phase2: network + stdio done")
 
 	appPid, err := phase2ForkApp(spec, cs)
 	if err != nil {
 		die("phase 2 fork: %v", err)
 	}
+	logf("phase2: app forked pid=%d", appPid)
 
 	// Move the app tree into the `app` cgroup so quiesce can freeze it.
 	// Fatal on failure: a pid left in the root cgroup would not freeze,
@@ -113,7 +158,13 @@ func main() {
 		logf("warn: app_started notify failed (continuing): %v", err)
 	}
 
-	supervisor := &supervisorState{appPid: appPid, restart: spec.Restart, execReg: newExecRegistry()}
+	supervisor := &supervisorState{
+		appPid:     appPid,
+		restart:    spec.Restart,
+		stopSignal: syscall.Signal(spec.StopSignal), // 0 → SIGTERM (handled in phase3)
+		stopGrace:  time.Duration(spec.StopGraceSec) * time.Second,
+		execReg:    newExecRegistry(),
+	}
 
 	// Reverse-channel dispatch goroutine. Lives until reboot. It carries
 	// the consoleBridge so host-initiated restore / attach can swap a
@@ -131,9 +182,12 @@ func main() {
 	// phase3Supervise does not return.
 }
 
-// phase1MountAndPivot mounts /proc /sys /dev, waits for vda/vdb,
-// assembles the overlay, then MS_MOVEs the overlay to / via chroot.
-func phase1MountAndPivot() error {
+// phase1aAssembleOverlay mounts /proc /sys /dev, waits for vda/vdb, and
+// assembles the overlay at /mnt/newroot (lower=blk0 ro, upper=blk1 rw). It
+// is spec-independent, so it runs concurrently with the launch handshake;
+// the chroot itself is deferred to phase1bSwitchRoot (after the join), where
+// it can run single-threaded.
+func phase1aAssembleOverlay() error {
 	for _, m := range []struct {
 		source, target, fstype string
 		flags                  uintptr
@@ -149,6 +203,7 @@ func phase1MountAndPivot() error {
 			return fmt.Errorf("mount %s on %s: %w", m.source, m.target, err)
 		}
 	}
+	logf("phase1a: base mounts done; waiting for vda/vdb")
 
 	if err := waitForDevice("/dev/vda", devicePollTimeout); err != nil {
 		return fmt.Errorf("wait /dev/vda: %w", err)
@@ -156,6 +211,7 @@ func phase1MountAndPivot() error {
 	if err := waitForDevice("/dev/vdb", devicePollTimeout); err != nil {
 		return fmt.Errorf("wait /dev/vdb: %w", err)
 	}
+	logf("phase1a: vda+vdb present")
 
 	if err := unix.Mount("/dev/vda", "/mnt/lower", "erofs", unix.MS_RDONLY, ""); err != nil {
 		return fmt.Errorf("mount blk0 (erofs ro) on /mnt/lower: %w", err)
@@ -178,7 +234,16 @@ func phase1MountAndPivot() error {
 	for _, dir := range []string{"/mnt/newroot/proc", "/mnt/newroot/sys", "/mnt/newroot/dev"} {
 		_ = os.MkdirAll(dir, 0o755)
 	}
+	logf("phase1a: overlay assembled at /mnt/newroot")
+	return nil
+}
 
+// phase1bSwitchRoot MS_MOVEs /proc /sys /dev (and any volume binds already
+// placed under /mnt/newroot) into the overlay, switches root into it, then
+// mounts the post-switch base filesystems (devpts, cgroup v2 freezer,
+// /run, /run/shm). Runs after the join, single-threaded — the chroot is a
+// process-global path switch so nothing else may touch a path concurrently.
+func phase1bSwitchRoot() error {
 	for _, src := range []struct{ from, to string }{
 		{"/proc", "/mnt/newroot/proc"},
 		{"/sys", "/mnt/newroot/sys"},
@@ -222,69 +287,117 @@ func phase1MountAndPivot() error {
 		return fmt.Errorf("cgroup setup: %w", err)
 	}
 
+	// /run + /run/shm: auto-mounted tmpfs (like /proc), so apps and the
+	// file-injection staging dir have them without an explicit mount entry.
+	if err := mountRunDirs(); err != nil {
+		return fmt.Errorf("mount /run: %w", err)
+	}
+
+	logf("phase1b: switch-root + devpts + cgroup + /run done")
 	return nil
 }
 
-// phase2Launch opens the one cold-start vsock connection, runs the launch
-// handshake on it, sets up the app's stdio per the negotiated StdioSpec,
-// then — instead of closing — keeps the connection and turns it into the
-// stdio MUX (pkg/sandbox/mux):
-//
-//	guest → host: hello
-//	host  → guest: launch{spec}
-//	guest applies network; sets up app stdio (pty or pipes)
-//	guest → host: launch_ack{stdio = what we established}
-//	host  → guest: ack
-//	... connection now speaks the framed MUX sub-protocol ...
-//
-// Returns the launch spec, the child's 0/1/2 fds, and the consoleBridge
-// (already attached to the new session and pumping). The bridge's pump
-// goroutines park until the MUX has a session, so starting them before
-// the user app is forked is safe.
-func phase2Launch() (*proto.LaunchSpec, childStdio, *consoleBridge, error) {
-	fail := func(err error) (*proto.LaunchSpec, childStdio, *consoleBridge, error) {
-		return nil, childStdio{}, nil, err
+// mountRunDirs mounts the auto-provided tmpfs /run and /run/shm.
+func mountRunDirs() error {
+	if err := os.MkdirAll("/run", 0o755); err != nil {
+		return fmt.Errorf("mkdir /run: %w", err)
 	}
+	if err := unix.Mount("tmpfs", "/run", "tmpfs", unix.MS_NOSUID|unix.MS_NODEV, "mode=0755"); err != nil {
+		return fmt.Errorf("mount tmpfs /run: %w", err)
+	}
+	if err := os.MkdirAll("/run/shm", 0o1777); err != nil {
+		return fmt.Errorf("mkdir /run/shm: %w", err)
+	}
+	if err := unix.Mount("tmpfs", "/run/shm", "tmpfs", unix.MS_NOSUID|unix.MS_NODEV, "mode=1777"); err != nil {
+		return fmt.Errorf("mount tmpfs /run/shm: %w", err)
+	}
+	return nil
+}
 
+// handshakeResult carries the outcome of the concurrent launch handshake
+// back to main(). On success conn is the still-open vsock connection (reused
+// for launch_ack and then the stdio MUX); on error conn is already closed.
+type handshakeResult struct {
+	spec *proto.LaunchSpec
+	conn *vsockConn
+	err  error
+}
+
+// runHandshake dials the host launch server, sends hello, and receives the
+// launch spec, handing the still-open connection back via ch. It touches no
+// filesystem path (pure socket I/O), so it is safe to run concurrently with
+// overlay assembly and the subsequent chroot. On any error it closes the
+// connection and reports the error; the conn is never closed on success.
+func runHandshake(ch chan<- handshakeResult) {
 	conn, err := dialVsock(proto.VsockHostCID, proto.LaunchPort)
 	if err != nil {
-		return fail(fmt.Errorf("vsock dial host:%d: %w", proto.LaunchPort, err))
+		ch <- handshakeResult{err: fmt.Errorf("vsock dial host:%d: %w", proto.LaunchPort, err)}
+		return
 	}
-	// Until the MUX takes ownership, close the conn on any error path.
-	muxOwns := false
-	defer func() {
-		if !muxOwns {
-			_ = conn.Close()
-		}
-	}()
-
+	fail := func(err error) {
+		_ = conn.Close()
+		ch <- handshakeResult{err: err}
+	}
 	if err := proto.WriteMessage(conn, &proto.Message{Type: proto.TypeHello, Phase: "ready"}); err != nil {
-		return fail(fmt.Errorf("send hello: %w", err))
+		fail(fmt.Errorf("send hello: %w", err))
+		return
 	}
 	msg, err := proto.ReadMessage(conn)
 	if err != nil {
-		return fail(fmt.Errorf("read launch: %w", err))
+		fail(fmt.Errorf("read launch: %w", err))
+		return
 	}
 	if msg.Type != proto.TypeLaunch || msg.Launch == nil {
-		return fail(fmt.Errorf("expected launch message, got %q", msg.Type))
+		fail(fmt.Errorf("expected launch message, got %q", msg.Type))
+		return
 	}
 	if msg.Launch.Exec == "" {
-		return fail(errors.New("launch spec missing exec"))
+		fail(errors.New("launch spec missing exec"))
+		return
+	}
+	ch <- handshakeResult{spec: msg.Launch, conn: conn}
+}
+
+// phase2Apply applies the launch spec on the (post-switch-root) rootfs, then
+// finishes the handshake on conn and turns it into the stdio MUX:
+//
+//	guest applies network / mounts / files / init; sets up app stdio
+//	guest → host: launch_ack{stdio = what we established}  ← settled signal
+//	host  → guest: ack
+//	... connection now speaks the framed MUX sub-protocol ...
+//
+// launch_ack is sent only after the whole spec is applied (incl. init), so
+// the host treats it as "environment ready, about to fork". Returns the
+// child's 0/1/2 fds and the consoleBridge (attached + pumping; its pump
+// goroutines park until the app is forked).
+func phase2Apply(spec *proto.LaunchSpec, conn *vsockConn) (childStdio, *consoleBridge, error) {
+	fail := func(err error) (childStdio, *consoleBridge, error) {
+		_ = conn.Close()
+		return childStdio{}, nil, err
 	}
 
-	if msg.Launch.Network != nil {
-		if err := applyNetwork(msg.Launch.Network); err != nil {
+	if spec.Network != nil {
+		if err := applyNetwork(spec.Network); err != nil {
 			return fail(fmt.Errorf("apply network: %w", err))
 		}
 	}
+	if err := applyFsMounts(spec.Mounts); err != nil {
+		return fail(fmt.Errorf("apply fs mounts: %w", err))
+	}
+	if err := applyFiles(spec.Files); err != nil {
+		return fail(fmt.Errorf("apply files: %w", err))
+	}
+	if err := runInit(spec.Init); err != nil {
+		return fail(fmt.Errorf("run init: %w", err))
+	}
 
-	cs, bridge, err := setupAppStdio(msg.Launch.Stdio)
+	cs, bridge, err := setupAppStdio(spec.Stdio)
 	if err != nil {
 		return fail(fmt.Errorf("setup app stdio: %w", err))
 	}
 	// v1: the guest honors whatever the host asked for, so the established
 	// spec is the requested one verbatim.
-	established := msg.Launch.Stdio
+	established := spec.Stdio
 
 	if err := proto.WriteMessage(conn, &proto.Message{Type: proto.TypeLaunchAck, Stdio: &established}); err != nil {
 		return fail(fmt.Errorf("send launch_ack: %w", err))
@@ -309,9 +422,7 @@ func phase2Launch() (*proto.LaunchSpec, childStdio, *consoleBridge, error) {
 	sess := mux.NewSession(conn, streamSetFor(established), mux.Options{OnSetWinsize: bridge.onSetWinsize})
 	bridge.attach(sess)
 	bridge.start()
-
-	muxOwns = true
-	return msg.Launch, cs, bridge, nil
+	return cs, bridge, nil
 }
 
 // phase2ForkApp re-execs ourselves with the "exec-child" sentinel argv in
@@ -322,7 +433,32 @@ func phase2Launch() (*proto.LaunchSpec, childStdio, *consoleBridge, error) {
 // child (runExecChild) remounts /proc and execs the user app.
 func phase2ForkApp(spec *proto.LaunchSpec, cs childStdio) (int, error) {
 	self := "/proc/self/exe"
-	args := append([]string{self, "exec-child", spec.Workdir, spec.Exec}, spec.Args...)
+
+	// Make the mount tree rshared BEFORE forking the app, so restore-time
+	// file injection (binds created later in PID 1's namespace) propagates
+	// into the app's private CLONE_NEWNS namespace. The app child marks its
+	// own copy rslave (runExecChild) so it receives PID 1's mount events but
+	// never leaks its own (e.g. /proc) back. Cold-start mounts/files are
+	// already in place and become shared peers in the copy. Without this,
+	// a restore-time bind stays invisible to the already-running app
+	// (docs/sandbox-runtime.md §4.3).
+	if err := unix.Mount("", "/", "", unix.MS_REC|unix.MS_SHARED, ""); err != nil {
+		return 0, fmt.Errorf("make-rshared /: %w", err)
+	}
+
+	// Resolve the run-as identity here (PID 1, post-chroot, /etc/passwd
+	// readable) and pass it to the exec-child to drop just before execve —
+	// never on the outer clone, which would run the child's `mount /proc`
+	// (new PID ns) as non-root and fail.
+	credStr := "-"
+	if spec.User != "" {
+		c, err := resolveCred(spec.User)
+		if err != nil {
+			return 0, fmt.Errorf("resolve user %q: %w", spec.User, err)
+		}
+		credStr = c.encode()
+	}
+	args := append([]string{self, "exec-child", credStr, spec.Workdir, spec.Exec}, spec.Args...)
 
 	sysAttr := &syscall.SysProcAttr{
 		Cloneflags: syscall.CLONE_NEWPID | syscall.CLONE_NEWNS,
@@ -364,12 +500,20 @@ func phase2ForkApp(spec *proto.LaunchSpec, cs childStdio) (int, error) {
 // If appPath has no '/', resolve via PATH lookup (image config Cmd
 // often holds bare names like "python3" or "node", expecting standard
 // PATH search semantics like sh/cmd would do).
-func runExecChild(workdir, appPath string, args []string, joined bool) {
+func runExecChild(cred, workdir, appPath string, args []string, joined bool) {
 	// Independent children (the user app) get a fresh pid namespace and
 	// need their own procfs. A joined exec command already runs in the
 	// app's mount + pid namespace, where /proc is mounted for that pid
 	// ns — remounting it would disrupt the shared view.
 	if !joined {
+		// Make this app's private mount namespace an rslave of PID 1's
+		// rshared tree: restore-time injections (binds in PID 1) propagate
+		// IN, while the app's own mounts (the /proc below) stay local and
+		// never leak back to PID 1. Done before the /proc mount so /proc is
+		// a local, non-propagating mount.
+		if err := unix.Mount("", "/", "", unix.MS_REC|unix.MS_SLAVE, ""); err != nil {
+			die("exec-child: make-rslave /: %v", err)
+		}
 		if err := unix.Mount("proc", "/proc", "proc", 0, ""); err != nil {
 			if errRemount := unix.Mount("none", "/proc", "", unix.MS_REMOUNT, ""); errRemount != nil {
 				die("exec-child: remount /proc: %v / %v", err, errRemount)
@@ -407,6 +551,12 @@ func runExecChild(workdir, appPath string, args []string, joined bool) {
 		}
 	}
 
+	// Drop to the run-as identity LAST — after mount /proc, chdir and PATH
+	// lookup, all of which need root — and right before execve.
+	if err := applyCred(cred); err != nil {
+		die("exec-child: drop privileges: %v", err)
+	}
+
 	if err := syscall.Exec(resolved, append([]string{appPath}, args...), os.Environ()); err != nil {
 		die("exec-child: exec %s: %v", resolved, err)
 	}
@@ -415,9 +565,11 @@ func runExecChild(workdir, appPath string, args []string, joined bool) {
 // supervisorState is shared between the signal loop and the reverse
 // channel goroutine.
 type supervisorState struct {
-	appPid  int
-	restart string
-	execReg *execRegistry // exec-session child reaping + quiesce gating
+	appPid     int
+	restart    string
+	stopSignal syscall.Signal // signal forwarded to app on host SIGTERM/SIGINT; 0 → SIGTERM
+	stopGrace  time.Duration  // grace before SIGKILL; 0 → gracefulShutdown default
+	execReg    *execRegistry  // exec-session child reaping + quiesce gating
 }
 
 // phase3Supervise reaps children. On user-app exit it drains the stdio
@@ -447,9 +599,17 @@ func phase3Supervise(s *supervisorState, b *consoleBridge) {
 				s.execReg.deliver(pid, status)
 			}
 		case syscall.SIGTERM, syscall.SIGINT:
-			logf("received %v, sending SIGTERM to app pid=%d", sig, s.appPid)
-			_ = syscall.Kill(s.appPid, syscall.SIGTERM)
-			waitOrTimeout(s.appPid, gracefulShutdown)
+			stopSig := s.stopSignal
+			if stopSig == 0 {
+				stopSig = syscall.SIGTERM
+			}
+			grace := s.stopGrace
+			if grace <= 0 {
+				grace = gracefulShutdown
+			}
+			logf("received %v, sending %v to app pid=%d (grace %s)", sig, stopSig, s.appPid, grace)
+			_ = syscall.Kill(s.appPid, stopSig)
+			waitOrTimeout(s.appPid, grace)
 			b.appExited()
 			notifyAppExited(0, 0)
 			doReboot()

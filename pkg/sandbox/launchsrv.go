@@ -38,6 +38,13 @@ type LaunchServer struct {
 	Spec *proto.LaunchSpec
 	Logf func(string, ...any)
 
+	// StartTimeout bounds the wait for launch_ack after the launch spec is
+	// sent. The guest sends launch_ack only after applying the whole spec
+	// (network, mounts, files, and possibly long-running init), so this
+	// must accommodate init. 0 → no deadline (wait indefinitely). The
+	// hello read keeps a short probe deadline regardless.
+	StartTimeout time.Duration
+
 	// OnLaunchAck fires when the guest reports it has applied the launch
 	// spec (network configured, ready to fork the app). Optional; nil →
 	// just ack. This is the Settled trigger: post-boot transient is over,
@@ -152,8 +159,10 @@ func (s *LaunchServer) LaunchAckDone() <-chan struct{} { return s.launchAckDone 
 // handleConn services one connection. It returns true iff it handed the
 // connection off (to OnMUXReady) and the caller must NOT close it.
 func (s *LaunchServer) handleConn(conn *net.UnixConn) (handedOff bool) {
-	// Bound the per-conn protocol exchange. Keeps a stuck guest from
-	// pinning a goroutine forever. Cleared before hand-off.
+	// Short probe deadline for the first read (hello). Catches a guest that
+	// connects but never speaks. The launch_ack read below uses a separate,
+	// configurable deadline because it spans the guest's whole spec-apply
+	// (incl. init). Cleared before hand-off.
 	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
 
 	msg, err := proto.ReadMessage(conn)
@@ -179,6 +188,15 @@ func (s *LaunchServer) handleConn(conn *net.UnixConn) (handedOff bool) {
 		}
 		s.helloSent.Store(true)
 		s.helloOnce.Do(func() { close(s.helloDone) })
+
+		// launch_ack spans the guest's whole spec-apply (incl. init), so
+		// switch from the short hello-probe deadline to StartTimeout
+		// (0 → no deadline, wait indefinitely).
+		if s.StartTimeout > 0 {
+			_ = conn.SetDeadline(time.Now().Add(s.StartTimeout))
+		} else {
+			_ = conn.SetDeadline(time.Time{})
+		}
 
 		// Same-connection launch_ack: guest applies network + sets up the
 		// app stdio fds, then sends launch_ack{stdio} on this conn.

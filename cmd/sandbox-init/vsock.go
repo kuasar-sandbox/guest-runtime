@@ -223,6 +223,16 @@ func handleReverseConn(c *vsockConn, sup *supervisorState, bridge *consoleBridge
 				logf("reverse-channel: restore network re-applied (epoch=%d)", req.Epoch)
 			}
 		}
+		// Inject per-instance files (secrets / instance config) the same way
+		// cold start does (tmpfs+bind, memory-only). Applied before the thaw
+		// so the resumed app sees them; best-effort + logged, like network.
+		if len(req.Files) > 0 {
+			if err := applyFiles(req.Files); err != nil {
+				logf("reverse-channel: restore applyFiles: %v", err)
+			} else {
+				logf("reverse-channel: restore files injected (epoch=%d, n=%d)", req.Epoch, len(req.Files))
+			}
+		}
 		spec := bridge.protoSpec()
 		resp := &proto.Message{Type: proto.TypeRestoreAck, Epoch: req.Epoch, Stdio: &spec, AppState: proto.AppStateRunning}
 		if err := proto.WriteMessage(c, resp); err != nil {

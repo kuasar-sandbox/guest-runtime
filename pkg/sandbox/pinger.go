@@ -273,7 +273,12 @@ func SendQuiesce(client *HostClient) error {
 // network (optional) carries a fresh guest IP-layer config the guest
 // re-applies flush-and-replace before thawing, so a clone restored from a
 // golden snapshot takes a new network identity. nil → keep the snapshot's.
-func OpenMUXViaRestore(client *HostClient, epoch uint32, network *proto.NetworkSpec, deadline time.Duration) (net.Conn, proto.StdioSpec, error) {
+//
+// files (optional) carries per-instance files the guest injects before
+// thawing (same tmpfs+bind mechanism as cold start), so a clone gets
+// instance-specific secrets / config that were never baked into the golden
+// snapshot. nil → no per-instance file injection.
+func OpenMUXViaRestore(client *HostClient, epoch uint32, network *proto.NetworkSpec, files []proto.FileSpec, deadline time.Duration) (net.Conn, proto.StdioSpec, error) {
 	// WallclockNs lets the guest jump CLOCK_REALTIME forward by the
 	// dormant interval (CH reloads the snapshot's stale clock verbatim).
 	// Captured here, as close to the send as possible; the residual
@@ -284,6 +289,7 @@ func OpenMUXViaRestore(client *HostClient, epoch uint32, network *proto.NetworkS
 		Epoch:       epoch,
 		WallclockNs: time.Now().UnixNano(),
 		Network:     network,
+		Files:       files,
 	}, proto.TypeRestoreAck, deadline)
 }
 

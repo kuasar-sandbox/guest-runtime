@@ -354,7 +354,55 @@ launch:
     HOME: /root
   workdir: /
   restart: never              # never | on-failure | always
+  user: "0:0"                 # uid:gid 或 name:group(覆盖镜像 User);命名用户由 guest 侧读 /etc/passwd 解析
+  stop_signal: SIGTERM        # 停机信号(覆盖镜像 StopSignal);信号名或编号;空 → SIGTERM
+  stop_grace_period: 10s      # 发停机信号后等应用退出的宽限,超时则 SIGKILL;默认 10s
+  start_timeout: ""           # host 等待 launch_ack(含 init 全程)的超时;空 / 0 = 无限期(见 §阶段 2)
+
+# 声明式挂载:在 rootfs 组装后、应用拉起前应用,顺序即列表序
+mounts:
+  - { target: /tmp,     type: tmpfs, options: "nosuid,nodev,mode=1777" }
+  - { target: /var/log, type: empty }      # 空目录卷:遮蔽镜像该路径原内容,落 vdb(磁盘),
+                                            # 模拟容器 VOLUME / k8s emptyDir(仅"初始化为空"语义)
+  # type 省略 = empty;tmpfs = 内存盘。/run 与 /run/shm 由 runtime 自动挂载,无需声明。
+  # 镜像 config.json 的 Volumes 自动并入(等价 type: empty);显式声明同 target 时以显式为准。
+
+# 文件注入:内容写入内存盘后 bind 到目标路径——仅在内存、不落 vdb,适合 secret
+files:
+  - path: /etc/resolv.conf
+    mode: "0644"              # 八进制;默认 0644
+    owner: "0:0"              # uid:gid 或 name:group;默认 0:0
+    read_only: false          # true → bind 后 remount 只读
+    content: |
+      nameserver 169.254.169.253
+      options timeout:2 attempts:2
+
+# 应用拉起前顺序执行的一次性初始化命令(类 initContainers);任一条非零退出 = 沙箱启动失败
+init:
+  - exec: /bin/sh
+    args: ["-c", "echo provisioning"]
+    user: "0:0"               # 可选,默认 root
 ```
+
+**`launch` 增强字段的来源与合并**:`user` / `stop_signal` 与 `exec` / `args`
+一样遵循"镜像 config.json 默认值 ⊕ yaml override(override 优先)";`stop_signal`
+的信号名在 **host 侧**解析成编号下发(信号名与 rootfs 无关);`user` 的命名用户在
+**guest 侧**解析(`/etc/passwd` 权威地在镜像 rootfs 内,host 不假设)。
+`stop_grace_period` 下发 guest 用于停机宽限;`start_timeout` 只在 host 侧约束
+launch 握手,不下发 guest。
+
+**`mounts` / `files` / `init` 的应用时机**:三者均在 guest 收到 LaunchSpec 后、
+应用进程拉起前生效(`init` 在 `launch_ack` 之前完成,故 host 的 "settled" 信号代表
+"环境与 init 全部就绪",详见 [`sandbox-runtime.md`](sandbox-runtime.md) §阶段 2)。
+`mounts` 的 `empty` 卷落 vdb(磁盘、不耗内存),`files` 落内存盘(不进磁盘快照层)。
+
+**冷启动(golden) vs restore(per-instance)注入**:`mounts` / `init` / 静态
+`files` 在冷启动期应用,会被黄金快照捕获、由 1:N 克隆共享。需要**逐实例不同且排除出
+黄金快照**的文件(per-instance secret、实例专属 resolv.conf),由 sandbox-ctl 在
+**restore 时**经 restore 通知把该实例的 `files` 推送给 guest,guest 在 thaw 前注入
+(与网络 flush-and-replace 同一窗口,见 §11);此类内容仅落克隆自身内存、不入黄金快照。
+路由由 sandbox-ctl 编排决定(冷启动 → LaunchSpec,restore → restore 通知),与网络
+字段一致,schema 无需 per-instance 标记。
 
 清单配置(manifest/store/crypto/cache 节)单独存在,不放入 sandbox.yaml——它
 是节点级配置,所有 CLI 共享(sandbox-ctl 通过 `--manifest-config` 或
@@ -389,8 +437,10 @@ sandbox-init 以 flush-and-replace 重配网卡(克隆取新 L3 身份,见 §恢
 `CONFIG_IP_PNP*`,不再支持
 `ip=...` cmdline 形式。
 
-**`launch.*` 不进 cmdline**:容器启动配置(exec/args/env/workdir/restart)通过
-vsock 在运行时下发,见 [`sandbox-runtime.md`](sandbox-runtime.md) §阶段 2。
+**`launch.*` / `mounts` / `files` / `init` 不进 cmdline**:容器启动配置
+(exec/args/env/workdir/restart/user/stop_signal/stop_grace_period)及挂载 / 文件 /
+初始化命令均通过 vsock 在运行时下发,见 [`sandbox-runtime.md`](sandbox-runtime.md)
+§阶段 2。`start_timeout` 仅在 host 侧约束 launch 握手等待。
 
 ### 3.2 file:// vs manifest:// truth table
 
@@ -418,6 +468,12 @@ ZIP 中央目录在文件末尾,erofs 内核驱动从文件起点读到 erofs su
 尺寸,自然忽略后缀;ZIP 解析器从尾部倒推。同一个文件:guest 把 erofs 部分
 挂为 / 的 lower 层,sandbox-ctl 在启动前读 ZIP 取 config.json 作为 launch
 默认值,与 sandbox.yaml `launch.*` 合并(yaml 优先)。
+
+honor 的 OCI config 子集:`Entrypoint` / `Cmd` / `Env` / `WorkingDir` /
+`User` / `StopSignal` / `Volumes`。合并规则:`exec`/`args` 按 Docker
+`--entrypoint` 语义;`env` 镜像在下、override 在上;`workdir` / `user` /
+`stop_signal` override 优先否则取镜像;`Volumes` 的每个目录自动并入 `mounts`
+(等价 `type: empty`),与显式 `mounts` 按 target 去重(显式为准)。
 
 `launch.exec` 不再必填——若 image config 有 Entrypoint/Cmd 即可省略。
 
@@ -626,6 +682,8 @@ T15  构造 CH 命令行(详见 §5.2):
      stderr = sandbox-ctl 的 stderr;cmd.SysProcAttr.Setpgid = true(CH 不在
      sandbox-ctl 控制终端的前台进程组)
 T16  fork+exec cloud-hypervisor (patched),读 CH 的 stdout(dmesg 管道)+ 转发 stderr
+     (tapfd 模式若交接带回 netns fd,fork/exec 在锁定线程 setns(CLONE_NEWNET) 进该
+     netns 后进行 → CH 在 tap 所在 network namespace 内运行;见 §5.2)
 T17  CH (patched) 启动:
      T17a 解析 --memory-zone fd=3 → 跳过 memfd_create,mmap 同一 inode → chVA
      T17b userfaultfd() → uffd_C(绑到 CH 的 mm)
@@ -698,6 +756,9 @@ cloud-hypervisor \
 
 # --net: tapfd 模式用 fd=<N>(memfd 之后继承的 fd,通常 fd=4)+ mac=<交接元数据>,
 #        id=_net0 供 restore 经 net_fds 重新绑定该网卡;tap 名模式则 --net tap=<name>。
+# tapfd 交接(docs/tapfd.md §5):exec helper 时置 TAPFD_SOCKET + TAPFD_WANT_NETNS=1
+#        (请求 tap 的 netns fd,§5.3.1)。provider 的 tap 处于独立 netns 时回带该 fd,
+#        sandbox-ctl 据此在该 netns 内 fork/exec CH(T16);否则 CH 在 host netns 启动。
 # CH 进程的 stdio(sandbox-ctl 设置):
 #   stdin  = /dev/null            ← 关键:CH 的 --console tty 只在 stdin 是终端时才会
 #                                     raw 化那个终端;接 /dev/null 故 CH 不碰任何终端
@@ -789,20 +850,23 @@ sandbox 实际驻留 200 MiB → 文件物理 ~200 MiB。`tar`、`cp --sparse=au
 
 **单 zone 假设**:v1 限定单 memory zone。多 zone 扩展时格式扩展见 §14。
 
-**`<sha256>.overlay` 写入路径**(hash-then-copy):
+**`<sha256>.overlay` / `<sha256>.snapshot` 写入路径**(copy-then-hash):
 
-1. snapshot 完成 srv1.Quiesce() 后,blk1.diff 内容稳定
-2. 第一道扫:跳空洞算摘要(SEEK_DATA/HOLE 提取数据 extent,(offset,length)+字节
-   喂入 SHA256;见 §6.1"内容摘要")→ digest
-3. 第二道扫:用最终文件名 `<out_dir>/<digest>.overlay` 一次 sparse copy
-   (`SEEK_DATA/HOLE` 驱动,空洞保留)
+file 模式下 overlay 与 snapshot bundle 走同一条落盘路径:
 
-不产生临时文件 + rename;输出目录从开始到结束只见最终命名。同一沙箱多次
-snapshot 在 overlay 内容不变时**自动写到同名文件**(覆盖,等价于无 op,
-天然内容寻址)。
+1. quiesce 完成后源内容稳定(overlay 源 = blk1.diff,snapshot 源 = memfd)
+2. 把源的**数据 extent** sparse copy 到同目录的 `<sid>.<ext>.partial`
+   (SEEK_DATA/HOLE 驱动,空洞保留为文件空洞);snapshot 在 `ramSize` 逻辑偏移后
+   追加 ZIP 段
+3. 对 `.partial` **跳空洞算摘要**(见上"内容摘要";只读驻留数据 + ZIP 段)→ `<digest>`
+4. `rename` `.partial` → `<out_dir>/<digest>.<ext>`(原子落定);snapshot 另建/更新
+   `<sid>.snapshot` 符号链接指向它
 
-代价是对 blk1.diff 的两次读,但两道都只触数据 extent(跳空洞);且 quiesce 后
-blk1.diff 通常驻 page cache(沙箱刚跑过的写层),第二道读 ≈ 内存读,可忽略。
+`.partial` 是同目录瞬态名,落定后输出目录只见内容寻址的终态文件。同一沙箱多次
+snapshot 内容不变时摘要相同 → rename 到**同名文件**(覆盖,等价无 op,天然内容寻址)。
+
+整条路径只读源的数据 extent(跳空洞)+ snapshot 的 ZIP 段;`.partial` 刚写完即驻
+page cache,摘要那道 ≈ 内存读。8 GiB / 200 MiB 驻留的沙箱只触约 200 MiB。
 
 ### 6.2 snapshot 时序
 
@@ -811,6 +875,9 @@ blk1.diff 通常驻 page cache(沙箱刚跑过的写层),第二道读 ≈ 内存
   overlay.base 引用一次写入 ZIP,不需要事后回填重写
 - **config.json + state.json + snapshot.cfg 全程在内存暂存**,只在最末把 ZIP
   一次性 append
+- staging 目录(`<run-dir>/<sid>/snap-stage`,tmpfs)只容纳 CH 产出的
+  config.json/state.json(KB 级);GiB 级 memory 段与 overlay 不经此目录——
+  --output 直接落 `<out_dir>`(写 `.partial` 再 rename),--upload 流式喂 ingest
 - pause 窗口 = quiesce + CH dump + overlay export + memory dump + zip append。
   overlay + memory 写都是 SEEK_DATA/HOLE 驱动的 sparse copy,稀疏 sandbox
   8 GiB → 驻留 200 MiB → ~100 ms
@@ -836,18 +903,19 @@ T3  CH /vm.snapshot { destination_url=file://<run-dir>/<sid>/snap-stage/ }
       config.json   - VM 配置(devices, memory layout, ...)
       state.json    - vCPU 寄存器、virtio queue 状态、IRQ 等
     sandbox-ctl 把这两个文件读进内存作为 ZIP 内容暂存,不再落盘
-T4  overlay 处理:
-    T4a 第一道扫:stream-hash blk1.diff → digest(SHA256 整字节流,hole=0)
-    T4b 若 --output:用 <out_dir>/<digest>.overlay 为目标 sparse copy
-        (SEEK_DATA/HOLE 驱动);overlay_ref = file://<digest>.overlay
-        若 --upload:跳过 hash + 写文件,直接走 manifest.Ingester 流式喂 store
-        → overlay_manifest_key;overlay_ref = manifest://<overlay_manifest_key>
+T4  overlay → sink(在 memory 前处理,snapshot.cfg 才能拿到终态 overlay.base):
+    若 --output:blk1.diff 数据 extent sparse copy → <sid>.overlay.partial →
+        跳空洞算摘要(§6.1)→ rename <out_dir>/<digest>.overlay;
+        overlay_ref = file://<digest>.overlay
+    若 --upload:blk1.diff 数据 extent 流式喂 manifest.Ingester(空洞编码进
+        manifest,不落盘)→ overlay_manifest_key;
+        overlay_ref = manifest://<overlay_manifest_key>
 T5  生成最终 snapshot.cfg(在内存中,§3.4 schema):
     resources.capacity:        从 sandbox 当前 SandboxConfig
     boot.runtime_ref:           file://<basename>@sha256:<digest>(file 模式 host
                                 启动时已扫过)或 manifest://<key>(原引用)
     boot.root.base_ref:         同上规则
-    boot.root.overlay.base:     T4b 的 overlay_ref(本次 diff = 磁盘链顶)
+    boot.root.overlay.base:     T4 的 overlay_ref(本次 diff = 磁盘链顶)
     from_refs / overlay.base_from_refs:  增量分层链(§3.5)。冷启动 = [];否则按
                                 运行进程持有的 provenance(恢复时记下的"从何而来")
                                 计算:from_refs = [父快照 ref] ++ 父.from_refs;
@@ -859,7 +927,7 @@ T6  生成 snapshot 内容:
                   snapshot.cfg(三个 entries)
     若 --upload:走流式构造,直接 io.Reader 喂 ingest,不落盘;
                   stdout 输出 snapshot_manifest_key(= 链中本快照的内容寻址名)
-    若 --output:先写到临时文件 → 跳空洞算摘要(§6.1)→ 落定为
+    若 --output:先写到 <sid>.snapshot.partial → 跳空洞算摘要(§6.1)→ rename
                   <out_dir>/<sha256>.snapshot,再建/更新符号链接
                   <out_dir>/<sid>.snapshot → <sha256>.snapshot
 T7  srv0.Resume() + srv1.Resume()
@@ -1617,6 +1685,12 @@ snapshot 路径要求 `/vm.pause` 之后内存内容稳定,但 backend worker �
 | `allocatable.memory ≤ capacity.memory` | "allocatable.memory must be ≤ capacity.memory" |
 | `overhead.memory ≥ 0` | "overhead.memory must be non-negative" |
 | `watermark_high.memory > 0` 且 `≤ allocatable.memory`(静态 cgroup / 动态控制模式启动初值) | "watermark_high.memory out of (0, allocatable.memory]" |
+| `mounts[].target` / `files[].path` 必须绝对路径 | "<field> must be absolute" |
+| `mounts[].type` ∈ {tmpfs, empty}(省略 = empty);`nfs` 暂未实现 | "mount type <t> not yet implemented" / "unknown mount type <t>" |
+| `files[].mode` 若设须为合法八进制 | "files[].mode invalid octal" |
+| `init[].exec` 非空 | "init[].exec is required" |
+| `launch.stop_signal` 若设须可解析为信号 | "unknown stop_signal <s>" |
+| `launch.stop_grace_period` / `launch.start_timeout` 若设须为合法 duration | "<field> invalid duration" |
 
 `allocatable.memory == capacity.memory` 时整个 balloon 设备不挂载
 (`--balloon` 不出现于 CH 命令行),BalloonController 不启动。若

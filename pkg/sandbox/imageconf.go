@@ -6,9 +6,13 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"sort"
+	"strconv"
+	"strings"
 
 	"github.com/fullof-work/mass-sandbox/pkg/flatten"
 	"github.com/fullof-work/mass-sandbox/pkg/sandbox/proto"
+	"golang.org/x/sys/unix"
 )
 
 // ImageConfig captures the container default launch settings the
@@ -22,6 +26,9 @@ type ImageConfig struct {
 	Entrypoint []string
 	Env        []string // "K=V" form, OCI-native
 	WorkingDir string
+	User       string              // OCI User (uid:gid or name:group)
+	StopSignal string              // OCI StopSignal (name or number)
+	Volumes    map[string]struct{} // OCI Volumes; each → implicit empty mount
 }
 
 // LoadImageConfig reads the trailing ZIP from the rootfs erofs at
@@ -75,6 +82,9 @@ func LoadImageConfigFrom(r io.ReaderAt, size int64) (*ImageConfig, error) {
 		Entrypoint: rc.Entrypoint,
 		Env:        rc.Env,
 		WorkingDir: rc.WorkingDir,
+		User:       rc.User,
+		StopSignal: rc.StopSignal,
+		Volumes:    rc.Volumes,
 	}, nil
 }
 
@@ -152,7 +162,107 @@ func MergeLaunch(image *ImageConfig, override LaunchConfig) (*proto.LaunchSpec, 
 		spec.Restart = override.Restart
 	}
 
+	// User: override else image (named forms resolved guest-side).
+	if override.User != "" {
+		spec.User = override.User
+	} else if image != nil {
+		spec.User = image.User
+	}
+
+	// StopSignal: override else image; resolve name→number host-side.
+	sigName := override.StopSignal
+	if sigName == "" && image != nil {
+		sigName = image.StopSignal
+	}
+	if sigName != "" {
+		n, err := ParseStopSignal(sigName)
+		if err != nil {
+			return nil, fmt.Errorf("merge launch: stop_signal: %w", err)
+		}
+		spec.StopSignal = n
+	}
+
 	return spec, nil
+}
+
+// ParseStopSignal resolves a signal name ("SIGTERM", "TERM") or decimal
+// number ("15") to its number. Used host-side so the guest receives a
+// plain int (signal names are arch-independent for the platform's
+// x86_64/arm64 targets where host and guest share the signal table).
+func ParseStopSignal(s string) (int, error) {
+	if n, err := strconv.Atoi(s); err == nil {
+		if n <= 0 {
+			return 0, fmt.Errorf("invalid signal number %q", s)
+		}
+		return n, nil
+	}
+	name := strings.ToUpper(s)
+	if !strings.HasPrefix(name, "SIG") {
+		name = "SIG" + name
+	}
+	if sig := unix.SignalNum(name); sig != 0 {
+		return int(sig), nil
+	}
+	return 0, fmt.Errorf("unknown signal %q", s)
+}
+
+// effectiveMounts converts config mounts and merges image Volumes as
+// implicit empty mounts (explicit config wins on the same target).
+func effectiveMounts(mounts []MountConfig, volumes map[string]struct{}) []proto.MountSpec {
+	out := make([]proto.MountSpec, 0, len(mounts)+len(volumes))
+	seen := make(map[string]struct{}, len(mounts))
+	for _, m := range mounts {
+		t := m.Type
+		if t == "" {
+			t = "empty"
+		}
+		out = append(out, proto.MountSpec{Target: m.Target, Type: t, Source: m.Source, Options: m.Options})
+		seen[m.Target] = struct{}{}
+	}
+	// Deterministic order for image Volumes.
+	vols := make([]string, 0, len(volumes))
+	for v := range volumes {
+		if _, ok := seen[v]; ok {
+			continue
+		}
+		vols = append(vols, v)
+	}
+	sort.Strings(vols)
+	for _, v := range vols {
+		out = append(out, proto.MountSpec{Target: v, Type: "empty"})
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// ProtoFiles returns the configured files as a proto slice. Used by the
+// restore path (a different package) to push this instance's per-instance
+// files in the restore notify.
+func (c *SandboxConfig) ProtoFiles() []proto.FileSpec { return toProtoFiles(c.Files) }
+
+// toProtoFiles / toProtoInit convert config slices to proto slices.
+func toProtoFiles(files []FileConfig) []proto.FileSpec {
+	if len(files) == 0 {
+		return nil
+	}
+	out := make([]proto.FileSpec, len(files))
+	for i, f := range files {
+		out[i] = proto.FileSpec{Path: f.Path, Content: f.Content, Mode: f.Mode, Owner: f.Owner, ReadOnly: f.ReadOnly}
+	}
+	return out
+}
+
+func toProtoInit(init []InitConfig) []proto.InitSpec {
+	if len(init) == 0 {
+		return nil
+	}
+	out := make([]proto.InitSpec, len(init))
+	for i, it := range init {
+		out[i] = proto.InitSpec{Exec: it.Exec, Args: it.Args, User: it.User}
+	}
+	return out
 }
 
 var errMissingExec = errMessage("merge launch: no executable found — set sandbox.yaml launch.exec, or ensure the rootfs image's config.json has Entrypoint/Cmd")

@@ -82,75 +82,108 @@ sandbox-init 通过 Go syscall 实现。
 
 ## 3. sandbox-init 三阶段
 
-### 3.1 阶段 1:早期挂载 + rootfs 组装
+### 3.1 阶段 1:早期挂载 + 并发取 launch spec + switch-root
+
+launch spec 携带 `mounts`(含 `empty` 卷)等"驱动 rootfs 组装"的字段,因此
+**hello/launch 握手与 overlay 组装并发进行**:握手是纯 socket 操作(无任何路径
+解析),与挂载链、乃至随后的 `chroot`(进程级,Go 线程共享 `CLONE_FS`)安全并发——
+关键约束是握手 goroutine 全程不碰文件系统,且 `chroot` 在 join 之后才执行。
 
 ```
-1. mount -t proc      proc       /proc
-2. mount -t sysfs     sysfs      /sys
-3. mount -t devtmpfs  devtmpfs   /dev   (kernel CONFIG_DEVTMPFS_MOUNT=y 时 EBUSY,跳过)
-4. wait for /dev/vda 和 /dev/vdb 出现(轮询 stat,timeout 10s)
-5. mount -t erofs -o ro /dev/vda /mnt/lower
-6. mount -t ext4         /dev/vdb /mnt/upper
-7. mkdir /mnt/upper/upperdir /mnt/upper/workdir 若不存在
-8. mount -t overlay overlay -o lowerdir=/mnt/lower,
-                                 upperdir=/mnt/upper/upperdir,
-                                 workdir=/mnt/upper/workdir  /mnt/newroot
-9. MS_MOVE /proc /sys /dev 到 newroot 下;chdir(newroot) → MS_MOVE . / → chroot(.) → 进入阶段 2
-10. mount -t cgroup2 cgroup2 /sys/fs/cgroup;mkdir /sys/fs/cgroup/app
-                                 ← cgroup v2 freezer:应用进程树的冻结域
-                                   (quiesce 前冻结、restore 后解冻,§3.4);
-                                   不在 subtree_control 开任何控制器
-11. AF_VSOCK bind+listen :5000   ← 反向通道(host→guest)早于阶段 2 的 hello 开门
+A. 先于一切(纯 socket,无 rootfs 依赖):
+   - raw netlink RTM_NEWLINK(lo, IFF_UP)   ← 拉起回环;内核自动补 127.0.0.1/8、::1/128,
+                                              无需 RTM_NEWADDR;失败即 die(lo 起不来 = guest 损坏)
+   - AF_VSOCK bind+listen :5000             ← 反向通道(host→guest)必须早于 hello 开门
+   - go handshake{ connect(CID=2:5000) → write hello → read launch }  ← spec, conn 经 channel 交回
+
+B. 与 handshake 并发(spec-independent 挂载链):
+   1. mount -t proc/sysfs/devtmpfs  /proc /sys /dev  (CONFIG_DEVTMPFS_MOUNT=y 时 /dev EBUSY,跳过)
+   2. wait /dev/vda、/dev/vdb 出现(轮询 stat,timeout 10s)
+   3. mount -t erofs -o ro /dev/vda /mnt/lower;mount -t ext4 /dev/vdb /mnt/upper
+   4. mkdir /mnt/upper/{upperdir,workdir} 若不存在
+   5. mount -t overlay overlay -o lowerdir=/mnt/lower,upperdir=/mnt/upper/upperdir,
+                                    workdir=/mnt/upper/workdir  /mnt/newroot
+
+C. JOIN:spec, conn := <-handshake               ← 拿到 LaunchSpec(及复用至 launch_ack 的连接)
+
+D. spec-dependent、switch-root 之前(empty/volume 卷需 raw ext4 source):
+   for each mounts[].type == empty:
+     mkdir /mnt/upper/volumes/<i>                 ← raw ext4(与 upperdir 同级,物理隔离于 overlay 写层)
+     mkdir -p /mnt/newroot/<target>
+     mount --bind /mnt/upper/volumes/<i> /mnt/newroot/<target>   ← 空目录遮蔽镜像该路径内容
+
+E. switch-root:
+   MS_MOVE /proc /sys /dev → /mnt/newroot/{proc,sys,dev}
+   chdir(/mnt/newroot) → MS_MOVE . / → chroot(.)  ← MS_MOVE 携带整个子树:proc/sys/dev
+                                                    与 D 的 volume binds 一并进入新 /
+
+F. switch-root 之后的基础挂载:
+   mount -t cgroup2 cgroup2 /sys/fs/cgroup;mkdir /sys/fs/cgroup/app   ← v2 freezer 冻结域(§3.4)
+   mount -t devpts devpts /dev/pts (newinstance,ptmxmode=0666)        ← tty 模式 openpty 需要
+   mount -t tmpfs  tmpfs  /run     (nosuid,nodev)                     ← 自动挂载(类 /proc)
+   mount -t tmpfs  tmpfs  /run/shm (nosuid,nodev,mode=1777)           ← 自动挂载
 ```
 
 全部通过 `golang.org/x/sys/unix.Mount` / `unix.Chroot` 等 syscall 完成,
 不依赖任何外部二进制。
 
 `/dev/vda`(blk0 base)是用户应用的镜像 erofs(只读);`/dev/vdb`(blk1 overlay
-ext4)是写层。overlay 合并后 `/mnt/newroot` 是 guest rootfs 的最终视图,
-`chroot` 之后这套视图变成新的 `/`。承载 sandbox-init 自身的 `sandbox-runtime.erofs`
-由内核经 virtio-pmem 挂在 `/`(`root=/dev/pmem0 ... dax=always`),阶段 1 把它
-让位给 overlay。
+ext4)是写层。overlay 合并后 `/mnt/newroot` 是 guest rootfs 的最终视图,switch-root
+之后这套视图变成新的 `/`。承载 sandbox-init 自身的 `sandbox-runtime.erofs` 由内核经
+virtio-pmem 挂在 `/`(`root=/dev/pmem0 ... dax=always`),阶段 1 把它让位给 overlay。
 
-**bind+listen 必须在阶段 2 的 hello 之前完成**:host 在 `launch` 写完后立即起
-ping ticker,如果 listener 没起会落空。vsock 不依赖 IP 配置,阶段 1 完成 chroot
-后立即 bind+listen 是合理的。
+**为何能并发**:`bind+listen` 必须在 `launch` 写出前完成(host 在 `launch` 写完即起
+ping ticker,listener 没起会落空),故提到最前;handshake 只做 socket 系统调用,挂载链
+只做 `mount()`(改的是挂载命名空间,不解析路径),二者无共享路径解析,可安全并发。
+`chroot` 是真正的进程级路径切换,排在 JOIN 之后单线程执行,届时 handshake goroutine
+已退出。这一并发把 hello→launch 的往返叠在 overlay 组装之下。
 
-### 3.2 阶段 2:launch 握手 + stdio 接线 + 应用拉起
+**volume 卷的 source 与搬运**:`empty` 卷的 source 是 raw ext4 上 `/mnt/upper/volumes/<i>`
+(与 overlay 的 `upperdir/` 物理隔离,同在 vdb、一起进磁盘快照),bind 到 newroot 内的
+target;switch-root 的 `MS_MOVE /mnt/newroot → /` 会把该 bind 随整棵子树搬进新 `/`
+(proc/sys/dev 正是同理),无需单独 MS_MOVE。switch-root 后 `/mnt/upper` 路径被埋,但
+bind 持有 ext4 inode 引用使卷内容在 target 处存活,且应用看不到 raw ext4 内部结构。
 
-阶段 2 在**同一条 vsock 连接**上完成 launch 握手,握手收尾后该连接**不关闭**——
-它升级成 MUX,承载应用的 stdin/stdout/stderr(或一个伪终端)直到沙箱结束(协议
-见 §4.5)。
+### 3.2 阶段 2:spec 应用 + stdio 接线 + 应用拉起
+
+阶段 1 的 JOIN 已拿到 LaunchSpec 与那条 vsock 连接(hello/launch 已收发)。阶段 2
+在**同一条连接**上把 spec 应用完、发 launch_ack;此后该连接**不关闭**——升级成 MUX,
+承载应用的 stdin/stdout/stderr(或一个伪终端)直到沙箱结束(协议见 §4.5)。
+
+`launch_ack` 在 spec **全部应用完(含 init)之后**才发出,故它对 host 是"环境与
+初始化全部就绪、即将 fork"的 settled 信号。spec 应用各步触碰文件系统,均在
+switch-root 之后单线程执行。
 
 ```
-1. socket(AF_VSOCK, SOCK_STREAM) → connect(CID=2 host, port=5000)
-   重试:第一次立即发起,失败后 100µs 起指数退避(×2,上限 10ms),deadline 5s
-
-2. write  hello{phase:"ready"}
-3. read   launch{spec}                  ← LaunchSpec: exec/args/env/workdir/restart,
-                                           network, stdio{tty? / which channels}
-4. 若 spec.Network 非空,applyNetwork(冷启动:全新网卡,additive):
+1. applyNetwork(spec.network)            ← 冷启动:全新网卡,additive
      - Sethostname(network.hostname)
      - raw netlink RTM_NEWLINK(interface UP[+IFLA_MTU]) / RTM_NEWADDR(IP/CIDR) /
        可选 RTM_NEWROUTE(nexthop)
-   失败 fast-fail —— 一次性沙箱模型下"网络配置失败"必须立刻 die
-   (restore 出来时若带 network,改走 flush-and-replace 重配,见 §4.3 restore)
-5. 按 spec.stdio 准备应用的 stdio fd(§3.5):
-     - tty 模式:openpty(); 记下 master fd 与 slave fd; 初始 winsize 来自 spec
-     - pipe 模式:为每个声明的通道(stdin/stdout/stderr)建一对 pipe / socketpair
-       未声明 stdin → 应用的 fd 0 接 /dev/null
-6. write  launch_ack{stdio: 实际启用的 channel 集合}
-                                         ← 此后这条连接进入 MUX 帧收发态,不再关闭
+     失败 fast-fail —— 一次性沙箱模型下"网络配置失败"必须立刻 die
+     (restore 出来时若带 network,改走 flush-and-replace 重配,见 §4.3 restore)
+2. applyFsMounts(spec.mounts: type==tmpfs)  ← 内存盘挂载(empty 卷已在阶段 1 switch-root 前完成)
+3. applyFiles(spec.files)                 ← 暂存 tmpfs(/run/.inject)→ 写内容 + chmod/chown →
+                                            bind 到 target →(read_only 时 remount-ro)→ MNT_DETACH 暂存;
+                                            内容仅在内存、不落 vdb;失败 fast-fail
+4. runInit(spec.init)                      ← 顺序执行一次性命令;输出走 console;init[].user 可降权;
+                                            任一条非零退出 = die(initContainers 语义)
+5. 按 spec.stdio 准备应用 stdio fd(§3.5):
+     - tty 模式:openpty();记 master/slave fd;初始 winsize 来自 spec
+     - pipe 模式:为每个声明通道建 pipe / socketpair;未声明 stdin → fd 0 接 /dev/null
+6. write  launch_ack{stdio: 实际启用的 channel 集合}  ← 此后连接进入 MUX 帧收发态,不再关闭
 7. read   ack                            ← host 确认进入 MUX 态
 
 8. 通过 exec.Cmd 拉起子进程:
      SysProcAttr.Cloneflags = CLONE_NEWPID | CLONE_NEWNS
      tty 模式: Setctty + setsid + slave 作为 fd 0/1/2;关闭 master 副本于子进程
      pipe 模式: 各 pipe/socketpair 的 child 端作为 fd 0/1/2
-     argv: [/proc/self/exe, "exec-child", workdir, exec, args...]
+     argv: [/proc/self/exe, "exec-child", cred, workdir, exec, args...]
+       cred = "uid:gid:sg1,sg2"(由 spec.user 在 guest 侧 /etc/passwd 解析)或 "-"(不降权)
      env:  spec.Env(默认补 PATH)
 
-9. 子进程在新 ns 内:mount -t proc proc /proc → chdir(workdir) → syscall.Exec(exec, args...)
+9. 子进程在新 ns 内:mount -t proc proc /proc(需 root)→ chdir(workdir) →
+     若 cred≠"-":setgroups → setgid → setuid(降权放在挂载 /proc 之后、execve 之前)→
+     syscall.Exec(exec, args...)
 
 10. 父进程(sandbox-init pid=1):
      - 把子进程 pid 写入 /sys/fs/cgroup/app/cgroup.procs(其派生的整棵进程树
@@ -160,11 +193,26 @@ ping ticker,如果 listener 没起会落空。vsock 不依赖 IP 配置,阶段 1
      - 进入阶段 3 supervisor
 ```
 
+**降权时机**:`spec.user` 解析后的 uid/gid 不在外层 clone 用 `SysProcAttr.Credential`
+——否则子进程会以非 root 身份执行 `mount /proc`(新 PID ns 必需)而 EPERM 失败。
+故降权放到子进程内、`mount /proc` 之后、`execve` 之前(`setgroups→setgid→setuid`)。
+`init[].user` 不受此限(init 在 PID1 既有 ns、无 proc 重挂),直接用 `Credential`。
+命名用户("nobody")在 guest 侧解析(`/etc/passwd` 权威地在镜像 rootfs 内)。
+
+**挂载传播(为 restore 注入铺路)**:app 用 `CLONE_NEWNS` fork,拿到的是 fork 那一刻
+的挂载树**私有副本**;restore 时(app 已在运行)PID1 里新建的 bind 默认不会进入这个
+私有 ns。为让 restore 注入能到达运行中的 app:fork **之前** PID1 把 `/` 标为
+`MS_REC|MS_SHARED`(rshared),app 子进程在 `mount /proc` **之前**把自己的副本标为
+`MS_REC|MS_SLAVE`(rslave)——PID1 的挂载事件单向传播给 app,app 自己的挂载(如
+`/proc`)不外泄回 PID1。冷启动注入不依赖此机制(那时 bind 早于 fork、随副本带入);
+**唯独 restore 注入靠它**。网络 restore 重配无此问题:app 只 `CLONE_NEWNS`、不
+`CLONE_NEWNET`,与 PID1 共享网络 ns,netlink 改动天然可见。
+
 **applyNetwork 不是 listener 的前置依赖**——applyNetwork 只对应用层网络服务
 有意义;vsock 控制面与网络配置正交。
 
-**fast-fail 网络**:一次性沙箱模型下,网络配置失败后让应用悄悄跑反而是反模式——
-上层调度器期望"沙箱起不来 = 重新调度",而不是"沙箱起来了但 IP 错了"。
+**fast-fail**:一次性沙箱模型下,网络 / 挂载 / 文件 / init 任一失败都让应用悄悄跑
+是反模式——上层调度器期望"沙箱起不来 = 重新调度",而不是"起来了但环境不对"。
 
 ### 3.3 阶段 3:supervisor
 
@@ -180,8 +228,8 @@ loop:
       else:                            // 孤儿被 reparent 到 PID 1,收割之
         // do nothing
     sigterm/sigint:
-      send SIGTERM to app_pid
-      wait up to 10s for app to exit (status assembled from waitpid result)
+      send spec.stop_signal to app_pid          // 默认 SIGTERM;覆盖镜像 StopSignal
+      wait up to spec.stop_grace_period for app to exit (默认 10s);超时 SIGKILL
       app_exit_then_reboot(status)
 
 app_exit_then_reboot(status):
@@ -397,7 +445,7 @@ vsock 端口固定 `5000`,**两个方向都复用同一端口号**,身份按方�
 | **健康探测** | host→guest | `ping{id, t_send_ns}` → `pong{id, t_send_ns}` | 关 | host 计 RTT / 超时 / 失败数(§4.8) |
 | **mem 报告** | guest→host | `mem_report{mem_avail, mem_total}` → `mem_report_ack` | 关 | guest 周期上报 `/proc/meminfo`,喂 host BalloonController |
 | **快照前** | host→guest | `quiesce` → `quiesced` | 关 | guest 冻结应用进程树 + 跑 prep + 关闭 MUX(§3.4),`quiesced` ⇒ 应用已冻结、可安全 `/vm.pause` |
-| **恢复后** | host→guest | `restore{epoch, wallclock_ns, network?}` → `restore_ack{stdio, app_state}` | **升级 MUX** | 快照恢复 vCPU 起跑后 host 通知 guest;应用此时仍处 freezer 冻结态(冻结态随快照保存,`/vm.resume` 不解冻);`restore` 携带 host 发送前一刻的墙钟 `wallclock_ns`,guest 收到后先 `clock_settime` 把 `CLOCK_REALTIME` 跳到该值(CH 把快照里的旧钟原样载回,不纠正则落后整个静置区间;单调钟不受影响);若带 `network`,再以 **flush-and-replace** 重配 L3(克隆取新 IP/MTU/nexthop/hostname;MAC 沿用快照设备状态不变),best-effort + 记日志,thaw 前完成;回 `restore_ack`(ATTACH_ACK 的超集 + "恢复完成"信号,host 据此判定 restore 完成)、重连 MUX,**最后 thaw 应用**(write `cgroup.freeze=0`)——故应用绝不会观察到旧墙钟、错误网络或未重连的 MUX。**RNG 重播种仍 deferred(未实现)**;该连接成为新 MUX |
+| **恢复后** | host→guest | `restore{epoch, wallclock_ns, network?, files?}` → `restore_ack{stdio, app_state}` | **升级 MUX** | 快照恢复 vCPU 起跑后 host 通知 guest;应用此时仍处 freezer 冻结态(冻结态随快照保存,`/vm.resume` 不解冻);`restore` 携带 host 发送前一刻的墙钟 `wallclock_ns`,guest 收到后先 `clock_settime` 把 `CLOCK_REALTIME` 跳到该值(CH 把快照里的旧钟原样载回,不纠正则落后整个静置区间;单调钟不受影响);若带 `network`,以 **flush-and-replace** 重配 L3(克隆取新 IP/MTU/nexthop/hostname;MAC 沿用快照设备状态不变);若带 `files`,把该实例专属文件(per-instance secret / resolv.conf)注入(同冷启动的内存盘 + bind 机制,仅落克隆内存、不入黄金快照)。两者均 best-effort + 记日志、thaw 前完成;回 `restore_ack`(ATTACH_ACK 的超集 + "恢复完成"信号,host 据此判定 restore 完成)、重连 MUX,**最后 thaw 应用**(write `cgroup.freeze=0`)——故应用绝不会观察到旧墙钟、错误网络、缺失的 per-instance 文件或未重连的 MUX。**RNG 重播种仍 deferred(未实现)**;该连接成为新 MUX |
 | **MUX 重连** | host→guest | `attach{epoch}` → `attach_ack{stdio, app_state}` | **升级 MUX** | 纯 stdio-MUX 传输重连:MUX 因 vsock 异常断了,host 拨新连接重建;guest 优雅关旧 MUX(已断则硬丢)、回 ack,该连接成为新 MUX(§4.6)。**attach ≠ 快照后 resume**——活 VM 上从未 quiesce 的断线兜底也走它。thaw 不属 attach 语义,而属 quiesce 生命周期(freeze 的逆),**由 guest 自身冻结状态驱动**:仍冻结才补 thaw(仅 `resume_after=true` 同进程续跑路径——VM 原地 resume,attach 恰为首个 post-resume 接触),活 VM 重连本未冻结即跳过 |
 | **执行命令** | host→guest | `exec{spec}` → `exec_ack{stdio}` | **升级 MUX(独立会话)** | guest 为这条 `exec` 起一个兄弟进程并准备其 stdio,回 `exec_ack`,该连接成为这次 exec 会话**独立**的 MUX;并发多条互不影响;命令结束 guest 在 MUX 上发 EXIT_STATUS 再走 §4.6 关闭。详见 §3.6 |
 | `error` | 任意 | (终止) | 关 | 任一端拒绝/出错的兜底响应,`msg` 人类可读 |
@@ -672,7 +720,8 @@ restore 语义干净)。
 
 | 消息 | 单次 deadline | 备注 |
 |---|---|---|
-| `hello/launch/launch_ack/ack` | 复用 dial 重试预算 5 s | 冷启动早期 host listener 可能短暂未起,既有指数退避保留;此连接随后转 MUX,deadline 只覆盖握手段 |
+| `hello` | guest dial 重试预算 5 s + host 侧短探活 deadline | 冷启动早期 host listener 可能短暂未起,指数退避保留;host 读 hello 用短 deadline 兜底"只连不 hello"的死 guest |
+| `launch_ack`(host 等待) | `launch.start_timeout`,空 / 0 = **无限期** | launch_ack 在 guest 把 spec 全部应用完(含可能很长的 `init`)后才发,故 host 读它的 deadline 由 start_timeout 控制;默认无限期(init 可任意长),生产建议显式设值,否则卡死的 guest 无 host 侧超时。此连接随后转 MUX |
 | `app_started` | 200 ms | 健康路径 µs 级,deadline 仅作 host 协程泄漏兜底 |
 | `app_exited` | 200 ms | ack 拿不到也照常 reboot |
 | `ping` | 200 ms | 1 s interval 下足够裕度;到点计入 `ping_timeout_total` |
@@ -698,7 +747,14 @@ sandbox.yaml `launch:` 节(yaml override 优先,Env merge),host sandbox-ctl 合�
   "env":     {"PATH": "...", "HOME": "/root"},
   "workdir": "/",
   "restart": "never",                    // never | on-failure | always
+  "user":    "0:0",                      // uid:gid 或 name:group(guest 侧 /etc/passwd 解析);空 → root
+  "stop_signal":   15,                   // 停机信号编号(host 已从名字解析);0 → SIGTERM
+  "stop_grace_sec": 10,                  // 停机宽限秒数;0 → 默认 10s
   "network": { "interface": "eth0", "ip": "169.254.1.1/31", "mtu": 1500, "nexthop": "", "hostname": "my-sandbox" },
+  "mounts":  [ {"target": "/tmp", "type": "tmpfs", "options": "nosuid,nodev,mode=1777"},
+               {"target": "/var/log", "type": "empty"} ],
+  "files":   [ {"path": "/etc/resolv.conf", "mode": "0644", "owner": "0:0", "content": "nameserver ..."} ],
+  "init":    [ {"exec": "/bin/sh", "args": ["-c", "..."], "user": "0:0"} ],
   "stdio":   {
     "tty":     true,                     // true: 给应用一个伪终端(pty 模式);false: pipe 模式
     "winsize": {"cols": 80, "rows": 24}, // tty 模式的初始窗口大小
@@ -709,13 +765,21 @@ sandbox.yaml `launch:` 节(yaml override 优先,Env merge),host sandbox-ctl 合�
 }
 ```
 
+`mounts` / `files` / `init` 的应用见 §3.2;`mounts[].type==empty` 的卷在 switch-root
+前以 raw ext4 source 建立(§3.1)。`start_timeout` 不在 LaunchSpec——它只约束 host 侧
+等待 launch_ack(见 §4.9)。
+
 ### 5.2 用户应用看到的环境
 
 - **PID 1**:用户应用本身(CLONE_NEWPID,看自己 PID = 1)
 - **mount namespace**:私有挂载 ns,起始视图与 sandbox-init 相同(overlayfs 合并的
   / + 自挂的 /proc)
 - **网络**:eth0(virtio-net,host TAP 后端),IP 已由 sandbox-init 配好
-- **/dev**:`devtmpfs`(/dev/null、/dev/random、/dev/urandom 等)
+- **/dev**:`devtmpfs`(/dev/null、/dev/random、/dev/urandom 等);`/dev/pts`(devpts)
+- **/run**、**/run/shm**:runtime 自动挂载的 tmpfs(无需声明)
+- **声明的挂载与注入文件**:`mounts` 的 tmpfs / empty 卷已就位(empty 卷遮蔽镜像该路径
+  原内容);`files` 注入的文件已 bind 到目标路径(只读卷不可写);均在应用启动前完成
+- **运行身份**:由 `launch.user` 决定(默认 root);非 root 时已 setgroups/setgid/setuid
 - **stdin/stdout/stderr**:
   - tty 模式:fd 0/1/2 是同一个伪终端的从端,`isatty()`=true,有控制终端与 job
     control,窗口变化收 SIGWINCH;stdout 与 stderr 在该终端上合并
@@ -739,8 +803,9 @@ restore 的 sandbox-init 仍在原 supervisor 循环内。
 
 - sandbox-ctl 通过 vsock 发 `quiesce`(snapshot 前)/ `restore` / `attach` / `ping`,
   **不**直接给 user app 发信号
-- 来自 host 的 SIGTERM 通过 cloud-hypervisor 传到 sandbox-init,sandbox-init 转发给
-  user app(给 10 s 优雅退出窗口)
+- 来自 host 的 SIGTERM 通过 cloud-hypervisor 传到 sandbox-init,sandbox-init 转发
+  `launch.stop_signal`(默认 SIGTERM,可被镜像 StopSignal / yaml 覆盖)给 user app,
+  等 `launch.stop_grace_period`(默认 10s)后超时 SIGKILL
 - tty 模式下,host 终端在 raw 态时键盘 `^C`(0x03)作为字节经 MUX PTY 流送到 guest
   伪终端,由 guest 的行规程转成 SIGINT 发给应用——这是想要的;杀沙箱另走 SIGTERM
   或转义序列(详见 [`sandbox.md`](sandbox.md) §2.2)
