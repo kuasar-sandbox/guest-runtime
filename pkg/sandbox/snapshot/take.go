@@ -10,6 +10,8 @@
 package snapshot
 
 import (
+	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
@@ -30,42 +32,34 @@ type Quiescer interface {
 	Resume()
 }
 
-// Sources gathers the file inputs Take needs.
+// Sources gathers the inputs Take needs.
 //
-// SnapshotCfg is the YAML-encoded snapshot.cfg (see docs/sandbox.md §3.4)
-// that the caller pre-renders with capacity, runtime_ref, base_ref;
-// overlay.base is filled in by Take before writing to ZIP because it
-// depends on the overlay digest computed during T4.
+// SnapshotCfg is rendered late (Take calls it with the final overlay.base
+// ref — file://<sha>.overlay or manifest://<key>) because that ref depends
+// on how the overlay was absorbed by the sink.
 type Sources struct {
-	SandboxID  string // <sid> for output filename
+	SandboxID  string // <sid> for output filename / symlink
 	APISock    string // CH api socket
-	MemfdFD    int    // memfd backing the zone
+	MemfdFD    int    // memfd backing the zone (read-only here; CH is paused)
 	MemfdSize  int64  // ramSize
 	DiffPath   string // blk1 diff file (sparse ext4)
-	StagingDir string // CH /vm.snapshot dest (caller creates+removes)
+	StagingDir string // CH /vm.snapshot dest for config.json/state.json (caller creates+removes)
 
-	// SnapshotCfg is a function: given the final overlay.base value
-	// (file://<digest>.overlay or manifest://<key>), returns the
-	// rendered YAML bytes. Defers building the cfg until overlay's
-	// digest is known.
+	// SnapshotCfg renders snapshot.cfg given the final overlay.base ref.
 	SnapshotCfg func(overlayRef string) ([]byte, error)
 
 	Quiescer Quiescer
 	Logf     func(string, ...any)
 }
 
-// Outputs describes what was written.
-//
-//   - SnapshotPath is the local <out_dir>/<sid>.snapshot
-//   - OverlayPath is the local <out_dir>/<sha256>.overlay
-//     (only set in --output mode; --upload skips this and uses Upload())
-//   - OverlaySha256 is the hex-encoded SHA256 of the overlay (also embedded
-//     in OverlayPath as basename)
+// Outputs describes what was produced. Refs are scheme-tagged
+// (file://<sha>.ext | manifest://<key>); Path is the local file (file mode
+// only, "" for upload). The handler maps these into the ctl.Response.
 type Outputs struct {
-	SnapshotPath   string
-	SnapshotSha256 string // --output mode: content digest naming <sha256>.snapshot
-	OverlayPath    string
-	OverlaySha256  string
+	OverlayRef   string
+	OverlayPath  string
+	SnapshotRef  string
+	SnapshotPath string
 
 	MemorySize       uint64
 	MemoryResident   uint64
@@ -73,14 +67,15 @@ type Outputs struct {
 	WallclockDumpMs  int64
 }
 
-// Take runs the snapshot sequence (§6.2 T2-T8).
+// Take runs the snapshot sequence (§6.2 T2-T8) and streams the two large
+// artifacts (blk1 overlay, memory+ZIP bundle) through the sink — never staging
+// them in the /run tmpfs. Only CH's small config.json/state.json land in
+// StagingDir. The overlay is absorbed first so snapshot.cfg can carry its final
+// overlay.base ref.
 //
-// Caller responsibility:
-//   - Set up StagingDir; remove on cleanup
-//   - Pre-build a SnapshotCfg builder (the function takes the final overlay_ref)
-//   - For --output mode pass outDir; for --upload caller passes empty outDir
-//     and uses Upload() afterward to ingest the staged <sid>.snapshot
-func Take(s Sources, outDir string, resumeAfter bool) (*Outputs, error) {
+// Caller responsibility: create/remove StagingDir; supply the sink
+// (fileSink for --output, ingestSink for --upload) and the SnapshotCfg builder.
+func Take(s Sources, sink SnapshotSink, resumeAfter bool) (*Outputs, error) {
 	logf := s.Logf
 	if logf == nil {
 		logf = func(string, ...any) {}
@@ -91,11 +86,13 @@ func Take(s Sources, outDir string, resumeAfter bool) (*Outputs, error) {
 	if s.SnapshotCfg == nil {
 		return nil, fmt.Errorf("snapshot: nil SnapshotCfg builder")
 	}
-	out := &Outputs{
-		MemorySize: uint64(s.MemfdSize),
+	if sink == nil {
+		return nil, fmt.Errorf("snapshot: nil sink")
 	}
+	ctx := context.Background()
+	out := &Outputs{MemorySize: uint64(s.MemfdSize)}
 
-	// T2a: pause CH
+	// T2a: pause CH.
 	pauseStart := time.Now()
 	if err := CHPause(s.APISock); err != nil {
 		return nil, fmt.Errorf("CH pause: %w", err)
@@ -103,24 +100,25 @@ func Take(s Sources, outDir string, resumeAfter bool) (*Outputs, error) {
 	pausedAt := time.Now()
 	resumed := false
 	defer func() {
-		// resume_after=false (destroy mode) is handled by caller via /vm.shutdown
-		// after Take returns, so here we only resume on the resume_after=true path
+		// resume_after=false (destroy mode) is handled by the caller via
+		// /vm.shutdown after Take returns; here we only resume on the
+		// resume_after=true path.
 		if !resumed && resumeAfter {
 			_ = CHResume(s.APISock)
 		}
 	}()
 	defer s.Quiescer.Resume() // unconditional
 
-	// T2b: quiesce backends
+	// T2b: quiesce backends (steady state before the dump).
 	s.Quiescer.Quiesce()
 
-	// T3: CH /vm.snapshot → staging dir
+	// T3: CH /vm.snapshot → staging dir. CH writes only config.json + state.json
+	// there (small); the multi-GiB memory + disk never touch the staging tmpfs —
+	// they stream straight to the sink.
 	dumpStart := time.Now()
 	if err := CHSnapshot(s.APISock, "file://"+s.StagingDir); err != nil {
 		return nil, fmt.Errorf("CH snapshot: %w", err)
 	}
-
-	// Read config.json + state.json into memory.
 	configJSON, err := os.ReadFile(filepath.Join(s.StagingDir, "config.json"))
 	if err != nil {
 		return nil, fmt.Errorf("read config.json: %w", err)
@@ -130,108 +128,55 @@ func Take(s Sources, outDir string, resumeAfter bool) (*Outputs, error) {
 		return nil, fmt.Errorf("read state.json: %w", err)
 	}
 
-	if outDir == "" {
-		// --upload mode: produce <sid>.snapshot in StagingDir; overlay
-		// is not materialized as a file (Upload() ingests blk1.diff
-		// directly from DiffPath).
-		outDir = s.StagingDir
+	// T4: overlay → sink, streamed from blk1.diff (no staging copy). Done first
+	// so snapshot.cfg below carries the final overlay.base ref.
+	diff, err := os.Open(s.DiffPath)
+	if err != nil {
+		return nil, fmt.Errorf("open blk1.diff: %w", err)
 	}
-	if err := os.MkdirAll(outDir, 0o755); err != nil {
-		return nil, fmt.Errorf("mkdir out: %w", err)
+	defer diff.Close()
+	dstat, err := diff.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("stat blk1.diff: %w", err)
 	}
-
-	// T4a: stream-hash blk1.diff → digest. Then T4b: sparse copy to
-	// <out_dir>/<digest>.overlay.
-	overlayRef := ""
-	if outDir != s.StagingDir {
-		// --output mode: materialize overlay locally with sha256 name.
-		digest, err := hashSparseFile(s.DiffPath)
-		if err != nil {
-			return nil, fmt.Errorf("hash blk1.diff: %w", err)
-		}
-		out.OverlaySha256 = digest
-		out.OverlayPath = filepath.Join(outDir, digest+".overlay")
-		if err := sparseCopyFile(s.DiffPath, out.OverlayPath); err != nil {
-			return nil, fmt.Errorf("sparse copy overlay: %w", err)
-		}
-		overlayRef = "file://" + digest + ".overlay"
-		logf("snapshot: %s.overlay written", digest[:12])
+	overlayHoles, err := walkHolesCodec(int(diff.Fd()), dstat.Size())
+	if err != nil {
+		return nil, fmt.Errorf("overlay holes: %w", err)
 	}
-	// --upload path: caller's Upload() ingests blk1.diff and patches
-	// snapshot.cfg's overlay.base = manifest://<key>; we still need a
-	// placeholder here so the ZIP can be built. The caller will rewrite
-	// overlay.base post-upload before ingesting <sid>.snapshot.
-	if overlayRef == "" {
-		overlayRef = "file://placeholder.overlay" // patched by Upload()
+	out.OverlayRef, out.OverlayPath, err = sink.AbsorbOverlay(ctx, diff, overlayHoles)
+	if err != nil {
+		return nil, fmt.Errorf("absorb overlay: %w", err)
 	}
 
-	// T5: build snapshot.cfg with overlay_ref filled in.
-	snapshotCfg, err := s.SnapshotCfg(overlayRef)
+	// T5: snapshot.cfg (final overlay ref) → ZIP trailer.
+	snapshotCfg, err := s.SnapshotCfg(out.OverlayRef)
 	if err != nil {
 		return nil, fmt.Errorf("build snapshot.cfg: %w", err)
 	}
-
-	// T6: sparse copy memory + ZIP append. Write to a working path first; in
-	// --output mode finalize to <sha256>.snapshot + a <sid>.snapshot symlink so
-	// file-mode from_refs chains reference an immutable, content-addressed name
-	// (docs/sandbox.md §6.1). --upload writes <sid>.snapshot in StagingDir and
-	// Upload() ingests it (named by manifest key), so no rename there.
-	isOutput := outDir != s.StagingDir
-	workPath := filepath.Join(outDir, s.SandboxID+".snapshot")
-	if isOutput {
-		workPath = filepath.Join(outDir, s.SandboxID+".snapshot.partial")
-	}
-	snapOut, err := os.Create(workPath)
-	if err != nil {
-		return nil, fmt.Errorf("create snapshot: %w", err)
-	}
-	memCopied, err := SparseCopy(snapOut, s.MemfdFD, s.MemfdSize)
-	if err != nil {
-		snapOut.Close()
-		return nil, fmt.Errorf("sparse copy memory: %w", err)
-	}
-	out.MemoryResident = uint64(memCopied)
-
-	// T6c: append ZIP at offset = memfdSize.
-	if _, err := AppendZIP(snapOut, s.MemfdSize, map[string][]byte{
+	zipBytes, err := BuildZIP(map[string][]byte{
 		"config.json":  configJSON,
 		"state.json":   stateJSON,
 		"snapshot.cfg": snapshotCfg,
-	}); err != nil {
-		snapOut.Close()
-		return nil, fmt.Errorf("append ZIP: %w", err)
+	})
+	if err != nil {
+		return nil, fmt.Errorf("build zip: %w", err)
 	}
-	if err := snapOut.Sync(); err != nil {
-		snapOut.Close()
-		return nil, fmt.Errorf("fsync snapshot: %w", err)
-	}
-	snapOut.Close()
-	out.SnapshotPath = workPath
 
-	if isOutput {
-		// Content-addressed name (skip-holes digest) + <sid>.snapshot symlink.
-		digest, err := hashSparseFile(workPath)
-		if err != nil {
-			return nil, fmt.Errorf("hash snapshot: %w", err)
-		}
-		finalPath := filepath.Join(outDir, digest+".snapshot")
-		if err := os.Rename(workPath, finalPath); err != nil {
-			return nil, fmt.Errorf("rename snapshot: %w", err)
-		}
-		linkPath := filepath.Join(outDir, s.SandboxID+".snapshot")
-		_ = os.Remove(linkPath)
-		if err := os.Symlink(digest+".snapshot", linkPath); err != nil {
-			return nil, fmt.Errorf("symlink %s.snapshot: %w", s.SandboxID, err)
-		}
-		out.SnapshotPath = finalPath
-		out.SnapshotSha256 = digest
-		logf("snapshot: %s.snapshot → %s.snapshot, memory_resident=%d", s.SandboxID, digest[:12], memCopied)
-	} else {
-		logf("snapshot: %s.snapshot written, memory_resident=%d", s.SandboxID, memCopied)
+	// T6: [memory][ZIP] bundle → sink, streamed from the memfd (CH paused, so
+	// the mapping is stable); only resident pages are read/transferred.
+	memHoles, err := walkHolesCodec(s.MemfdFD, s.MemfdSize)
+	if err != nil {
+		return nil, fmt.Errorf("memory holes: %w", err)
+	}
+	out.MemoryResident = residentBytes(s.MemfdSize, memHoles)
+	out.SnapshotRef, out.SnapshotPath, err = sink.AbsorbBundle(
+		ctx, memfdReader(s.MemfdFD, s.MemfdSize), memHoles, bytes.NewReader(zipBytes))
+	if err != nil {
+		return nil, fmt.Errorf("absorb bundle: %w", err)
 	}
 	dumpEnd := time.Now()
 
-	// T8: resume (only when caller asked; destroy path handled by caller)
+	// T8: resume (destroy path handled by caller).
 	if resumeAfter {
 		if err := CHResume(s.APISock); err != nil {
 			return nil, fmt.Errorf("CH resume: %w", err)
@@ -241,6 +186,7 @@ func Take(s Sources, outDir string, resumeAfter bool) (*Outputs, error) {
 
 	out.WallclockPauseMs = pausedAt.Sub(pauseStart).Milliseconds()
 	out.WallclockDumpMs = dumpEnd.Sub(dumpStart).Milliseconds()
+	logf("snapshot: overlay=%s snapshot=%s memory_resident=%d", out.OverlayRef, out.SnapshotRef, out.MemoryResident)
 	return out, nil
 }
 
@@ -299,27 +245,4 @@ func hashSparseFile(path string) (string, error) {
 	binary.LittleEndian.PutUint64(hdr[0:8], uint64(size))
 	h.Write(hdr[:8])
 	return hex.EncodeToString(h.Sum(nil)), nil
-}
-
-// sparseCopyFile copies src to dst preserving SEEK_DATA/SEEK_HOLE
-// extents. Logical size of dst equals src.
-func sparseCopyFile(srcPath, dstPath string) error {
-	src, err := os.Open(srcPath)
-	if err != nil {
-		return err
-	}
-	defer src.Close()
-	st, err := src.Stat()
-	if err != nil {
-		return err
-	}
-	dst, err := os.Create(dstPath)
-	if err != nil {
-		return err
-	}
-	defer dst.Close()
-	if _, err := SparseCopy(dst, int(src.Fd()), st.Size()); err != nil {
-		return err
-	}
-	return dst.Sync()
 }
