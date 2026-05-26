@@ -13,27 +13,32 @@ import (
 
 func TestParsePayload(t *testing.T) {
 	cases := []struct {
-		name    string
-		in      string
-		wantMAC string
-		wantIP  string
-		wantMTU int
-		wantFD  int
-		wantErr string
+		name      string
+		in        string
+		wantMAC   string
+		wantIP    string
+		wantMTU   int
+		wantFD    int
+		wantNetns int
+		wantErr   string
 	}{
 		{name: "full", in: "mac=02:00:00:00:80:01 mtu=1500 ip=169.254.1.1 fd=1\x00",
 			wantMAC: "02:00:00:00:80:01", wantIP: "169.254.1.1", wantMTU: 1500, wantFD: 1},
 		{name: "ignores unknown keys + trailing bytes", in: "port=3 mac=aa:bb:cc:dd:ee:ff fd=2\x00garbage after nul",
 			wantMAC: "aa:bb:cc:dd:ee:ff", wantFD: 2},
+		{name: "netns fd", in: "mac=02:00:00:00:80:01 fd=1 netns_fd=1\x00",
+			wantMAC: "02:00:00:00:80:01", wantFD: 1, wantNetns: 1},
+		{name: "netns_fd=0 explicit", in: "fd=1 netns_fd=0\x00", wantFD: 1, wantNetns: 0},
 		{name: "missing fd", in: "mac=x ip=y\x00", wantErr: "missing required fd"},
 		{name: "bad fd", in: "fd=zero\x00", wantErr: "invalid fd"},
 		{name: "zero fd", in: "fd=0\x00", wantErr: "invalid fd"},
+		{name: "netns out of range", in: "fd=1 netns_fd=2\x00", wantErr: "netns_fd"},
 		{name: "token without =", in: "mac=x bogus fd=1\x00", wantErr: "no '='"},
 		{name: "value may contain =", in: "k=a=b fd=1\x00", wantFD: 1}, // first = splits; rest kept (unknown key)
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			meta, fdCount, err := parsePayload([]byte(tc.in))
+			meta, fdCount, netnsCount, err := parsePayload([]byte(tc.in))
 			if tc.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
 					t.Fatalf("want error %q, got %v", tc.wantErr, err)
@@ -43,8 +48,8 @@ func TestParsePayload(t *testing.T) {
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
-			if meta.MAC != tc.wantMAC || meta.IP != tc.wantIP || meta.MTU != tc.wantMTU || fdCount != tc.wantFD {
-				t.Fatalf("got mac=%q ip=%q mtu=%d fd=%d", meta.MAC, meta.IP, meta.MTU, fdCount)
+			if meta.MAC != tc.wantMAC || meta.IP != tc.wantIP || meta.MTU != tc.wantMTU || fdCount != tc.wantFD || netnsCount != tc.wantNetns {
+				t.Fatalf("got mac=%q ip=%q mtu=%d fd=%d netns_fd=%d", meta.MAC, meta.IP, meta.MTU, fdCount, netnsCount)
 			}
 		})
 	}
@@ -91,7 +96,7 @@ func TestRecvFd_OK(t *testing.T) {
 	defer dn.Close()
 
 	sendMsg(t, a, "mac=02:00:00:00:80:01 mtu=1450 ip=169.254.4.1 fd=1\x00", int(dn.Fd()))
-	files, meta, err := RecvFd(b)
+	files, netnsFile, meta, err := RecvFd(b)
 	if err != nil {
 		t.Fatalf("RecvFd: %v", err)
 	}
@@ -103,8 +108,51 @@ func TestRecvFd_OK(t *testing.T) {
 	if len(files) != 1 {
 		t.Fatalf("got %d files, want 1", len(files))
 	}
+	if netnsFile != nil {
+		netnsFile.Close()
+		t.Fatalf("got netns fd without netns_fd= in payload")
+	}
 	if meta.MAC != "02:00:00:00:80:01" || meta.IP != "169.254.4.1" || meta.MTU != 1450 {
 		t.Fatalf("meta = %+v", meta)
+	}
+}
+
+// TestRecvFd_Netns: payload declares netns_fd=1, so the trailing fd is split
+// off as the netns reference (docs/tapfd.md §4.6 / §4.4 step 5). Any two fds
+// stand in for [tap, netns]; the split is positional, not content-based.
+func TestRecvFd_Netns(t *testing.T) {
+	a, b := socketPair(t)
+	defer a.Close()
+	defer b.Close()
+	tapFD, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tapFD.Close()
+	netnsFD, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer netnsFD.Close()
+
+	sendMsg(t, a, "mac=02:00:00:00:80:01 fd=1 netns_fd=1\x00", int(tapFD.Fd()), int(netnsFD.Fd()))
+	files, netnsFile, _, err := RecvFd(b)
+	if err != nil {
+		t.Fatalf("RecvFd: %v", err)
+	}
+	defer func() {
+		for _, f := range files {
+			f.Close()
+		}
+		if netnsFile != nil {
+			netnsFile.Close()
+		}
+	}()
+	if len(files) != 1 {
+		t.Fatalf("got %d tap files, want 1", len(files))
+	}
+	if netnsFile == nil {
+		t.Fatal("netns_fd=1 declared but no netns file returned")
 	}
 }
 
@@ -119,7 +167,7 @@ func TestRecvFd_CountMismatch(t *testing.T) {
 	defer dn.Close()
 
 	sendMsg(t, a, "fd=2\x00", int(dn.Fd())) // declares 2, sends 1
-	files, _, err := RecvFd(b)
+	files, _, _, err := RecvFd(b)
 	if err == nil || !strings.Contains(err.Error(), "fd=2") {
 		for _, f := range files {
 			f.Close()
@@ -129,11 +177,11 @@ func TestRecvFd_CountMismatch(t *testing.T) {
 }
 
 func TestAcquire_Errors(t *testing.T) {
-	if _, _, err := Acquire(context.Background(), nil, time.Second); err == nil {
+	if _, _, _, err := Acquire(context.Background(), nil, time.Second); err == nil {
 		t.Fatal("empty argv: want error")
 	}
 	// Helper exits non-zero without handing over a fd (§5.1: must fail).
-	if _, _, err := Acquire(context.Background(), []string{"sh", "-c", "exit 3"}, 2*time.Second); err == nil {
+	if _, _, _, err := Acquire(context.Background(), []string{"sh", "-c", "exit 3"}, 2*time.Second); err == nil {
 		t.Fatal("non-zero helper: want error")
 	}
 }

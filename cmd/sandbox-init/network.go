@@ -30,6 +30,30 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// bringUpLoopback sets IFF_UP on the `lo` interface. The kernel creates the
+// loopback device DOWN; bringing it up makes the kernel auto-assign the
+// host-scope 127.0.0.1/8 and ::1/128, so no RTM_NEWADDR is needed. Done
+// unconditionally on cold start (independent of any NetworkSpec) — guest apps
+// that bind localhost would otherwise hit EADDRNOTAVAIL.
+func bringUpLoopback() error {
+	ifindex, err := readIfindex("lo")
+	if err != nil {
+		return fmt.Errorf("ifindex lo: %w", err)
+	}
+	fd, err := unix.Socket(unix.AF_NETLINK, unix.SOCK_RAW|unix.SOCK_CLOEXEC, unix.NETLINK_ROUTE)
+	if err != nil {
+		return fmt.Errorf("netlink socket: %w", err)
+	}
+	defer unix.Close(fd)
+	if err := unix.Bind(fd, &unix.SockaddrNetlink{Family: unix.AF_NETLINK}); err != nil {
+		return fmt.Errorf("netlink bind: %w", err)
+	}
+	if err := nlSendLinkUp(fd, 1, ifindex, 0); err != nil {
+		return fmt.Errorf("link up lo: %w", err)
+	}
+	return nil
+}
+
 // applyNetwork configures the guest IP layer on cold start: a fresh iface,
 // additive (RTM_NEWADDR with NLM_F_EXCL, route with NLM_F_EXCL).
 func applyNetwork(spec *proto.NetworkSpec) error { return applyNetworkMode(spec, false) }

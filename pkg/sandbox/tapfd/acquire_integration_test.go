@@ -151,7 +151,7 @@ func TestAcquireHandoffIT(t *testing.T) {
 	t.Setenv("GO_TAPFD_HELPER", "1") // inherited by the re-exec'd helper child
 	argv := []string{os.Args[0], "-test.run=TestHelperProcess", "--", name}
 
-	f, meta, err := Acquire(context.Background(), argv, 5*time.Second)
+	f, _, meta, err := Acquire(context.Background(), argv, 5*time.Second)
 	if err != nil {
 		t.Fatalf("Acquire: %v", err)
 	}
