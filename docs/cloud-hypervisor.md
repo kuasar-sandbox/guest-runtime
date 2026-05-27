@@ -69,7 +69,7 @@ CH `--memory-zone` 增加两个 key:
 
 ```
 cloud-hypervisor \
-  --memory-zone size=8G,shared=on,fd=3,uffd_socket=/run/<sid>/uffd.sock \
+  --memory-zone size=8G,shared=on,fd=3,uffd_socket=/run/sandbox/<sid>/uffd.sock \
   ...
 # fd=3 ← memfd from sandbox-ctl via cmd.ExtraFiles[0]
 ```
@@ -341,8 +341,8 @@ vsock 在 host 端通过 hybrid 代理映射到 UDS:
 
 ```
 guest VM (CID=3) → CID=2 (host) → CH 把流量转发到
-  /run/<sid>/vsock.sock_<port>     guest → host 方向(host 在该 UDS 上 listen)
-  /run/<sid>/vsock.sock + "CONNECT <port>\n" 行    host → guest 方向(guest 在 port 上 listen)
+  /run/sandbox/<sid>/vsock.sock_<port>     guest → host 方向(host 在该 UDS 上 listen)
+  /run/sandbox/<sid>/vsock.sock + "CONNECT <port>\n" 行    host → guest 方向(guest 在 port 上 listen)
 ```
 
 host → guest 方向需要在第一笔写入发 ASCII `CONNECT <port>\n`,CH 回一行
