@@ -44,7 +44,7 @@ func (e *envFlag) Set(v string) error {
 func execCmd(args []string) int {
 	fs := flag.NewFlagSet("exec", flag.ContinueOnError)
 	sandboxID := fs.String("sandbox-id", "", "target sandbox id (required)")
-	runDir := fs.String("run-dir", "", "host runtime state dir (overrides SANDBOX_RUN_DIR env; default /run)")
+	runRoot := fs.String("run-root", "", "tmpfs run root (overrides SANDBOX_RUN_ROOT env; default /run/sandbox)")
 	cwd := fs.String("cwd", "", "working directory inside the sandbox (default: guest root)")
 	var env envFlag
 	fs.Var(&env, "env", "environment variable KEY=VALUE (repeatable)")
@@ -101,12 +101,12 @@ func execCmd(args []string) int {
 		return 2
 	}
 
-	rd := *runDir
+	rd := *runRoot
 	if rd == "" {
-		rd = os.Getenv("SANDBOX_RUN_DIR")
+		rd = os.Getenv("SANDBOX_RUN_ROOT")
 	}
 	if rd == "" {
-		rd = "/run"
+		rd = "/run/sandbox"
 	}
 
 	envMap := make(map[string]string, len(env))

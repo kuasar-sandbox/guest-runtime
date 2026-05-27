@@ -45,7 +45,8 @@ type Options struct {
 	Fetcher             fetch.Fetcher           // required when any URI is manifest://; caller owns lifecycle
 	SandboxID           string
 	CHBinary            string
-	RuntimeRoot         string
+	RuntimeRoot         string     // tmpfs run root; "/run/sandbox" by default
+	BaseRoot            string     // on-disk base root (fresh overlay diff); "/var/lib/sandbox" by default
 	StatsJSONPath       string     // if non-empty, dump uffd + per-backend stats here on exit
 	StdioMode           stdio.Mode // CH process stdio wiring; see pkg/sandbox/stdio
 
@@ -72,7 +73,10 @@ func Run(ctx context.Context, opts Options) (int, error) {
 		opts.SandboxID = "rs-default"
 	}
 	if opts.RuntimeRoot == "" {
-		opts.RuntimeRoot = "/run"
+		opts.RuntimeRoot = "/run/sandbox"
+	}
+	if opts.BaseRoot == "" {
+		opts.BaseRoot = sandbox.DefaultBaseRoot
 	}
 	if opts.CHBinary == "" {
 		opts.CHBinary = "cloud-hypervisor"
@@ -371,18 +375,36 @@ func Run(ctx context.Context, opts Options) (int, error) {
 	baseStream := fetch.NewLayered(diskLayers...)
 	baseReader := vhost.NewStreamReader(ctx, baseStream, int64(baseStream.Size()))
 	defer baseReader.Close()
-	_, diffPath, ok := sandbox.SchemeAndPath(snapCfg.Boot.Root.Overlay.Diff)
-	if !ok {
-		return -1, fmt.Errorf("bad overlay.diff: %s", snapCfg.Boot.Root.Overlay.Diff)
+	// Restore always builds a FRESH writable diff on top of the snapshot's
+	// overlay (baseReader). Empty diff path → auto-default to the on-disk base
+	// dir; an auto-defaulted diff is removed when this run ends. The base
+	// provides the ext4, so a blank diff sized to it is mountable.
+	diffURI := snapCfg.Boot.Root.Overlay.Diff
+	ownedDiff := diffURI == ""
+	if ownedDiff {
+		baseDir := sandbox.DefaultBaseDir(opts.BaseRoot, opts.SandboxID)
+		if err := os.MkdirAll(baseDir, 0o755); err != nil {
+			return -1, fmt.Errorf("mkdir base dir %s: %w", baseDir, err)
+		}
+		diffURI = sandbox.DefaultDiffURI(opts.BaseRoot, opts.SandboxID)
+		defer func() {
+			_ = os.Remove(filepath.Join(baseDir, opts.SandboxID+".overlay.diff"))
+			_ = os.Remove(baseDir)
+		}()
 	}
-	overlaySize, err := snapCfg.OverlaySize()
+	_, diffPath, ok := sandbox.SchemeAndPath(diffURI)
+	if !ok {
+		return -1, fmt.Errorf("bad overlay.diff: %s", diffURI)
+	}
+	diffSize, err := snapCfg.DiffSizeBytes()
 	if err != nil {
 		return -1, err
 	}
-	if baseReader.Size() > overlaySize {
-		overlaySize = baseReader.Size()
+	createSize, err := sandbox.PrepareDiff(diffPath, snapCfg.Boot.Root.Overlay.DiffTemplate, baseReader.Size(), diffSize)
+	if err != nil {
+		return -1, fmt.Errorf("prepare overlay diff: %w", err)
 	}
-	cow, err := vhost.OpenBlockCOW(diffPath, baseReader, overlaySize)
+	cow, err := vhost.OpenBlockCOW(diffPath, baseReader, createSize)
 	if err != nil {
 		return -1, fmt.Errorf("open BlockCOW: %w", err)
 	}
@@ -470,6 +492,7 @@ func Run(ctx context.Context, opts Options) (int, error) {
 		SnapCfg:     &snapCfg,
 		ManifestCfg: opts.ManifestCfg,
 		DiffPath:    diffPath,
+		OwnedDiff:   ownedDiff,
 
 		BuildCmd: func(e sandbox.CmdEnv) (*exec.Cmd, func(), error) {
 			// CH 51 `--restore source_url=file://<dir>` replaces

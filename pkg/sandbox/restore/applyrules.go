@@ -172,10 +172,9 @@ func ApplyRules(host *sandbox.SandboxConfig, snap *SnapshotCfg, snapshotPath str
 	//    snapshot.cfg.
 	out.Boot.Root.Overlay.Base = snap.Boot.Root.Overlay.Base
 
-	// 6. boot.root.overlay.diff: required (host-localized).
-	if host.Boot.Root.Overlay.Diff == "" {
-		return nil, errors.New("boot.root.overlay.diff is required in restore mode")
-	}
+	// 6. boot.root.overlay.diff: optional (host-localized). Empty → restore
+	// auto-defaults a fresh diff under the on-disk base dir (restore.go),
+	// sized to the snapshot's overlay base.
 
 	// boot.kernel / boot.cmdline / launch.* silently ignored — fields
 	// stay as host yaml provided, but lifecycle.go won't use them on

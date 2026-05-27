@@ -129,7 +129,7 @@ func TestApplyRules_NetworkTAPRequired(t *testing.T) {
 	}
 }
 
-func TestApplyRules_OverlayDiffRequired(t *testing.T) {
+func TestApplyRules_OverlayDiffOptional(t *testing.T) {
 	dir := t.TempDir()
 	rtPath := filepath.Join(dir, "runtime.erofs")
 	rtDigest := writeFile(t, rtPath, []byte("runtime body"))
@@ -140,8 +140,14 @@ func TestApplyRules_OverlayDiffRequired(t *testing.T) {
 	host := &sandbox.SandboxConfig{}
 	host.Network.TAP = "tap0"
 
-	if _, err := ApplyRules(host, snap, filepath.Join(dir, "x.snapshot")); err == nil || !strings.Contains(err.Error(), "overlay.diff") {
-		t.Fatalf("expected overlay.diff required error, got %v", err)
+	// An empty overlay.diff is now allowed: restore auto-defaults a fresh diff
+	// under the on-disk base dir (sized to the snapshot's overlay base).
+	merged, err := ApplyRules(host, snap, filepath.Join(dir, "x.snapshot"))
+	if err != nil {
+		t.Fatalf("empty overlay.diff should be accepted, got %v", err)
+	}
+	if merged.Boot.Root.Overlay.Diff != "" {
+		t.Errorf("merged diff = %q, want empty (defaulted at runtime)", merged.Boot.Root.Overlay.Diff)
 	}
 }
 

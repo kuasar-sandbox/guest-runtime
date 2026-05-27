@@ -291,11 +291,19 @@ type OverlayConfig struct {
 	// state). May be file:// or manifest://. Empty for fresh sandboxes.
 	Base string `yaml:"base"`
 	// Diff is the local sparse ext4 file collecting writes since boot.
-	// file:// only. Created sparse if missing.
+	// file:// only. Optional: empty → auto-default to
+	// file://<base-dir>/<sid>.overlay.diff (on disk, see docs/sandbox.md §3.1).
+	// An auto-defaulted diff is removed when the sandbox ends; an explicitly
+	// set diff is never removed.
 	Diff string `yaml:"diff"`
-	// Size is the visible block-device size. Optional; defaults to
-	// max(base size if any, diff existing size) or 10 GiB if neither.
-	Size string `yaml:"size"`
+	// DiffTemplate, when set (file:// only), seeds a freshly-created diff by
+	// sparse-copying this pre-formatted ext4 image (so cold boot gets a
+	// mountable upper layer without mkfs). Ignored if the diff already exists.
+	DiffTemplate string `yaml:"diff_template"`
+	// DiffSize is the size of a freshly-created blank diff (no template, no
+	// base). Applied ONLY at creation; an existing diff keeps its own size.
+	// Optional; defaults to 1 GiB.
+	DiffSize string `yaml:"diff_size"`
 }
 
 // LaunchConfig overrides the container's default launch (which lives
@@ -504,17 +512,17 @@ func (c *SandboxConfig) CPUWeight() uint64 {
 	return uint64(w)
 }
 
-// OverlaySize returns the resolved visible block-device size for the
-// overlay (disk1) in bytes. If user didn't set Size, it defaults to
-// 10 GiB. Caller is responsible for cross-checking against existing
-// diff/base file sizes.
-func (c *SandboxConfig) OverlaySize() (int64, error) {
-	if c.Boot.Root.Overlay.Size == "" {
-		return 10 << 30, nil
+// DiffSizeBytes returns the size used when CREATING a fresh blank diff
+// (no template, no base). It never applies to an existing diff — that keeps
+// its own on-disk size (truncating it would corrupt its filesystem). If
+// unset, defaults to 1 GiB.
+func (c *SandboxConfig) DiffSizeBytes() (int64, error) {
+	if c.Boot.Root.Overlay.DiffSize == "" {
+		return 1 << 30, nil
 	}
-	v, err := util.ParseSize(c.Boot.Root.Overlay.Size)
+	v, err := util.ParseSize(c.Boot.Root.Overlay.DiffSize)
 	if err != nil {
-		return 0, fmt.Errorf("boot.root.overlay.size: %w", err)
+		return 0, fmt.Errorf("boot.root.overlay.diff_size: %w", err)
 	}
 	return int64(v), nil
 }
@@ -643,14 +651,30 @@ func (c *SandboxConfig) ValidateCold() error {
 			return err
 		}
 	}
-	if c.Boot.Root.Overlay.Diff == "" {
-		return errors.New("boot.root.overlay.diff is required")
+	// Diff is optional: empty → auto-defaulted to <base-dir>/<sid>.overlay.diff
+	// at runtime (lifecycle.go). If set, it must be an absolute file://.
+	if c.Boot.Root.Overlay.Diff != "" {
+		if err := requireFileAbs("boot.root.overlay.diff", c.Boot.Root.Overlay.Diff); err != nil {
+			return err
+		}
 	}
-	if err := requireFileAbs("boot.root.overlay.diff", c.Boot.Root.Overlay.Diff); err != nil {
+	if c.Boot.Root.Overlay.DiffTemplate != "" {
+		if err := requireFileAbs("boot.root.overlay.diff_template", c.Boot.Root.Overlay.DiffTemplate); err != nil {
+			return err
+		}
+	}
+	if _, err := c.DiffSizeBytes(); err != nil {
 		return err
 	}
-	if _, err := c.OverlaySize(); err != nil {
-		return err
+	// Cold boot needs a mountable ext4 source for the upper layer: a fresh
+	// blank diff is not a valid filesystem. Require at least one of
+	// diff_template, overlay.base, or an explicitly-provided diff path
+	// (assumed pre-formatted). The auto-default empty diff with neither is
+	// rejected here rather than failing as a guest mount error.
+	if c.Boot.Root.Overlay.DiffTemplate == "" &&
+		c.Boot.Root.Overlay.Base == "" &&
+		c.Boot.Root.Overlay.Diff == "" {
+		return errors.New("cold boot needs an ext4 source for the overlay upper: set boot.root.overlay.diff_template, boot.root.overlay.base, or an explicit boot.root.overlay.diff")
 	}
 
 	if (c.Network.TAP == "") == (c.Network.TapFD == nil) {

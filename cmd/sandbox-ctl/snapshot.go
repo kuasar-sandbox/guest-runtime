@@ -22,7 +22,7 @@ func snapshotCmd(args []string) int {
 	outDir := fs.String("output", "", "local output dir; produces <sid>.snapshot + <sha256>.overlay")
 	upload := fs.Bool("upload", false, "ingest snapshot bundle + overlay into manifest store; stdout = snapshot manifest key")
 	resume := fs.Bool("resume", false, "keep sandbox running after snapshot (default: destroy via /vm.shutdown)")
-	runDir := fs.String("run-dir", "", "host runtime state dir (overrides SANDBOX_RUN_DIR env; default /run)")
+	runRoot := fs.String("run-root", "", "tmpfs run root (overrides SANDBOX_RUN_ROOT env; default /run/sandbox)")
 	timeoutS := fs.Int("timeout", 0, "seconds to wait for snapshot_done (0 = wait indefinitely; upload can take minutes)")
 
 	if err := fs.Parse(args); err != nil {
@@ -56,12 +56,12 @@ func snapshotCmd(args []string) int {
 		}
 	}
 
-	rd := *runDir
+	rd := *runRoot
 	if rd == "" {
-		rd = os.Getenv("SANDBOX_RUN_DIR")
+		rd = os.Getenv("SANDBOX_RUN_ROOT")
 	}
 	if rd == "" {
-		rd = "/run"
+		rd = "/run/sandbox"
 	}
 
 	ctlSock := filepath.Join(rd, *sandboxID, "ctl.sock")

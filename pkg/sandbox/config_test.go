@@ -107,7 +107,7 @@ func TestMemoryParsing(t *testing.T) {
 	}
 }
 
-func TestOverlaySize_Defaults(t *testing.T) {
+func TestDiffSize_Defaults(t *testing.T) {
 	cfg, _ := Load(writeYAML(t, `
 resources:
   capacity: { cpu: 1, memory: 256MiB }
@@ -121,12 +121,12 @@ boot:
       diff: file:///d
 launch: { exec: /bin/true }
 `))
-	got, err := cfg.OverlaySize()
+	got, err := cfg.DiffSizeBytes()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got != 10<<30 {
-		t.Errorf("default overlay size = %d, want 10GiB", got)
+	if got != 1<<30 {
+		t.Errorf("default diff size = %d, want 1GiB", got)
 	}
 }
 

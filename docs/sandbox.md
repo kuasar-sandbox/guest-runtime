@@ -45,10 +45,21 @@ handler、cgroup/balloon 联动(含 host 端 BalloonController)、与 node-ctl
        │   blk0 / blk1 → sandbox-ctl backend     │
        └─────────────────────────────────────────┘
 
-       /run/<sid>/        ch.sock  blk0.sock  blk1.sock  uffd.sock  ctl.sock  vsock.sock (+ _5000)
-       /run/<sid>/blk1.diff                  local ext4 COW upper file (copied from a template)
-       /var/lib/sandbox/<sid>/snap/          snapshot / restore staging dir
+       /run/sandbox/<sid>/   ch.sock  blk0.sock  blk1.sock  uffd.sock  ctl.sock  vsock.sock (+ _5000)
+                             snap-stage/ (snapshot) | snap-state/ (restore)   tmpfs run dir
+       /var/lib/sandbox/<sid>/<sid>.overlay.diff    overlay writable upper layer (ext4 sparse, on disk)
 ```
+
+Two host-side roots, kept distinct (overridable via --run-root / SANDBOX_RUN_ROOT
+and --base-root / SANDBOX_BASE_ROOT):
+
+- **run dir** `/run/sandbox/<sid>/` (tmpfs): sockets + the small CH-metadata
+  staging (`snap-stage` for snapshot, `snap-state` for restore — config.json /
+  state.json only; the multi-GiB memory/overlay never land here).
+- **base dir** `/var/lib/sandbox/<sid>/` (disk): the overlay writable layer.
+  The writable layer must be on disk, never the tmpfs run dir. An auto-created
+  diff lives and dies with the sandbox; an explicitly-configured diff is left
+  untouched. Snapshot **output** goes to `--output <dir>` (disk), separate again.
 
 sandbox-ctl 是 CH 的父进程。CH 退出 → sandbox-ctl 收 SIGCHLD → 优雅 cleanup →
 自身退出。退出码:优先用 guest 经 vsock 上报的 `app_exited{code, term_signal}`
@@ -110,10 +121,13 @@ sandbox-ctl run [flags]
                           1. SANDBOX_CH_PATH env(若非空)
                           2. <sandbox-ctl 自身可执行文件目录>/cloud-hypervisor
                           3. exec.LookPath("cloud-hypervisor")(走 PATH)
-  --run-dir <dir>         host runtime state 目录(SANDBOX_RUN_DIR env;默认 /run)。
-                          sandbox-ctl 在 <run-dir>/<sid>/ 下创建 ch.sock /
-                          blk{0,1}.sock / vsock.sock / uffd.sock / ctl.sock 与
-                          blk1.diff 默认存放位置
+  --run-root <dir>        tmpfs run 根(SANDBOX_RUN_ROOT env;默认 /run/sandbox)。
+                          sandbox-ctl 在 <run-root>/<sid>/ 下创建 ch.sock /
+                          blk{0,1}.sock / vsock.sock / uffd.sock / ctl.sock 及
+                          snap-stage/snap-state(CH 元数据中转)
+  --base-root <dir>       磁盘 base 根(SANDBOX_BASE_ROOT env;默认 /var/lib/sandbox)。
+                          overlay 写层默认落在 <base-root>/<sid>/<sid>.overlay.diff
+                          (可写层必须落盘,不能用 tmpfs run 根)
 
   # 资源覆盖(运维临时调整)
   --cgroup-path <path>    覆盖 control.cgroup_path
@@ -224,8 +238,8 @@ sandbox-ctl snapshot [flags]
                         manifest://<key>;stdout 输出 snapshot manifest key
   --resume              默认 false(快照后销毁沙箱);`--resume` / `--resume=true`
                         保留沙箱继续运行
-  --run-dir <dir>       与 run 一致;SANDBOX_RUN_DIR env;默认 /run。snapshot 通过
-                        <run-dir>/<sid>/ctl.sock 联系运行中的 sandbox-ctl run 进程
+  --run-root <dir>      与 run 一致;SANDBOX_RUN_ROOT env;默认 /run/sandbox。snapshot 通过
+                        <run-root>/<sid>/ctl.sock 联系运行中的 sandbox-ctl run 进程
   --timeout <sec>       等 snapshot_done 的客户端超时。默认 0 = 无限期等待:一次真实
                         的多 GiB 内存 + overlay ingest 上传动辄数分钟,固定客户端
                         deadline 会误杀一个仍在健康推进的上传。需要兜底时显式
@@ -258,8 +272,8 @@ snapshot.cfg 的 overlay.base 引用与实际数据位置脱节。
 sandbox-ctl exec --sandbox-id <sid> [flags] -- CMD [ARGS...]
 
   --sandbox-id <sid>    必填,目标 sandbox
-  --run-dir <dir>       与 run 一致;SANDBOX_RUN_DIR env;默认 /run。exec 通过
-                        <run-dir>/<sid>/ctl.sock 联系运行中的 sandbox-ctl run 进程
+  --run-root <dir>      与 run 一致;SANDBOX_RUN_ROOT env;默认 /run/sandbox。exec 通过
+                        <run-root>/<sid>/ctl.sock 联系运行中的 sandbox-ctl run 进程
   --cwd <dir>           命令在 guest 内的工作目录(默认 guest 根)
   --env KEY=VAL         追加/覆盖一个环境变量,可重复。在一个默认 PATH 基线上叠加
                         (exec 命令不继承应用的 image env,故 PATH 总是注入,裸命令
@@ -342,8 +356,15 @@ boot:
                                               # config.json 定义默认容器启动配置
     overlay:                                  # 自动挂为 disk1(vhost-user-blk rw)
       base: file:///container-snapshot.ext4   # 可选,快照恢复时常用 manifest://
-      diff: file:///run/<sid>/blk1.diff       # 始终 file://;不存在则创建空 sparse
-      size: 10GiB                             # 可选,默认 10GiB(若 overlay.base 较大则取较大者)
+      diff: ""                                # 可选,file:// only。空 → 默认落盘
+                                              # file:///var/lib/sandbox/<sid>/<sid>.overlay.diff
+                                              # (自动创建的随沙箱销毁;显式给定的不删)
+      diff_template: file:///opt/sandbox/overlay-templates/basic-1G.ext4
+                                              # 可选,file:// only。diff 不存在时从该预格式化
+                                              # ext4 稀疏复制(冷启动得到可挂载上层,免 mkfs);
+                                              # 已存在的 diff 忽略此项
+      diff_size: 1GiB                         # 可选,默认 1GiB。仅在"创建空白 diff"(无模板、
+                                              # 无 base)时用于定尺寸;已有 diff 保持自身大小
 
 # 容器应用启动配置(覆盖 boot.root.base 内嵌的 config.json 默认值)
 launch:
@@ -450,7 +471,8 @@ sandbox-init 以 flush-and-replace 重配网卡(克隆取新 L3 身份,见 §恢
 | `boot.runtime` | ✓ | ✗ | sandbox-runtime.erofs 节点级共享,DAX 直接用 host 文件 |
 | `boot.root.base` | ✓ | ✓ | 跨 sandbox 复用率高,manifest 化收益最大 |
 | `boot.root.overlay.base` | ✓ | ✓ | 快照恢复时常用 manifest:// |
-| `boot.root.overlay.diff` | ✓ (only) | ✗ | 运行时 dirty 数据,本地 sparse 文件 |
+| `boot.root.overlay.diff` | ✓ (only) | ✗ | 运行时 dirty 数据,本地 sparse 文件;可选,空→落盘 base 目录 |
+| `boot.root.overlay.diff_template` | ✓ (only) | ✗ | 预格式化 ext4 模板,seed 新建 diff |
 | `run --restore=<ref>` | ✓ | ✓ | `<sid>.snapshot` 文件路径 / manifest://<key> |
 
 ### 3.3 flattened image 内嵌 config.json
@@ -545,8 +567,8 @@ boot:
 | `control.{cgroup_path,controller}` | host-localized 资源策略 |
 | `overhead` / `watermark_high` / `startup_burst` / `allocatable` | 同上,host 资源策略 |
 | `boot.kernel` / `boot.cmdline` | restore 不重新 boot,kernel 在 snapshot 内存中 |
-| `boot.root.overlay.diff` | host 本地写层路径,restore 时新建一个 |
-| `boot.root.overlay.size` | 不影响内容,沿用 capacity 默认 / yaml 提供 |
+| `boot.root.overlay.diff` | host 本地写层路径,restore 时新建一个(空→落盘 base 目录) |
+| `boot.root.overlay.diff_size` | 仅"创建空白 diff"时用;restore 的新 diff 尺寸取 base 大小,与之无关 |
 
 **版本字段**:不引入显式 schema version。snapshot 是 ephemeral 资产
 (host 重启即丢,跨主机复制只在调度场景),hard cut over;旧版 snapshot 解析
@@ -647,8 +669,9 @@ CPU 维度本质比内存简单——没有不可逆失败、调整即时、释�
 ```
 T0   sandbox-ctl run --config sandbox.yaml 启动
 T1   解析 yaml(可选 --sandbox-id 覆盖)→ 构造完整 SandboxConfig
-T2   验证 TAP 存在,准备 /run/<sid>/ 目录
-T3   准备 blk1.diff 文件(若不存在则 truncate 到声明大小,稀疏文件)
+T2   验证 TAP 存在,准备 /run/sandbox/<sid>/ 目录
+T3   准备 overlay diff:已存在→原样用(绝不 truncate);不存在→从 diff_template 稀疏复制 /
+     按 base 大小新建 / 否则按 diff_size 新建空白稀疏文件(详见 §3.1)
 T4   动态控制模式:dial controller, send Admit, 收 grant 后继续(详见 §10)
 T5   cgroup setup:写 cgroup limits + 把自身 PID 加入 cgroup.procs
      (后续 fork 的 CH 自然在同 cgroup)
@@ -663,18 +686,18 @@ T6   memory 准备(统一模型,冷启动 + 恢复同):
          pageStates 切片初始全 Absent,ramSize/4KiB 个元素
          snapshotReader = ZeroSource(冷启动 sentinel)
 T7   构造 BlockReader for blk0(file 或 manifest)
-T8   起 blk0 backend goroutine:listen /run/<sid>/blk0.sock
+T8   起 blk0 backend goroutine:listen /run/sandbox/<sid>/blk0.sock
 T9   构造 BlockBaseReader for blk1.base(可能为空)
-T10  起 blk1 backend goroutine:listen /run/<sid>/blk1.sock
+T10  起 blk1 backend goroutine:listen /run/sandbox/<sid>/blk1.sock
      blk1 backend 内部对 blk1.diff 做 SEEK_DATA 扫描重建 dirty bitmap
 T11  读 boot.root.base 末尾 ZIP 拿 ImageConfig(缺 ZIP 软失败返回空)
      合并 ImageConfig 与 sandbox.yaml `launch:` → LaunchSpec
-T12  起 launch server goroutine:listen /run/<sid>/vsock.sock_5000
-T13  起 va_report UDS server: listen /run/<sid>/uffd.sock
+T12  起 launch server goroutine:listen /run/sandbox/<sid>/vsock.sock_5000
+T13  起 va_report UDS server: listen /run/sandbox/<sid>/uffd.sock
      OnReady callback 内将 adopt uffd_C(从 SCM_RIGHTS)+ 起 epoll/worker
-T14  起 ctl.sock UDS server: listen /run/<sid>/ctl.sock(snapshot / exec 请求入口)
+T14  起 ctl.sock UDS server: listen /run/sandbox/<sid>/ctl.sock(snapshot / exec 请求入口)
 T15  构造 CH 命令行(详见 §5.2):
-     `--memory-zone size=<ramSize>,shared=on,fd=3,uffd_socket=/run/<sid>/uffd.sock`
+     `--memory-zone size=<ramSize>,shared=on,fd=3,uffd_socket=/run/sandbox/<sid>/uffd.sock`
      `--console tty --serial off`,cmdline `... console=hvc0`(内核 dmesg 走 hvc0)
      cmd.ExtraFiles = [memfd] 让 fd=3 在 CH 进程中可见
      CH 进程 stdio:stdin = /dev/null(CH 因此不 raw 化任何宿主终端)、
@@ -740,14 +763,14 @@ T24  sandbox-ctl 退出,exit code = guest 上报的 app_exited{code,term_signal}
 
 ```
 cloud-hypervisor \
-  --api-socket  /run/<sid>/ch.sock \
+  --api-socket  /run/sandbox/<sid>/ch.sock \
   --kernel      /opt/sandbox/vmlinux \
   --pmem        file=/opt/sandbox/sandbox-runtime.erofs,discard_writes=on,iommu=off \
-  --memory-zone size=8G,shared=on,fd=3,uffd_socket=/run/<sid>/uffd.sock \
+  --memory-zone size=8G,shared=on,fd=3,uffd_socket=/run/sandbox/<sid>/uffd.sock \
   --balloon     size=0[,deflate_on_oom=on] \
-  --disk        vhost_user=on,socket=/run/<sid>/blk0.sock,readonly=on \
-  --disk        vhost_user=on,socket=/run/<sid>/blk1.sock \
-  --vsock       cid=3,socket=/run/<sid>/vsock.sock \
+  --disk        vhost_user=on,socket=/run/sandbox/<sid>/blk0.sock,readonly=on \
+  --disk        vhost_user=on,socket=/run/sandbox/<sid>/blk1.sock \
+  --vsock       cid=3,socket=/run/sandbox/<sid>/vsock.sock \
   --net         fd=4,mac=<from tapfd>,id=_net0,iommu=off \
   --console     tty \
   --serial      off \
@@ -904,7 +927,10 @@ T3  CH /vm.snapshot { destination_url=file://<run-dir>/<sid>/snap-stage/ }
       state.json    - vCPU 寄存器、virtio queue 状态、IRQ 等
     sandbox-ctl 把这两个文件读进内存作为 ZIP 内容暂存,不再落盘
 T4  overlay → sink(在 memory 前处理,snapshot.cfg 才能拿到终态 overlay.base):
-    若 --output:blk1.diff 数据 extent sparse copy → <sid>.overlay.partial →
+    若 --output 且 diff 是自动创建(沙箱独占)且本次不 resume(沙箱将销毁):
+        **零拷贝**——就地跳空洞算摘要(§6.1)后直接 rename diff → <out_dir>/<digest>.overlay
+        (同文件系统;跨文件系统则回退到下面的复制);overlay_ref = file://<digest>.overlay
+    否则若 --output:blk1.diff 数据 extent sparse copy → <sid>.overlay.partial →
         跳空洞算摘要(§6.1)→ rename <out_dir>/<digest>.overlay;
         overlay_ref = file://<digest>.overlay
     若 --upload:blk1.diff 数据 extent 流式喂 manifest.Ingester(空洞编码进
@@ -1021,7 +1047,7 @@ va_report → uffd_C 就绪);区别:
    `<run-dir>`)
 
 ```
-T0  sandbox-ctl run --restore <ref> --config sandbox.yaml [--run-dir <dir>] ...
+T0  sandbox-ctl run --restore <ref> --config sandbox.yaml [--run-root <dir>] ...
 T1  解析 host sandbox.yaml(本地化字段:network、overlay.diff、cgroup/控制器等)
 T2  打开 <ref>:
     file path: os.Open + Stat → ReaderAt
@@ -1478,8 +1504,8 @@ allocatable 初值必须够大才能避免 PSI 节流 / sensor 反复 burst。
 | `boot.root.base`(manifest://) | manifest key 与 snapshot.cfg.base_ref 一致才允许 | 用 snapshot.cfg.base_ref 原值 |
 | `boot.root.overlay.base` | **静默忽略** | 用 snapshot.cfg.overlay.base |
 | `from_refs` / `boot.root.overlay.base_from_refs` | 无此 yaml 字段(增量分层链纯由 snapshot.cfg 提供,§3.5) | 用 snapshot.cfg 原值 |
-| `boot.root.overlay.diff` | 必须 file:// 绝对路径;沙箱写层 | error: missing |
-| `boot.root.overlay.size` | 与冷启动一致(默认 10 GiB) | 默认 10 GiB |
+| `boot.root.overlay.diff` | 可选 file:// 绝对路径;空→落盘 base 目录(随沙箱销毁) | 默认落盘 base 目录 |
+| `boot.root.overlay.diff_size` | restore 新 diff 取 base 大小,此项不参与 | 取 base 大小 |
 | `boot.cmdline` | 静默忽略(restore 不 boot) | 同 |
 | `launch.*` | 静默忽略(应用在 guest 内存里) | 同 |
 | `control.cgroup_path` / `control.controller` | 用作本次恢复的资源策略 | 同冷启动默认 |
@@ -1731,7 +1757,7 @@ gating 规则仍生效;额外:
 | sandbox.yaml 提供 file:// runtime / base 时,文件 SHA256 digest 必须与 snapshot.cfg ref 中 @sha256:<digest> 一致 | "<field> digest mismatch with snapshot.cfg" |
 | sandbox.yaml 提供 manifest:// runtime / base 时,manifest key 必须与 snapshot.cfg ref 一致 | "<field> manifest key mismatch with snapshot.cfg" |
 | sandbox.yaml 提供 `resources.capacity.{cpu,memory}` 时,与 snapshot.cfg 严格相等 | "capacity mismatch with snapshot.cfg" |
-| sandbox.yaml 必须提供 `boot.root.overlay.diff`(file:// 绝对路径) | "boot.root.overlay.diff is required in restore mode" |
+| `boot.root.overlay.diff` 可选;空→落盘 base 目录新建(随沙箱销毁) | — |
 | sandbox.yaml 必须提供 `network.tap` | "network.tap is required in restore mode" |
 
 ## 14. 已知限制与扩展点

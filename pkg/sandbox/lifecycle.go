@@ -33,7 +33,8 @@ type RunOptions struct {
 	ManifestCfg   *ManifestConfig // for manifest:// resolution; may be nil if all file://
 	SandboxID     string          // generated if empty
 	CHBinary      string          // path to bin/cloud-hypervisor
-	RuntimeRoot   string          // /run prefix; "/run" by default
+	RuntimeRoot   string          // tmpfs run root (sockets / snap staging); "/run/sandbox" by default
+	BaseRoot      string          // on-disk base root (overlay diff); "/var/lib/sandbox" by default
 	StatsJSONPath string          // if set, write vhost stats as JSON to this path on shutdown
 	StdioMode     stdio.Mode      // CH process stdio wiring; see pkg/sandbox/stdio
 
@@ -56,7 +57,10 @@ func Run(ctx context.Context, opts RunOptions) (int, error) {
 		opts.SandboxID = generateSandboxID()
 	}
 	if opts.RuntimeRoot == "" {
-		opts.RuntimeRoot = "/run"
+		opts.RuntimeRoot = "/run/sandbox"
+	}
+	if opts.BaseRoot == "" {
+		opts.BaseRoot = DefaultBaseRoot
 	}
 	if opts.CHBinary == "" {
 		opts.CHBinary = "cloud-hypervisor"
@@ -261,18 +265,39 @@ func Run(ctx context.Context, opts RunOptions) (int, error) {
 		overlayBase = r
 		defer overlayBase.Close()
 	}
-	_, diffPath, ok := SchemeAndPath(opts.Cfg.Boot.Root.Overlay.Diff)
-	if !ok {
-		return -1, fmt.Errorf("boot.root.overlay.diff invalid URI: %s", opts.Cfg.Boot.Root.Overlay.Diff)
+	// Resolve the overlay diff path. Empty → auto-default to the on-disk
+	// base dir (NOT the tmpfs run dir — the writable layer must be on disk).
+	// An auto-defaulted diff is ours: removed when the sandbox ends.
+	diffURI := opts.Cfg.Boot.Root.Overlay.Diff
+	ownedDiff := diffURI == ""
+	if ownedDiff {
+		baseDir := DefaultBaseDir(opts.BaseRoot, opts.SandboxID)
+		if err := os.MkdirAll(baseDir, 0o755); err != nil {
+			return -1, fmt.Errorf("mkdir base dir %s: %w", baseDir, err)
+		}
+		diffURI = DefaultDiffURI(opts.BaseRoot, opts.SandboxID)
+		defer func() {
+			_ = os.Remove(filepath.Join(baseDir, opts.SandboxID+".overlay.diff"))
+			_ = os.Remove(baseDir)
+		}()
 	}
-	overlaySize, err := opts.Cfg.OverlaySize()
+	_, diffPath, ok := SchemeAndPath(diffURI)
+	if !ok {
+		return -1, fmt.Errorf("boot.root.overlay.diff invalid URI: %s", diffURI)
+	}
+	var baseSize int64
+	if overlayBase != nil {
+		baseSize = overlayBase.Size()
+	}
+	diffSize, err := opts.Cfg.DiffSizeBytes()
 	if err != nil {
 		return -1, err
 	}
-	if overlayBase != nil && overlayBase.Size() > overlaySize {
-		overlaySize = overlayBase.Size()
+	createSize, err := PrepareDiff(diffPath, opts.Cfg.Boot.Root.Overlay.DiffTemplate, baseSize, diffSize)
+	if err != nil {
+		return -1, fmt.Errorf("prepare overlay diff: %w", err)
 	}
-	cow, err := vhost.OpenBlockCOW(diffPath, overlayBase, overlaySize)
+	cow, err := vhost.OpenBlockCOW(diffPath, overlayBase, createSize)
 	if err != nil {
 		return -1, fmt.Errorf("overlay COW: %w", err)
 	}
@@ -316,6 +341,7 @@ func Run(ctx context.Context, opts RunOptions) (int, error) {
 		SnapCfg:     opts.Cfg,
 		ManifestCfg: opts.ManifestCfg,
 		DiffPath:    diffPath,
+		OwnedDiff:   ownedDiff,
 
 		BuildCmd: func(e CmdEnv) (*exec.Cmd, func(), error) {
 			_, kernelPath, _ := SchemeAndPath(opts.Cfg.Boot.Kernel)
@@ -487,6 +513,7 @@ type SnapshotHandler struct {
 	SandboxID   string          // required: snapshot.Take rejects empty
 	Memfd       *memory.Memfd
 	DiffPath    string
+	OwnedDiff   bool // diff is auto-created (ours) → eligible for zero-copy move on destroy-snapshot
 	Srv0        *vhost.Server
 	Srv1        *vhost.Server
 	CHSock      string
@@ -499,7 +526,7 @@ type SnapshotHandler struct {
 // Handle dispatches one ctl snapshot_request. Public for restore.Run.
 func (h *SnapshotHandler) Handle(req ctl.Request) (ctl.Response, error) {
 	opts := RunOptions{Cfg: h.Cfg, ManifestCfg: h.ManifestCfg, SandboxID: h.SandboxID}
-	return handleSnapshotRequest(req, opts, h.Memfd, h.DiffPath, h.Srv0, h.Srv1, h.CHSock, h.RunDir, h.Pinger, h.Reattach, h.Logf)
+	return handleSnapshotRequest(req, opts, h.Memfd, h.DiffPath, h.OwnedDiff, h.Srv0, h.Srv1, h.CHSock, h.RunDir, h.Pinger, h.Reattach, h.Logf)
 }
 
 // handleSnapshotRequest executes one snapshot_request received via
@@ -512,6 +539,7 @@ func handleSnapshotRequest(
 	opts RunOptions,
 	mfd *memory.Memfd,
 	diffPath string,
+	ownedDiff bool,
 	srv0, srv1 *vhost.Server,
 	chSock, runDir string,
 	pinger *Pinger,
@@ -618,6 +646,7 @@ func handleSnapshotRequest(
 		MemfdFD:     mfd.FD(),
 		MemfdSize:   int64(mfd.Size()),
 		DiffPath:    diffPath,
+		OwnedDiff:   ownedDiff,
 		StagingDir:  stagingDir,
 		SnapshotCfg: snapCfgBuilder,
 		Quiescer:    &pairQuiescer{a: srv0, b: srv1},

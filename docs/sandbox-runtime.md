@@ -41,7 +41,7 @@ page cache 的密度收益。
                                        ├──── conn: ping ─────────►│      app sees itself PID 1
                                        │◄─── conn: app_started ───┤
                                        │                          │
-   /run/<sid>/vsock.sock  ◄────────────┤◄─── conn: app_exited ────┤    user app exits
+   /run/sandbox/<sid>/vsock.sock  ◄────────────┤◄─── conn: app_exited ────┤    user app exits
                                        │                          │    reboot()
                                        │◄─── CH exits ────────────┤
 ```
@@ -415,10 +415,10 @@ vsock 端口固定 `5000`,**两个方向都复用同一端口号**,身份按方�
                       │ sandbox-ctl (host)         │                    │ sandbox-init (guest)    │
                       │                            │                    │                         │
   guest → host  ────► │ listen UDS                 │ ◄──── CH proxy ─── │ AF_VSOCK dial CID=2:5000│
-                      │ /run/<sid>/vsock.sock_5000 │                    │                         │
+                      │ /run/sandbox/<sid>/vsock.sock_5000 │                    │                         │
                       │                            │                    │                         │
   host → guest  ────► │ dial UDS                   │ ───── CH proxy ──► │ AF_VSOCK listen :5000   │
-                      │ /run/<sid>/vsock.sock      │ + "CONNECT 5000\n" │                         │
+                      │ /run/sandbox/<sid>/vsock.sock      │ + "CONNECT 5000\n" │                         │
                       └────────────────────────────┘                    └─────────────────────────┘
 ```
 

@@ -60,15 +60,16 @@ func printUsage(w *os.File) {
 
 Usage:
   sandbox-ctl run       --config sandbox.yaml [--manifest-config <path>]
-                        [--sandbox-id <sid>] [--ch-binary <path>] [--run-dir <dir>]
+                        [--sandbox-id <sid>] [--ch-binary <path>]
+                        [--run-root <dir>] [--base-root <dir>]
                         [--restore <file_path|manifest://hex>]
                         [--stdin] [--stdout=false] [--stderr=false]
                         [--stdin-from F] [--stdout-to F] [--stderr-to F]
                         [--tty] [--console off|default|file=PATH]
                         [--ping-fatal-threshold N]
   sandbox-ctl snapshot  --sandbox-id <sid> (--output <out_dir> | --upload)
-                        [--resume] [--run-dir <dir>] [--timeout <sec>]
-  sandbox-ctl exec      --sandbox-id <sid> [--run-dir <dir>] [--cwd <dir>]
+                        [--resume] [--run-root <dir>] [--timeout <sec>]
+  sandbox-ctl exec      --sandbox-id <sid> [--run-root <dir>] [--cwd <dir>]
                         [--env KEY=VAL ...]
                         [--stdin] [--stdout=false] [--stderr=false]
                         [--stdin-from F] [--stdout-to F] [--stderr-to F]
@@ -97,4 +98,3 @@ exit code. Rejected while a snapshot is quiescing the sandbox.
 See docs/sandbox.md for the full design.
 `)
 }
-

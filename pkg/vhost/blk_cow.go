@@ -41,35 +41,57 @@ const cowBlockSize = 4096
 // builds the dirty bitmap, and pairs it with the optional base reader.
 //
 // If base is nil, reads to clean blocks return zeros.
-// declaredSize is the visible block-device size; diff is truncated to
-// declaredSize if smaller (so writes anywhere in range are valid).
-func OpenBlockCOW(diffPath string, base BlockReader, declaredSize int64) (*BlockCOW, error) {
-	if declaredSize <= 0 {
-		return nil, errors.New("vhost: declaredSize must be > 0")
+//
+// createSize sizes the diff ONLY when it is freshly created (absent/empty):
+// the device size then equals createSize. An existing non-empty diff is used
+// at its current size and is NEVER truncated — shrinking would corrupt the
+// filesystem inside it, and growing the block device would not grow that
+// filesystem anyway, so the diff is provisioned at its final size up front
+// (see docs/sandbox.md §3.1). The caller provisions a pre-formatted /
+// template- / base-backed diff for cold boot.
+func OpenBlockCOW(diffPath string, base BlockReader, createSize int64) (*BlockCOW, error) {
+	if createSize <= 0 {
+		return nil, errors.New("vhost: createSize must be > 0")
 	}
-	if declaredSize%cowBlockSize != 0 {
-		return nil, fmt.Errorf("vhost: declaredSize %d not aligned to %d", declaredSize, cowBlockSize)
-	}
-	if base != nil && base.Size() > declaredSize {
-		return nil, fmt.Errorf("vhost: base size %d > declaredSize %d", base.Size(), declaredSize)
+	if createSize%cowBlockSize != 0 {
+		return nil, fmt.Errorf("vhost: createSize %d not aligned to %d", createSize, cowBlockSize)
 	}
 
 	f, err := os.OpenFile(diffPath, os.O_RDWR|os.O_CREATE, 0o644)
 	if err != nil {
 		return nil, fmt.Errorf("vhost: open diff %s: %w", diffPath, err)
 	}
-	if err := f.Truncate(declaredSize); err != nil {
+	st, err := f.Stat()
+	if err != nil {
 		_ = f.Close()
-		return nil, fmt.Errorf("vhost: truncate diff to %d: %w", declaredSize, err)
+		return nil, fmt.Errorf("vhost: stat diff %s: %w", diffPath, err)
+	}
+	size := st.Size()
+	if size == 0 {
+		// Freshly created (or empty): size it once, here. This truncate is
+		// creation-only — it never runs against a diff that already has data.
+		size = createSize
+		if err := f.Truncate(size); err != nil {
+			_ = f.Close()
+			return nil, fmt.Errorf("vhost: size fresh diff to %d: %w", size, err)
+		}
+	}
+	if size%cowBlockSize != 0 {
+		_ = f.Close()
+		return nil, fmt.Errorf("vhost: existing diff size %d not aligned to %d", size, cowBlockSize)
+	}
+	if base != nil && base.Size() > size {
+		_ = f.Close()
+		return nil, fmt.Errorf("vhost: base size %d > diff size %d", base.Size(), size)
 	}
 
-	numBlocks := declaredSize / cowBlockSize
+	numBlocks := size / cowBlockSize
 	bitmap := make([]uint64, (numBlocks+63)/64)
 
 	cow := &BlockCOW{
 		base:      base,
 		diff:      f,
-		size:      declaredSize,
+		size:      size,
 		bitmap:    bitmap,
 		blockSize: cowBlockSize,
 	}

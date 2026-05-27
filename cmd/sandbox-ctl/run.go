@@ -29,7 +29,9 @@ import (
 // --ch-binary defaults to a precedence chain: SANDBOX_CH_PATH env →
 // directory of running sandbox-ctl executable → exec.LookPath.
 //
-// --run-dir defaults to SANDBOX_RUN_DIR env or "/run".
+// --run-root defaults to SANDBOX_RUN_ROOT env or "/run/sandbox" (tmpfs:
+// sockets + snap staging). --base-root defaults to SANDBOX_BASE_ROOT env or
+// "/var/lib/sandbox" (on-disk: the overlay diff).
 func runCmd(args []string) int {
 	fs := flag.NewFlagSet("run", flag.ContinueOnError)
 
@@ -37,7 +39,8 @@ func runCmd(args []string) int {
 	manifestPath := fs.String("manifest-config", "", "path to manifest config YAML (overrides MANIFEST_CONFIG env; required for manifest:// resources)")
 	sandboxID := fs.String("sandbox-id", "", "sandbox id (overrides sandbox.yaml)")
 	chBinary := fs.String("ch-binary", "", "path to cloud-hypervisor binary (default: SANDBOX_CH_PATH env, exe-dir, or PATH)")
-	runDir := fs.String("run-dir", "", "host runtime state dir (overrides SANDBOX_RUN_DIR env; default /run)")
+	runRoot := fs.String("run-root", "", "tmpfs run root: sockets + snap staging (overrides SANDBOX_RUN_ROOT env; default /run/sandbox)")
+	baseRoot := fs.String("base-root", "", "on-disk base root: overlay diff (overrides SANDBOX_BASE_ROOT env; default /var/lib/sandbox)")
 
 	cgroupPath := fs.String("cgroup-path", "", "absolute cgroup v2 directory to join (must already exist); empty = no cgroup")
 	statsJSON := fs.String("stats-json", "", "if set, write per-backend + uffd stats as JSON to this path on shutdown")
@@ -142,13 +145,21 @@ func runCmd(args []string) int {
 		}
 	}
 
-	// Resolve --run-dir precedence: flag > env > /run.
-	rd := *runDir
+	// Resolve --run-root precedence: flag > env > /run/sandbox.
+	rd := *runRoot
 	if rd == "" {
-		rd = os.Getenv("SANDBOX_RUN_DIR")
+		rd = os.Getenv("SANDBOX_RUN_ROOT")
 	}
 	if rd == "" {
-		rd = "/run"
+		rd = "/run/sandbox"
+	}
+	// Resolve --base-root precedence: flag > env > /var/lib/sandbox.
+	br := *baseRoot
+	if br == "" {
+		br = os.Getenv("SANDBOX_BASE_ROOT")
+	}
+	if br == "" {
+		br = "/var/lib/sandbox"
 	}
 
 	// Optional manifest config (required for manifest:// resources).
@@ -170,7 +181,7 @@ func runCmd(args []string) int {
 	// Restore mode dispatch.
 	if *restoreRef != "" {
 		return runRestore(ctx, cfg, manifestCfg, *restoreRef,
-			*sandboxID, chBin, rd, *statsJSON, stdioMode, *pingFatal)
+			*sandboxID, chBin, rd, br, *statsJSON, stdioMode, *pingFatal)
 	}
 
 	exit, err := sandbox.Run(ctx, sandbox.RunOptions{
@@ -179,6 +190,7 @@ func runCmd(args []string) int {
 		SandboxID:          *sandboxID,
 		CHBinary:           chBin,
 		RuntimeRoot:        rd,
+		BaseRoot:           br,
 		StatsJSONPath:      *statsJSON,
 		StdioMode:          stdioMode,
 		PingFatalThreshold: *pingFatal,
@@ -192,7 +204,7 @@ func runCmd(args []string) int {
 
 // runRestore parses the snapshot reference and dispatches to restore.Run.
 func runRestore(ctx context.Context, cfg *sandbox.SandboxConfig, manifestCfg *sandbox.ManifestConfig,
-	ref, sandboxID, chBin, runDir, statsJSON string, stdioMode stdio.Mode, pingFatal int,
+	ref, sandboxID, chBin, runDir, baseRoot, statsJSON string, stdioMode stdio.Mode, pingFatal int,
 ) int {
 	const manifestPrefix = "manifest://"
 	var (
@@ -231,6 +243,7 @@ func runRestore(ctx context.Context, cfg *sandbox.SandboxConfig, manifestCfg *sa
 		SandboxID:           sandboxID,
 		CHBinary:            chBin,
 		RuntimeRoot:         runDir,
+		BaseRoot:            baseRoot,
 		StatsJSONPath:       statsJSON,
 		StdioMode:           stdioMode,
 		PingFatalThreshold:  pingFatal,

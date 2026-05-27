@@ -113,6 +113,7 @@ type VMParams struct {
 	SnapCfg     *SandboxConfig // ctl.sock SnapshotHandler.Cfg
 	ManifestCfg *ManifestConfig
 	DiffPath    string
+	OwnedDiff   bool // diff is auto-created (ours) → eligible for zero-copy move on destroy-snapshot
 
 	BuildCmd  func(CmdEnv) (cmd *exec.Cmd, cleanup func(), err error)
 	PostSpawn func(PostSpawnCtx) error
@@ -303,6 +304,7 @@ func ServeAndWait(p VMParams) (int, error) {
 		SandboxID:   p.SandboxID,
 		Memfd:       memfd,
 		DiffPath:    p.DiffPath,
+		OwnedDiff:   p.OwnedDiff,
 		Srv0:        srv0,
 		Srv1:        srv1,
 		CHSock:      chSock,

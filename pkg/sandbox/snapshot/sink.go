@@ -37,6 +37,17 @@ type SnapshotSink interface {
 	AbsorbBundle(ctx context.Context, mem io.ReadSeeker, holes []codec.HoleExtent, zip io.Reader) (ref, path string, err error)
 }
 
+// OverlayMover is an optional fast path a sink may implement: instead of
+// sparse-COPYING the diff into the content-addressed overlay file, hash the
+// diff in place and RENAME it (zero-copy on the same filesystem). Take uses it
+// only when the diff is the sandbox's own (auto-created) AND the sandbox is
+// being destroyed (no resume) — i.e. the diff is consumed, not a user file.
+// On cross-filesystem rename (or any error) Take falls back to AbsorbOverlay.
+// FileSink implements it; IngestSink does not (it must stream to the store).
+type OverlayMover interface {
+	MoveOverlay(diffPath string) (ref, path string, err error)
+}
+
 // ---------------------------------------------------------------------------
 // FileSink — sparse local files, content-addressed via hashSparseFile.
 // ---------------------------------------------------------------------------
@@ -60,6 +71,23 @@ func (s *FileSink) AbsorbOverlay(_ context.Context, diff io.ReadSeeker, holes []
 		return "", "", err
 	}
 	s.logf("snapshot: %s.overlay written", digest[:12])
+	return "file://" + digest + ".overlay", final, nil
+}
+
+// MoveOverlay hashes the diff in place (resident-only) and renames it to the
+// content-addressed <sha>.overlay — no copy. The digest is identical to what
+// AbsorbOverlay would produce, so the overlay ref is the same. Returns the
+// rename error (e.g. EXDEV across filesystems) so Take can fall back to a copy.
+func (s *FileSink) MoveOverlay(diffPath string) (string, string, error) {
+	digest, err := hashSparseFile(diffPath)
+	if err != nil {
+		return "", "", fmt.Errorf("hash overlay: %w", err)
+	}
+	final := filepath.Join(s.outDir, digest+".overlay")
+	if err := os.Rename(diffPath, final); err != nil {
+		return "", "", err // cross-fs / other → caller falls back to copy
+	}
+	s.logf("snapshot: %s.overlay moved (zero-copy)", digest[:12])
 	return "file://" + digest + ".overlay", final, nil
 }
 

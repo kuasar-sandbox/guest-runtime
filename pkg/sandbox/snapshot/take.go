@@ -43,6 +43,7 @@ type Sources struct {
 	MemfdFD    int    // memfd backing the zone (read-only here; CH is paused)
 	MemfdSize  int64  // ramSize
 	DiffPath   string // blk1 diff file (sparse ext4)
+	OwnedDiff  bool   // true iff the diff is the sandbox's own (auto-created) → eligible for zero-copy move
 	StagingDir string // CH /vm.snapshot dest for config.json/state.json (caller creates+removes)
 
 	// SnapshotCfg renders snapshot.cfg given the final overlay.base ref.
@@ -128,24 +129,39 @@ func Take(s Sources, sink SnapshotSink, resumeAfter bool) (*Outputs, error) {
 		return nil, fmt.Errorf("read state.json: %w", err)
 	}
 
-	// T4: overlay → sink, streamed from blk1.diff (no staging copy). Done first
-	// so snapshot.cfg below carries the final overlay.base ref.
-	diff, err := os.Open(s.DiffPath)
-	if err != nil {
-		return nil, fmt.Errorf("open blk1.diff: %w", err)
+	// T4: overlay → sink. Done first so snapshot.cfg below carries the final
+	// overlay.base ref.
+	//
+	// Fast path: when the diff is the sandbox's own and the sandbox is being
+	// destroyed (no resume), the diff is consumed — hand it to the sink's
+	// OverlayMover to rename (zero-copy) instead of sparse-copying multi-GiB.
+	// Falls back to the streaming copy on cross-fs rename or any other sink.
+	if mover, ok := sink.(OverlayMover); ok && s.OwnedDiff && !resumeAfter {
+		ref, path, mErr := mover.MoveOverlay(s.DiffPath)
+		if mErr == nil {
+			out.OverlayRef, out.OverlayPath = ref, path
+		} else {
+			logf("snapshot: overlay move fell back to copy: %v", mErr)
+		}
 	}
-	defer diff.Close()
-	dstat, err := diff.Stat()
-	if err != nil {
-		return nil, fmt.Errorf("stat blk1.diff: %w", err)
-	}
-	overlayHoles, err := walkHolesCodec(int(diff.Fd()), dstat.Size())
-	if err != nil {
-		return nil, fmt.Errorf("overlay holes: %w", err)
-	}
-	out.OverlayRef, out.OverlayPath, err = sink.AbsorbOverlay(ctx, diff, overlayHoles)
-	if err != nil {
-		return nil, fmt.Errorf("absorb overlay: %w", err)
+	if out.OverlayRef == "" { // not moved (no mover, not owned, resume, or move failed)
+		diff, err := os.Open(s.DiffPath)
+		if err != nil {
+			return nil, fmt.Errorf("open blk1.diff: %w", err)
+		}
+		defer diff.Close()
+		dstat, err := diff.Stat()
+		if err != nil {
+			return nil, fmt.Errorf("stat blk1.diff: %w", err)
+		}
+		overlayHoles, err := walkHolesCodec(int(diff.Fd()), dstat.Size())
+		if err != nil {
+			return nil, fmt.Errorf("overlay holes: %w", err)
+		}
+		out.OverlayRef, out.OverlayPath, err = sink.AbsorbOverlay(ctx, diff, overlayHoles)
+		if err != nil {
+			return nil, fmt.Errorf("absorb overlay: %w", err)
+		}
 	}
 
 	// T5: snapshot.cfg (final overlay ref) → ZIP trailer.
