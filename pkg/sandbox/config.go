@@ -356,15 +356,31 @@ type InitConfig struct {
 	User string   `yaml:"user,omitempty"`
 }
 
-// Load reads sandbox.yaml at the given path and applies defaults.
+// Load reads one sandbox.yaml and applies defaults.
 func Load(path string) (*SandboxConfig, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("sandbox: read %s: %w", path, err)
+	return LoadMerged([]string{path})
+}
+
+// LoadMerged reads one or more sandbox.yaml files and deep-merges them
+// front-to-back (later files override earlier), then applies defaults once.
+// Merge follows yaml.v3 sequential-decode semantics into a single value:
+// scalars and lists are replaced by the last file that sets them; nested
+// maps and structs merge recursively (a later file's `resources.capacity.cpu`
+// overrides without clobbering sibling keys). An absent key keeps the prior
+// file's value. This is the same loader `sandbox-ctl run --config a:b:c` uses.
+func LoadMerged(paths []string) (*SandboxConfig, error) {
+	if len(paths) == 0 {
+		return nil, errors.New("sandbox: no config files given")
 	}
 	var cfg SandboxConfig
-	if err := yaml.Unmarshal(data, &cfg); err != nil {
-		return nil, fmt.Errorf("sandbox: parse %s: %w", path, err)
+	for _, p := range paths {
+		data, err := os.ReadFile(p)
+		if err != nil {
+			return nil, fmt.Errorf("sandbox: read %s: %w", p, err)
+		}
+		if err := yaml.Unmarshal(data, &cfg); err != nil {
+			return nil, fmt.Errorf("sandbox: parse %s: %w", p, err)
+		}
 	}
 	cfg.applyDefaults()
 	return &cfg, nil
@@ -736,6 +752,53 @@ func (c *SandboxConfig) ValidateCold() error {
 	// defaults. MergeLaunch fails late with a clear error if neither
 	// the override nor the image provides an executable.
 
+	return nil
+}
+
+// ValidateRestoreHostConfig checks the subset of invariants a restore host
+// yaml must satisfy on its own (the snapshot.cfg cross-checks — capacity
+// equality, runtime/base digest — happen later in restore.ApplyRules with the
+// bundle in hand). It is the strict-mode check for `sandbox-ctl config
+// --mode restore`: cold-only fields (kernel, launch, mounts, ...) are not
+// required here.
+func (c *SandboxConfig) ValidateRestoreHostConfig() error {
+	if (c.Network.TAP == "") == (c.Network.TapFD == nil) {
+		return errors.New("network: exactly one of `tap` or `tapfd` is required")
+	}
+	if c.Network.TapFD != nil && len(c.Network.TapFD.Exec) == 0 {
+		return errors.New("network.tapfd.exec is required")
+	}
+	// Capacity is optional in the host yaml (matched against snapshot.cfg);
+	// if provided it must be well-formed.
+	if c.Resources.Capacity.CPU != 0 || c.Resources.Capacity.Memory != "" {
+		if c.Resources.Capacity.CPU <= 0 {
+			return errors.New("resources.capacity.cpu must be > 0")
+		}
+		if _, err := c.CapacityMemoryBytes(); err != nil {
+			return fmt.Errorf("resources.capacity.memory: %w", err)
+		}
+	}
+	// Reference formats (when provided).
+	if c.Boot.Runtime != "" {
+		if err := requireFileAbs("boot.runtime", c.Boot.Runtime); err != nil {
+			return err
+		}
+	}
+	if c.Boot.Root.Base != "" {
+		if err := requireAbsIfFile("boot.root.base", c.Boot.Root.Base); err != nil {
+			return err
+		}
+	}
+	if c.Boot.Root.Overlay.Diff != "" {
+		if err := requireFileAbs("boot.root.overlay.diff", c.Boot.Root.Overlay.Diff); err != nil {
+			return err
+		}
+	}
+	if c.Boot.Root.Overlay.DiffTemplate != "" {
+		if err := requireFileAbs("boot.root.overlay.diff_template", c.Boot.Root.Overlay.DiffTemplate); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 

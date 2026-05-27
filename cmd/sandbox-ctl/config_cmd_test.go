@@ -1,0 +1,44 @@
+package main
+
+import (
+	"strings"
+	"testing"
+)
+
+func TestRestoreFilter(t *testing.T) {
+	in := `resources:
+  capacity: { cpu: 2, memory: 8GiB }
+network: { tap: tap0 }
+boot:
+  kernel: file:///opt/vmlinux
+  cmdline: "quiet"
+  runtime: file:///opt/rt.erofs
+  root:
+    base: file:///opt/app.erofs
+    overlay:
+      base: file:///snap.ext4
+      diff_template: file:///opt/t.ext4
+launch: { exec: /bin/app }
+mounts:
+  - { target: /tmp, type: tmpfs }
+files:
+  - { path: /etc/x }
+init:
+  - { exec: /bin/true }
+`
+	out, err := restoreFilter([]byte(in))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(out)
+	for _, dropped := range []string{"launch:", "mounts:", "files:", "init:", "kernel:", "cmdline:", "/snap.ext4"} {
+		if strings.Contains(got, dropped) {
+			t.Errorf("restore filter should have dropped %q; output:\n%s", dropped, got)
+		}
+	}
+	for _, kept := range []string{"runtime:", "tap0", "diff_template", "capacity"} {
+		if !strings.Contains(got, kept) {
+			t.Errorf("restore filter should have kept %q; output:\n%s", kept, got)
+		}
+	}
+}

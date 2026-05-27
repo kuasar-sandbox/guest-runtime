@@ -107,6 +107,58 @@ func TestMemoryParsing(t *testing.T) {
 	}
 }
 
+func TestLoadMerged(t *testing.T) {
+	dir := t.TempDir()
+	base := filepath.Join(dir, "base.yaml")
+	over := filepath.Join(dir, "over.yaml")
+	if err := os.WriteFile(base, []byte(`
+resources: { capacity: { cpu: 2, memory: 8GiB }, allocatable: { cpu: 2, memory: 8GiB } }
+network: { tap: tap0, ip: 169.254.1.1/31, hostname: h1 }
+boot:
+  kernel: file:///opt/vmlinux
+  runtime: file:///opt/rt.erofs
+  root: { base: file:///opt/app.erofs, overlay: { diff_template: file:///opt/t.ext4 } }
+launch: { exec: /bin/app, args: ["a", "b"], env: { K1: v1, K2: v2 }, restart: never }
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(over, []byte(`
+resources: { capacity: { cpu: 4 }, allocatable: { cpu: 4 } }
+network: { ip: 10.0.0.5/24, hostname: h2 }
+launch: { args: ["c"], env: { K2: v2x, K3: v3 } }
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadMerged([]string{base, over})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// scalar override (later wins) + sibling kept (deep merge)
+	if cfg.Resources.Capacity.CPU != 4 {
+		t.Errorf("capacity.cpu = %d, want 4 (override)", cfg.Resources.Capacity.CPU)
+	}
+	if cfg.Resources.Capacity.Memory != "8GiB" {
+		t.Errorf("capacity.memory = %q, want 8GiB (kept from base)", cfg.Resources.Capacity.Memory)
+	}
+	if cfg.Network.IP != "10.0.0.5/24" || cfg.Network.Hostname != "h2" {
+		t.Errorf("network override mismatch: ip=%q host=%q", cfg.Network.IP, cfg.Network.Hostname)
+	}
+	if cfg.Network.TAP != "tap0" {
+		t.Errorf("network.tap = %q, want tap0 (kept from base)", cfg.Network.TAP)
+	}
+	if cfg.Boot.Kernel != "file:///opt/vmlinux" {
+		t.Errorf("boot.kernel lost: %q", cfg.Boot.Kernel)
+	}
+	// list replaced wholesale
+	if len(cfg.Launch.Args) != 1 || cfg.Launch.Args[0] != "c" {
+		t.Errorf("launch.args = %v, want [c] (list replaced)", cfg.Launch.Args)
+	}
+	// map merged (K1 kept, K2 overridden, K3 added)
+	if cfg.Launch.Env["K1"] != "v1" || cfg.Launch.Env["K2"] != "v2x" || cfg.Launch.Env["K3"] != "v3" {
+		t.Errorf("launch.env merge mismatch: %v", cfg.Launch.Env)
+	}
+}
+
 func TestDiffSize_Defaults(t *testing.T) {
 	cfg, _ := Load(writeYAML(t, `
 resources:

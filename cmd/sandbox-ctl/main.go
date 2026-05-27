@@ -45,6 +45,8 @@ func main() {
 		os.Exit(snapshotCmd(os.Args[2:]))
 	case "exec":
 		os.Exit(execCmd(os.Args[2:]))
+	case "config":
+		os.Exit(configCmd(os.Args[2:]))
 	case "-h", "--help", "help":
 		printUsage(os.Stdout)
 		os.Exit(0)
@@ -74,6 +76,9 @@ Usage:
                         [--stdin] [--stdout=false] [--stderr=false]
                         [--stdin-from F] [--stdout-to F] [--stderr-to F]
                         [--tty] -- CMD [ARGS...]
+  sandbox-ctl config    [--config a.yaml[:b.yaml...] | --template]
+                        [--mode default|restore] [--check skip|strict] [-o <file>]
+                        produce/merge/validate a sandbox.yaml on stdout
 
 --manifest-config (or MANIFEST_CONFIG env) is required for any
 manifest:// resource (boot.root.base, --restore manifest://, --upload).

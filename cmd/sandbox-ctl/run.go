@@ -35,7 +35,7 @@ import (
 func runCmd(args []string) int {
 	fs := flag.NewFlagSet("run", flag.ContinueOnError)
 
-	configPath := fs.String("config", "", "path to sandbox.yaml (or SANDBOX_CONFIG env)")
+	configPath := fs.String("config", "", "sandbox.yaml path(s), ':'-separated, merged front-to-back (or SANDBOX_CONFIG env)")
 	manifestPath := fs.String("manifest-config", "", "path to manifest config YAML (overrides MANIFEST_CONFIG env; required for manifest:// resources)")
 	sandboxID := fs.String("sandbox-id", "", "sandbox id (overrides sandbox.yaml)")
 	chBinary := fs.String("ch-binary", "", "path to cloud-hypervisor binary (default: SANDBOX_CH_PATH env, exe-dir, or PATH)")
@@ -125,7 +125,9 @@ func runCmd(args []string) int {
 		fmt.Fprintln(os.Stderr, "sandbox-ctl run: --config or SANDBOX_CONFIG required")
 		return 2
 	}
-	cfg, err := sandbox.Load(*configPath)
+	// --config accepts ':'-separated paths, deep-merged front-to-back (later
+	// overrides earlier) — same as `sandbox-ctl config`.
+	cfg, err := sandbox.LoadMerged(strings.Split(*configPath, ":"))
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
