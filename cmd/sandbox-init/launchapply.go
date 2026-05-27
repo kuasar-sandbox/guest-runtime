@@ -13,6 +13,7 @@ import (
 	"syscall"
 
 	"github.com/fullof-work/mass-sandbox/pkg/sandbox/proto"
+	"github.com/moby/sys/user"
 	"golang.org/x/sys/unix"
 )
 
@@ -228,72 +229,23 @@ func (c *ugCred) encode() string {
 }
 
 // resolveCred resolves a "uid:gid" / "name:group" / "name" / "uid" spec
-// against the rootfs /etc/passwd and /etc/group. Numeric forms work without
-// a passwd entry. Empty spec → nil (no drop). Supplementary groups are the
-// groups listing the user as a member.
+// against the rootfs /etc/passwd and /etc/group via moby/sys/user (the
+// runc/containerd resolver). Numeric forms work without a passwd entry;
+// supplementary groups come from group membership; missing files are
+// tolerated. Empty spec → nil (no drop).
 func resolveCred(spec string) (*ugCred, error) {
 	if spec == "" {
 		return nil, nil
 	}
-	userTok, groupTok, hasGroup := strings.Cut(spec, ":")
-	passwd := readColonFile("/etc/passwd")
-
-	var uid, gid uint32
-	var uname string
-	if n, err := strconv.ParseUint(userTok, 10, 32); err == nil {
-		uid = uint32(n)
-		for _, e := range passwd { // best-effort name + default gid by uid
-			if len(e) >= 4 && e[2] == userTok {
-				uname, gid = e[0], atoiU(e[3])
-				break
-			}
-		}
-	} else {
-		found := false
-		for _, e := range passwd {
-			if len(e) >= 4 && e[0] == userTok {
-				uname, uid, gid, found = e[0], atoiU(e[2]), atoiU(e[3]), true
-				break
-			}
-		}
-		if !found {
-			return nil, fmt.Errorf("user %q not found in /etc/passwd", userTok)
-		}
+	eu, err := user.GetExecUserPath(spec, nil, "/etc/passwd", "/etc/group")
+	if err != nil {
+		return nil, err
 	}
-
-	groups := readColonFile("/etc/group")
-	if hasGroup && groupTok != "" {
-		if n, err := strconv.ParseUint(groupTok, 10, 32); err == nil {
-			gid = uint32(n)
-		} else {
-			found := false
-			for _, e := range groups {
-				if len(e) >= 3 && e[0] == groupTok {
-					gid, found = atoiU(e[2]), true
-					break
-				}
-			}
-			if !found {
-				return nil, fmt.Errorf("group %q not found in /etc/group", groupTok)
-			}
-		}
+	sgids := make([]uint32, len(eu.Sgids))
+	for i, g := range eu.Sgids {
+		sgids[i] = uint32(g)
 	}
-
-	var sgids []uint32
-	if uname != "" {
-		for _, e := range groups {
-			if len(e) < 4 {
-				continue
-			}
-			for _, m := range strings.Split(e[3], ",") {
-				if m == uname {
-					sgids = append(sgids, atoiU(e[2]))
-					break
-				}
-			}
-		}
-	}
-	return &ugCred{uid: uid, gid: gid, sgids: sgids}, nil
+	return &ugCred{uid: uint32(eu.Uid), gid: uint32(eu.Gid), sgids: sgids}, nil
 }
 
 // resolveOwner resolves a file owner spec to numeric uid/gid (empty → 0:0).
@@ -344,27 +296,4 @@ func applyCred(cred string) error {
 		return fmt.Errorf("setuid %d: %w", uid, err)
 	}
 	return nil
-}
-
-// readColonFile reads /etc/passwd-style files into per-line colon-split
-// fields, skipping blanks and comments. Missing file → nil (no entries).
-func readColonFile(path string) [][]string {
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return nil
-	}
-	var out [][]string
-	for _, line := range strings.Split(string(b), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		out = append(out, strings.Split(line, ":"))
-	}
-	return out
-}
-
-func atoiU(s string) uint32 {
-	n, _ := strconv.ParseUint(strings.TrimSpace(s), 10, 32)
-	return uint32(n)
 }
