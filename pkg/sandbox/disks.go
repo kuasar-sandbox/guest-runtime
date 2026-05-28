@@ -5,10 +5,10 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/fullof-work/mass-sandbox/pkg/manifest"
-	"github.com/fullof-work/mass-sandbox/pkg/manifest/fetch"
-	"github.com/fullof-work/mass-sandbox/pkg/store"
-	"github.com/fullof-work/mass-sandbox/pkg/vhost"
+	"github.com/kuasar-sandbox/sandbox-accelerator/pkg/manifest"
+	"github.com/kuasar-sandbox/sandbox-accelerator/pkg/manifest/fetch"
+	"github.com/kuasar-sandbox/sandbox-accelerator/pkg/store"
+	"github.com/kuasar-sandbox/sandbox-runtime/pkg/vhost"
 )
 
 // OpenBlockReader resolves a file:// or manifest:// disk URI into a

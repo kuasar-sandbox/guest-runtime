@@ -12,10 +12,10 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/fullof-work/mass-sandbox/pkg/sandbox/ctl"
-	"github.com/fullof-work/mass-sandbox/pkg/sandbox/mux"
-	"github.com/fullof-work/mass-sandbox/pkg/sandbox/proto"
-	"github.com/fullof-work/mass-sandbox/pkg/sandbox/stdio"
+	"github.com/kuasar-sandbox/sandbox-runtime/pkg/sandbox/ctl"
+	"github.com/kuasar-sandbox/sandbox-runtime/pkg/sandbox/mux"
+	"github.com/kuasar-sandbox/sandbox-runtime/pkg/sandbox/proto"
+	"github.com/kuasar-sandbox/sandbox-runtime/pkg/sandbox/stdio"
 )
 
 // envFlag collects repeatable --env KEY=VALUE pairs.

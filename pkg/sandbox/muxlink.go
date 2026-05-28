@@ -4,9 +4,9 @@ import (
 	"context"
 	"sync"
 
-	"github.com/fullof-work/mass-sandbox/pkg/sandbox/mux"
-	"github.com/fullof-work/mass-sandbox/pkg/sandbox/proto"
-	"github.com/fullof-work/mass-sandbox/pkg/sandbox/stdio"
+	"github.com/kuasar-sandbox/sandbox-runtime/pkg/sandbox/mux"
+	"github.com/kuasar-sandbox/sandbox-runtime/pkg/sandbox/proto"
+	"github.com/kuasar-sandbox/sandbox-runtime/pkg/sandbox/stdio"
 )
 
 // MUXLink holds the live stdio MUX session and its bridge-cleanup func —

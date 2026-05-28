@@ -6,7 +6,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/fullof-work/mass-sandbox/pkg/sandbox"
+	"github.com/kuasar-sandbox/sandbox-runtime/pkg/sandbox"
 	"gopkg.in/yaml.v3"
 )
 

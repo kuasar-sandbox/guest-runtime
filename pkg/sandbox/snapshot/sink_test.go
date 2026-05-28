@@ -10,7 +10,7 @@ import (
 	"syscall"
 	"testing"
 
-	"github.com/fullof-work/mass-sandbox/pkg/manifest/codec"
+	"github.com/kuasar-sandbox/sandbox-accelerator/pkg/manifest/codec"
 )
 
 // dataSegments must return exactly the resident runs = [0,size) minus holes.

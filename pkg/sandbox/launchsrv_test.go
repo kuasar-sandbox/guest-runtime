@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/fullof-work/mass-sandbox/pkg/sandbox/proto"
+	"github.com/kuasar-sandbox/sandbox-runtime/pkg/sandbox/proto"
 )
 
 // TestLaunchServer_HelloLaunchHandshake spawns the launch server on a

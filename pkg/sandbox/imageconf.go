@@ -10,8 +10,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/fullof-work/mass-sandbox/pkg/flatten"
-	"github.com/fullof-work/mass-sandbox/pkg/sandbox/proto"
+	"github.com/kuasar-sandbox/sandbox-builder/pkg/image"
+	"github.com/kuasar-sandbox/sandbox-runtime/pkg/sandbox/proto"
 	"golang.org/x/sys/unix"
 )
 
@@ -65,12 +65,12 @@ func LoadImageConfig(path string) (*ImageConfig, error) {
 // unconditionally. Hard errors (malformed JSON, transport failure)
 // propagate.
 //
-// Delegates to flatten.ReadConfig, the authoritative reader paired
+// Delegates to image.ReadConfig, the authoritative reader paired
 // with flatten-ctl's AppendConfigZip writer. We translate
-// flatten.RuntimeConfig (persisted shape) into our internal
+// image.RuntimeConfig (persisted shape) into our internal
 // ImageConfig (merge-step shape).
 func LoadImageConfigFrom(r io.ReaderAt, size int64) (*ImageConfig, error) {
-	rc, err := flatten.ReadConfig(r, size)
+	rc, err := image.ReadConfig(r, size)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return &ImageConfig{}, nil

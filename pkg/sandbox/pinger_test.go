@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/fullof-work/mass-sandbox/pkg/sandbox/proto"
+	"github.com/kuasar-sandbox/sandbox-runtime/pkg/sandbox/proto"
 )
 
 // TestPinger_TickAndPause runs a fake guest behind a fakeCHProxy and

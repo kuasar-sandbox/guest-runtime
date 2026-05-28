@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/fullof-work/mass-sandbox/pkg/sandbox/mux"
+	"github.com/kuasar-sandbox/sandbox-runtime/pkg/sandbox/mux"
 )
 
 // fakeMUXConn is a minimal io.ReadWriteCloser for MUXLink tests: Read

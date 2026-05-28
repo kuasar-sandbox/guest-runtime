@@ -7,7 +7,7 @@ import (
 	"runtime"
 	"time"
 
-	"github.com/fullof-work/mass-sandbox/pkg/vhost"
+	"github.com/kuasar-sandbox/sandbox-runtime/pkg/vhost"
 )
 
 // statsReport is the JSON layout written by --stats-json. The bucket

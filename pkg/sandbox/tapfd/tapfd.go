@@ -3,7 +3,10 @@
 // queue fd (with virtio-net header) plus metadata over a unix socket via
 // SCM_RIGHTS, so CH can drive virtio-net off a fd the network provider owns.
 //
-// Self-contained: stdlib + golang.org/x/sys/unix only.
+// The wire receive + payload parse are delegated to the canonical
+// sandbox-vswitch/pkg/tapfd; this package adds only the exec-helper
+// orchestration and projects the port metadata onto the subset sandbox-ctl
+// needs.
 package tapfd
 
 import (
@@ -14,18 +17,20 @@ import (
 	"net"
 	"os"
 	"os/exec"
-	"strconv"
 	"strings"
 	"time"
 
 	"golang.org/x/sys/unix"
+
+	vsw "github.com/kuasar-sandbox/sandbox-vswitch/pkg/tapfd"
 )
 
 // DefaultTimeout bounds the whole handoff (exec helper → recv fd → helper exit).
 const DefaultTimeout = 5 * time.Second
 
 // Metadata is the recognized subset of the handoff payload (docs/tapfd.md
-// §4.3). Unknown keys are ignored per the protocol's forward-compat rule.
+// §4.3) sandbox-ctl acts on. Unknown keys are ignored per the protocol's
+// forward-compat rule (handled by the vswitch parser).
 type Metadata struct {
 	MAC string // provider-assigned MAC the VMM must mirror onto virtio-net
 	IP  string // interface L3 address (may be bare, no mask)
@@ -108,102 +113,18 @@ func Acquire(ctx context.Context, argv []string, timeout time.Duration) (tap *os
 	return tapFiles[0], netnsFile, meta, nil
 }
 
-// RecvFd performs the §4.4 receive on a connected unix socket: one recvmsg,
-// collect every SCM_RIGHTS fd (so none leak), parse the NUL-terminated metadata
-// line, cross-check the declared fd= + netns_fd= count against what arrived,
-// then split by position — the first fd= are tap queues, the trailing netns_fd=
-// (0 or 1) is the tap's netns reference (docs/tapfd.md §4.6). netnsFile is nil
-// when the provider sends none. Any error closes all received fds.
+// RecvFd performs the §4.4 receive by delegating to the canonical
+// sandbox-vswitch tapfd library (recvmsg, SCM_RIGHTS fd collection, payload
+// parse, fd-count cross-check, and the positional tap/netns split), then
+// projects the resulting PortMetadata onto the MAC/IP/MTU subset sandbox-ctl
+// acts on. netnsFile is nil when the provider attached none. Any error closes
+// all received fds.
 func RecvFd(conn *net.UnixConn) (tapFiles []*os.File, netnsFile *os.File, meta Metadata, err error) {
-	buf := make([]byte, 512)
-	oob := make([]byte, unix.CmsgSpace(8*4)) // up to 8 ints: multi-queue + trailing netns (§4.4 step 1)
-	n, oobn, _, _, rerr := conn.ReadMsgUnix(buf, oob)
+	taps, netnsF, pm, rerr := vsw.RecvFdsWithNetns(conn)
 	if rerr != nil {
-		return nil, nil, Metadata{}, fmt.Errorf("recvmsg: %w", rerr)
+		return nil, nil, Metadata{}, rerr
 	}
-
-	// Collect ALL fds from every SCM_RIGHTS control message (§4.4 step 2).
-	var fds []int
-	if scms, perr := unix.ParseSocketControlMessage(oob[:oobn]); perr == nil {
-		for i := range scms {
-			if rs, e := unix.ParseUnixRights(&scms[i]); e == nil {
-				fds = append(fds, rs...)
-			}
-		}
-	}
-
-	m, fdCount, netnsCount, perr := parsePayload(buf[:n])
-	if perr != nil {
-		closeAllInts(fds)
-		return nil, nil, Metadata{}, perr
-	}
-	if len(fds) == 0 {
-		return nil, nil, Metadata{}, errors.New("tapfd: no fd in SCM_RIGHTS")
-	}
-	if want := fdCount + netnsCount; len(fds) != want {
-		closeAllInts(fds)
-		return nil, nil, Metadata{}, fmt.Errorf("tapfd: payload fd=%d netns_fd=%d but received %d fds", fdCount, netnsCount, len(fds))
-	}
-
-	// Split by position (§4.4 step 5): first fdCount = tap queues, trailing
-	// netnsCount (0 or 1) = the tap's netns.
-	tapFiles = make([]*os.File, fdCount)
-	for i := 0; i < fdCount; i++ {
-		tapFiles[i] = os.NewFile(uintptr(fds[i]), "tapfd-queue")
-	}
-	if netnsCount > 0 {
-		netnsFile = os.NewFile(uintptr(fds[fdCount]), "tapfd-netns")
-	}
-	return tapFiles, netnsFile, m, nil
-}
-
-// parsePayload parses the metadata line up to the first NUL (§4.3), returning
-// the recognized fields, the required fd= count, and the optional netns_fd=
-// count (0 or 1, §4.3). Unknown keys are ignored.
-func parsePayload(b []byte) (Metadata, int, int, error) {
-	if i := bytes.IndexByte(b, 0); i >= 0 {
-		b = b[:i]
-	}
-	var m Metadata
-	fdCount := 0
-	netnsCount := 0
-	haveFD := false
-	for _, tok := range strings.Fields(string(b)) {
-		k, v, ok := strings.Cut(tok, "=")
-		if !ok {
-			return Metadata{}, 0, 0, fmt.Errorf("tapfd: token %q has no '='", tok)
-		}
-		switch k {
-		case "mac":
-			m.MAC = v
-		case "ip":
-			m.IP = v
-		case "mtu":
-			m.MTU, _ = strconv.Atoi(v) // best-effort; absent/garbage → 0
-		case "fd":
-			c, err := strconv.Atoi(v)
-			if err != nil || c < 1 {
-				return Metadata{}, 0, 0, fmt.Errorf("tapfd: invalid fd=%q", v)
-			}
-			fdCount, haveFD = c, true
-		case "netns_fd":
-			c, err := strconv.Atoi(v)
-			if err != nil || c < 0 || c > 1 {
-				return Metadata{}, 0, 0, fmt.Errorf("tapfd: invalid netns_fd=%q (want 0 or 1)", v)
-			}
-			netnsCount = c
-		}
-	}
-	if !haveFD {
-		return Metadata{}, 0, 0, errors.New("tapfd: payload missing required fd= count")
-	}
-	return m, fdCount, netnsCount, nil
-}
-
-func closeAllInts(fds []int) {
-	for _, fd := range fds {
-		_ = unix.Close(fd)
-	}
+	return taps, netnsF, Metadata{MAC: pm.MAC, IP: pm.InnerIP, MTU: int(pm.MTU)}, nil
 }
 
 func closeAll(files []*os.File) {

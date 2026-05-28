@@ -18,13 +18,13 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/fullof-work/mass-sandbox/pkg/manifest/fetch"
-	"github.com/fullof-work/mass-sandbox/pkg/sandbox"
-	"github.com/fullof-work/mass-sandbox/pkg/sandbox/proto"
-	"github.com/fullof-work/mass-sandbox/pkg/sandbox/stdio"
-	"github.com/fullof-work/mass-sandbox/pkg/sandbox/tapfd"
-	"github.com/fullof-work/mass-sandbox/pkg/sandbox/uffd"
-	"github.com/fullof-work/mass-sandbox/pkg/vhost"
+	"github.com/kuasar-sandbox/sandbox-accelerator/pkg/manifest/fetch"
+	"github.com/kuasar-sandbox/sandbox-runtime/pkg/sandbox"
+	"github.com/kuasar-sandbox/sandbox-runtime/pkg/sandbox/proto"
+	"github.com/kuasar-sandbox/sandbox-runtime/pkg/sandbox/stdio"
+	"github.com/kuasar-sandbox/sandbox-runtime/pkg/sandbox/tapfd"
+	"github.com/kuasar-sandbox/sandbox-runtime/pkg/sandbox/uffd"
+	"github.com/kuasar-sandbox/sandbox-runtime/pkg/vhost"
 )
 
 // Options is the restore-specific input.

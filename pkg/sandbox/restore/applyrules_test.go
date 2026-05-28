@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/fullof-work/mass-sandbox/pkg/sandbox"
+	"github.com/kuasar-sandbox/sandbox-runtime/pkg/sandbox"
 )
 
 // helper: creates a file at path with body, returns hex(sha256).

@@ -6,11 +6,11 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/fullof-work/mass-sandbox/pkg/flatten"
+	"github.com/kuasar-sandbox/sandbox-builder/pkg/image"
 )
 
 // TestLoadImageConfig_RoundTrip writes a fake "erofs prefix + appended
-// config.json ZIP" file using flatten.AppendConfigZip, then reads it
+// config.json ZIP" file using image.AppendConfigZip, then reads it
 // back via sandbox.LoadImageConfig. Validates the host-side reader
 // pairs correctly with the writer side.
 func TestLoadImageConfig_RoundTrip(t *testing.T) {
@@ -25,14 +25,14 @@ func TestLoadImageConfig_RoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	rc := &flatten.RuntimeConfig{
+	rc := &image.RuntimeConfig{
 		Architecture: "amd64",
 		Os:           "linux",
 		Env:          []string{"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", "LANG=C.UTF-8"},
 		Cmd:          []string{"python3"},
 		WorkingDir:   "/",
 	}
-	if err := flatten.AppendConfigZip(path, rc); err != nil {
+	if err := image.AppendConfigZip(path, rc); err != nil {
 		t.Fatalf("AppendConfigZip: %v", err)
 	}
 

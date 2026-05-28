@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/fullof-work/mass-sandbox/pkg/nodectl"
+	"github.com/kuasar-sandbox/sandbox-runtime/pkg/resource"
 )
 
 // ControllerHookOptions configures the dynamic-mode controller integration.
@@ -49,7 +49,7 @@ type ControllerHooks struct {
 	cfg  *SandboxConfig
 
 	mu                sync.Mutex
-	client            *nodectl.Client
+	client            *resource.Client
 	allocatableNowMem uint64
 	released          bool
 	cancelBg          context.CancelFunc
@@ -67,7 +67,7 @@ func NewControllerHooks(opts ControllerHookOptions, cfg *SandboxConfig) (*Contro
 	if opts.SocketPath == "" {
 		return h, nil
 	}
-	h.client = &nodectl.Client{SocketPath: opts.SocketPath}
+	h.client = &resource.Client{SocketPath: opts.SocketPath}
 	if err := h.client.Connect(); err != nil {
 		return nil, err
 	}
@@ -137,7 +137,7 @@ func (h *ControllerHooks) Admit(sid string, allocatableAtSnapshot uint64) (uint6
 		return 0, err
 	}
 	floorCPU := h.cfg.Resources.Allocatable.CPU
-	res, err := h.client.Admit(nodectl.AdmitParams{
+	res, err := h.client.Admit(resource.AdmitParams{
 		SandboxID:             sid,
 		CapacityMemoryBytes:   cap,
 		CapacityCPU:           h.cfg.Resources.Capacity.CPU,
@@ -150,10 +150,10 @@ func (h *ControllerHooks) Admit(sid string, allocatableAtSnapshot uint64) (uint6
 	if err != nil {
 		return 0, fmt.Errorf("admit: %w", err)
 	}
-	if res.Status == nodectl.StatusRejected {
+	if res.Status == resource.StatusRejected {
 		return 0, fmt.Errorf("admit rejected: %s", res.Msg)
 	}
-	if res.Status == nodectl.StatusQueued {
+	if res.Status == resource.StatusQueued {
 		return 0, fmt.Errorf("admit queued (eta %d ms); retry policy not yet implemented", res.QueuedETAMs)
 	}
 	h.mu.Lock()

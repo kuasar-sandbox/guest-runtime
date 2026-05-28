@@ -11,49 +11,9 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-func TestParsePayload(t *testing.T) {
-	cases := []struct {
-		name      string
-		in        string
-		wantMAC   string
-		wantIP    string
-		wantMTU   int
-		wantFD    int
-		wantNetns int
-		wantErr   string
-	}{
-		{name: "full", in: "mac=02:00:00:00:80:01 mtu=1500 ip=169.254.1.1 fd=1\x00",
-			wantMAC: "02:00:00:00:80:01", wantIP: "169.254.1.1", wantMTU: 1500, wantFD: 1},
-		{name: "ignores unknown keys + trailing bytes", in: "port=3 mac=aa:bb:cc:dd:ee:ff fd=2\x00garbage after nul",
-			wantMAC: "aa:bb:cc:dd:ee:ff", wantFD: 2},
-		{name: "netns fd", in: "mac=02:00:00:00:80:01 fd=1 netns_fd=1\x00",
-			wantMAC: "02:00:00:00:80:01", wantFD: 1, wantNetns: 1},
-		{name: "netns_fd=0 explicit", in: "fd=1 netns_fd=0\x00", wantFD: 1, wantNetns: 0},
-		{name: "missing fd", in: "mac=x ip=y\x00", wantErr: "missing required fd"},
-		{name: "bad fd", in: "fd=zero\x00", wantErr: "invalid fd"},
-		{name: "zero fd", in: "fd=0\x00", wantErr: "invalid fd"},
-		{name: "netns out of range", in: "fd=1 netns_fd=2\x00", wantErr: "netns_fd"},
-		{name: "token without =", in: "mac=x bogus fd=1\x00", wantErr: "no '='"},
-		{name: "value may contain =", in: "k=a=b fd=1\x00", wantFD: 1}, // first = splits; rest kept (unknown key)
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			meta, fdCount, netnsCount, err := parsePayload([]byte(tc.in))
-			if tc.wantErr != "" {
-				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
-					t.Fatalf("want error %q, got %v", tc.wantErr, err)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if meta.MAC != tc.wantMAC || meta.IP != tc.wantIP || meta.MTU != tc.wantMTU || fdCount != tc.wantFD || netnsCount != tc.wantNetns {
-				t.Fatalf("got mac=%q ip=%q mtu=%d fd=%d netns_fd=%d", meta.MAC, meta.IP, meta.MTU, fdCount, netnsCount)
-			}
-		})
-	}
-}
+// Payload-parse unit tests live with the canonical parser in
+// sandbox-vswitch/pkg/tapfd (payload_test.go); this package delegates to it
+// and is covered by the RecvFd / Acquire tests below.
 
 // socketPair returns two connected *net.UnixConn (a sender, b receiver).
 func socketPair(t *testing.T) (a, b *net.UnixConn) {

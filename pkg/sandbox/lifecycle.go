@@ -16,15 +16,15 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"github.com/fullof-work/mass-sandbox/pkg/manifest"
-	"github.com/fullof-work/mass-sandbox/pkg/sandbox/ctl"
-	"github.com/fullof-work/mass-sandbox/pkg/sandbox/memory"
-	"github.com/fullof-work/mass-sandbox/pkg/sandbox/proto"
-	"github.com/fullof-work/mass-sandbox/pkg/sandbox/snapshot"
-	"github.com/fullof-work/mass-sandbox/pkg/sandbox/stdio"
-	"github.com/fullof-work/mass-sandbox/pkg/sandbox/tapfd"
-	"github.com/fullof-work/mass-sandbox/pkg/sandbox/uffd"
-	"github.com/fullof-work/mass-sandbox/pkg/vhost"
+	"github.com/kuasar-sandbox/sandbox-accelerator/pkg/manifest"
+	"github.com/kuasar-sandbox/sandbox-runtime/pkg/sandbox/ctl"
+	"github.com/kuasar-sandbox/sandbox-runtime/pkg/sandbox/memory"
+	"github.com/kuasar-sandbox/sandbox-runtime/pkg/sandbox/proto"
+	"github.com/kuasar-sandbox/sandbox-runtime/pkg/sandbox/snapshot"
+	"github.com/kuasar-sandbox/sandbox-runtime/pkg/sandbox/stdio"
+	"github.com/kuasar-sandbox/sandbox-runtime/pkg/sandbox/tapfd"
+	"github.com/kuasar-sandbox/sandbox-runtime/pkg/sandbox/uffd"
+	"github.com/kuasar-sandbox/sandbox-runtime/pkg/vhost"
 )
 
 // RunOptions controls a single sandbox-ctl run invocation.

@@ -12,7 +12,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"github.com/fullof-work/mass-sandbox/pkg/sandbox"
+	"github.com/kuasar-sandbox/sandbox-runtime/pkg/sandbox"
 )
 
 // SnapshotCfg mirrors the on-disk snapshot.cfg schema (docs/sandbox.md

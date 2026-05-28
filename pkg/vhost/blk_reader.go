@@ -4,7 +4,7 @@ import (
 	"context"
 	"io"
 
-	"github.com/fullof-work/mass-sandbox/pkg/manifest/fetch"
+	"github.com/kuasar-sandbox/sandbox-accelerator/pkg/manifest/fetch"
 )
 
 // BlockReader is the abstract source for read-only block data behind a

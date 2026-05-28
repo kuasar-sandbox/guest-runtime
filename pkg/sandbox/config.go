@@ -15,9 +15,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/fullof-work/mass-sandbox/pkg/manifest"
-	"github.com/fullof-work/mass-sandbox/pkg/sandbox/proto"
-	"github.com/fullof-work/mass-sandbox/pkg/util"
+	"github.com/kuasar-sandbox/sandbox-accelerator/pkg/manifest"
+	"github.com/kuasar-sandbox/sandbox-runtime/pkg/sandbox/proto"
+	"github.com/kuasar-sandbox/sandbox-runtime/internal/util"
 	"gopkg.in/yaml.v3"
 )
 

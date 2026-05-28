@@ -9,7 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/fullof-work/mass-sandbox/pkg/nodectl"
+	"github.com/kuasar-sandbox/sandbox-runtime/pkg/resource"
 )
 
 // PressureSensor watches the per-sandbox cgroup for memory pressure
@@ -120,13 +120,13 @@ func (s *PressureSensor) tickOnce(now time.Time) {
 	reason := ""
 	switch {
 	case dOOM > 0:
-		urgency = nodectl.UrgencyHigh
+		urgency = resource.UrgencyHigh
 		reason = "oom_event"
 	case dHigh > 0:
-		urgency = nodectl.UrgencyNormal
+		urgency = resource.UrgencyNormal
 		reason = "high_event"
 	case memHigh > 0 && rss > 0 && rising && rssRatio(rss, memHigh) > 0.95:
-		urgency = nodectl.UrgencyLow
+		urgency = resource.UrgencyLow
 		reason = "predicted"
 	}
 	if urgency == "" {

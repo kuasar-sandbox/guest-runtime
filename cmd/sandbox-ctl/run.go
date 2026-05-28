@@ -9,11 +9,11 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/fullof-work/mass-sandbox/pkg/manifest"
-	"github.com/fullof-work/mass-sandbox/pkg/sandbox"
-	"github.com/fullof-work/mass-sandbox/pkg/sandbox/restore"
-	"github.com/fullof-work/mass-sandbox/pkg/sandbox/stdio"
-	"github.com/fullof-work/mass-sandbox/pkg/util"
+	"github.com/kuasar-sandbox/sandbox-accelerator/pkg/manifest"
+	"github.com/kuasar-sandbox/sandbox-runtime/pkg/sandbox"
+	"github.com/kuasar-sandbox/sandbox-runtime/pkg/sandbox/restore"
+	"github.com/kuasar-sandbox/sandbox-runtime/pkg/sandbox/stdio"
+	"github.com/kuasar-sandbox/sandbox-runtime/internal/util"
 )
 
 // runCmd implements `sandbox-ctl run`. With --restore=<ref> it switches

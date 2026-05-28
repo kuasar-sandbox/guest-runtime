@@ -1,4 +1,4 @@
-package nodectl
+package resource
 
 import (
 	"bytes"

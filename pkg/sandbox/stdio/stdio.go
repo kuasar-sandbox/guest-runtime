@@ -37,8 +37,8 @@ import (
 	"sync"
 	"syscall"
 
-	"github.com/fullof-work/mass-sandbox/pkg/sandbox/mux"
-	"github.com/fullof-work/mass-sandbox/pkg/sandbox/proto"
+	"github.com/kuasar-sandbox/sandbox-runtime/pkg/sandbox/mux"
+	"github.com/kuasar-sandbox/sandbox-runtime/pkg/sandbox/proto"
 	"golang.org/x/sys/unix"
 )
 

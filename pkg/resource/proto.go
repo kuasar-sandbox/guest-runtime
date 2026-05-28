@@ -1,10 +1,12 @@
-// Package nodectl implements the sandbox resource control protocol and
-// its reference controller daemon (node-ctl).
+// Package resource is the client side of the sandbox resource control
+// protocol: the wire format (Message, WriteMessage/ReadMessage) and the
+// Client that sandbox-ctl uses to talk to a node-level controller.
 //
-// See docs/node.md for the protocol contract and the per-sandbox state
-// machine. Other implementations of the controller role are free to
-// exist; this package is the canonical reference.
-package nodectl
+// The reference controller (server, admission, allocation, state) lives in
+// the sandbox-sentinel repo, which imports this package for the protocol
+// definitions. See sandbox-sentinel's docs/node.md for the protocol
+// contract and the per-sandbox state machine.
+package resource
 
 import (
 	"encoding/binary"

@@ -1,0 +1,120 @@
+# sandbox-runtime — microVM sandbox lifecycle engine.
+#
+#   sandbox-ctl     host control plane (run / snapshot / restore)
+#   sandbox-init    guest PID 1 (packed into sandbox-runtime.erofs)
+#   sandbox-runtime sandbox-init packed into a virtio-pmem-mountable EROFS
+#
+# `make build` produces all three. sandbox-runtime needs mkfs.erofs from
+# sandbox-deps; the finder below probes PATH, this repo's bin/, and the
+# sibling sandbox-deps/bin/ (the org-root layout).
+
+SHELL := /bin/bash
+
+.PHONY: all build sandbox-ctl sandbox-init sandbox-runtime test vet bench clean help
+
+# ---------------------------------------------------------------------------
+# Architecture selection (identical block across all kuasar-sandbox repos)
+# ---------------------------------------------------------------------------
+HOST_ARCH   := $(shell uname -m)
+TARGET_ARCH ?= $(HOST_ARCH)
+ifeq ($(TARGET_ARCH),amd64)
+  override TARGET_ARCH := x86_64
+endif
+ifeq ($(TARGET_ARCH),arm64)
+  override TARGET_ARCH := aarch64
+endif
+ifeq ($(TARGET_ARCH),x86_64)
+  GO_ARCH := amd64
+else ifeq ($(TARGET_ARCH),aarch64)
+  GO_ARCH := arm64
+else
+  $(error unsupported TARGET_ARCH=$(TARGET_ARCH); supported: x86_64, aarch64)
+endif
+
+# ---------------------------------------------------------------------------
+# Build settings
+# ---------------------------------------------------------------------------
+GO             := go
+GO_BUILD_FLAGS := -trimpath
+BINDIR         := bin/$(TARGET_ARCH)
+BUILD_DIR      := build/$(TARGET_ARCH)
+
+# mkfs.erofs lookup chain (in priority order):
+#   PATH → this repo's $(BINDIR)/ → this repo's bin/ symlink →
+#   sibling sandbox-deps/bin/$(TARGET_ARCH)/ → sibling sandbox-deps/bin/ symlink
+MKFS_EROFS ?= $(shell \
+    command -v mkfs.erofs 2>/dev/null \
+    || ( [ -x $(BINDIR)/mkfs.erofs ] && echo $(BINDIR)/mkfs.erofs ) \
+    || ( [ -x bin/mkfs.erofs ] && echo bin/mkfs.erofs ) \
+    || ( [ -x ../sandbox-deps/$(BINDIR)/mkfs.erofs ] && echo ../sandbox-deps/$(BINDIR)/mkfs.erofs ) \
+    || ( [ -x ../sandbox-deps/bin/mkfs.erofs ] && echo ../sandbox-deps/bin/mkfs.erofs ))
+
+define link_bin
+@if [ "$(HOST_ARCH)" = "$(TARGET_ARCH)" ]; then \
+   mkdir -p bin && ln -sfn $(TARGET_ARCH)/$(1) bin/$(1); \
+ fi
+endef
+
+# ---------------------------------------------------------------------------
+# Targets
+# ---------------------------------------------------------------------------
+all: build
+
+build: sandbox-ctl sandbox-init sandbox-runtime
+
+sandbox-ctl:
+	@mkdir -p $(BINDIR)
+	GOOS=linux GOARCH=$(GO_ARCH) CGO_ENABLED=0 $(GO) build $(GO_BUILD_FLAGS) -o $(BINDIR)/sandbox-ctl ./cmd/sandbox-ctl
+	$(call link_bin,sandbox-ctl)
+
+# guest PID 1: stripped (no libc inside the guest rootfs).
+sandbox-init:
+	@mkdir -p $(BINDIR)
+	GOOS=linux GOARCH=$(GO_ARCH) CGO_ENABLED=0 $(GO) build $(GO_BUILD_FLAGS) -ldflags '-s -w' -o $(BINDIR)/sandbox-init ./cmd/sandbox-init
+	$(call link_bin,sandbox-init)
+
+# Pack sandbox-init into the guest "/" image (virtio-pmem, DAX, read-only,
+# shared across sandboxes via host page cache). Needs mkfs.erofs; EROFS is
+# endian-neutral / cross-mountable.
+sandbox-runtime: sandbox-init
+	@[ -n "$(MKFS_EROFS)" ] || { echo "mkfs.erofs not found — build it in sandbox-deps (\`make -C ../sandbox-deps erofs\`) or set MKFS_EROFS=<path>" >&2; exit 1; }
+	rm -rf $(BUILD_DIR)/sandbox-runtime
+	mkdir -p $(BUILD_DIR)/sandbox-runtime/sbin $(BUILD_DIR)/sandbox-runtime/proc \
+	         $(BUILD_DIR)/sandbox-runtime/sys $(BUILD_DIR)/sandbox-runtime/dev \
+	         $(BUILD_DIR)/sandbox-runtime/mnt/lower $(BUILD_DIR)/sandbox-runtime/mnt/upper \
+	         $(BUILD_DIR)/sandbox-runtime/mnt/newroot
+	cp $(BINDIR)/sandbox-init $(BUILD_DIR)/sandbox-runtime/sbin/init
+	chmod +x $(BUILD_DIR)/sandbox-runtime/sbin/init
+	rm -f $(BINDIR)/sandbox-runtime.erofs
+	"$(MKFS_EROFS)" $(BINDIR)/sandbox-runtime.erofs $(BUILD_DIR)/sandbox-runtime
+	@# virtio-pmem requires 2 MiB-aligned backing; EROFS self-describes its
+	@# extent in the superblock so sparse padding is invisible to mount.
+	@actual=$$(stat -c %s $(BINDIR)/sandbox-runtime.erofs); \
+	 aligned=$$(( ($$actual + 2097151) / 2097152 * 2097152 )); \
+	 [ "$$aligned" = "$$actual" ] || truncate -s $$aligned $(BINDIR)/sandbox-runtime.erofs
+	@echo "==> built $(BINDIR)/sandbox-runtime.erofs"
+
+test:
+	CGO_ENABLED=0 $(GO) test ./...
+
+vet:
+	CGO_ENABLED=0 $(GO) vet ./...
+
+clean:
+	rm -rf bin build
+
+# Go micro-benchmarks. Sandbox-level e2e (cold/snapshot/restore/...) lives in
+# kuasar-sandbox/test/e2e — they need vmlinux + cloud-hypervisor + mkfs.erofs
+# (from sandbox-deps) plus accelerator binaries, so they're cross-repo and
+# their natural home is the umbrella.
+bench:
+	CGO_ENABLED=0 $(GO) test -bench=. -benchmem -run=^$$ ./...
+
+help:
+	@echo "sandbox-runtime. Targets:"
+	@echo "  build              sandbox-ctl + sandbox-init + sandbox-runtime.erofs"
+	@echo "  sandbox-ctl        host control plane"
+	@echo "  sandbox-init       guest PID 1 (stripped)"
+	@echo "  sandbox-runtime    pack sandbox-init into the guest erofs (needs mkfs.erofs)"
+	@echo "  test / vet / clean"
+	@echo "  TARGET_ARCH        x86_64 (default) | aarch64"

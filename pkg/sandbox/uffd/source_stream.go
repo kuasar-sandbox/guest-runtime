@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/fullof-work/mass-sandbox/pkg/manifest/fetch"
+	"github.com/kuasar-sandbox/sandbox-accelerator/pkg/manifest/fetch"
 )
 
 // StreamSnapshotSource implements SnapshotReader against a snapshot bundle's
