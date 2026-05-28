@@ -382,8 +382,8 @@ make perf-density      # 密度场景(N 沙箱并发,workload = cycles/pareto/id
 # 1. 在 x86_64 host(或 aarch64 host)上分别构建两个架构的 release tarball
 make TARGET_ARCH=x86_64 release VERSION=v0.1
 make TARGET_ARCH=aarch64 release VERSION=v0.1
-#    → build/dist/mass-sandbox-v0.1-linux-x86_64.tar.gz
-#    → build/dist/mass-sandbox-v0.1-linux-aarch64.tar.gz
+#    → build/dist/kuasar-sandbox-v0.1-linux-x86_64.tar.gz
+#    → build/dist/kuasar-sandbox-v0.1-linux-aarch64.tar.gz
 
 # 2. 打 git tag 并推送(注意:Makefile 不自动打 tag)
 git tag v0.1
@@ -401,7 +401,7 @@ make release-publish VERSION=v0.1
 ### 8.1 Release tarball 结构
 
 ```
-mass-sandbox-v0.1/
+kuasar-sandbox-v0.1/
 ├── bin/                    # 扁平,所有二进制(单架构)
 ├── test/{e2e,perf,scripts}/
 ├── docs/                   # 设计文档(本目录)
