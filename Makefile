@@ -75,7 +75,11 @@ sandbox-init:
 
 # Pack sandbox-init into the guest "/" image (virtio-pmem, DAX, read-only,
 # shared across sandboxes via host page cache). Needs mkfs.erofs; EROFS is
-# endian-neutral / cross-mountable.
+# endian-neutral / cross-mountable. mkfs flags mirror sandbox-builder's
+# flatten.go buildEROFS for deterministic, dedup-friendly output. stderr
+# discarded because mkfs.erofs 1.9 emits a false-positive
+# "<E> Compression is not enabled" on -Ededupe even when --chunksize already
+# triggers chunk-based dedup (matches flatten.go Stderr=io.Discard).
 sandbox-runtime: sandbox-init
 	@[ -n "$(MKFS_EROFS)" ] || { echo "mkfs.erofs not found — build it in sandbox-deps (\`make -C ../sandbox-deps erofs\`) or set MKFS_EROFS=<path>" >&2; exit 1; }
 	rm -rf $(BUILD_DIR)/sandbox-runtime
@@ -86,7 +90,15 @@ sandbox-runtime: sandbox-init
 	cp $(BINDIR)/sandbox-init $(BUILD_DIR)/sandbox-runtime/sbin/init
 	chmod +x $(BUILD_DIR)/sandbox-runtime/sbin/init
 	rm -f $(BINDIR)/sandbox-runtime.erofs
-	"$(MKFS_EROFS)" $(BINDIR)/sandbox-runtime.erofs $(BUILD_DIR)/sandbox-runtime
+	"$(MKFS_EROFS)" \
+	    -Ededupe \
+	    --chunksize=4096 \
+	    --all-root \
+	    -T0 \
+	    -b4096 \
+	    -x-1 \
+	    -U 00000000-0000-0000-0000-000000000000 \
+	    $(BINDIR)/sandbox-runtime.erofs $(BUILD_DIR)/sandbox-runtime 2>/dev/null
 	@# virtio-pmem requires 2 MiB-aligned backing; EROFS self-describes its
 	@# extent in the superblock so sparse padding is invisible to mount.
 	@actual=$$(stat -c %s $(BINDIR)/sandbox-runtime.erofs); \
