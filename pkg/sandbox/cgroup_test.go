@@ -18,8 +18,8 @@ func TestJoinCgroup_EmptyPath_NoOp(t *testing.T) {
 	if cg.Path != "" {
 		t.Errorf("Path = %q, want empty", cg.Path)
 	}
-	if cg.joined {
-		t.Error("joined = true, want false (no-cgroup mode)")
+	if cg.Active() {
+		t.Error("Active() = true, want false (no-cgroup mode)")
 	}
 	// Cleanup must also be a no-op (no panic, no error).
 	if err := cg.Cleanup(); err != nil {

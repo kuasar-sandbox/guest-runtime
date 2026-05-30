@@ -94,8 +94,8 @@ func Run(ctx context.Context, opts Options) (int, error) {
 	if err != nil {
 		return -1, fmt.Errorf("cgroup: %w", err)
 	}
-	if cg.Path != "" {
-		logf("cgroup joined: %s", cg.Path)
+	if cg.Active() {
+		logf("cgroup limits set: %s (CH joins on start; sandbox-ctl stays out)", cg.Path)
 	}
 	defer func() { _ = cg.Cleanup() }()
 
@@ -493,6 +493,7 @@ func Run(ctx context.Context, opts Options) (int, error) {
 		ManifestCfg: opts.ManifestCfg,
 		DiffPath:    diffPath,
 		OwnedDiff:   ownedDiff,
+		Cgroup:      cg,
 
 		BuildCmd: func(e sandbox.CmdEnv) (*exec.Cmd, func(), error) {
 			// CH 51 `--restore source_url=file://<dir>` replaces

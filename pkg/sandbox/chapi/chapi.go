@@ -1,4 +1,12 @@
-package snapshot
+// Package chapi provides a tiny HTTP/1.1 client over the cloud-hypervisor
+// api-socket (Unix Domain Socket). It is intentionally a leaf package
+// (only stdlib deps) so both pkg/sandbox (lifecycle, balloon) and
+// pkg/sandbox/snapshot can import it without creating a cycle.
+//
+// CH speaks plain HTTP/1.1 on the UDS exposed by --api-socket. The call
+// rate is low (one-shot per snapshot/shutdown), so a hand-rolled
+// request/response keeps the dep surface minimal compared to net/http.
+package chapi
 
 import (
 	"fmt"
@@ -25,16 +33,20 @@ func CHSnapshot(apiSock, destURL string) error {
 }
 
 // CHShutdownVMM issues PUT /api/v1/vmm.shutdown — tears the whole VMM
-// down so the cloud-hypervisor process exits. Used by the "destroy"
-// snapshot path (resume_after=false): after the bundle is written the
-// guest is left paused, and this is what makes `sandbox-ctl run` return.
+// down so the cloud-hypervisor process exits. CH performs an ordered
+// internal cleanup (stop vCPU → destroy devices → release memory zones
+// → close sockets → exit). Preferred over forwarding host SIGTERM,
+// which forces an unordered signal-handler exit and leaves Linux to
+// unmap large memory zones via the reaper path (slow under host
+// oversubscribe — see density-perf forensics).
+//
+// Used by both the "destroy" snapshot path (snapshot.go --resume=false)
+// and by lifecycle.go's normal shutdown path.
 func CHShutdownVMM(apiSock string) error {
 	return chAPI(apiSock, "PUT", "/api/v1/vmm.shutdown", "")
 }
 
-// chAPI sends a tiny HTTP/1.1 request over the CH api UDS. CH speaks
-// HTTP/1.1; we hand-roll because the call rate is one-shot per
-// snapshot operation.
+// chAPI sends a tiny HTTP/1.1 request over the CH api UDS.
 func chAPI(sock, method, path, body string) error {
 	c, err := net.DialTimeout("unix", sock, 5*time.Second)
 	if err != nil {

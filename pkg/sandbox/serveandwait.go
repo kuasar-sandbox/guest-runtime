@@ -104,6 +104,12 @@ type VMParams struct {
 	TapFile *os.File
 	NetMAC  string
 
+	// Cgroup, when active, gets the CH PID appended after cmd.Start so CH is
+	// the only process in the per-sandbox cgroup. sandbox-ctl deliberately
+	// stays in its parent cgroup — see pkg/sandbox/cgroup.go header for the
+	// memcg-throttle deadlock that caused.
+	Cgroup *CgroupController
+
 	// NetnsFile, when non-nil, is the tap's network-namespace fd from the same
 	// handoff (docs/tapfd.md §4.6). ServeAndWait fork/execs CH on a thread that
 	// setns()'d into it, so CH runs inside the tap's netns. CH does NOT inherit
@@ -393,6 +399,17 @@ func ServeAndWait(p VMParams) (int, error) {
 	chPid := cmd.Process.Pid
 	logf("CH started pid=%d", chPid)
 
+	// Move CH (and only CH) into the per-sandbox cgroup. sandbox-ctl
+	// stays in its parent cgroup — see pkg/sandbox/cgroup.go header.
+	// Failure is fatal: missing cgroup enforcement on CH is worse than
+	// taking the boot down so the orchestrator restarts cleanly.
+	if err := p.Cgroup.AddPID(chPid); err != nil {
+		_ = cmd.Process.Kill()
+		cancelBackends()
+		backendWG.Wait()
+		return -1, fmt.Errorf("cgroup: move CH (pid=%d) in: %w", chPid, err)
+	}
+
 	// PingFatalThreshold wiring: when the threshold is hit (opt-in),
 	// SIGTERM CH so cmd.Wait returns; waitForCHWithSignalEscalation then
 	// escalates to SIGKILL after chShutdownGrace if CH doesn't drain.
@@ -422,7 +439,7 @@ func ServeAndWait(p VMParams) (int, error) {
 	doneCh := make(chan error, 1)
 	go func() { doneCh <- cmd.Wait() }()
 
-	waitErr := waitForCHWithSignalEscalation(doneCh, sigCh, cmd.Process, chPid, chShutdownGrace, logf)
+	waitErr := waitForCHWithSignalEscalation(doneCh, sigCh, cmd.Process, chPid, chSock, chShutdownGrace, logf)
 	cancelBackends()
 	backendWG.Wait()
 	exit := 0

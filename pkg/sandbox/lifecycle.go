@@ -17,6 +17,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/kuasar-sandbox/sandbox-accelerator/pkg/manifest"
+	"github.com/kuasar-sandbox/sandbox-runtime/pkg/sandbox/chapi"
 	"github.com/kuasar-sandbox/sandbox-runtime/pkg/sandbox/ctl"
 	"github.com/kuasar-sandbox/sandbox-runtime/pkg/sandbox/memory"
 	"github.com/kuasar-sandbox/sandbox-runtime/pkg/sandbox/proto"
@@ -158,8 +159,8 @@ func Run(ctx context.Context, opts RunOptions) (int, error) {
 	if err != nil {
 		return -1, fmt.Errorf("cgroup: %w", err)
 	}
-	if cg.joined {
-		logf("cgroup joined: %s memory.max=%d memory.high=%d cpu.max=%dus/100000us cpu.weight=%d",
+	if cg.Active() {
+		logf("cgroup limits set: %s memory.max=%d memory.high=%d cpu.max=%dus/100000us cpu.weight=%d (CH joins on start; sandbox-ctl stays out)",
 			cg.Path, cgCfg.MemoryMaxBytes, cgCfg.MemoryHighBytes,
 			cgCfg.CPUMaxQuotaUs, cgCfg.CPUWeight)
 	} else {
@@ -342,6 +343,7 @@ func Run(ctx context.Context, opts RunOptions) (int, error) {
 		ManifestCfg: opts.ManifestCfg,
 		DiffPath:    diffPath,
 		OwnedDiff:   ownedDiff,
+		Cgroup:      cg,
 
 		BuildCmd: func(e CmdEnv) (*exec.Cmd, func(), error) {
 			_, kernelPath, _ := SchemeAndPath(opts.Cfg.Boot.Kernel)
@@ -412,28 +414,53 @@ type processSignaler interface {
 	Signal(sig os.Signal) error
 }
 
-// waitForCHWithSignalEscalation blocks until doneCh fires, forwarding
-// host SIGTERM/SIGINT to the CH process. After the first forward we arm
-// a grace deadline; if CH doesn't exit within grace we SIGKILL. A second
-// SIGTERM/INT escalates immediately.
+// waitForCHWithSignalEscalation blocks until doneCh fires, driving CH
+// shutdown when host SIGTERM/SIGINT arrives. Shutdown path (in order):
+//
+//  1. PUT /api/v1/vmm.shutdown via chapi — CH performs an ordered
+//     internal cleanup (stop vCPU → destroy devices → release memory
+//     zones → close sockets → exit), avoiding the slow Linux reaper
+//     unmap-on-SIGKILL path that hurts host-oversubscribe density
+//     scenarios (see density-perf forensics: 8 GiB zone × 8 sandbox
+//     teardown spent ~31 s in kernel mm-lock contention after SIGKILL).
+//  2. If the API call fails (CH dead, socket closed, etc.) fall back
+//     to forwarding SIGTERM to the CH process.
+//  3. Arm a grace timer; if CH still hasn't exited, escalate to SIGKILL.
+//  4. A second SIGTERM/INT from the user escalates immediately.
+//
+// chSock is empty for tests that exercise only the signal path; in that
+// case we skip step 1 and go straight to SIGTERM (matches the old
+// behavior).
 func waitForCHWithSignalEscalation(
 	doneCh <-chan error,
 	sigCh <-chan os.Signal,
 	proc processSignaler,
 	chPid int,
+	chSock string,
 	grace time.Duration,
 	logf func(format string, args ...any),
 ) error {
 	var killTimer *time.Timer
 	var killCh <-chan time.Time
-	sigtermSent := false
+	shutdownInitiated := false
 	for {
 		select {
 		case sig := <-sigCh:
-			if !sigtermSent {
-				logf("received %v, forwarding SIGTERM to CH (will SIGKILL after %s)", sig, grace)
-				_ = proc.Signal(syscall.SIGTERM)
-				sigtermSent = true
+			if !shutdownInitiated {
+				usedAPI := false
+				if chSock != "" {
+					if err := chapi.CHShutdownVMM(chSock); err == nil {
+						logf("received %v, requested vmm.shutdown via API (will SIGKILL after %s if CH still alive)", sig, grace)
+						usedAPI = true
+					} else {
+						logf("received %v, vmm.shutdown API failed (%v) — falling back to SIGTERM", sig, err)
+					}
+				}
+				if !usedAPI {
+					logf("received %v, forwarding SIGTERM to CH (will SIGKILL after %s)", sig, grace)
+					_ = proc.Signal(syscall.SIGTERM)
+				}
+				shutdownInitiated = true
 				killTimer = time.NewTimer(grace)
 				killCh = killTimer.C
 			} else {
@@ -445,7 +472,7 @@ func waitForCHWithSignalEscalation(
 				killCh = nil
 			}
 		case <-killCh:
-			logf("CH didn't exit within %s of SIGTERM, sending SIGKILL pid=%d", grace, chPid)
+			logf("CH didn't exit within %s of shutdown request, sending SIGKILL pid=%d", grace, chPid)
 			_ = proc.Signal(syscall.SIGKILL)
 			killCh = nil
 		case waitErr := <-doneCh:
@@ -710,7 +737,7 @@ const destroyAfterSnapshotDelay = 300 * time.Millisecond
 // are only logged — the sandbox is being torn down regardless.
 func destroyAfterSnapshot(chSock string, logf func(string, ...any)) {
 	time.Sleep(destroyAfterSnapshotDelay)
-	if err := snapshot.CHShutdownVMM(chSock); err != nil {
+	if err := chapi.CHShutdownVMM(chSock); err != nil {
 		logf("snapshot: destroy mode — vmm.shutdown: %v", err)
 		return
 	}

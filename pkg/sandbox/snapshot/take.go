@@ -22,6 +22,8 @@ import (
 	"path/filepath"
 	"syscall"
 	"time"
+
+	"github.com/kuasar-sandbox/sandbox-runtime/pkg/sandbox/chapi"
 )
 
 // Quiescer abstracts the vhost backend's pause/resume hooks. A typical
@@ -95,7 +97,7 @@ func Take(s Sources, sink SnapshotSink, resumeAfter bool) (*Outputs, error) {
 
 	// T2a: pause CH.
 	pauseStart := time.Now()
-	if err := CHPause(s.APISock); err != nil {
+	if err := chapi.CHPause(s.APISock); err != nil {
 		return nil, fmt.Errorf("CH pause: %w", err)
 	}
 	pausedAt := time.Now()
@@ -105,7 +107,7 @@ func Take(s Sources, sink SnapshotSink, resumeAfter bool) (*Outputs, error) {
 		// /vm.shutdown after Take returns; here we only resume on the
 		// resume_after=true path.
 		if !resumed && resumeAfter {
-			_ = CHResume(s.APISock)
+			_ = chapi.CHResume(s.APISock)
 		}
 	}()
 	defer s.Quiescer.Resume() // unconditional
@@ -117,7 +119,7 @@ func Take(s Sources, sink SnapshotSink, resumeAfter bool) (*Outputs, error) {
 	// there (small); the multi-GiB memory + disk never touch the staging tmpfs —
 	// they stream straight to the sink.
 	dumpStart := time.Now()
-	if err := CHSnapshot(s.APISock, "file://"+s.StagingDir); err != nil {
+	if err := chapi.CHSnapshot(s.APISock, "file://"+s.StagingDir); err != nil {
 		return nil, fmt.Errorf("CH snapshot: %w", err)
 	}
 	configJSON, err := os.ReadFile(filepath.Join(s.StagingDir, "config.json"))
@@ -194,7 +196,7 @@ func Take(s Sources, sink SnapshotSink, resumeAfter bool) (*Outputs, error) {
 
 	// T8: resume (destroy path handled by caller).
 	if resumeAfter {
-		if err := CHResume(s.APISock); err != nil {
+		if err := chapi.CHResume(s.APISock); err != nil {
 			return nil, fmt.Errorf("CH resume: %w", err)
 		}
 		resumed = true
