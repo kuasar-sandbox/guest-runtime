@@ -251,8 +251,12 @@ func madviseDontneedRange(addr, length uintptr) error {
 	if addr&pageMask != 0 || length&pageMask != 0 {
 		return unix.EINVAL
 	}
-	// Build a slice header pointing at the mapping without holding
-	// a Go reference to the bytes — we never read/write through it.
-	b := unsafe.Slice((*byte)(unsafe.Pointer(addr)), length)
-	return unix.Madvise(b, unix.MADV_DONTNEED)
+	// addr is a raw MAP_SHARED memfd VA (not Go-managed memory), so pass it
+	// straight to madvise(2) as a uintptr — same direct-syscall idiom as the
+	// ioctls above. Avoids fabricating a Go slice header from a uintptr, which
+	// is what trips go vet's unsafeptr check (a uintptr isn't GC-tracked).
+	if _, _, errno := unix.Syscall(unix.SYS_MADVISE, addr, length, uintptr(unix.MADV_DONTNEED)); errno != 0 {
+		return errno
+	}
+	return nil
 }
