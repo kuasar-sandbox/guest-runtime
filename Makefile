@@ -85,8 +85,8 @@ sandbox-runtime: sandbox-init
 	rm -rf $(BUILD_DIR)/sandbox-runtime
 	mkdir -p $(BUILD_DIR)/sandbox-runtime/sbin $(BUILD_DIR)/sandbox-runtime/proc \
 	         $(BUILD_DIR)/sandbox-runtime/sys $(BUILD_DIR)/sandbox-runtime/dev \
-	         $(BUILD_DIR)/sandbox-runtime/mnt/lower $(BUILD_DIR)/sandbox-runtime/mnt/upper \
-	         $(BUILD_DIR)/sandbox-runtime/mnt/newroot
+	         $(BUILD_DIR)/sandbox-runtime/overlay/lower $(BUILD_DIR)/sandbox-runtime/overlay/upper \
+	         $(BUILD_DIR)/sandbox-runtime/sysroot $(BUILD_DIR)/sandbox-runtime/opt/sandbox-runtime
 	cp $(BINDIR)/sandbox-init $(BUILD_DIR)/sandbox-runtime/sbin/init
 	chmod +x $(BUILD_DIR)/sandbox-runtime/sbin/init
 	rm -f $(BINDIR)/sandbox-runtime.erofs

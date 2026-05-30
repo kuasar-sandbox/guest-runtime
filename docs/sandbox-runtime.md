@@ -66,13 +66,20 @@ page cache 的密度收益。
 /proc/                    空挂载点
 /sys/                     空挂载点
 /dev/                     空挂载点
-/mnt/lower/               空挂载点(blk0 EROFS 挂入点)
-/mnt/upper/               空挂载点(blk1 ext4 挂入点)
-/mnt/newroot/             空挂载点(overlayfs 合并目标 + chroot 目标)
+/overlay/lower/           空挂载点(blk0/vda EROFS 挂入点 = overlayfs lowerdir)
+/overlay/upper/           空挂载点(blk1/vdb ext4 挂入点;内含 upperdir/ workdir/ volumes/)
+/sysroot/                 空挂载点(overlayfs 合并目标 + chroot 目标)
+/opt/sandbox-runtime/     Guest 侧发布件根(平台保留);phase1a 末 bind 进 /sysroot 同名路径
 ```
 
-**没有其他文件**——无 /etc、/usr、/var、/lib、共享库等。所有额外功能由
-sandbox-init 通过 Go syscall 实现。
+**除挂载点与 `/opt/sandbox-runtime/` 外无其他文件**——无 /etc、/usr、/var、
+/lib、共享库等,所有额外功能由 sandbox-init 通过 Go syscall 实现。
+
+`/opt/sandbox-runtime/` 是预留的 **Guest 侧发布件根**:随本镜像出厂的平台运行时
+组件(如 `/opt/sandbox-runtime/bin/envd`)放此处,经 virtio-pmem + DAX 跨 sandbox
+共享一份、与 sandbox-init 原子同版;phase1a 把它 bind 进新 root 同名路径(§3.1),
+应用在自身 rootfs 内以**只读**看到它,且该路径遮蔽 app 镜像在此的任何内容(§5.2)。
+当前为空占位,payload 后续填充。
 
 镜像小(~15 MiB)+ DAX 直接映射 host page cache,N 个 sandbox 共享同一份内存
 工作集(实际 ~10 MiB 驻留)。EROFS 文件格式 endian-neutral,任意 host arch 上
@@ -99,23 +106,27 @@ A. 先于一切(纯 socket,无 rootfs 依赖):
 B. 与 handshake 并发(spec-independent 挂载链):
    1. mount -t proc/sysfs/devtmpfs  /proc /sys /dev  (CONFIG_DEVTMPFS_MOUNT=y 时 /dev EBUSY,跳过)
    2. wait /dev/vda、/dev/vdb 出现(轮询 stat,timeout 10s)
-   3. mount -t erofs -o ro /dev/vda /mnt/lower;mount -t ext4 /dev/vdb /mnt/upper
-   4. mkdir /mnt/upper/{upperdir,workdir} 若不存在
-   5. mount -t overlay overlay -o lowerdir=/mnt/lower,upperdir=/mnt/upper/upperdir,
-                                    workdir=/mnt/upper/workdir  /mnt/newroot
+   3. mount -t erofs -o ro /dev/vda /overlay/lower;mount -t ext4 /dev/vdb /overlay/upper
+   4. mkdir /overlay/upper/{upperdir,workdir} 若不存在
+   5. mount -t overlay overlay -o lowerdir=/overlay/lower,upperdir=/overlay/upper/upperdir,
+                                    workdir=/overlay/upper/workdir  /sysroot
+   6. mkdir -p /sysroot/opt/sandbox-runtime
+      mount --bind /opt/sandbox-runtime /sysroot/opt/sandbox-runtime  ← pmem 内发布件根投影进新 root;
+                                              源在 pmem(switch-root 后无路径可达),由 E 的 MS_MOVE
+                                              随子树带进新 /(与 D volume 同理);源 ro EROFS,bind 天然只读
 
 C. JOIN:spec, conn := <-handshake               ← 拿到 LaunchSpec(及复用至 launch_ack 的连接)
 
 D. spec-dependent、switch-root 之前(empty/volume 卷需 raw ext4 source):
    for each mounts[].type == empty:
-     mkdir /mnt/upper/volumes/<i>                 ← raw ext4(与 upperdir 同级,物理隔离于 overlay 写层)
-     mkdir -p /mnt/newroot/<target>
-     mount --bind /mnt/upper/volumes/<i> /mnt/newroot/<target>   ← 空目录遮蔽镜像该路径内容
+     mkdir /overlay/upper/volumes/<i>            ← raw ext4(与 upperdir 同级,物理隔离于 overlay 写层)
+     mkdir -p /sysroot/<target>
+     mount --bind /overlay/upper/volumes/<i> /sysroot/<target>   ← 空目录遮蔽镜像该路径内容
 
 E. switch-root:
-   MS_MOVE /proc /sys /dev → /mnt/newroot/{proc,sys,dev}
-   chdir(/mnt/newroot) → MS_MOVE . / → chroot(.)  ← MS_MOVE 携带整个子树:proc/sys/dev
-                                                    与 D 的 volume binds 一并进入新 /
+   MS_MOVE /proc /sys /dev → /sysroot/{proc,sys,dev}
+   chdir(/sysroot) → MS_MOVE . / → chroot(.)      ← MS_MOVE 携带整个子树:proc/sys/dev、
+                                                    B6 的 /opt 与 D 的 volume binds 一并进入新 /
 
 F. switch-root 之后的基础挂载:
    mount -t cgroup2 cgroup2 /sys/fs/cgroup;mkdir /sys/fs/cgroup/app   ← v2 freezer 冻结域(§3.4)
@@ -128,9 +139,10 @@ F. switch-root 之后的基础挂载:
 不依赖任何外部二进制。
 
 `/dev/vda`(blk0 base)是用户应用的镜像 erofs(只读);`/dev/vdb`(blk1 overlay
-ext4)是写层。overlay 合并后 `/mnt/newroot` 是 guest rootfs 的最终视图,switch-root
+ext4)是写层。overlay 合并后 `/sysroot` 是 guest rootfs 的最终视图,switch-root
 之后这套视图变成新的 `/`。承载 sandbox-init 自身的 `sandbox-runtime.erofs` 由内核经
-virtio-pmem 挂在 `/`(`root=/dev/pmem0 ... dax=always`),阶段 1 把它让位给 overlay。
+virtio-pmem 挂在 `/`(`root=/dev/pmem0 ... dax=always`),阶段 1 把它让位给 overlay
+(其中 `/opt/sandbox-runtime` 经 bind 在让位时随子树保留进新 root)。
 
 **为何能并发**:`bind+listen` 必须在 `launch` 写出前完成(host 在 `launch` 写完即起
 ping ticker,listener 没起会落空),故提到最前;handshake 只做 socket 系统调用,挂载链
@@ -138,11 +150,20 @@ ping ticker,listener 没起会落空),故提到最前;handshake 只做 socket �
 `chroot` 是真正的进程级路径切换,排在 JOIN 之后单线程执行,届时 handshake goroutine
 已退出。这一并发把 hello→launch 的往返叠在 overlay 组装之下。
 
-**volume 卷的 source 与搬运**:`empty` 卷的 source 是 raw ext4 上 `/mnt/upper/volumes/<i>`
-(与 overlay 的 `upperdir/` 物理隔离,同在 vdb、一起进磁盘快照),bind 到 newroot 内的
-target;switch-root 的 `MS_MOVE /mnt/newroot → /` 会把该 bind 随整棵子树搬进新 `/`
-(proc/sys/dev 正是同理),无需单独 MS_MOVE。switch-root 后 `/mnt/upper` 路径被埋,但
-bind 持有 ext4 inode 引用使卷内容在 target 处存活,且应用看不到 raw ext4 内部结构。
+**volume 卷的 source 与搬运**:`empty` 卷的 source 是 raw ext4 上 `/overlay/upper/volumes/<i>`
+(与 overlay 的 `upperdir/` 物理隔离,同在 vdb、一起进磁盘快照),bind 到 sysroot 内的
+target;switch-root 的 `MS_MOVE /sysroot → /` 会把该 bind 随整棵子树搬进新 `/`
+(proc/sys/dev、`/opt/sandbox-runtime` 正是同理),无需单独 MS_MOVE。switch-root 后
+`/overlay/upper` 路径被埋,但 bind 持有 ext4 inode 引用使卷内容在 target 处存活,且应用
+看不到 raw ext4 内部结构。
+
+**`/opt/sandbox-runtime` 的搬运与版本钉住**:同一通道——B6 在 switch-root 前把 pmem 内的
+发布件根 bind 进 `/sysroot/opt/sandbox-runtime`,由 E 的 `MS_MOVE /sysroot → /` 随子树带进
+新 `/`,bind 持有 pmem inode 引用使其在原挂载被遮蔽后仍存活;phase2 fork 前的 `MS_REC|MS_SHARED`
+令其作为对等挂载传播进应用私有 mount ns(应用以只读看到)。因 payload 驻留 pmem,改它即改
+`sandbox-runtime.erofs` 的 digest——而 restore 本就要求该 digest 与快照一致(同一份 pmem 必被
+重挂),故恢复出来的 sandbox 看到同一份 payload、无版本偏斜。代价是 payload 与 runtime 镜像同
+生命周期、无法独立热补丁(需独立版本时改用独立只读 EROFS 设备,见 §6)。
 
 ### 3.2 阶段 2:spec 应用 + stdio 接线 + 应用拉起
 
@@ -777,6 +798,9 @@ sandbox.yaml `launch:` 节(yaml override 优先,Env merge),host sandbox-ctl 合�
 - **网络**:eth0(virtio-net,host TAP 后端),IP 已由 sandbox-init 配好
 - **/dev**:`devtmpfs`(/dev/null、/dev/random、/dev/urandom 等);`/dev/pts`(devpts)
 - **/run**、**/run/shm**:runtime 自动挂载的 tmpfs(无需声明)
+- **/opt/sandbox-runtime**(平台保留):随 runtime 镜像出厂的 Guest 侧发布件根,经 bind 以
+  **只读**出现在该路径(遮蔽 app 镜像在此的内容);应用可执行其中的工具(如
+  `/opt/sandbox-runtime/bin/envd`),但不应把自己的文件放到此路径下
 - **声明的挂载与注入文件**:`mounts` 的 tmpfs / empty 卷已就位(empty 卷遮蔽镜像该路径
   原内容);`files` 注入的文件已 bind 到目标路径(只读卷不可写);均在应用启动前完成
 - **运行身份**:由 `launch.user` 决定(默认 root);非 root 时已 setgroups/setgid/setuid
@@ -820,6 +844,7 @@ restore 的 sandbox-init 仍在原 supervisor 循环内。
 | 应用 stderr 旁路 | 需要 host 侧 stdout 与 stderr 分流(终端模式天然无此区分,pipe 模式可加一条 vsock 旁路) | §3.5 / §4.5 |
 | 自带 vmlinux | 用户需要 cgroup 资源控制器(平台 kernel 仅带 v2 freezer)/ nested userfaultfd / 别的 kernel 特性 | sandbox-ctl `boot.kernel: file://...` |
 | 自带 sandbox-runtime | 用户应用对 PID 1 / supervisor 有特殊要求(罕见) | 平台不阻止,但失去 DAX 共享收益 |
+| 独立发布件设备 | Guest 侧 payload(envd 等)需独立于 runtime 镜像迭代 / 热补丁 | §2 / §3.1:bind 源改为独立只读 EROFS 设备(多一 virtio 盘 + vhost 后端) |
 
 ## 7. See Also
 

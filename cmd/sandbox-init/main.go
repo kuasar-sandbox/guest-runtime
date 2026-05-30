@@ -6,7 +6,7 @@
 //     ticker fires). Then run the launch handshake (dial CID 2:5000 → hello
 //     → recv launch spec) in a goroutine CONCURRENT with the spec-independent
 //     overlay assembly (mount /proc /sys /dev, wait vda/vdb, mount overlay →
-//     /mnt/newroot). The handshake touches no path, so it is safe alongside
+//     /sysroot). The handshake touches no path, so it is safe alongside
 //     the mount chain and the later chroot. After the join: set up volume
 //     (empty) mounts on the raw ext4 pre-switch, then MS_MOVE + chroot into
 //     the overlay and mount the post-switch base filesystems (devpts, cgroup
@@ -100,7 +100,7 @@ func main() {
 	hsCh := make(chan handshakeResult, 1)
 	go runHandshake(hsCh)
 
-	// Spec-independent overlay assembly (base mounts + overlay → newroot).
+	// Spec-independent overlay assembly (base mounts + overlay → sysroot).
 	if err := phase1aAssembleOverlay(); err != nil {
 		die("phase 1a overlay assembly: %v", err)
 	}
@@ -113,8 +113,8 @@ func main() {
 	logf("phase1: launch spec received; switching root")
 
 	// Volume (empty) mounts are set up BEFORE switch-root: their source is a
-	// fresh dir on the raw ext4 (/mnt/upper/volumes), bound onto the target
-	// inside /mnt/newroot so the switch-root MS_MOVE carries them into /.
+	// fresh dir on the raw ext4 (/overlay/upper/volumes), bound onto the target
+	// inside /sysroot so the switch-root MS_MOVE carries them into /.
 	if err := applyVolumeMounts(spec.Mounts); err != nil {
 		die("apply volume mounts: %v", err)
 	}
@@ -182,11 +182,12 @@ func main() {
 	// phase3Supervise does not return.
 }
 
-// phase1aAssembleOverlay mounts /proc /sys /dev, waits for vda/vdb, and
-// assembles the overlay at /mnt/newroot (lower=blk0 ro, upper=blk1 rw). It
-// is spec-independent, so it runs concurrently with the launch handshake;
-// the chroot itself is deferred to phase1bSwitchRoot (after the join), where
-// it can run single-threaded.
+// phase1aAssembleOverlay mounts /proc /sys /dev, waits for vda/vdb, assembles
+// the overlay at /sysroot (lower=blk0 ro, upper=blk1 rw), and binds the
+// guest-side runtime payload (/opt/sandbox-runtime) into it. It is
+// spec-independent, so it runs concurrently with the launch handshake; the
+// chroot itself is deferred to phase1bSwitchRoot (after the join), where it
+// can run single-threaded.
 func phase1aAssembleOverlay() error {
 	for _, m := range []struct {
 		source, target, fstype string
@@ -213,49 +214,64 @@ func phase1aAssembleOverlay() error {
 	}
 	logf("phase1a: vda+vdb present")
 
-	if err := unix.Mount("/dev/vda", "/mnt/lower", "erofs", unix.MS_RDONLY, ""); err != nil {
-		return fmt.Errorf("mount blk0 (erofs ro) on /mnt/lower: %w", err)
+	if err := unix.Mount("/dev/vda", "/overlay/lower", "erofs", unix.MS_RDONLY, ""); err != nil {
+		return fmt.Errorf("mount blk0 (erofs ro) on /overlay/lower: %w", err)
 	}
-	if err := unix.Mount("/dev/vdb", "/mnt/upper", "ext4", 0, ""); err != nil {
-		return fmt.Errorf("mount blk1 (ext4 rw) on /mnt/upper: %w", err)
+	if err := unix.Mount("/dev/vdb", "/overlay/upper", "ext4", 0, ""); err != nil {
+		return fmt.Errorf("mount blk1 (ext4 rw) on /overlay/upper: %w", err)
 	}
-	if err := os.MkdirAll("/mnt/upper/upperdir", 0o755); err != nil {
+	if err := os.MkdirAll("/overlay/upper/upperdir", 0o755); err != nil {
 		return fmt.Errorf("mkdir upperdir: %w", err)
 	}
-	if err := os.MkdirAll("/mnt/upper/workdir", 0o755); err != nil {
+	if err := os.MkdirAll("/overlay/upper/workdir", 0o755); err != nil {
 		return fmt.Errorf("mkdir workdir: %w", err)
 	}
 
-	overlayOpts := "lowerdir=/mnt/lower,upperdir=/mnt/upper/upperdir,workdir=/mnt/upper/workdir"
-	if err := unix.Mount("overlay", "/mnt/newroot", "overlay", 0, overlayOpts); err != nil {
-		return fmt.Errorf("mount overlay on /mnt/newroot: %w", err)
+	overlayOpts := "lowerdir=/overlay/lower,upperdir=/overlay/upper/upperdir,workdir=/overlay/upper/workdir"
+	if err := unix.Mount("overlay", "/sysroot", "overlay", 0, overlayOpts); err != nil {
+		return fmt.Errorf("mount overlay on /sysroot: %w", err)
 	}
 
-	for _, dir := range []string{"/mnt/newroot/proc", "/mnt/newroot/sys", "/mnt/newroot/dev"} {
+	for _, dir := range []string{"/sysroot/proc", "/sysroot/sys", "/sysroot/dev"} {
 		_ = os.MkdirAll(dir, 0o755)
 	}
-	logf("phase1a: overlay assembled at /mnt/newroot")
+
+	// Project the guest-side runtime payload (/opt/sandbox-runtime, shipped in
+	// the pmem rootfs) into the new root. The source lives on the pmem EROFS,
+	// which becomes unreachable after switch-root, so it must be bound into
+	// /sysroot HERE — phase1b's MS_MOVE /sysroot → / then carries it into the
+	// new / along the same subtree (exactly like the empty-volume binds). The
+	// bind keeps the pmem inodes referenced after the original mount is hidden;
+	// the source is a read-only EROFS, so the bind is inherently read-only.
+	if err := os.MkdirAll("/sysroot/opt/sandbox-runtime", 0o755); err != nil {
+		return fmt.Errorf("mkdir sysroot opt/sandbox-runtime: %w", err)
+	}
+	if err := unix.Mount("/opt/sandbox-runtime", "/sysroot/opt/sandbox-runtime", "", unix.MS_BIND|unix.MS_REC, ""); err != nil {
+		return fmt.Errorf("bind /opt/sandbox-runtime into sysroot: %w", err)
+	}
+
+	logf("phase1a: overlay assembled at /sysroot")
 	return nil
 }
 
 // phase1bSwitchRoot MS_MOVEs /proc /sys /dev (and any volume binds already
-// placed under /mnt/newroot) into the overlay, switches root into it, then
+// placed under /sysroot) into the overlay, switches root into it, then
 // mounts the post-switch base filesystems (devpts, cgroup v2 freezer,
 // /run, /run/shm). Runs after the join, single-threaded — the chroot is a
 // process-global path switch so nothing else may touch a path concurrently.
 func phase1bSwitchRoot() error {
 	for _, src := range []struct{ from, to string }{
-		{"/proc", "/mnt/newroot/proc"},
-		{"/sys", "/mnt/newroot/sys"},
-		{"/dev", "/mnt/newroot/dev"},
+		{"/proc", "/sysroot/proc"},
+		{"/sys", "/sysroot/sys"},
+		{"/dev", "/sysroot/dev"},
 	} {
 		if err := unix.Mount(src.from, src.to, "", unix.MS_MOVE, ""); err != nil {
 			logf("warn: MS_MOVE %s -> %s: %v (continuing)", src.from, src.to, err)
 		}
 	}
 
-	if err := unix.Chdir("/mnt/newroot"); err != nil {
-		return fmt.Errorf("chdir newroot: %w", err)
+	if err := unix.Chdir("/sysroot"); err != nil {
+		return fmt.Errorf("chdir sysroot: %w", err)
 	}
 	if err := unix.Mount(".", "/", "", unix.MS_MOVE, ""); err != nil {
 		return fmt.Errorf("MS_MOVE newroot -> /: %w", err)

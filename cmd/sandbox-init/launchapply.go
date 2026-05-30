@@ -20,23 +20,23 @@ import (
 const fileInjectStage = "/run/.inject"
 
 // applyVolumeMounts sets up `empty` (volume) mounts BEFORE switch-root: the
-// source is a fresh dir on the raw ext4 (/mnt/upper/volumes/<i>, sibling to
-// the overlay upperdir), bound onto the target inside /mnt/newroot. The
+// source is a fresh dir on the raw ext4 (/overlay/upper/volumes/<i>, sibling
+// to the overlay upperdir), bound onto the target inside /sysroot. The
 // switch-root MS_MOVE then carries the bind into the new /. The bind keeps
-// the ext4 source alive after /mnt/upper becomes unreachable, and masks any
-// image content at the target. Disk-backed (vdb), so it does not consume RAM.
+// the ext4 source alive after /overlay/upper becomes unreachable, and masks
+// any image content at the target. Disk-backed (vdb), so it does not consume RAM.
 func applyVolumeMounts(mounts []proto.MountSpec) error {
 	vi := 0
 	for _, m := range mounts {
 		if m.Type != "empty" {
 			continue
 		}
-		src := fmt.Sprintf("/mnt/upper/volumes/%d", vi)
+		src := fmt.Sprintf("/overlay/upper/volumes/%d", vi)
 		vi++
 		if err := os.MkdirAll(src, 0o755); err != nil {
 			return fmt.Errorf("mkdir volume source %s: %w", src, err)
 		}
-		tgt := "/mnt/newroot" + m.Target
+		tgt := "/sysroot" + m.Target
 		if err := os.MkdirAll(tgt, 0o755); err != nil {
 			return fmt.Errorf("mkdir volume target %s: %w", tgt, err)
 		}
