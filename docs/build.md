@@ -319,7 +319,7 @@ cross 编译时 `CC=$(CROSS_PREFIX)gcc` / `CXX=$(CROSS_PREFIX)g++` 透传给 cgo
 `make sandbox-runtime` 流程(详见 [`sandbox-runtime.md`](sandbox-runtime.md)):
 
 1. 准备 `build/<arch>/sandbox-runtime/` 空目录
-2. mkdir `sbin proc sys dev mnt mnt/lower mnt/upper mnt/newroot`
+2. mkdir `sbin proc sys dev overlay/lower overlay/upper sysroot opt/sandbox-runtime`
 3. cp `bin/<arch>/sandbox-init` → `sbin/init`,chmod +x
 4. 选择 mkfs.erofs:优先 `bin/<HOST_ARCH>/mkfs.erofs`,fallback `bin/<arch>/`
    (仅原生构建可用),最后 system PATH。EROFS 文件格式 endian-neutral,
