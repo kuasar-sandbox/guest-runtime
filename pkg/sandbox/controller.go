@@ -107,18 +107,18 @@ func (h *ControllerHooks) AllocatableNowMem() uint64 {
 }
 
 // Admit performs the controller handshake. Caller passes capacity /
-// floor / startup_burst values from sandbox.yaml; allocatableAtSnapshot
-// is non-zero only on the restore path.
+// floor / startup values from sandbox.yaml; allocatableAtSnapshot is
+// non-zero only on the restore path.
 //
-// On success, the returned grantedInitialAlloc must be used to size
-// initial cgroup memory.high and balloon target — it may be smaller
-// than startup_burst when the controller had to degrade.
+// On success, the returned grantedInitialAlloc is what to use for
+// initial cgroup memory.high and balloon target. The controller
+// computes max(yaml.startup, yaml.allocatable, allocatable_at_snapshot)
+// so the grant may exceed yaml.startup, but never falls below it.
 func (h *ControllerHooks) Admit(sid string, allocatableAtSnapshot uint64) (uint64, error) {
 	if !h.Enabled() {
-		// Mode A/B: no admission, return startup_burst (or floor if
-		// startup_burst not configured) so the cold-start cgroup setup
-		// works the same way.
-		burst, err := h.cfg.StartupBurstBytes()
+		// Mode A/B: no admission, return startup (or floor if startup
+		// not configured) so the cold-start cgroup setup works the same.
+		burst, err := h.cfg.StartupBytes()
 		if err != nil {
 			return 0, err
 		}
@@ -132,7 +132,7 @@ func (h *ControllerHooks) Admit(sid string, allocatableAtSnapshot uint64) (uint6
 	if err != nil {
 		return 0, err
 	}
-	burst, err := h.cfg.StartupBurstBytes()
+	burst, err := h.cfg.StartupBytes()
 	if err != nil {
 		return 0, err
 	}
@@ -151,15 +151,28 @@ func (h *ControllerHooks) Admit(sid string, allocatableAtSnapshot uint64) (uint6
 		return 0, fmt.Errorf("admit: %w", err)
 	}
 	if res.Status == resource.StatusRejected {
+		if res.Reason != "" {
+			return 0, fmt.Errorf("admit rejected (%s): %s", res.Reason, res.Msg)
+		}
 		return 0, fmt.Errorf("admit rejected: %s", res.Msg)
 	}
-	if res.Status == resource.StatusQueued {
-		return 0, fmt.Errorf("admit queued (eta %d ms); retry policy not yet implemented", res.QueuedETAMs)
+	if res.Status != resource.StatusAdmitted {
+		// StatusQueued was deprecated when the controller moved to a
+		// server-side hold-connection queue (the server blocks the conn
+		// rather than returning Queued). Any other status is a server
+		// protocol violation.
+		return 0, fmt.Errorf("admit returned unexpected status %q", res.Status)
 	}
 	h.mu.Lock()
 	h.allocatableNowMem = res.GrantedInitialAlloc
 	h.mu.Unlock()
-	h.opts.Logf("controller admit: token=%s initial_alloc=%d", res.Token[:8], res.GrantedInitialAlloc)
+	if res.QueuedForMs > 0 {
+		h.opts.Logf("controller admit: token=%s initial_alloc=%d (queued %dms, pos %d at entry)",
+			res.Token[:8], res.GrantedInitialAlloc, res.QueuedForMs, res.QueuePosAtIn)
+	} else {
+		h.opts.Logf("controller admit: token=%s initial_alloc=%d",
+			res.Token[:8], res.GrantedInitialAlloc)
+	}
 	return res.GrantedInitialAlloc, nil
 }
 

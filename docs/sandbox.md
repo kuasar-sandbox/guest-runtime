@@ -325,7 +325,7 @@ resources:
     memory: 32MiB              # memory.max = capacity.memory + 此值
   watermark_high:              # 仅 cgroup_path 已设时允许;默认 allocatable.memory × 0.875
     memory: 128MiB             # cgroup memory.high 初始值
-  startup_burst:               # 仅 controller 已设时允许;默认 = allocatable.memory
+  startup:               # 仅 controller 已设时允许;默认 = allocatable.memory
     memory: 256MiB             # 启动期 allocatable_now;约束 floor ≤ 此 ≤ capacity
 
 # 网络:源二选一(tap 名 / tapfd 交接);属性在 tapfd 模式下被交接元数据覆盖
@@ -565,7 +565,7 @@ boot:
 | `network.{tap\|tapfd,mac,ip,mtu,nexthop,hostname,interface}` | host-localized,restore 时由 sandbox.yaml 提供;源二选一,tapfd 元数据覆盖 mac/ip/mtu |
 | `launch.{exec,args,env,workdir,restart}` | 应用启动配置在 guest 内存里已经反映为运行中进程,restore 后不再走 launch 协议 |
 | `control.{cgroup_path,controller}` | host-localized 资源策略 |
-| `overhead` / `watermark_high` / `startup_burst` / `allocatable` | 同上,host 资源策略 |
+| `overhead` / `watermark_high` / `startup` / `allocatable` | 同上,host 资源策略 |
 | `boot.kernel` / `boot.cmdline` | restore 不重新 boot,kernel 在 snapshot 内存中 |
 | `boot.root.overlay.diff` | host 本地写层路径,restore 时新建一个(空→落盘 base 目录) |
 | `boot.root.overlay.diff_size` | 仅"创建空白 diff"时用;restore 的新 diff 尺寸取 base 大小,与之无关 |
@@ -1414,7 +1414,7 @@ startup → settled,不进入 burst / recover;restoring 仅在快照恢复路径
 |------|------|----------------------------------|-------------------|
 | **admitted** | 收到 Admit grant | reservation 占用预算,沙箱未启动 | 验证 cgroup_path,准备 socket |
 | **creating** | 开始创建 CH 等 | reservation 持有 | 拉起 CH、handshake |
-| **startup** | CH 已启动,等 launch hello | startup_burst.memory | 等 launch protocol hello |
+| **startup** | CH 已启动,等 launch hello | startup.memory | 等 launch protocol hello |
 | **restoring** | CH /vm.restore + /vm.resume 完成,等 restore_ack | allocatable_at_snapshot 或降级值 | 发 `restore{epoch}` 等 `restore_ack`(该连接随后升级为新 stdio MUX) |
 | **settled** | hello 收到 / restore_ack 收到 | 渐缩到 floor + 工作集余量 | 周期上报 RSS;发 Settled |
 | **burst** | 检测到压力 | 申请扩展,可达 capacity | resize-balloon、改 memory.high |
@@ -1435,9 +1435,9 @@ startup → settled,不进入 burst / recover;restoring 仅在快照恢复路径
 
 | 阶段 | memory.max | memory.high | balloon target | cpu.max / cpu.weight |
 |------|-----------|-------------|----------------|---------------------|
-| admitted | capacity+overhead | startup_burst × ratio | (未启动 CH) | 静态(永不变) |
+| admitted | capacity+overhead | startup × ratio | (未启动 CH) | 静态(永不变) |
 | creating | 同上 | 同上 | (CH 启动中) | 同上 |
-| startup | 同上 | 同上 | capacity − startup_burst | 同上 |
+| startup | 同上 | 同上 | capacity − startup | 同上 |
 | restoring | 同上 | allocatable_at_snapshot × ratio | capacity − allocatable_at_snapshot | 同上 |
 | settled | 同上(永不变) | allocatable_now × ratio | capacity − allocatable_now | 同上 |
 | burst | 同上 | allocatable_now × ratio(allocatable_now ↑) | capacity − allocatable_now ↓ | 同上 |
@@ -1509,7 +1509,7 @@ allocatable 初值必须够大才能避免 PSI 节流 / sensor 反复 burst。
 | `boot.cmdline` | 静默忽略(restore 不 boot) | 同 |
 | `launch.*` | 静默忽略(应用在 guest 内存里) | 同 |
 | `control.cgroup_path` / `control.controller` | 用作本次恢复的资源策略 | 同冷启动默认 |
-| `overhead` / `watermark_high` / `startup_burst` | 同 control 规则 | 同冷启动默认 |
+| `overhead` / `watermark_high` / `startup` | 同 control 规则 | 同冷启动默认 |
 | 其他 | 静默忽略 | — |
 
 **为什么 capacity 必须严格相等(而不是 max)**:guest 内存中已经按当时
@@ -1702,11 +1702,11 @@ snapshot 路径要求 `/vm.pause` 之后内存内容稳定,但 backend worker �
 |------|---------|
 | 所有 file:// URL 必须绝对路径(filepath.IsAbs) | "<field> file:// must be absolute" |
 | `cgroup_path` 为空时,`controller` 必须为空 | "controller requires cgroup_path" |
-| `cgroup_path` 为空时,`overhead` / `watermark_high` / `startup_burst` 必须未设 | "<field> requires cgroup_path" |
+| `cgroup_path` 为空时,`overhead` / `watermark_high` / `startup` 必须未设 | "<field> requires cgroup_path" |
 | `cgroup_path` 为空时,`allocatable.cpu == capacity.cpu` | "fractional cpu requires cgroup_path" |
 | `cgroup_path` 已设时,该路径必须存在(系统调用检查) | "cgroup_path <p> does not exist" |
-| `cgroup_path` 已设但 `controller` 为空时,`startup_burst` 必须未设 | "startup_burst requires controller" |
-| `controller` 已设时,`startup_burst.memory` 满足 `floor ≤ ≤ capacity` | "startup_burst.memory out of [floor, capacity]" |
+| `cgroup_path` 已设但 `controller` 为空时,`startup` 必须未设 | "startup requires controller" |
+| `controller` 已设时,`startup.memory` 满足 `floor ≤ ≤ capacity` | "startup.memory out of [floor, capacity]" |
 | `allocatable.cpu ≤ capacity.cpu` 且均 > 0 | "allocatable.cpu must be in (0, capacity.cpu]" |
 | `allocatable.memory ≤ capacity.memory` | "allocatable.memory must be ≤ capacity.memory" |
 | `overhead.memory ≥ 0` | "overhead.memory must be non-negative" |

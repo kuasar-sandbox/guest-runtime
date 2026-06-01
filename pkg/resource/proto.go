@@ -89,9 +89,19 @@ type Message struct {
 	CgroupPath            string  `json:"cgroup_path,omitempty"`
 
 	// AdmitResponse (controller → sandbox-ctl).
+	// Status ∈ {admitted, rejected}. StatusQueued is reserved (server
+	// holds the connection on short-term block instead of returning queued).
 	Status              string `json:"status,omitempty"`
 	GrantedInitialAlloc uint64 `json:"granted_initial_alloc,omitempty"`
-	QueuedETAMs         int64  `json:"queued_eta_ms,omitempty"`
+	// QueuedETAMs is deprecated (server no longer surfaces Queued status);
+	// retained to preserve wire-format BC with older clients.
+	QueuedETAMs         int64 `json:"queued_eta_ms,omitempty"`
+	// QueuedForMs / QueuePosAtIn are informational metadata returned on
+	// Admitted: how long the request spent in the server-side FIFO queue
+	// before being granted (0 means immediate admit), and the queue depth
+	// at insert time. Useful for log/audit; does not affect client logic.
+	QueuedForMs  int64 `json:"queued_for_ms,omitempty"`
+	QueuePosAtIn int64 `json:"queue_pos_at_in,omitempty"`
 
 	// Settled / Heartbeat.
 	CurrentRSS          uint64 `json:"current_rss,omitempty"`

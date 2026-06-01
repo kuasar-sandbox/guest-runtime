@@ -270,13 +270,13 @@ func TestValidateCold_ResourceControl(t *testing.T) {
 		}, "resources.watermark_high requires")
 	})
 
-	t.Run("startup_burst without controller", func(t *testing.T) {
-		// Even with cgroup_path set, startup_burst still needs controller.
+	t.Run("startup without controller", func(t *testing.T) {
+		// Even with cgroup_path set, startup still needs controller.
 		dir := t.TempDir()
 		run(t, func(c *SandboxConfig) {
 			c.Resources.Control.CgroupPath = dir
-			c.Resources.StartupBurst = &StartupBurstConfig{Memory: "256MiB"}
-		}, "resources.startup_burst requires")
+			c.Resources.Startup = &StartupConfig{Memory: "256MiB"}
+		}, "resources.startup requires")
 	})
 
 	t.Run("fractional cpu without cgroup", func(t *testing.T) {
@@ -311,24 +311,24 @@ func TestValidateCold_ResourceControl(t *testing.T) {
 		}, "watermark_high.memory")
 	})
 
-	t.Run("startup_burst below allocatable", func(t *testing.T) {
+	t.Run("startup below allocatable", func(t *testing.T) {
 		dir := t.TempDir()
 		run(t, func(c *SandboxConfig) {
 			c.Resources.Control.CgroupPath = dir
 			c.Resources.Control.Controller = "/run/x.sock"
 			// allocatable=1GiB; startup below it
-			c.Resources.StartupBurst = &StartupBurstConfig{Memory: "256MiB"}
-		}, "startup_burst.memory")
+			c.Resources.Startup = &StartupConfig{Memory: "256MiB"}
+		}, "startup.memory")
 	})
 
-	t.Run("startup_burst above capacity", func(t *testing.T) {
+	t.Run("startup above capacity", func(t *testing.T) {
 		dir := t.TempDir()
 		run(t, func(c *SandboxConfig) {
 			c.Resources.Control.CgroupPath = dir
 			c.Resources.Control.Controller = "/run/x.sock"
 			// capacity=2GiB; startup above
-			c.Resources.StartupBurst = &StartupBurstConfig{Memory: "4GiB"}
-		}, "startup_burst.memory")
+			c.Resources.Startup = &StartupConfig{Memory: "4GiB"}
+		}, "startup.memory")
 	})
 
 	t.Run("valid static-cgroup mode with fractional cpu", func(t *testing.T) {
@@ -339,12 +339,12 @@ func TestValidateCold_ResourceControl(t *testing.T) {
 		}, "")
 	})
 
-	t.Run("valid dynamic mode with explicit startup_burst", func(t *testing.T) {
+	t.Run("valid dynamic mode with explicit startup", func(t *testing.T) {
 		dir := t.TempDir()
 		run(t, func(c *SandboxConfig) {
 			c.Resources.Control.CgroupPath = dir
 			c.Resources.Control.Controller = "/run/x.sock"
-			c.Resources.StartupBurst = &StartupBurstConfig{Memory: "1500MiB"}
+			c.Resources.Startup = &StartupConfig{Memory: "1500MiB"}
 		}, "")
 	})
 }
@@ -393,13 +393,13 @@ launch: { exec: /bin/true }
 		t.Errorf("default watermark_high = %d, want %d", wm, want)
 	}
 
-	// StartupBurst default = allocatable
-	sb, err := cfg.StartupBurstBytes()
+	// Startup default = allocatable
+	sb, err := cfg.StartupBytes()
 	if err != nil {
 		t.Fatal(err)
 	}
 	if sb != 256<<20 {
-		t.Errorf("default startup_burst = %d, want allocatable %d", sb, 256<<20)
+		t.Errorf("default startup = %d, want allocatable %d", sb, 256<<20)
 	}
 
 	// DeflateOnOOM default = true

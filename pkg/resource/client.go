@@ -106,17 +106,33 @@ type AdmitParams struct {
 }
 
 // AdmitResult captures the response from an Admit call.
+//
+// Status is admitted or rejected (StatusQueued is deprecated — the
+// controller now holds the connection on short-term block instead of
+// surfacing Queued through the API). Reason is the machine-readable
+// reject classification when Status==rejected. QueuedForMs / QueuePosAtIn
+// are informational metadata returned on admitted: how long the request
+// spent in the server-side FIFO queue before being granted, and the
+// queue depth at the moment the entry was inserted.
 type AdmitResult struct {
 	Status              string
 	Token               string
 	GrantedInitialAlloc uint64
-	QueuedETAMs         int64
-	Msg                 string
+	Reason              string // machine-readable reject code
+	Msg                 string // human-readable detail
+	QueuedForMs         int64
+	QueuePosAtIn        int64
+
+	// QueuedETAMs is retained for wire-format BC; never populated by the
+	// modern controller (which never returns StatusQueued).
+	QueuedETAMs int64
 }
 
-// Admit performs the initial handshake. The sandbox-ctl caller is
-// expected to retry after QueuedETAMs when Status == StatusQueued, and
-// to abort when Status == StatusRejected.
+// Admit performs the initial handshake. The sandbox-ctl caller continues
+// on Status==StatusAdmitted, aborts on Status==StatusRejected. There is
+// no longer a Queued path — the controller blocks the connection while
+// the admission worker holds it in the server-side FIFO queue, so the
+// Admit call simply takes as long as queuing takes.
 func (c *Client) Admit(p AdmitParams) (*AdmitResult, error) {
 	resp, err := c.roundTrip(&Message{
 		Type:                  TypeAdmit,
@@ -142,8 +158,11 @@ func (c *Client) Admit(p AdmitParams) (*AdmitResult, error) {
 		Status:              resp.Status,
 		Token:               resp.Token,
 		GrantedInitialAlloc: resp.GrantedInitialAlloc,
-		QueuedETAMs:         resp.QueuedETAMs,
+		Reason:              resp.Reason,
 		Msg:                 resp.Msg,
+		QueuedForMs:         resp.QueuedForMs,
+		QueuePosAtIn:        resp.QueuePosAtIn,
+		QueuedETAMs:         resp.QueuedETAMs,
 	}, nil
 }
 

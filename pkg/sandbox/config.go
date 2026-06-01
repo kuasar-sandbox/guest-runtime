@@ -85,12 +85,12 @@ type ResourcesConfig struct {
 	// = static-cgroup mode; both set = dynamic mode (controller-managed).
 	Control ControlConfig `yaml:"control,omitempty"`
 
-	// Overhead, WatermarkHigh, StartupBurst use pointers so we can
-	// distinguish "not set" from "set to zero". They are only valid when
-	// the gating field is set (see ValidateCold).
+	// Overhead, WatermarkHigh, Startup use pointers so we can distinguish
+	// "not set" from "set to zero". They are only valid when the gating
+	// field is set (see ValidateCold).
 	Overhead      *OverheadConfig      `yaml:"overhead,omitempty"`
 	WatermarkHigh *WatermarkHighConfig `yaml:"watermark_high,omitempty"`
-	StartupBurst  *StartupBurstConfig  `yaml:"startup_burst,omitempty"`
+	Startup       *StartupConfig       `yaml:"startup,omitempty"`
 }
 
 type CapacityConfig struct {
@@ -139,11 +139,14 @@ type WatermarkHighConfig struct {
 	Memory string `yaml:"memory"`
 }
 
-// StartupBurstConfig sets the elevated initial allocatable_now during
-// the startup phase (before launch hello / restored). Drops to
-// allocatable.memory after settled. Only meaningful in dynamic mode
-// (controller set); admission reserves this amount up-front.
-type StartupBurstConfig struct {
+// StartupConfig sets the requested initial allocatable_now during the
+// startup phase (before launch hello / restored). The controller's
+// admission gives max(startup, allocatable, allocatable_at_snapshot) so
+// the actual grant may exceed this when restoring a snapshot whose
+// allocatable_at_snapshot is larger, or when allocatable.memory is. Drops
+// to max(rss, allocatable.memory) after settled. Only meaningful in
+// dynamic mode (controller set).
+type StartupConfig struct {
 	Memory string `yaml:"memory"`
 }
 
@@ -500,18 +503,19 @@ func (c *SandboxConfig) WatermarkHighBytes() (uint64, error) {
 	return util.ParseSize(c.Resources.WatermarkHigh.Memory)
 }
 
-// StartupBurstBytes returns the elevated startup-phase allocatable_now.
+// StartupBytes returns the requested startup-phase allocatable_now.
 // Only meaningful when Controller is set; default = allocatable.memory.
 // Returns allocatable when Controller is empty (caller treats startup
-// as if no burst).
-func (c *SandboxConfig) StartupBurstBytes() (uint64, error) {
+// as if no elevated request). Note: the admission controller may grant
+// more than this — actual grant = max(this, allocatable, allocatable_at_snapshot).
+func (c *SandboxConfig) StartupBytes() (uint64, error) {
 	if c.Resources.Control.Controller == "" {
 		return c.AllocatableMemoryBytes()
 	}
-	if c.Resources.StartupBurst == nil {
+	if c.Resources.Startup == nil {
 		return c.AllocatableMemoryBytes()
 	}
-	return util.ParseSize(c.Resources.StartupBurst.Memory)
+	return util.ParseSize(c.Resources.Startup.Memory)
 }
 
 // CPUWeight maps allocatable.cpu to a cgroup v2 cpu.weight value in
@@ -548,11 +552,11 @@ func (c *SandboxConfig) DiffSizeBytes() (int64, error) {
 // Resource-control gating rules (see docs/sandbox.md §13):
 //   - Controller requires CgroupPath
 //   - Overhead / WatermarkHigh require CgroupPath
-//   - StartupBurst requires Controller
+//   - Startup requires Controller
 //   - allocatable.cpu == capacity.cpu when CgroupPath is empty (no
 //     fractional CPU without cgroup)
 //   - CgroupPath must exist on the host filesystem
-//   - StartupBurst.memory ∈ [allocatable.memory, capacity.memory]
+//   - Startup.memory ∈ [allocatable.memory, capacity.memory]
 //   - WatermarkHigh.memory ∈ (0, allocatable.memory]
 func (c *SandboxConfig) ValidateCold() error {
 	if c.Resources.Capacity.CPU <= 0 {
@@ -589,8 +593,8 @@ func (c *SandboxConfig) ValidateCold() error {
 	if !cgroupSet && c.Resources.WatermarkHigh != nil {
 		return errors.New("resources.watermark_high requires resources.control.cgroup_path")
 	}
-	if !controllerSet && c.Resources.StartupBurst != nil {
-		return errors.New("resources.startup_burst requires resources.control.controller")
+	if !controllerSet && c.Resources.Startup != nil {
+		return errors.New("resources.startup requires resources.control.controller")
 	}
 	if !cgroupSet && c.Resources.Allocatable.CPU != float64(c.Resources.Capacity.CPU) {
 		return fmt.Errorf("resources.allocatable.cpu must equal capacity.cpu (%d) when cgroup_path is not set; got %g (fractional cpu requires cgroup_path)",
@@ -629,17 +633,17 @@ func (c *SandboxConfig) ValidateCold() error {
 		}
 	}
 
-	// StartupBurst ∈ [allocatable.memory, capacity.memory]
-	if c.Resources.StartupBurst != nil {
-		sb, err := util.ParseSize(c.Resources.StartupBurst.Memory)
+	// Startup ∈ [allocatable.memory, capacity.memory]
+	if c.Resources.Startup != nil {
+		sb, err := util.ParseSize(c.Resources.Startup.Memory)
 		if err != nil {
-			return fmt.Errorf("resources.startup_burst.memory: %w", err)
+			return fmt.Errorf("resources.startup.memory: %w", err)
 		}
 		if sb < allocMem {
-			return fmt.Errorf("resources.startup_burst.memory (%d) must be ≥ allocatable.memory (%d)", sb, allocMem)
+			return fmt.Errorf("resources.startup.memory (%d) must be ≥ allocatable.memory (%d)", sb, allocMem)
 		}
 		if sb > capMem {
-			return fmt.Errorf("resources.startup_burst.memory (%d) must be ≤ capacity.memory (%d)", sb, capMem)
+			return fmt.Errorf("resources.startup.memory (%d) must be ≤ capacity.memory (%d)", sb, capMem)
 		}
 	}
 
