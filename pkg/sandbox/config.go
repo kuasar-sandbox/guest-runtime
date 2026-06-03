@@ -123,6 +123,40 @@ type ControlConfig struct {
 	// Controller is the UDS path of a sandbox-resource-control protocol
 	// endpoint. Non-empty enables dynamic mode (M2+). Requires CgroupPath.
 	Controller string `yaml:"controller,omitempty"`
+	// Sensor tunes the per-sandbox memory pressure sensor (data source +
+	// reaction). Optional; nil = use PSI mode with default thresholds.
+	Sensor *SensorConfig `yaml:"sensor,omitempty"`
+}
+
+// SensorConfig configures the pressure sensor that turns cgroup memory
+// pressure into RequestBudget RPCs. Sensor lives in sandbox-ctl; only
+// meaningful in dynamic mode (Controller set).
+//
+// Mode selects the signal source:
+//
+//   - "psi" (default): epoll on cgroup memory.pressure with a "some"
+//     trigger. Sub-millisecond reaction once the trigger fires. Falls
+//     back to events_poll if the kernel rejects the trigger write.
+//   - "events_poll": legacy 100ms poll of memory.events.local high
+//     counter. Worst-case 100ms reaction latency.
+//   - "none": disable sensor (admission + balloon only).
+type SensorConfig struct {
+	Mode string `yaml:"mode,omitempty"`
+	// PSI trigger format: "some <stall_us> <window_us>". Sensor wakes
+	// when the cgroup accumulates StallUs microseconds of "some-task
+	// stalled in reclaim" within a WindowUs sliding window.
+	//
+	// Defaults: 10_000 us stall in 1_000_000 us (1s) window. Empirical
+	// sweet spot on dense workloads — looser (50ms) misses brief stalls
+	// that don't sum to threshold; tighter (1ms) yields no further hang
+	// reduction (limit becomes allocator throughput + single reclaim-
+	// iteration time).
+	PSISomeStallUs  uint64 `yaml:"psi_some_stall_us,omitempty"`
+	PSISomeWindowUs uint64 `yaml:"psi_some_window_us,omitempty"`
+	// MinIntervalMs debounces consecutive RequestBudget calls so a
+	// stream of PSI wakeups becomes at most one RPC per interval.
+	// Default 100ms.
+	MinIntervalMs int `yaml:"min_interval_ms,omitempty"`
 }
 
 // OverheadConfig adjusts cgroup memory.max above capacity.memory to give
@@ -148,6 +182,35 @@ type WatermarkHighConfig struct {
 // dynamic mode (controller set).
 type StartupConfig struct {
 	Memory string `yaml:"memory"`
+}
+
+// SensorRuntime returns the resolved sensor parameters, applying defaults
+// for any unset fields. Mode defaults to "psi"; trigger defaults to 10ms
+// of "some" stall accumulated within a 1s window (density-perf empirical
+// sweet spot — see docs/sandbox.md §10.3 tuning notes); debounce defaults
+// to 100ms between RequestBudget calls.
+func (c *SandboxConfig) SensorRuntime() (mode string, stallUs, windowUs uint64, minInterval time.Duration) {
+	mode = "psi"
+	stallUs = 10_000
+	windowUs = 1_000_000
+	minInterval = 100 * time.Millisecond
+	if c == nil || c.Resources.Control.Sensor == nil {
+		return
+	}
+	s := c.Resources.Control.Sensor
+	if s.Mode != "" {
+		mode = s.Mode
+	}
+	if s.PSISomeStallUs != 0 {
+		stallUs = s.PSISomeStallUs
+	}
+	if s.PSISomeWindowUs != 0 {
+		windowUs = s.PSISomeWindowUs
+	}
+	if s.MinIntervalMs > 0 {
+		minInterval = time.Duration(s.MinIntervalMs) * time.Millisecond
+	}
+	return
 }
 
 // NetworkConfig declares the host-side network source (one of TAP / TapFD)
@@ -630,6 +693,22 @@ func (c *SandboxConfig) ValidateCold() error {
 		}
 		if wm > allocMem {
 			return fmt.Errorf("resources.watermark_high.memory (%d) must be ≤ allocatable.memory (%d)", wm, allocMem)
+		}
+	}
+
+	// Sensor mode validation
+	if c.Resources.Control.Sensor != nil {
+		s := c.Resources.Control.Sensor
+		switch s.Mode {
+		case "", "psi", "events_poll", "none":
+		default:
+			return fmt.Errorf("resources.control.sensor.mode must be one of psi|events_poll|none, got %q", s.Mode)
+		}
+		if s.PSISomeStallUs > 0 && s.PSISomeWindowUs == 0 {
+			return errors.New("resources.control.sensor.psi_some_window_us required when psi_some_stall_us set")
+		}
+		if s.PSISomeWindowUs > 0 && s.PSISomeStallUs > s.PSISomeWindowUs {
+			return errors.New("resources.control.sensor.psi_some_stall_us must be ≤ psi_some_window_us")
 		}
 	}
 
