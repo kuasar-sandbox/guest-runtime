@@ -82,7 +82,9 @@ Usage:
 
 --manifest-config (or MANIFEST_CONFIG env) is required for any
 manifest:// resource (boot.root.base, --restore manifest://, --upload).
-file://-only configurations may omit it.
+file://-only configurations may omit it. The sensitive manifest.key may
+be supplied via the MANIFEST_KEY env var instead of the config file
+(MANIFEST_KEY overrides a manifest.key set in the file).
 
 run starts one sandbox VM and blocks until the guest exits. With
 --restore, the sandbox is resumed from a snapshot bundle instead of
