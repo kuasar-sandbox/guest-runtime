@@ -121,6 +121,12 @@ type VMParams struct {
 	DiffPath    string
 	OwnedDiff   bool // diff is auto-created (ours) → eligible for zero-copy move on destroy-snapshot
 
+	// Forwards are the parsed `--connect` port-forward directives. Each
+	// gets a host-local listener whose accepted connections are spliced to
+	// a guest-side target via a reverse channel (docs/sandbox-runtime.md
+	// §3.7). Empty → no port forwarding.
+	Forwards []ForwardSpec
+
 	BuildCmd  func(CmdEnv) (cmd *exec.Cmd, cleanup func(), err error)
 	PostSpawn func(PostSpawnCtx) error
 }
@@ -302,6 +308,11 @@ func ServeAndWait(p VMParams) (int, error) {
 		Logf:   logf,
 	}
 
+	// Port-forward listeners. Built here so the snapshot handler can pause
+	// + collapse active relays around quiesce (symmetric with the pinger);
+	// started below alongside the other backend servers.
+	forwarder := NewForwarder(vsockBase, logf)
+
 	// ctl.sock server for snapshot requests. SnapshotHandler is the
 	// shared bundle both Run and restore.Run use.
 	snapHandler := &SnapshotHandler{
@@ -316,6 +327,7 @@ func ServeAndWait(p VMParams) (int, error) {
 		CHSock:      chSock,
 		RunDir:      runDir,
 		Pinger:      pinger,
+		Forwarder:   forwarder,
 		Reattach:    reattach,
 		Logf:        logf,
 	}
@@ -346,6 +358,16 @@ func ServeAndWait(p VMParams) (int, error) {
 	go func() { defer backendWG.Done(); _ = launch.Serve(backendCtx) }()
 	go func() { defer backendWG.Done(); _ = vaReportSrv.Serve(backendCtx) }()
 	go func() { defer backendWG.Done(); _ = ctlSrv.Serve(backendCtx) }()
+
+	// Port-forward accept loops run under backendCtx (they end when CH
+	// exits / the run unwinds). A bad listener (e.g. fd= not a socket)
+	// aborts the run. Close on the way out tears down listeners + relays.
+	if err := forwarder.Start(backendCtx, p.Forwards); err != nil {
+		cancelBackends()
+		backendWG.Wait()
+		return -1, fmt.Errorf("port-forward: %w", err)
+	}
+	defer forwarder.Close()
 
 	defer pinger.Stop()
 	defer func() {

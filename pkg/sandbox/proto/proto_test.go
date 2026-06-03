@@ -236,6 +236,27 @@ func TestRoundTrip_AppLifecycle(t *testing.T) {
 	}
 }
 
+func TestRoundTrip_Connect(t *testing.T) {
+	cases := []*Message{
+		{Type: TypeConnect, Connect: &ConnectSpec{Address: "127.0.0.1:49983"}},
+		{Type: TypeConnect, Connect: &ConnectSpec{Network: "tcp6", Address: "[::1]:8080"}},
+		{Type: TypeConnectAck},
+	}
+	for _, m := range cases {
+		var buf bytes.Buffer
+		if err := WriteMessage(&buf, m); err != nil {
+			t.Fatalf("write %s: %v", m.Type, err)
+		}
+		got, err := ReadMessage(&buf)
+		if err != nil {
+			t.Fatalf("read %s: %v", m.Type, err)
+		}
+		if !reflect.DeepEqual(got, m) {
+			t.Errorf("%s round-trip mismatch:\n got=%+v\nwant=%+v", m.Type, got, m)
+		}
+	}
+}
+
 func TestHostConnectLine(t *testing.T) {
 	want := "CONNECT 5000\n"
 	if string(HostConnectLine) != want {

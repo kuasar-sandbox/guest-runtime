@@ -10,10 +10,10 @@ import (
 	"strings"
 
 	"github.com/kuasar-sandbox/sandbox-accelerator/pkg/manifest"
+	"github.com/kuasar-sandbox/sandbox-runtime/internal/util"
 	"github.com/kuasar-sandbox/sandbox-runtime/pkg/sandbox"
 	"github.com/kuasar-sandbox/sandbox-runtime/pkg/sandbox/restore"
 	"github.com/kuasar-sandbox/sandbox-runtime/pkg/sandbox/stdio"
-	"github.com/kuasar-sandbox/sandbox-runtime/internal/util"
 )
 
 // runCmd implements `sandbox-ctl run`. With --restore=<ref> it switches
@@ -65,6 +65,13 @@ func runCmd(args []string) int {
 	// With the default 1 s ping interval, 30 ≈ 30 s of unreachability.
 	pingFatal := fs.Int("ping-fatal-threshold", 0,
 		"consecutive ping failures before SIGTERMing CH (overrides SANDBOX_PING_FATAL_THRESHOLD env; 0 disables)")
+
+	// --connect LOCAL:HOST:PORT — port-forward a host-local endpoint to a
+	// guest-side target (repeatable). LOCAL is a UDS path or fd=N (an
+	// inherited, already-listening socket).
+	var forwards forwardFlags
+	fs.Var(&forwards, "connect",
+		"port-forward LOCAL:HOST:PORT to a guest target; LOCAL = UDS path or fd=N (repeatable)")
 
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -183,7 +190,7 @@ func runCmd(args []string) int {
 	// Restore mode dispatch.
 	if *restoreRef != "" {
 		return runRestore(ctx, cfg, manifestCfg, *restoreRef,
-			*sandboxID, chBin, rd, br, *statsJSON, stdioMode, *pingFatal)
+			*sandboxID, chBin, rd, br, *statsJSON, stdioMode, *pingFatal, forwards)
 	}
 
 	exit, err := sandbox.Run(ctx, sandbox.RunOptions{
@@ -196,6 +203,7 @@ func runCmd(args []string) int {
 		StatsJSONPath:      *statsJSON,
 		StdioMode:          stdioMode,
 		PingFatalThreshold: *pingFatal,
+		Forwards:           forwards,
 	})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -207,6 +215,7 @@ func runCmd(args []string) int {
 // runRestore parses the snapshot reference and dispatches to restore.Run.
 func runRestore(ctx context.Context, cfg *sandbox.SandboxConfig, manifestCfg *sandbox.ManifestConfig,
 	ref, sandboxID, chBin, runDir, baseRoot, statsJSON string, stdioMode stdio.Mode, pingFatal int,
+	forwards []sandbox.ForwardSpec,
 ) int {
 	const manifestPrefix = "manifest://"
 	var (
@@ -249,12 +258,34 @@ func runRestore(ctx context.Context, cfg *sandbox.SandboxConfig, manifestCfg *sa
 		StatsJSONPath:       statsJSON,
 		StdioMode:           stdioMode,
 		PingFatalThreshold:  pingFatal,
+		Forwards:            forwards,
 	})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
 	return exit
+}
+
+// forwardFlags collects repeated `--connect LOCAL:HOST:PORT` directives,
+// parsing each into a sandbox.ForwardSpec as it is seen.
+type forwardFlags []sandbox.ForwardSpec
+
+func (f *forwardFlags) String() string {
+	parts := make([]string, len(*f))
+	for i, s := range *f {
+		parts[i] = s.Raw
+	}
+	return strings.Join(parts, ",")
+}
+
+func (f *forwardFlags) Set(v string) error {
+	spec, err := sandbox.ParseForwardSpec(v)
+	if err != nil {
+		return err
+	}
+	*f = append(*f, spec)
+	return nil
 }
 
 // locateCH resolves the cloud-hypervisor binary with a fixed

@@ -21,6 +21,13 @@
 //	    (pkg/sandbox/mux) which carries the app's stdin/stdout/stderr
 //	    (or a pty). See StdioSpec for what's negotiated in the *_ack.
 //
+//	(3) Forward long connections — 0..N. Each `sandbox-ctl run --connect`
+//	    port forward opens one reverse-channel conn per accepted local
+//	    connection: a `connect{ConnectSpec}` → `connect_ack` handshake,
+//	    then the conn switches to the fwd frame sub-protocol
+//	    (pkg/sandbox/fwd) which splices the bytes to a guest-side dial
+//	    target with TCP half-close preserved (docs/sandbox-runtime.md §3.7).
+//
 // This package is dependency-light (stdlib only) so the guest
 // sandbox-init binary can import it without dragging in YAML or other
 // heavy deps.
@@ -194,6 +201,26 @@ type ExecSpec struct {
 	Stdio StdioSpec         `json:"stdio,omitempty"`
 }
 
+// --- ConnectSpec ------------------------------------------------------
+
+// ConnectSpec is the payload of a `connect` reverse-channel op: open a
+// stream connection from inside the sandbox to Address and splice it to
+// the host-side listener that accepted the local connection. It backs
+// `sandbox-ctl run --connect` port forwarding. After connect_ack the
+// reverse-channel conn switches to the fwd frame sub-protocol
+// (pkg/sandbox/fwd), which carries the spliced bytes with TCP half-close
+// preserved. Each accepted local connection gets its own ConnectSpec /
+// reverse-channel conn — forwards are concurrent and independent (the
+// port-forward analogue of exec sessions).
+type ConnectSpec struct {
+	// Network is the guest-side dial network: "tcp" (default), "tcp4",
+	// "tcp6", or "unix".
+	Network string `json:"network,omitempty"`
+	// Address is the guest-side dial target, e.g. "127.0.0.1:49983" (or a
+	// path for network "unix").
+	Address string `json:"address"`
+}
+
 // App lifecycle state reported in restore_ack / attach_ack.
 const (
 	AppStateRunning = "running"
@@ -245,6 +272,11 @@ type Message struct {
 	// becomes the stdio MUX after exec_ack.
 	Exec *ExecSpec `json:"exec,omitempty"`
 
+	// connect: the guest-side dial target for one port-forward connection.
+	// The connect / connect_ack handshake mirrors exec — same conn becomes
+	// the fwd frame relay after connect_ack (§3.7).
+	Connect *ConnectSpec `json:"connect,omitempty"`
+
 	// restore: host wall clock (UnixNano) captured just before the
 	// notify is sent. A snapshot's CLOCK_REALTIME is reloaded verbatim
 	// by CH on restore, so the guest's wall clock is stale by the whole
@@ -292,6 +324,8 @@ const (
 	TypeQuiesced     = "quiesced"
 	TypeExec         = "exec"
 	TypeExecAck      = "exec_ack"
+	TypeConnect      = "connect"
+	TypeConnectAck   = "connect_ack"
 	TypeMemReport    = "mem_report"
 	TypeMemReportAck = "mem_report_ack"
 	TypeAck          = "ack"
@@ -313,6 +347,11 @@ const (
 	// child and resolves argv via PATH before acking. The conn's
 	// deadline is cleared once it becomes the stdio MUX.
 	DeadlineExec = 10 * time.Second
+	// DeadlineConnect covers the port-forward handshake only (dial +
+	// connect → connect_ack). The guest dials the target before acking, so
+	// it must exceed the guest-side dial timeout; the conn's deadline is
+	// cleared once it becomes the fwd frame relay.
+	DeadlineConnect = 10 * time.Second
 )
 
 // --- Management wire format: [4 bytes LE length][JSON payload] --------

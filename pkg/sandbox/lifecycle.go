@@ -44,6 +44,11 @@ type RunOptions struct {
 	// (default — wait for the user's signal). With the default 1 s
 	// ping interval, 30 ≈ 30 s of unreachability. See pinger.go.
 	PingFatalThreshold int
+
+	// Forwards are parsed `--connect` port-forward directives (forward.go).
+	// Each opens a host-local listener whose connections are spliced to a
+	// guest-side target. Empty → no port forwarding.
+	Forwards []ForwardSpec
 }
 
 // Run executes one sandbox lifecycle: prepare backends + launch server,
@@ -343,6 +348,7 @@ func Run(ctx context.Context, opts RunOptions) (int, error) {
 		ManifestCfg: opts.ManifestCfg,
 		DiffPath:    diffPath,
 		OwnedDiff:   ownedDiff,
+		Forwards:    opts.Forwards,
 		Cgroup:      cg,
 
 		BuildCmd: func(e CmdEnv) (*exec.Cmd, func(), error) {
@@ -546,6 +552,7 @@ type SnapshotHandler struct {
 	CHSock      string
 	RunDir      string
 	Pinger      *Pinger      // optional; if non-nil, paused around quiesce/Take
+	Forwarder   *Forwarder   // optional; if non-nil, paused + active relays collapsed around quiesce
 	Reattach    func() error // optional; re-establishes the stdio MUX after --resume
 	Logf        func(string, ...any)
 }
@@ -553,7 +560,7 @@ type SnapshotHandler struct {
 // Handle dispatches one ctl snapshot_request. Public for restore.Run.
 func (h *SnapshotHandler) Handle(req ctl.Request) (ctl.Response, error) {
 	opts := RunOptions{Cfg: h.Cfg, ManifestCfg: h.ManifestCfg, SandboxID: h.SandboxID}
-	return handleSnapshotRequest(req, opts, h.Memfd, h.DiffPath, h.OwnedDiff, h.Srv0, h.Srv1, h.CHSock, h.RunDir, h.Pinger, h.Reattach, h.Logf)
+	return handleSnapshotRequest(req, opts, h.Memfd, h.DiffPath, h.OwnedDiff, h.Srv0, h.Srv1, h.CHSock, h.RunDir, h.Pinger, h.Forwarder, h.Reattach, h.Logf)
 }
 
 // handleSnapshotRequest executes one snapshot_request received via
@@ -570,6 +577,7 @@ func handleSnapshotRequest(
 	srv0, srv1 *vhost.Server,
 	chSock, runDir string,
 	pinger *Pinger,
+	forwarder *Forwarder, // gates new forwards + collapses active relays around quiesce; may be nil
 	reattachMUX func() error, // re-establishes the stdio MUX after --resume; may be nil
 	logf func(string, ...any),
 ) (resp ctl.Response, err error) {
@@ -593,6 +601,19 @@ func handleSnapshotRequest(
 			go destroyAfterSnapshot(chSock, logf)
 		}
 	}()
+	// Gate new port-forward connects for the whole quiesce→snapshot window;
+	// active relays are collapsed after the guest acks `quiesced` (it has
+	// already torn down its ends, lingered). Resume mirrors the pinger:
+	// stay paused only on the success + destroy path.
+	if forwarder != nil {
+		forwarder.Pause()
+		defer func() {
+			if err == nil && !req.ResumeAfter {
+				return
+			}
+			forwarder.Resume()
+		}()
+	}
 	if pinger != nil {
 		pinger.Pause()
 		// Resume on the way out UNLESS this is the success + destroy
@@ -615,7 +636,13 @@ func handleSnapshotRequest(
 			logf("quiesce: %v (aborting snapshot)", err)
 			return ctl.Response{}, fmt.Errorf("quiesce: %w", err)
 		}
-		logf("quiesce: guest acked (MUX closed), proceeding to /vm.pause")
+		// Guest acked: it has closed the stdio MUX and torn down its
+		// port-forward ends (lingered). Collapse the host-side relay halves
+		// promptly so none linger into the paused snapshot window.
+		if forwarder != nil {
+			forwarder.CloseActive()
+		}
+		logf("quiesce: guest acked (MUX + forwards closed), proceeding to /vm.pause")
 	}
 
 	if req.Upload && (opts.ManifestCfg == nil || opts.ManifestCfg.Store.Endpoint == "") {

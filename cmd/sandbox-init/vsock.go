@@ -193,9 +193,17 @@ func handleReverseConn(c *vsockConn, sup *supervisorState, bridge *consoleBridge
 		runExecSession(c, req, sup)
 		return true
 
+	case proto.TypeConnect:
+		// Port-forward: splice this reverse-channel conn to a guest-side
+		// dial target. runConnectSession owns c for the whole session (the
+		// relay closes it); never closed by the caller — handedToMUX=true.
+		runConnectSession(c, req, sup)
+		return true
+
 	case proto.TypeRestore:
 		logf("reverse-channel: restore epoch=%d — re-establishing stdio MUX", req.Epoch)
 		sup.execReg.endQuiesce() // sandbox live again — allow exec
+		sup.connReg.endQuiesce() // and allow port-forward connects
 		bridge.closeLiveMUX()    // drop any stale session first (normally already gone via quiesce)
 		// CH reloaded the snapshot's CLOCK_REALTIME verbatim, so the
 		// guest wall clock is stale by the whole dormant interval. Jump
@@ -253,6 +261,7 @@ func handleReverseConn(c *vsockConn, sup *supervisorState, bridge *consoleBridge
 	case proto.TypeAttach:
 		logf("reverse-channel: attach epoch=%d — re-establishing stdio MUX", req.Epoch)
 		sup.execReg.endQuiesce() // sandbox live again (post-resume) — allow exec
+		sup.connReg.endQuiesce() // and allow port-forward connects
 		bridge.closeLiveMUX()    // gracefully close the old session, then switch
 		spec := bridge.protoSpec()
 		resp := &proto.Message{Type: proto.TypeAttachAck, Epoch: req.Epoch, Stdio: &spec, AppState: proto.AppStateRunning}
@@ -280,7 +289,7 @@ func handleReverseConn(c *vsockConn, sup *supervisorState, bridge *consoleBridge
 		return true
 
 	case proto.TypeQuiesce:
-		logf("reverse-channel: quiesce — freeze + prep + MUX close")
+		logf("reverse-channel: quiesce — freeze + prep + MUX/forward close")
 		// Reject new exec + SIGKILL in-flight exec children so the
 		// snapshot captures no running exec siblings (their sessions
 		// tear down once the reaper delivers).
@@ -296,7 +305,12 @@ func handleReverseConn(c *vsockConn, sup *supervisorState, bridge *consoleBridge
 			logf("reverse-channel: quiesce freeze failed, NOT sending quiesced: %v", err)
 			return false
 		}
-		runQuiesce()          // sync + drop_caches
+		runQuiesce() // sync + drop_caches
+		// Tear down port-forward relays the same way as the stdio MUX: a
+		// live forward left open would be captured as a half-open vsock
+		// remnant. Each vsock conn closes with SO_LINGER so the teardown is
+		// confirmed before `quiesced` (deterministic steady state, §3.4).
+		closeConnectSessions(sup.connReg)
 		bridge.closeLiveMUX() // stop forwarding app output, then the MUX_CLOSE handshake
 		if err := proto.WriteMessage(c, &proto.Message{Type: proto.TypeQuiesced}); err != nil {
 			logf("reverse-channel: write quiesced: %v", err)

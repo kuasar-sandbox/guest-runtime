@@ -175,6 +175,13 @@ sandbox-ctl run [flags]
   --console <mode>        guest 内核控制台(hvc0)的去向。off:给 CH --console off,
                           丢弃;default(默认):写 sandbox-ctl 的 stderr(--tty raw
                           模式下做 \n→\r\n 转换);file=<path>:写 <path>
+
+  # 端口转发(冷启动 + 恢复模式都生效;详见 docs/sandbox-runtime.md §3.7)
+  --connect <L:H:P>       把 host 本地端点 L 转发到沙箱内目标 H:P,可重复。L = UDS
+                          路径(@name 抽象命名空间)或 fd=N(继承的已 listen socket);
+                          H:P 用 net.SplitHostPort 解析,支持 [::1]:port。每条被接受
+                          的本地连接经一条反向通道发 connect、guest 拨 H:P 后双向中继
+                          (保留 TCP 半关闭);quiesce 时主动拆除、resume/restore 后恢复
 ```
 
 **行为**:阻塞前台运行,直到 CH 退出或收到 SIGTERM/SIGINT。退出码:应用正常退出 →
@@ -320,6 +327,11 @@ resources:
   control:                     # 部署模式驱动
     cgroup_path: ""            # 空 = 无 cgroup 模式;非空 = 必须已存在的 cgroup 绝对路径
     controller: ""             # 空 = 无 cgroup / 静态 cgroup 模式;非空 = 动态控制模式(UDS 路径)
+    sensor:                    # 压力感知器(动态控制模式;§10.3),可选,缺省 psi 默认值
+      mode: psi                # psi | events_poll | none;psi 失败自动回落 events_poll
+      psi_some_stall_us: 10000 # PSI trigger:1s 窗口累计 10ms stall 触发(密集 workload 实测甜点)
+      psi_some_window_us: 1000000
+      min_interval_ms: 100     # 两次 RequestBudget 最小间隔;PSI 抖动去抖
 
   overhead:                    # 仅 cgroup_path 已设时允许;默认 32 MiB
     memory: 32MiB              # memory.max = capacity.memory + 此值
@@ -913,10 +925,11 @@ T2  目标进程串行:
         收到后:拒绝新的 exec 并 SIGKILL 在飞的 exec 子进程(快照不能带运行中的
         exec 兄弟进程;沙箱 resume/restore 后解除)→ **freeze 应用进程树**
         (cgroup.freeze=1,等 cgroup.events 至 frozen 1)→ sync + drop_caches →
-        停读应用 stdout/stderr(pty master)→ 在 stdio
+        停读应用 stdout/stderr(pty master)→ 拆除所有 connect 端口转发中继(SO_LINGER
+        确认拆除,sandbox-runtime.md §3.7)→ 在 stdio
         MUX 上发起优雅关闭握手(sandbox-ctl 的 MUX 端响应 MUX_CLOSE_ACK 并读到 EOF
         确认 MUX 已彻底关闭)→ 回 quiesced。quiesced 一回来即表示"应用已冻结、MUX
-        已关、guest 干净态",可继续 T2b;deadline(见 sandbox-runtime.md §4.9)内未
+        与转发已关、guest 干净态",可继续 T2b;deadline(见 sandbox-runtime.md §4.10)内未
         收到 quiesced(含 freeze 在有界等待内未确认 frozen)→ 视为协议失败,**放弃
         此次 snapshot**(绝不带半冻结/半开 MUX 快照),sandbox 继续运行
     T2b CH /vm.pause:vCPU 暂停,virtio 设备 quiesce
@@ -1449,14 +1462,46 @@ cpu.max、cpu.weight 全程不变。memory.high 与 balloon target 随 allocatab
 
 ### 10.3 压力信号(动态控制模式)
 
-sandbox-ctl 内部周期 100 ms 读取:
+sensor 是 sandbox-ctl 的 goroutine,Settled 之后启动,根据 cgroup 内存压力发
+`RequestBudget` 给 node-ctl。数据源由 `resources.control.sensor.mode` 选择:
+
+**`psi` 模式(默认)** —— 推荐。epoll on `memory.pressure`:
+
+| 信号源 | 触发方式 | 用途 |
+|---|---|---|
+| `memory.pressure` 注册的 PSI trigger | epoll EPOLLPRI 唤醒(sub-ms) | 主信号:`urgency=normal` 申请扩展 |
+| `memory.events.local` oom 计数差 | 1s sidecar tick | 紧急信号:`urgency=high` |
+| `memory.events.local` high 计数差 | 1s sidecar tick | 仅 log warn(说明 PSI 触发阈值过松) |
+
+PSI trigger 写入格式 `some <stall_us> <window_us>`,缺省 `some 10000 1000000`
+(1 s 窗口累计 10 ms stall 即触发——dense workload 实测甜点)。trigger 写入失败
+(老内核 / CONFIG_PSI=n)→ 自动回落 `events_poll` 模式。
+
+**阈值取舍**(density-perf N=16 BURST=2GiB on 8 vCPU host 实测):
+
+| `psi_some_stall_us` | hang 数/16 | 备注 |
+|---|---|---|
+| 50000 (50 ms) | 9 | 单次 over_high < 1ms,1s 内累计不到 50ms,大量信号漏掉 |
+| 10000 (10 ms) | 3 | 甜点,sidecar 漏报警显著减少 |
+| 1000 (1 ms) | 3 | 灵敏度饱和,无进一步收益(瓶颈转移到 allocator throughput) |
+
+**`events_poll` 模式** —— 兼容回落。100 ms 周期读 cgroup 文件:
 
 | 文件 | 信号 | 用途 |
-|------|------|------|
-| `memory.events.local` | high 计数差(本周期新增) | 主信号:有新 high 事件 → 申请扩展 |
-| `memory.events.local` | oom 计数差 | 紧急信号:发 urgency=high 申请 |
-| `memory.current` | RSS 数值与短周期斜率(过去 1s) | 预测信号:即将触 high 时提前申请 |
-| `memory.pressure` | PSI memory.some.avg10 | 诊断,不入决策 |
+|---|---|---|
+| `memory.events.local` | high 计数差 | 主信号:`urgency=normal` |
+| `memory.events.local` | oom 计数差 | 紧急信号:`urgency=high` |
+| `memory.current` + `memory.high` | RSS 上升斜率且 RSS/high > 0.95 | 预测信号:`urgency=low` |
+
+**`none` 模式** —— 关闭 sensor(admission + balloon 仍工作)。
+
+**为什么 PSI 是主路径**: `events_poll` 100 ms tick + 多源 RPC 调度让 burst 反应
+延迟 ~50 ms 平均;PSI epoll 让 trigger 触发到 RequestBudget 在 ms 级。在重负载
+host 上更早调高 `memory.high` → 缩短 / 消除 `mem_cgroup_handle_over_high`
+同步回收的 D-state 窗口。
+
+**`min_interval_ms`(默认 100 ms)** —— PSI 唤醒去抖,确保两次 RPC 间最小间
+隔。避免 PSI 触发抖动产生 RPC 风暴。
 
 不采纳:guest balloon STATS_VQ(5 s 周期太粗);uffd fault rate(信号扭曲);
 guest 内进程级压力(跨 host/guest 边界,接口复杂)。

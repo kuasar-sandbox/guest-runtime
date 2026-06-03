@@ -53,6 +53,11 @@ type Options struct {
 	// PingFatalThreshold: same semantics as sandbox.RunOptions —
 	// SIGTERM CH after N consecutive ping failures. 0 disables.
 	PingFatalThreshold int
+
+	// Forwards are parsed `--connect` port-forward directives — a restored
+	// sandbox re-opens the same host-local listeners (forward.go). Empty →
+	// no port forwarding.
+	Forwards []sandbox.ForwardSpec
 }
 
 // Run executes restore. Returns the CH exit code.
@@ -493,6 +498,7 @@ func Run(ctx context.Context, opts Options) (int, error) {
 		ManifestCfg: opts.ManifestCfg,
 		DiffPath:    diffPath,
 		OwnedDiff:   ownedDiff,
+		Forwards:    opts.Forwards,
 		Cgroup:      cg,
 
 		BuildCmd: func(e sandbox.CmdEnv) (*exec.Cmd, func(), error) {

@@ -164,6 +164,7 @@ func main() {
 		stopSignal: syscall.Signal(spec.StopSignal), // 0 → SIGTERM (handled in phase3)
 		stopGrace:  time.Duration(spec.StopGraceSec) * time.Second,
 		execReg:    newExecRegistry(),
+		connReg:    newConnRegistry(),
 	}
 
 	// Reverse-channel dispatch goroutine. Lives until reboot. It carries
@@ -586,6 +587,7 @@ type supervisorState struct {
 	stopSignal syscall.Signal // signal forwarded to app on host SIGTERM/SIGINT; 0 → SIGTERM
 	stopGrace  time.Duration  // grace before SIGKILL; 0 → gracefulShutdown default
 	execReg    *execRegistry  // exec-session child reaping + quiesce gating
+	connReg    *connRegistry  // port-forward session tracking + quiesce teardown
 }
 
 // phase3Supervise reaps children. On user-app exit it drains the stdio

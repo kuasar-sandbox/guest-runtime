@@ -279,8 +279,9 @@ quiesce 是 host `/vm.pause` 之前的最后一次清理机会,目标两件事:
 
 1. 把跨实例 snapshot 的内存与磁盘状态推向"确定性",让分块去重率从 50-70% 升至
    >90%(PROPOSAL §4)。
-2. **让 MUX 连接在快照前彻底关闭**——快照绝不能捕获一条半开/握手中途的 MUX 连接
-   (restore 出来后无对端,成为悬挂状态;§4.6)。
+2. **让 MUX 与端口转发连接在快照前彻底关闭**——快照绝不能捕获一条半开/握手中途的
+   MUX 连接,或一条仍在飞的 `connect` 端口转发连接(restore 出来后无对端,成为
+   悬挂状态;§4.6 / §3.7)。
 
 `attach`/`quiesce` 等短连接由 listener 单线程顺序处理;host 看到的语义是
 "`quiesced` 一回来即可继续 `/vm.pause`"。
@@ -297,13 +298,17 @@ quiesce 是 host `/vm.pause` 之前的最后一次清理机会,目标两件事:
                                                     // 同时丢 page cache + dentry/inode cache
 3. 停止读应用的 stdout/stderr pipe(或 pty master) // 应用已冻结,残留有界
    (停读是 MUX 关闭的前置动作)
-4. 在 MUX 连接上发起优雅关闭握手(§4.6):MUX_CLOSE → 收 MUX_CLOSE_ACK → close(MUX)。
+4. 拆除所有 `connect` 端口转发中继(§3.7):标记 quiescing 拒绝新 connect,逐条
+   关闭 target 连接 + 反向通道 vsock 连接,后者带 SO_LINGER **阻塞至 socket 移除**
+   ——与 MUX 同理,不留半开 vsock 残留。多会话**并发**关闭,有界于 quiesce 预算。
+   host 侧 Forwarder 同步暂停新建并收拢活跃中继的 host 半边
+5. 在 MUX 连接上发起优雅关闭握手(§4.6):MUX_CLOSE → 收 MUX_CLOSE_ACK → close(MUX)。
    close 带 SO_LINGER,**阻塞至该 vsock socket 真正从内核移除**(host 响应方回 ACK
    后立即关闭其连接,RST 回到 guest → 这端 socket 移除),而非"发起关闭即返回"——
    保证 `quiesced` 时连接已彻底拆除,不留半关闭残留(§4.6 详述其必要性)。
    连接已断则降级硬丢
-5. WriteMessage(quiesced) 于 quiesce 短连接
-6. close(quiesce 短连接)
+6. WriteMessage(quiesced) 于 quiesce 短连接
+7. close(quiesce 短连接)
 ```
 
 **为什么 prep 必须做这两步**:
@@ -344,7 +349,7 @@ quiesce 是 host `/vm.pause` 之前的最后一次清理机会,目标两件事:
   env 竞态源)。若 MUX_CLOSE 握手因连接已断而走不通 → 按硬丢处理(对端也看到了
   断链),仍可发 `quiesced`;若 `quiesced` 未发或写不出去(host 侧不可达)→ host
   在 deadline 内拿不到响应 → host 视为协议失败、放弃此次 snapshot,sandbox 继续
-  运行(详见 §4.9 与 [`sandbox.md`](sandbox.md) §6.2)
+  运行(详见 §4.10 与 [`sandbox.md`](sandbox.md) §6.2)
 
 ### 3.5 应用 stdio / console 接线
 
@@ -403,6 +408,47 @@ MUX 中途断(host 侧 `sandbox-ctl exec` 退出 / 失联)→ guest SIGKILL 该�
 所有在飞的 exec 辅助进程**(快照不能带运行中的 exec 兄弟进程);沙箱在 resume /
 restore(§4.3 `attach` / `restore`)后解除拒绝、重新受理。
 
+### 3.7 connect 端口转发会话(`sandbox-ctl run --connect`)
+
+`sandbox-ctl run --connect LOCAL:HOST:PORT`(可重复)把一个 **host 本地端点**转发
+到沙箱内的一个目标地址:host 在 `LOCAL` 上 listen,对**每条**被接受的本地连接开一条
+反向通道发 `connect{ConnectSpec}`(§4.3);sandbox-init `net.Dial` 目标地址,回
+`connect_ack`,该连接随即成为这条转发的**独立长连接数据通道**。一本地连接 ↔ 一反向
+vsock 连接 ↔ 一目标连接,全程 1:1;多条转发并发独立——是 exec 会话的端口转发类比。
+
+```
+ 本地客户端       sandbox-ctl run (host)         CH proxy      sandbox-init (guest)       目标
+    │ connect        │                                            │
+    ├───────────────►│ accept(UDS/fd)                             │
+    │                │ DialRaw vsock + "CONNECT 5000\n"           │
+    │                ├──────────────────────────────►│ accept :5000│
+    │                │ connect{addr:"127.0.0.1:49983"}│───────────►│ net.Dial(tcp, addr)
+    │                │                                │            ├──────────►│ 49983
+    │                │ connect_ack │ (或 error)       │◄───────────┤  ok       │◄─────────┤
+    │                │◄──────────────────────────────┤            │
+    │ ◄═══════════ fwd 帧子协议(§4.7),保留 TCP 半关闭 ════════════════════►│
+```
+
+**LOCAL 端点**。`LOCAL` 在第一个 `:` 处切出,故其自身不得含 `:`:要么是 `fd=N`
+(继承来的**已 listen** socket,host 用 `net.FileListener` 包装后关掉原 fd,避免泄漏
+进 CH),要么是 UDS 路径(`@name` 为抽象命名空间;非抽象则先删陈旧节点再 listen)。
+目标 `HOST:PORT` 用 `net.SplitHostPort` 解析,支持 `[::1]:port` IPv6 字面量。
+
+**数据通道为何加帧**。转发要做**通用**端口转发,须忠实保留 TCP 半关闭
+(`shutdown(SHUT_WR)`:一端发完仍可继续收)。但 CH hybrid vsock proxy 是用户态字节
+泵,**不**把传输层的 `SHUT_WR` 翻译过 UDS↔vsock 边界(它连"对端已关"都只在下次 I/O
+才浮现——同 §4.6 注),裸中继靠转发传输层关闭会丢半关闭。故数据通道走 `fwd` 帧子协议
+(§4.7):关闭信号以 **EOF/RST 帧**走数据面一个字节,proxy 当不透明字节原样搬运,
+100% 保真。单条转发=单条逻辑流,无需流 ID 与应用窗口——vsock 连接自身的内核缓冲背压
+即流控(与 §4.5 MUX 的多流窗口不同)。
+
+**与 snapshot 的关系**。转发中继与应用 MUX 同列入 quiesce 拆除(§3.4 step 4):
+快照不能带在飞的转发连接,否则 restore 出来无对端、成半开 vsock 残留。quiesce 时
+guest 标记 quiescing 拒绝新 connect,逐条关 target + vsock(后者 SO_LINGER 确认拆除),
+host 侧 Forwarder 暂停新建并收拢活跃中继;`resume`/`restore`/`attach`(§4.3)后解除
+拒绝、重新受理。host 的转发 listener 本身**不**随 quiesce 关闭——同 guest 的反向通道
+listener,跨快照存活,restore 进程以同样 `--connect` 重新接管。
+
 ## 4. vsock 控制面 + console MUX 协议
 
 ### 4.1 两类连接
@@ -419,13 +465,21 @@ restore(§4.3 `attach` / `restore`)后解除拒绝、重新受理。
         │  the app session: at most one MUX (launch; re-established by restore/attach)
         │  each exec: its own independent short-lived MUX — 0..N concurrent (§3.6)
         │  wire: [stream:u8][type:u8][len:u16 BE][payload]   ·   per-stream flow control
+
+  (3) forward long-conn      — splices one port-forward connection to a guest target
+        │  born from a `connect` conn, which stays open after connect_ack and
+        │  switches to the fwd frame sub-protocol                     (§3.7 / §4.7)
+        │  one per accepted `--connect` local connection — 0..N concurrent
+        │  wire: [type:u8][len:u16 BE][payload]   ·   TCP half-close preserved, no window
 ```
 
 管理连接不做帧复用——每条连接就一次请求 + 一次响应。MUX 是带帧多路复用与流控
 的连接,只承载某条会话的 stdin/stdout/stderr 或伪终端,**不**替代任何管理操作:
 即使 MUX 开着,`quiesce` / `app_exited` 等仍各起各的短连接、并行发生。应用会话
 那条 MUX 任一时刻至多一条;`exec` 每次会话另起一条独立、短生命的 MUX,与应用
-会话及彼此并发互不影响(§3.6)。
+会话及彼此并发互不影响(§3.6)。`connect` 端口转发(§3.7)与 MUX 同属"握手后升级
+为长连接"一类,但走的是更薄的 fwd 帧子协议(§4.7,单流、无窗口、保留半关闭),
+每条被接受的本地连接一条、0..N 并发。
 
 ### 4.2 通道与寻址
 
@@ -450,7 +504,8 @@ vsock 端口固定 `5000`,**两个方向都复用同一端口号**,身份按方�
   `CONNECT 5000\n`(CH hybrid vsock 协议头;CH 回一行 `OK <port>\n`,host 须先排空
   再读后续 payload),CH 把其余字节代理到 guest port 5000 listener。承载:`ping` /
   `quiesce` / `restore`(其连接升级 MUX)/ `attach`(其连接升级 MUX)/ `exec`
-  (其连接升级为该 exec 会话的独立 MUX)
+  (其连接升级为该 exec 会话的独立 MUX)/ `connect`(其连接升级为该转发的 fwd 数据
+  通道,§3.7)
 - 两个方向独立寻址,互不干扰——同一时刻 host→guest `ping` 与 guest→host
   `app_started` 可并行,各用一条新连接
 
@@ -463,12 +518,13 @@ vsock 端口固定 `5000`,**两个方向都复用同一端口号**,身份按方�
 | **冷启动** | guest→host | `hello` → `launch{spec}` → `launch_ack{stdio}` → `ack` | **升级 MUX** | guest 报 ready,host 回 LaunchSpec;guest 准备好 app stdio 后回 launch_ack,该连接成为 MUX |
 | **应用启动通知** | guest→host | `app_started{pid}` → `ack` | 关 | guest 已 fork/exec 用户进程 |
 | **应用退出通知** | guest→host | `app_exited{code, term_signal}` → `ack` | 关 | 用户进程退出;guest 收 ack 后再 reboot;host 用作自身退出码 |
-| **健康探测** | host→guest | `ping{id, t_send_ns}` → `pong{id, t_send_ns}` | 关 | host 计 RTT / 超时 / 失败数(§4.8) |
+| **健康探测** | host→guest | `ping{id, t_send_ns}` → `pong{id, t_send_ns}` | 关 | host 计 RTT / 超时 / 失败数(§4.9) |
 | **mem 报告** | guest→host | `mem_report{mem_avail, mem_total}` → `mem_report_ack` | 关 | guest 周期上报 `/proc/meminfo`,喂 host BalloonController |
 | **快照前** | host→guest | `quiesce` → `quiesced` | 关 | guest 冻结应用进程树 + 跑 prep + 关闭 MUX(§3.4),`quiesced` ⇒ 应用已冻结、可安全 `/vm.pause` |
 | **恢复后** | host→guest | `restore{epoch, wallclock_ns, network?, files?}` → `restore_ack{stdio, app_state}` | **升级 MUX** | 快照恢复 vCPU 起跑后 host 通知 guest;应用此时仍处 freezer 冻结态(冻结态随快照保存,`/vm.resume` 不解冻);`restore` 携带 host 发送前一刻的墙钟 `wallclock_ns`,guest 收到后先 `clock_settime` 把 `CLOCK_REALTIME` 跳到该值(CH 把快照里的旧钟原样载回,不纠正则落后整个静置区间;单调钟不受影响);若带 `network`,以 **flush-and-replace** 重配 L3(克隆取新 IP/MTU/nexthop/hostname;MAC 沿用快照设备状态不变);若带 `files`,把该实例专属文件(per-instance secret / resolv.conf)注入(同冷启动的内存盘 + bind 机制,仅落克隆内存、不入黄金快照)。两者均 best-effort + 记日志、thaw 前完成;回 `restore_ack`(ATTACH_ACK 的超集 + "恢复完成"信号,host 据此判定 restore 完成)、重连 MUX,**最后 thaw 应用**(write `cgroup.freeze=0`)——故应用绝不会观察到旧墙钟、错误网络、缺失的 per-instance 文件或未重连的 MUX。**RNG 重播种仍 deferred(未实现)**;该连接成为新 MUX |
 | **MUX 重连** | host→guest | `attach{epoch}` → `attach_ack{stdio, app_state}` | **升级 MUX** | 纯 stdio-MUX 传输重连:MUX 因 vsock 异常断了,host 拨新连接重建;guest 优雅关旧 MUX(已断则硬丢)、回 ack,该连接成为新 MUX(§4.6)。**attach ≠ 快照后 resume**——活 VM 上从未 quiesce 的断线兜底也走它。thaw 不属 attach 语义,而属 quiesce 生命周期(freeze 的逆),**由 guest 自身冻结状态驱动**:仍冻结才补 thaw(仅 `resume_after=true` 同进程续跑路径——VM 原地 resume,attach 恰为首个 post-resume 接触),活 VM 重连本未冻结即跳过 |
 | **执行命令** | host→guest | `exec{spec}` → `exec_ack{stdio}` | **升级 MUX(独立会话)** | guest 为这条 `exec` 起一个兄弟进程并准备其 stdio,回 `exec_ack`,该连接成为这次 exec 会话**独立**的 MUX;并发多条互不影响;命令结束 guest 在 MUX 上发 EXIT_STATUS 再走 §4.6 关闭。详见 §3.6 |
+| **端口转发** | host→guest | `connect{spec}` → `connect_ack` | **升级转发数据通道** | guest 为这条 `connect` 拨 `ConnectSpec.address` 目标并准备中继,回 `connect_ack`,该连接成为这条转发的 fwd 帧数据通道(§4.7),保留 TCP 半关闭;并发多条互不影响;quiesce 时主动拆除(§3.4)。详见 §3.7 |
 | `error` | 任意 | (终止) | 关 | 任一端拒绝/出错的兜底响应,`msg` 人类可读 |
 
 `ATTACH` 仅用于 sandbox-ctl 自身的可靠性兜底(同一进程在 MUX 连接坏掉后重建转发),
@@ -485,6 +541,7 @@ JSON 可读、调试友好;消息量极少,无需 protobuf 工具链。
   "phase":    "ready",                 // hello: optional hint
   "launch":   { ... LaunchSpec ... },  // launch (含 stdio 节,见 §5.1)
   "exec":     { "argv":[...], "env":{}, "cwd":"", "stdio":{} },  // exec: ExecSpec(§3.6)
+  "connect":  { "network":"tcp", "address":"127.0.0.1:49983" },  // connect: ConnectSpec(§3.7)
   "stdio":    { ... },                 // launch_ack / restore_ack / attach_ack / exec_ack: 实际启用的 channel 集合
   "app_state":"running",               // restore_ack / attach_ack: running | exited{code,term_signal}
   "pid":      4711,                    // app_started
@@ -620,7 +677,41 @@ SO_LINGER 阻塞至移除完成——`quiesced`(§3.4)时连接确已彻底拆�
 握手;guest 回到"等 host 来 attach 重建"的状态(listener 一直在),host 检测到后拨
 新连接发 `attach`。
 
-### 4.7 时序
+### 4.7 connect 转发帧子协议(fwd)
+
+`connect` 连接在 `connect_ack` 后切到 fwd 帧子协议(包 `pkg/sandbox/fwd`,host 与
+guest 共享),把这条转发的本地连接与 guest 目标连接双向 splice。**单流**——一条
+vsock 连接只承载一条转发流,故无流 ID、无应用窗口;流控就是 vsock 连接自身的内核
+缓冲背压(与 §4.5 MUX 多流共享一条连接才需窗口不同)。
+
+```
+ 帧:  ┌────────┬───────────────┬────────────────────────┐
+      │  type  │  len (u16 BE) │   payload (len bytes)  │
+      │  (u8)  │               │                        │
+      └────────┴───────────────┴────────────────────────┘
+   DATA(0)  载荷字节(单帧 ≤ 32 KiB,更大切多帧)
+   EOF (1)  半关闭:发送方写方向结束 → 对端 splice 连接 CloseWrite()(SHUT_WR),仍可继续收
+   RST (2)  异常中止:双向硬关
+```
+
+**为何用帧而非转发传输层关闭**:见 §3.7——CH hybrid vsock proxy 不把 `SHUT_WR`
+翻译过 UDS↔vsock 边界,关闭信号必须以帧(数据面字节)承载才忠实保真。
+
+**半关闭中继**(host/guest 对称:framed 侧恒为 vsock 连接,plain 侧 host 为本地
+连接、guest 为目标连接):
+
+```
+ plain → framed:  字节 → DATA 帧;干净 EOF → EOF 帧;读错 → RST 帧
+ framed → plain:  DATA → plain 写;EOF → plain.CloseWrite();RST/传输错 → abort
+ 收尾:两个方向各自 EOF(半关闭)后才整体 close;任一 abort 立即双关解阻塞
+```
+
+故一端 `shutdown(SHUT_WR)` 后另一端仍可回数据,直到它也半关——通用端口转发语义。
+所有关闭(干净收尾 / 内部错误 / 外部 quiesce 拆除)经单个 `sync.Once` 收口,底层
+连接恰好关一次(guest 的裸 fd `vsockConn` 双关会误伤复用 fd)。quiesce 时(§3.4)
+guest 对 vsock 连接 arm SO_LINGER 再关,阻塞至 host RST 确认拆除,不留半开残留。
+
+### 4.8 时序
 
 每段图里 `─►` 是普通管理短连接的请求/响应,`══►` 是 MUX 帧流动;一条连接做完
 管理握手后转为 MUX 用 "(this conn ⇒ MUX)" 标注。
@@ -692,7 +783,7 @@ SO_LINGER 阻塞至移除完成——`quiesced`(§3.4)时连接确已彻底拆�
 bind+listen idle 状态(idle vsock socket 没有连接表也没有缓冲数据,跟随快照过去再
 restore 语义干净)。
 
-### 4.8 ping 健康探测
+### 4.9 ping 健康探测
 
 **目的**:用 host→guest 探针检测 guest agent 存活与响应延迟。**不**作为应用层
 心跳,不主动 kill VM,只产指标。
@@ -715,7 +806,7 @@ restore 语义干净)。
 `ping_success_total` / `ping_timeout_total` / `ping_dial_error_total` /
 `ping_rtt_ms_{p50,p95,p99,max}`(pong 到达时 `now - t_send_ns` 计算)。
 
-### 4.9 失败语义
+### 4.10 失败语义
 
 **guest 端**(sandbox-init):
 
@@ -788,7 +879,7 @@ sandbox.yaml `launch:` 节(yaml override 优先,Env merge),host sandbox-ctl 合�
 
 `mounts` / `files` / `init` 的应用见 §3.2;`mounts[].type==empty` 的卷在 switch-root
 前以 raw ext4 source 建立(§3.1)。`start_timeout` 不在 LaunchSpec——它只约束 host 侧
-等待 launch_ack(见 §4.9)。
+等待 launch_ack(见 §4.10)。
 
 ### 5.2 用户应用看到的环境
 
