@@ -58,9 +58,12 @@ build/
   (`make sandbox-ctl` 只重建一个)
 - **Single-entry aggregator**:`make build` 一次产出全部 6 个 Go 二进制 +
   sandbox-runtime.erofs
-- **opt-in 重型依赖**:`cloud-hypervisor` 和 `vmlinux` 不在 `make build` 内,
-  分别 `make cloud-hypervisor` / `make vmlinux` 触发,因为冷构建分别需要
-  ~10 min / ~5-10 min,且不是每次开发都需要重建
+- **opt-in 重型依赖**:在**主项目（umbrella）Makefile** 的 `make build` 里,
+  `cloud-hypervisor` 和 `vmlinux` 不随 Go 二进制一起构建,分别 `make cloud-hypervisor`
+  / `make vmlinux` 触发,因为冷构建分别需要 ~10 min / ~5-10 min,且不是每次开发
+  都需要重建。注意 **`sandbox-deps` 仓自身**的 `make build`(=all)语义不同:
+  它一次构建全部四件原生依赖 `cloud-hypervisor + vmlinux + erofs + envd`
+  (CH / vmlinux 为多分钟冷构建)
 - **CGO 静态链接**:cache-ctl 静态链接 librocksdb + libstdc++,binary 可以
   ship 到没装这些库的 host;glibc 仍动态
 - **跨 arch 自动检测**:`TARGET_ARCH != HOST_ARCH` 自动启用交叉编译,设置
@@ -117,8 +120,7 @@ make release-clean
 
 make proto             # 重新生成 gRPC stubs(需 protoc + protoc-gen-go(-grpc))
 make lint              # go vet
-make clean             # 删除 bin/(保留 build/ 与 deps)
-make clean-deps        # 删除 build/<arch>/{rocksdb,cloud-hypervisor,sandbox-runtime,linux},
+make clean             # 删除 bin/ + build/<arch>/{rocksdb,cloud-hypervisor,sandbox-runtime,linux},
                         # 保留 tarball + src/(可能含 WIP git)
 make help              # 列举所有 target
 ```
@@ -313,10 +315,6 @@ make vmlinux                # 应用 + 重 build,验证可重复
 **工具链注意**:envd 的 `go.mod` 钉了较新的 Go(如 `go 1.26.3`),`GOTOOLCHAIN=auto`
 会按需下载该工具链。**该下载要求开启 GOSUMDB**——Go 拒绝在 `GOSUMDB=off` 下下载并运行
 工具链(内网构建常关 GOSUMDB,会让这步失败)。
-
-**WSL2 注意**:kernel 源树 ~85K 文件。Makefile 自动检测:若 host 在
-`/mnt/<drive>/`(DrvFs)且 `$HOME/linux-build/src` 存在,自动把
-`LINUX_BUILD_SRC` + `LINUX_BUILD_OUT` 重定向到 `$HOME` 下。
 
 ## 5. CGO 与静态链接
 

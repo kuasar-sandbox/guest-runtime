@@ -30,7 +30,7 @@ vmlinux 是平台资产,**不**对外暴露内核版本/配置接口给租户。
 ### 1.3 输出
 
 ```
-bin/x86_64/vmlinux        ELF 内核,PVH 启动协议,~6 MiB
+bin/x86_64/vmlinux        ELF 内核,PVH 启动协议,~21 MiB(CC_OPTIMIZE_FOR_SIZE,无 debug-info)
 bin/aarch64/vmlinux       PE 格式 Image,EFI stub + ACPI 启动,~14 MiB
 ```
 
@@ -56,7 +56,7 @@ build         把 sandbox-common.config + sandbox-<arch>.config 拼接成
               (x86_64: vmlinux ELF;arm64: Image PE)→ cp 到 bin/<arch>/vmlinux
 ```
 
-幂等:`bin/<arch>/vmlinux` 存在则跳过(删了重跑或 `make clean-deps && make vmlinux`
+幂等:`bin/<arch>/vmlinux` 存在则跳过(删了重跑或 `make clean && make vmlinux`
 强制重建)。
 
 **Patch 开发流**(与 cloud-hypervisor 的 ch-patches 流对称,见

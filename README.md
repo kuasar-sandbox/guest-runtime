@@ -9,17 +9,21 @@
 | 产物 | 来源 | 消费方 |
 |---|---|---|
 | `mkfs.erofs` | erofs-utils v1.9.1 | `sandbox-builder`（展平）、`sandbox-runtime`（打 guest 镜像） |
+| `fsck.erofs` | erofs-utils v1.9.1 | `sandbox-orchestrator`（`fsck.erofs --extract` 解包 base runtime 注入 envd） |
 | `vmlinux` | Linux 6.1.169 + `deps/linux-patches` + `deps/vmlinux/*.config` | `sandbox-runtime`（boot guest） |
 | `cloud-hypervisor` | CH v51.1 + `deps/ch-patches`（memfd 注入 / uffd handler / snapshot skip / balloon） | `sandbox-runtime`（VMM） |
+| `envd` | e2b-dev/infra（发布 tarball，默认 tag `2026.22`） | `sandbox-orchestrator`（注入 `sandbox-runtime-e2b.erofs` 的 guest agent） |
 
 > `librocksdb`（`sandbox-accelerator` 的 CGO 链接依赖）在该仓内构建，不在此处。
 
 ## 构建
 
 ```bash
-make erofs                      # mkfs.erofs（较快）
+make build                      # =all：cloud-hypervisor + vmlinux + erofs + envd（全部四件）
+make erofs                      # mkfs.erofs + fsck.erofs（较快）
 make vmlinux                    # 内核（~5-10 min 冷启；需 bc/bison/flex/libelf-dev/libssl-dev）
 make cloud-hypervisor           # 打 patch + cargo build（~minutes 冷启，~200 crates）
+make envd                       # e2b guest agent（e2b-dev/infra tarball；ENVD_TARBALL 覆盖 tag）
 make TARGET_ARCH=aarch64 ...    # 交叉编译（配合 CROSS_PREFIX）
 
 # CH / 内核 patch 开发循环
@@ -31,7 +35,7 @@ make ch-patch-check             # 构建 CH patch 行为验证探针
 
 ## 内容
 
-- `deps/build-{erofs,vmlinux,cloud-hypervisor}.sh` + `common.sh` — 构建脚本
+- `deps/build-{erofs,vmlinux,cloud-hypervisor,envd}.sh` + `common.sh` — 构建脚本
 - `deps/ch-patches/`、`deps/linux-patches/` — 源码 patch（`git am` 应用）
 - `deps/vmlinux/*.config` — 内核 defconfig 片段（common + per-arch）
 - `tools/ch_patch_check/` — CH patch 的运行期行为验证探针

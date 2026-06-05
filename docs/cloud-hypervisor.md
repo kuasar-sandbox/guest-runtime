@@ -27,14 +27,14 @@
 
 | 文件 | 改动行数 | 内容 |
 |------|----------|------|
-| `vmm/src/vm_config.rs` | ~10 | `MemoryZoneConfig` 新增 `fd` / `uffd_socket` 字段 |
-| `vmm/src/config.rs` | ~10 | `MemoryConfig::parse` 增加两个 key 解析 |
-| `vmm/src/memory_manager.rs` | ~355 | fd 注入 + user_managed skip + create_ram_region 内创建 uffd + va_report sendmsg(SCM_RIGHTS) + UFFDIO_REGISTER |
+| `vmm/src/vm_config.rs` | ~19 | `MemoryZoneConfig` 新增 `fd` / `uffd_socket` 字段 |
+| `vmm/src/config.rs` | ~9 | `MemoryConfig::parse` 增加两个 key 解析 |
+| `vmm/src/memory_manager.rs` | ~338 | fd 注入 + user_managed skip + create_ram_region 内创建 uffd + va_report sendmsg(SCM_RIGHTS) + UFFDIO_REGISTER |
 | `vmm/src/seccomp_filters.rs` | ~17 | allowlist `userfaultfd` syscall + `UFFDIO_API` / `UFFDIO_REGISTER` ioctl |
-| `virtio-devices/src/balloon.rs` | ~40 | balloon release 对 user-managed zone 的空洞 run 跳过 `PUNCH_HOLE`/`MADV_DONTNEED`(`SEEK_DATA` 探测)|
+| `virtio-devices/src/balloon.rs` | ~38 | balloon release 对 user-managed zone 的空洞 run 跳过 `PUNCH_HOLE`/`MADV_DONTNEED`(`SEEK_DATA` 探测)|
 | `virtio-devices/src/seccomp_filters.rs` | ~8 | balloon 线程 seccomp 放行 `SYS_lseek`(skip-hole 探测所需)|
 
-总计 ~445 行 Rust + 4 个 cohesive commits。基于 cloud-hypervisor `v51.1`。
+总计 ~429 行 Rust（约数）+ 4 个 cohesive commits。基于 cloud-hypervisor `v51.1`。
 
 ### 1.3 维护策略
 
