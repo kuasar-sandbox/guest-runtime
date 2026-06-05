@@ -4,6 +4,8 @@
 //	run       — start a sandbox (cold-start; or with --restore=<ref> from a snapshot)
 //	snapshot  — pause + dump to <sid>.snapshot + <sha256>.overlay (or upload)
 //	exec      — run an ad-hoc command inside a running sandbox
+//	config    — produce / merge / validate a sandbox.yaml
+//	info      — print a snapshot's embedded snapshot.cfg
 //
 // See docs/sandbox.md for the full design.
 package main

@@ -1,6 +1,6 @@
 # sandbox-runtime — microVM sandbox lifecycle engine.
 #
-#   sandbox-ctl     host control plane (run / snapshot / restore)
+#   sandbox-ctl     host control plane (run / snapshot / exec / config / info)
 #   sandbox-init    guest PID 1 (packed into sandbox-runtime.erofs)
 #   sandbox-runtime sandbox-init packed into a virtio-pmem-mountable EROFS
 #
