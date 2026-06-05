@@ -4,11 +4,12 @@
 #   mkfs.erofs        (erofs-utils)        — used by sandbox-builder, sandbox-runtime
 #   vmlinux           (guest kernel)       — used by sandbox-runtime
 #   cloud-hypervisor  (patched Rust VMM)   — used by sandbox-runtime
+#   envd              (e2b guest agent)    — injected into sandbox-runtime-e2b.erofs
 #
 # (librocksdb, sandbox-accelerator's CGO link dep, is built in that repo.)
 #
-# `make build` builds all three (cloud-hypervisor + vmlinux + erofs). Each
-# artifact has fetch / patch / build sub-stages; idempotency lives inside the
+# `make build` builds all four (cloud-hypervisor + vmlinux + erofs + envd). Each
+# artifact has fetch / (patch) / build sub-stages; idempotency lives inside the
 # scripts. cloud-hypervisor and vmlinux are multi-minute cold builds.
 # Cross-compile by setting TARGET_ARCH; CROSS_PREFIX auto-derives when
 # HOST_ARCH != TARGET_ARCH (distros ship cross packages under the GNU triple).
@@ -59,6 +60,7 @@ TARBALL_DIR    := build/tarball
 EROFS_BIN   := $(abspath $(BINDIR)/mkfs.erofs)
 CH_BIN      := $(abspath $(BINDIR)/cloud-hypervisor)
 VMLINUX_BIN := $(abspath $(BINDIR)/vmlinux)
+ENVD_BIN    := $(abspath $(BINDIR)/envd)
 
 # Upstream tarballs + optional SHA256 (scripts skip verify when empty).
 EROFS_TARBALL                   ?= https://github.com/erofs/erofs-utils/archive/refs/tags/v1.9.1.tar.gz\#erofs-utils-v1.9.1.tar.gz
@@ -67,6 +69,8 @@ LINUX_TARBALL                   ?= https://cdn.kernel.org/pub/linux/kernel/v6.x/
 LINUX_TARBALL_SHA256            ?=
 CLOUD_HYPERVISOR_TARBALL        ?= https://github.com/cloud-hypervisor/cloud-hypervisor/archive/refs/tags/v51.1.tar.gz\#cloud-hypervisor-51.1.tar.gz
 CLOUD_HYPERVISOR_TARBALL_SHA256 ?=
+ENVD_TARBALL                    ?= https://github.com/e2b-dev/infra/archive/refs/tags/2026.22.tar.gz\#e2b-infra-2026.22.tar.gz
+ENVD_TARBALL_SHA256             ?=
 
 # WSL2 + /mnt/<drive>/ detection: kernel tags itself "microsoft" and cwd is on
 # a 9p/drvfs mount. WSL2 users pay a 5-10x per-file I/O penalty for the ~85k
@@ -92,6 +96,10 @@ LINUX_PATCHES_DIR := $(abspath deps/linux-patches)
 CLOUD_HYPERVISOR_SRC       ?= $(abspath build/src/cloud-hypervisor)
 CLOUD_HYPERVISOR_BUILD_OUT ?= $(abspath $(BUILD_DIR)/cloud-hypervisor)
 CH_PATCHES_DIR             := $(abspath deps/ch-patches)
+
+# envd: e2b-dev/infra source tree — arch-neutral and shared (Go: GOARCH picks
+# the target at build), like cloud-hypervisor / linux.
+ENVD_SRC ?= $(abspath build/src/e2b-infra)
 
 # Cross toolchain env for the C/C++ steps (CGO/cargo/kbuild). Empty for native.
 ifneq ($(CROSS_PREFIX),)
@@ -121,7 +129,7 @@ endef
 # ---------------------------------------------------------------------------
 # Targets
 # ---------------------------------------------------------------------------
-.PHONY: all build erofs cloud-hypervisor vmlinux \
+.PHONY: all build erofs cloud-hypervisor vmlinux envd \
         ch-fetch ch-patches-apply ch-patches ch-patches-format ch-build \
         linux-fetch linux-patches-apply linux-patches linux-patches-format linux-build \
         ch-patch-check clean help
@@ -129,8 +137,8 @@ endef
 all: build
 
 # All native artifacts. cloud-hypervisor and vmlinux are multi-minute cold
-# builds; erofs is the fastest (subminute on a warm tarball cache).
-build: cloud-hypervisor vmlinux erofs
+# builds; erofs + envd are the fastest (subminute on a warm tarball cache).
+build: cloud-hypervisor vmlinux erofs envd
 
 # --- erofs-utils (mkfs.erofs) ----------------------------------------------
 erofs: $(EROFS_BIN)
@@ -140,6 +148,17 @@ $(EROFS_BIN):
 	EROFS_TARBALL_SHA256="$(EROFS_TARBALL_SHA256)" \
 		bash deps/build-erofs.sh
 	$(call link_bin,mkfs.erofs)
+
+# --- envd (e2b guest agent; injected into sandbox-runtime-e2b.erofs) -------
+envd: $(ENVD_BIN)
+$(ENVD_BIN):
+	$(DEPS_ENV) \
+	ENVD_TARBALL="$(ENVD_TARBALL)" \
+	ENVD_TARBALL_SHA256="$(ENVD_TARBALL_SHA256)" \
+	ENVD_SRC="$(ENVD_SRC)" \
+	GO_ARCH="$(GO_ARCH)" \
+		bash deps/build-envd.sh
+	$(call link_bin,envd)
 
 # --- cloud-hypervisor (patched Rust VMM) -----------------------------------
 CH_INVOKE = $(DEPS_ENV) \
@@ -197,10 +216,11 @@ clean:
 
 help:
 	@echo "sandbox-deps — native dependency builds. Targets:"
-	@echo "  build (=all)          cloud-hypervisor + vmlinux + erofs (multi-min cold)"
+	@echo "  build (=all)          cloud-hypervisor + vmlinux + erofs + envd (multi-min cold)"
 	@echo "  erofs                 build mkfs.erofs (erofs-utils)"
 	@echo "  vmlinux               build the guest kernel (~5-10 min cold)"
 	@echo "  cloud-hypervisor      build the patched VMM (~minutes cold)"
+	@echo "  envd                  build the e2b guest agent (e2b-dev/infra; pin via ENVD_TARBALL)"
 	@echo "  ch-patches-format     extract HEAD CH commits back to deps/ch-patches/"
 	@echo "  linux-patches-format  extract HEAD linux commits back to deps/linux-patches/"
 	@echo "  ch-patch-check        build the CH patch verification probes (nested module)"

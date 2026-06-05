@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 #
-# Build a mkfs.erofs binary (no compression, no fuse) into $BINDIR so it
-# sits alongside flatten-ctl — flatten-ctl locates mkfs.erofs via its
-# own binary directory when MKFS_EROFS_PATH is unset.
+# Build mkfs.erofs + fsck.erofs (no compression, no fuse) into $BINDIR.
+# mkfs.erofs sits alongside flatten-ctl (it locates mkfs.erofs via its own binary
+# directory when MKFS_EROFS_PATH is unset); fsck.erofs is used by
+# orchestrator-ctl build-runtime (`fsck.erofs --extract`) to unpack the base
+# sandbox-runtime.erofs before injecting envd.
 #
-# mkfs.erofs is treated as a TARGET-ARCH binary (not a host tool): it
-# ships in the release tarball next to flatten-ctl for the target it
-# runs on. Cross-compilation uses CROSS_PREFIX for the C toolchain.
+# Both are TARGET-ARCH binaries (not host tools): they ship in the release tarball
+# for the target they run on. Cross-compilation uses CROSS_PREFIX for the C toolchain.
 #
 # Inputs (env):
 #   EROFS_TARBALL         URL or local path; supports "url#filename" form.
@@ -34,9 +35,10 @@ source "$script_dir/common.sh"
 : "${BINDIR:=$(pwd)/bin}"
 : "${CROSS_PREFIX:=}"
 
-out_bin="$BINDIR/mkfs.erofs"
-if [ -x "$out_bin" ]; then
-    log "already built: $out_bin (delete it to force rebuild)"
+out_mkfs="$BINDIR/mkfs.erofs"
+out_fsck="$BINDIR/fsck.erofs"
+if [ -x "$out_mkfs" ] && [ -x "$out_fsck" ]; then
+    log "already built: $out_mkfs + $out_fsck (delete one to force rebuild)"
     exit 0
 fi
 
@@ -122,22 +124,25 @@ log "configure (no compression, no fuse)"
     --without-libnl3 \
     --disable-multithreading)
 
-log "make mkfs.erofs (only mkfs subdir; skips mount/fsck/dump/fuse)"
-# Build lib first (mkfs depends on liberofs.a), then mkfs only.
-# Avoids mount.erofs (pthread link bug in v1.9.1 when multithreading
-# is disabled) and other subdirs we don't need.
+log "make mkfs.erofs + fsck.erofs (mkfs + fsck subdirs; skips mount/dump/fuse)"
+# Build lib first (mkfs/fsck depend on liberofs.a), then the two subdirs we ship.
+# Avoids mount.erofs (pthread link bug in v1.9.1 when multithreading is disabled)
+# and other subdirs we don't need.
 make -C "$src_dir/lib"  -j"$(nproc)"
 make -C "$src_dir/mkfs" -j"$(nproc)"
+make -C "$src_dir/fsck" -j"$(nproc)"
 
 mkdir -p "$BINDIR"
-cp "$src_dir/mkfs/mkfs.erofs" "$out_bin"
-chmod +x "$out_bin"
+cp "$src_dir/mkfs/mkfs.erofs" "$out_mkfs"
+cp "$src_dir/fsck/fsck.erofs" "$out_fsck"
+chmod +x "$out_mkfs" "$out_fsck"
 
-log "built $out_bin"
+log "built $out_mkfs + $out_fsck"
 # When cross-compiling, --help on the target binary won't run on the host;
 # only run it for native builds.
 if [ -z "$CROSS_PREFIX" ]; then
-    "$out_bin" --help 2>&1 | head -3 || true
+    "$out_mkfs" --help 2>&1 | head -2 || true
+    "$out_fsck" --help 2>&1 | head -2 || true
 else
-    file "$out_bin" 2>&1 | head -1 || true
+    file "$out_mkfs" "$out_fsck" 2>&1 | head -2 || true
 fi

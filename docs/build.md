@@ -21,22 +21,24 @@
 | cloud-hypervisor | host VMM | n/a | rust + ch-patches |
 | vmlinux | guest kernel | n/a | linux 6.1.169 + sandbox-{common,arch}.config |
 | mkfs.erofs | host 工具 | n/a | erofs-utils 1.9.1 |
+| fsck.erofs | host 工具 | n/a | erofs-utils 1.9.1(build-runtime-e2b.sh 解包) |
+| envd | guest agent(e2b) | 否 | e2b-dev/infra(发布 tarball) |
 
 ### 1.2 目录布局
 
 ```
 bin/
 ├── x86_64/                 # x86_64 二进制
-│   ├── manifest-ctl, flatten-ctl, mkfs.erofs
+│   ├── manifest-ctl, flatten-ctl, mkfs.erofs, fsck.erofs
 │   ├── store-ctl, cache-ctl, sandbox-ctl, node-ctl
 │   ├── sandbox-init, sandbox-runtime.erofs
-│   └── cloud-hypervisor, vmlinux
+│   └── cloud-hypervisor, vmlinux, envd
 ├── aarch64/                # aarch64 二进制(同上)
 └── <name>                  # 软链接 → <host-arch>/<name>(仅原生构建生成)
 
 build/
 ├── tarball/                # 跨架构共享的源码 tarball 缓存
-├── src/{rocksdb,linux,cloud-hypervisor}/   # 跨架构共享的源码树
+├── src/{rocksdb,linux,cloud-hypervisor,e2b-infra}/   # 跨架构共享的源码树
 ├── x86_64/                 # x86_64 中间产物
 │   ├── rocksdb/            (out-of-source build)
 │   ├── linux/              (kbuild output)
@@ -83,6 +85,7 @@ make deps-erofs
 
 make cloud-hypervisor  # patched CH 二进制(~10 min cold,opt-in)
 make vmlinux           # guest 内核(~5-10 min,opt-in)
+make envd              # e2b guest agent(e2b-dev/infra tarball,subminute)
 
 make ch-fetch          # 拉源码 + git tag(一次性)
 make ch-patches-apply  # 应用 deps/ch-patches/*.patch
@@ -216,14 +219,17 @@ aarch64 host(交叉构建产物在 x86_64 host 上不能直接执行)。
 - 编译选项关闭 snappy / lz4 / zstd / bz2 / zlib(链接器仍要这些 .so 因为
   grocksdb 的 cgo LDFLAGS 硬编码,见 §3.2)
 
-### 4.2 erofs-utils(`make deps-erofs`)
+### 4.2 erofs-utils(`make erofs`)
 
-构建 mkfs.erofs:
+构建 mkfs.erofs + fsck.erofs:
 
 - 上游:`erofs/erofs-utils v1.9.1`
-- 输出:`bin/<arch>/mkfs.erofs`
-- 用途:flatten-ctl 运行时调用(展平镜像);build 时构建
-  sandbox-runtime.erofs
+- 输出:`bin/<arch>/mkfs.erofs`、`bin/<arch>/fsck.erofs`
+- 用途:
+  - mkfs.erofs —— flatten-ctl 运行时展平镜像;build 时打包 sandbox-runtime.erofs
+  - fsck.erofs —— orchestrator-ctl `build-runtime`(`fsck.erofs --extract`)解包基础
+    runtime erofs 再注入 envd(组 sandbox-runtime-e2b.erofs)
+- 只编 `lib`+`mkfs`+`fsck` 子目录(跳过 mount/dump/fuse;mount.erofs 在禁多线程时有 pthread 链接 bug)
 
 erofs-utils 不支持 out-of-source 构建(autotools),源树拷贝到
 `build/<arch>/src/erofs-utils/` 各自构建。
@@ -290,6 +296,23 @@ make vmlinux                # 应用 + 重 build,验证可重复
 并指引先 `make linux-patches-format` 保 WIP 再 reset),避免静默覆盖开发中改动。
 
 详细配置体系与补丁决策见 [`sandbox-kernel.md`](sandbox-kernel.md)。
+
+### 4.5 envd(`make envd`)
+
+构建 e2b guest agent,供 sandbox-orchestrator `make sandbox-runtime-e2b` 注入到
+`sandbox-runtime-e2b.erofs` 的 `/opt/sandbox-runtime/bin/envd`:
+
+- 上游:`e2b-dev/infra` 发布 tarball(默认 tag `2026.22`;`ENVD_TARBALL` 覆盖)
+- 输出:`bin/<arch>/envd`
+- 构建:`go build packages/envd`,`CGO_ENABLED=0`,GOARCH 选目标(无需交叉工具链)
+- 用途:e2b profile guest 内的数据面 agent(端口 49983)
+
+源码 tarball 缓存到 `build/tarball/e2b-infra-<tag>.tar.gz`,extract 到跨架构共享的
+`build/src/e2b-infra/`(Go 以 GOARCH 选目标)。与 cloud-hypervisor/vmlinux 不同,envd 无 patch 流。
+
+**工具链注意**:envd 的 `go.mod` 钉了较新的 Go(如 `go 1.26.3`),`GOTOOLCHAIN=auto`
+会按需下载该工具链。**该下载要求开启 GOSUMDB**——Go 拒绝在 `GOSUMDB=off` 下下载并运行
+工具链(内网构建常关 GOSUMDB,会让这步失败)。
 
 **WSL2 注意**:kernel 源树 ~85K 文件。Makefile 自动检测:若 host 在
 `/mnt/<drive>/`(DrvFs)且 `$HOME/linux-build/src` 存在,自动把
