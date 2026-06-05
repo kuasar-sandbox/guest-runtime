@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 )
 
 // IMPORTANT: sandbox-ctl NEVER joins the sandbox cgroup itself. Only the CH
@@ -48,6 +49,11 @@ type CgroupConfig struct {
 	MemoryHighBytes uint64
 	CPUMaxQuotaUs   int
 	CPUWeight       uint64
+	// Adopt: Path is the cgroup sandbox-ctl is already a member of (its
+	// systemd unit's cgroup). Limits are written to it, but AddPID is a
+	// no-op — CH inherits membership as a forked child. See cgroup.go header
+	// for the throttle-deadlock this re-exposes; caller opts in via --cgroup-adopt.
+	Adopt bool
 }
 
 // CgroupController holds the cgroup path after limits have been written.
@@ -56,6 +62,7 @@ type CgroupConfig struct {
 type CgroupController struct {
 	Path   string
 	active bool
+	adopt  bool
 }
 
 // JoinCgroup writes resource limits to an existing cgroup but does NOT
@@ -114,7 +121,24 @@ func JoinCgroup(cfg CgroupConfig) (*CgroupController, error) {
 		}
 	}
 
-	return &CgroupController{Path: cfg.Path, active: true}, nil
+	return &CgroupController{Path: cfg.Path, active: true, adopt: cfg.Adopt}, nil
+}
+
+// SelfCgroupV2Path returns the absolute cgroup-v2 directory the current
+// process is a member of, read from /proc/self/cgroup ("0::<path>"). Used by
+// --cgroup-adopt to point CgroupPath at the launching systemd unit's cgroup.
+func SelfCgroupV2Path() (string, error) {
+	data, err := os.ReadFile("/proc/self/cgroup")
+	if err != nil {
+		return "", fmt.Errorf("cgroup: read /proc/self/cgroup: %w", err)
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		// cgroup v2 unified hierarchy line is "0::<path>".
+		if rest, ok := strings.CutPrefix(line, "0::"); ok {
+			return filepath.Join("/sys/fs/cgroup", rest), nil
+		}
+	}
+	return "", fmt.Errorf("cgroup: no cgroup-v2 (0::) entry in /proc/self/cgroup")
 }
 
 // Active reports whether limits were written (i.e. cfg.Path was non-empty).
@@ -131,6 +155,11 @@ func (c *CgroupController) Active() bool {
 // startup pages, so the window is harmless in practice.
 func (c *CgroupController) AddPID(pid int) error {
 	if c == nil || !c.active {
+		return nil
+	}
+	if c.adopt {
+		// Adopt mode: the cgroup is sandbox-ctl's own; CH is a forked child
+		// and already a member. Moving it would be a no-op at best.
 		return nil
 	}
 	if err := writeCgFile(c.Path, "cgroup.procs", strconv.Itoa(pid)); err != nil {
@@ -201,5 +230,6 @@ func buildCgroupConfig(cfg *SandboxConfig) (CgroupConfig, error) {
 		MemoryHighBytes: wm,
 		CPUMaxQuotaUs:   cfg.Resources.Capacity.CPU * 100000,
 		CPUWeight:       cfg.CPUWeight(),
+		Adopt:           cfg.Resources.Control.Adopt,
 	}, nil
 }

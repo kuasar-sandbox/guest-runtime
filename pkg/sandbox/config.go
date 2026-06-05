@@ -16,8 +16,8 @@ import (
 	"time"
 
 	"github.com/kuasar-sandbox/sandbox-accelerator/pkg/manifest"
-	"github.com/kuasar-sandbox/sandbox-runtime/pkg/sandbox/proto"
 	"github.com/kuasar-sandbox/sandbox-runtime/internal/util"
+	"github.com/kuasar-sandbox/sandbox-runtime/pkg/sandbox/proto"
 	"gopkg.in/yaml.v3"
 )
 
@@ -123,6 +123,15 @@ type ControlConfig struct {
 	// Controller is the UDS path of a sandbox-resource-control protocol
 	// endpoint. Non-empty enables dynamic mode (M2+). Requires CgroupPath.
 	Controller string `yaml:"controller,omitempty"`
+	// Adopt makes sandbox-ctl ADOPT the cgroup it is already a member of
+	// (e.g. its systemd unit's cgroup): it writes limits to that cgroup but
+	// does NOT move any process into it — CH is forked as a child and
+	// inherits membership. Set by --cgroup-adopt, which also resolves
+	// CgroupPath from /proc/self/cgroup. NOTE: in adopt mode sandbox-ctl
+	// shares the limited cgroup with CH, re-exposing the memory.high
+	// throttle-deadlock the non-adopt path avoids (see cgroup.go header);
+	// omit --cgroup-adopt to fall back to the decoupled path.
+	Adopt bool `yaml:"adopt,omitempty"`
 	// Sensor tunes the per-sandbox memory pressure sensor (data source +
 	// reaction). Optional; nil = use PSI mode with default thresholds.
 	Sensor *SensorConfig `yaml:"sensor,omitempty"`
@@ -447,6 +456,18 @@ func LoadMerged(paths []string) (*SandboxConfig, error) {
 		if err := yaml.Unmarshal(data, &cfg); err != nil {
 			return nil, fmt.Errorf("sandbox: parse %s: %w", p, err)
 		}
+	}
+	cfg.applyDefaults()
+	return &cfg, nil
+}
+
+// LoadConfigBytes parses a single SANDBOX_CONFIG YAML document held in memory
+// (e.g. delivered over the config-socket) and applies defaults — the in-memory
+// equivalent of LoadMerged for one document, with nothing read from disk.
+func LoadConfigBytes(data []byte) (*SandboxConfig, error) {
+	var cfg SandboxConfig
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
+		return nil, fmt.Errorf("sandbox: parse config bytes: %w", err)
 	}
 	cfg.applyDefaults()
 	return &cfg, nil

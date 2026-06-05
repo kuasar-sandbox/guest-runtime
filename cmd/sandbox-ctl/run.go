@@ -43,6 +43,7 @@ func runCmd(args []string) int {
 	baseRoot := fs.String("base-root", "", "on-disk base root: overlay diff (overrides SANDBOX_BASE_ROOT env; default /var/lib/sandbox)")
 
 	cgroupPath := fs.String("cgroup-path", "", "absolute cgroup v2 directory to join (must already exist); empty = no cgroup")
+	cgroupAdopt := fs.Bool("cgroup-adopt", false, "adopt the cgroup sandbox-ctl is already in (its systemd unit's cgroup): write limits there, do NOT move CH; resolves the cgroup path from /proc/self/cgroup")
 	statsJSON := fs.String("stats-json", "", "if set, write per-backend + uffd stats as JSON to this path on shutdown")
 
 	restoreRef := fs.String("restore", "", "snapshot reference (file path or manifest://<hex>) — switches to restore mode")
@@ -124,23 +125,21 @@ func runCmd(args []string) int {
 		return 2
 	}
 
-	// Resolve --config (flag > env).
-	if *configPath == "" {
-		*configPath = os.Getenv("SANDBOX_CONFIG")
+	// Resolve --run-root / --base-root (flag > env > default) first — the
+	// config-socket pidfile lives under run-root.
+	rd := *runRoot
+	if rd == "" {
+		rd = os.Getenv("SANDBOX_RUN_ROOT")
 	}
-	if *configPath == "" {
-		fmt.Fprintln(os.Stderr, "sandbox-ctl run: --config or SANDBOX_CONFIG required")
-		return 2
+	if rd == "" {
+		rd = "/run/sandbox"
 	}
-	// --config accepts ':'-separated paths, deep-merged front-to-back (later
-	// overrides earlier) — same as `sandbox-ctl config`.
-	cfg, err := sandbox.LoadMerged(strings.Split(*configPath, ":"))
-	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		return 1
+	br := *baseRoot
+	if br == "" {
+		br = os.Getenv("SANDBOX_BASE_ROOT")
 	}
-	if *cgroupPath != "" {
-		cfg.Resources.Control.CgroupPath = *cgroupPath
+	if br == "" {
+		br = "/var/lib/sandbox"
 	}
 
 	// Resolve --ch-binary precedence: explicit flag > $SANDBOX_CH_PATH >
@@ -154,24 +153,23 @@ func runCmd(args []string) int {
 		}
 	}
 
-	// Resolve --run-root precedence: flag > env > /run/sandbox.
-	rd := *runRoot
-	if rd == "" {
-		rd = os.Getenv("SANDBOX_RUN_ROOT")
+	// Load the sandbox + manifest config from --config / --manifest-config (files
+	// + env). The orchestrator delivers per-sandbox config by writing these files;
+	// the secret manifest key rides in the MANIFEST_KEY env (resolved by
+	// pkg/manifest). orchestrator-ctl run-task sets both up before exec'ing here.
+	if *configPath == "" {
+		*configPath = os.Getenv("SANDBOX_CONFIG")
 	}
-	if rd == "" {
-		rd = "/run/sandbox"
+	if *configPath == "" {
+		fmt.Fprintln(os.Stderr, "sandbox-ctl run: --config or SANDBOX_CONFIG required")
+		return 2
 	}
-	// Resolve --base-root precedence: flag > env > /var/lib/sandbox.
-	br := *baseRoot
-	if br == "" {
-		br = os.Getenv("SANDBOX_BASE_ROOT")
+	// --config accepts ':'-separated paths, deep-merged front-to-back.
+	cfg, err := sandbox.LoadMerged(strings.Split(*configPath, ":"))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
 	}
-	if br == "" {
-		br = "/var/lib/sandbox"
-	}
-
-	// Optional manifest config (required for manifest:// resources).
 	manifestCfg, err := sandbox.LoadManifestConfig(*manifestPath)
 	if err != nil {
 		if !errors.Is(err, manifest.ErrConfigNotProvided) {
@@ -181,6 +179,22 @@ func runCmd(args []string) int {
 		manifestCfg = nil
 	}
 
+	// cgroup overrides.
+	if *cgroupPath != "" {
+		cfg.Resources.Control.CgroupPath = *cgroupPath
+	}
+	if *cgroupAdopt {
+		p, perr := sandbox.SelfCgroupV2Path()
+		if perr != nil {
+			fmt.Fprintf(os.Stderr, "[sandbox-ctl] --cgroup-adopt: %v\n", perr)
+			return 1
+		}
+		cfg.Resources.Control.CgroupPath = p
+		cfg.Resources.Control.Adopt = true
+	}
+
+	restoreR := *restoreRef
+
 	// Signal handling lives in pkg/sandbox (lifecycle.go /
 	// restore.go) — they own the CH process and forward SIGTERM/SIGINT
 	// to it with SIGKILL escalation. So this layer just passes a plain
@@ -188,8 +202,8 @@ func runCmd(args []string) int {
 	ctx := context.Background()
 
 	// Restore mode dispatch.
-	if *restoreRef != "" {
-		return runRestore(ctx, cfg, manifestCfg, *restoreRef,
+	if restoreR != "" {
+		return runRestore(ctx, cfg, manifestCfg, restoreR,
 			*sandboxID, chBin, rd, br, *statsJSON, stdioMode, *pingFatal, forwards)
 	}
 

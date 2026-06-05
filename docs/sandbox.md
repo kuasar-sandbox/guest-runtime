@@ -104,6 +104,8 @@ sandbox-ctl 是 CH 的父进程。CH 退出 → sandbox-ctl 收 SIGCHLD → 优�
 | `run` | 启动一个 sandbox 跑到退出。冷启动 = 不带 `--restore`;恢复 = 带 `--restore=<...>`,与冷启动共用同一进程模型与 stdio 接线 |
 | `snapshot` | 暂停一个运行中的 sandbox 并 dump 到 snapshot |
 | `exec` | 在运行中的 sandbox 内执行一条命令——应用的兄弟进程(不替换应用),加入应用的 mount + pid 命名空间,与 `run` 共用 stdio 模型 |
+| `config` | 产出 / 合并 / 校验 sandbox.yaml(`--config a.yaml[:b...]` 或 `--template`;`--mode default\|restore`、`--check skip\|strict`、`-o`) |
+| `info` | 打印 snapshot 内嵌的 `snapshot.cfg`(`manifest://<key>` 或本地 snapshot 路径;`--json`;`--manifest-config`) |
 
 ### 2.2 `sandbox-ctl run`
 
