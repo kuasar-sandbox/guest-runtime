@@ -8,7 +8,7 @@ host 侧编排。
 
 | 路径 | 角色 |
 |---|---|
-| `cmd/sandbox-ctl` | host 控制平面：`run` / `snapshot` / `restore` |
+| `cmd/sandbox-ctl` | host 控制平面：`run` / `snapshot` / `exec` / `config` / `info`（恢复 = `run --restore`，无独立 `restore` 子命令） |
 | `cmd/sandbox-init` | guest PID 1（打进 `sandbox-runtime.erofs`）；三阶段 init + vsock 控制面 |
 | `pkg/sandbox` | 控制平面库：config/cgroup/ch/lifecycle/uffd/memory/snapshot/restore/mux/proto/tap |
 | `pkg/vhost` | vhost-user-blk 后端（经 accelerator 的 `manifest/fetch` 取 chunk） |

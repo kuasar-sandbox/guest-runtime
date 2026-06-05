@@ -132,9 +132,19 @@ sandbox-ctl run [flags]
                           (可写层必须落盘,不能用 tmpfs run 根)
 
   # 资源覆盖(运维临时调整)
-  --cgroup-path <path>    覆盖 control.cgroup_path
-  --controller <path>     覆盖 control.controller;`--controller=disable` 强制清空,
-                          即使配置文件给了也不连
+  --cgroup-path <path>    覆盖 control.cgroup_path:写到该已存在的 cgroup 绝对路径,
+                          并把 CH(仅 CH)move 进去
+  --cgroup-adopt          采纳 sandbox-ctl 自己所在的 cgroup(其 systemd 单元的
+                          cgroup):把资源上限写到该 cgroup,但**不**把 CH move 进去
+                          (CH 作为 fork 出的子进程已是成员,AddPID 成为 no-op)。
+                          cgroup 路径从 /proc/self/cgroup 解析(SelfCgroupV2Path),
+                          置 control.adopt(YAML `adopt: true`)。注意:adopt 模式
+                          让 sandbox-ctl 与 CH 同处一个 cgroup,重新暴露了常规解耦
+                          路径所规避的 memory.high 节流死锁(见 pkg/sandbox/cgroup.go
+                          头注)——面向 run-task 启动器路径
+
+  # 诊断
+  --stats-json <path>     退出时把各 backend + uffd 统计以 JSON 写到该路径
 
   # 可靠性兜底
   --ping-fatal-threshold N  连续 N 次 host→guest ping 失败后,sandbox-ctl 主动给 CH
@@ -234,6 +244,14 @@ sandbox-ctl 控制终端的前台进程组——终端产生的 `^C` / `^\` / `^
 的语义对应于 `sandbox-ctl run --restore=<x> --config=y.yaml`,行为完全等价
 (stdio / cgroup / network 接线统一)。
 
+**配置交付(文件 vs 内存)与 run-task 启动模型**:上面的 `--config` / `SANDBOX_CONFIG`
+是文件路径形态。除此之外,sandbox-ctl 还能在无 config-socket 的前提下接收**内存内**
+交付的单份 sandbox.yaml:`pkg/sandbox.LoadConfigBytes` 解析一份在内存中持有的
+`SANDBOX_CONFIG` YAML 文档(不从磁盘读),敏感的 manifest 根密钥经 `MANIFEST_KEY`
+env 传入(由 `pkg/manifest` 解析)。编排侧的 `orchestrator-ctl run-task` 启动器即按此
+模型工作:它在 `execve` 成 sandbox-ctl 之前,先把非密的 per-sandbox 配置(文件或内存)
+与 `MANIFEST_KEY` env 备好。
+
 ### 2.3 `sandbox-ctl snapshot`
 
 ```
@@ -310,6 +328,42 @@ guest 之间。多个 exec 会话并发互不影响。
 **与 snapshot 的关系**:snapshot quiesce 期间拒绝新的 exec,并 SIGKILL 在飞的
 exec 子进程(快照不能带运行中的 exec 兄弟进程);沙箱 resume / restore 后恢复
 受理。详见 §6.2 与 [`sandbox-runtime.md`](sandbox-runtime.md) §3.6。
+
+### 2.5 `sandbox-ctl config`
+
+从给定来源产出 / 合并 / 校验一份 sandbox.yaml(默认 stdout),不启动沙箱。
+
+```
+sandbox-ctl config [flags]
+
+  --config a.yaml[:b...]  读入一组 sandbox.yaml(':' 分隔),按 front-to-back 深合并
+                          (后者覆盖前者、嵌套 map 递归合并)后重新序列化输出
+                          (SANDBOX_CONFIG env;与 --template 互斥)
+  --template              改为输出一份带注释的骨架配置(注释保留;与 --config 互斥)
+  --mode default|restore  restore 模式剥掉 restore 会忽略的冷启动专属键:顶层
+                          launch / mounts / files / init、boot.kernel / boot.cmdline、
+                          boot.root.overlay.base
+  --check skip|strict     skip(原样输出)| strict(按 mode 校验:default→ValidateCold,
+                          restore→ValidateRestoreHostConfig;不通过则报错且非零退出)
+  -o <file>               写到文件(默认 stdout)
+```
+
+`--config` 合并路径输出的是规范化后的配置(经解析 + 重新序列化,**注释不保留**);
+要带注释的可编辑骨架走 `--template`。
+
+### 2.6 `sandbox-ctl info`
+
+打印一个 snapshot bundle 内嵌的 `snapshot.cfg`(§3.4 的 post-quiesce 平台契约)。
+对齐 `flatten-ctl info`。
+
+```
+sandbox-ctl info <manifest://hex | snapshot-path> [flags]
+
+  <manifest://hex | snapshot-path>  本地 snapshot 路径,或 manifest://<hex>
+  --json                  默认输出 snapshot.cfg 原始 YAML;--json 改为重新输出解析后的结构
+  --manifest-config <p>   manifest 配置 YAML(MANIFEST_CONFIG env);仅 manifest://
+                          输入需要,file/本地路径可省
+```
 
 ## 3. 配置
 
@@ -644,8 +698,10 @@ CoW diff,只有写过的块是数据。
 | 创建期资源管控 | ✗ | ✗ | ✓ |
 | 超分密度提升 | ✗ | 有限(allocatable 必须保守) | ✓ allocatable 可贴近真实工作集 |
 
-切换模式通过加 / 减 sandbox.yaml 字段。命令行覆盖在配置变更不便时给运维一个
-临时调整入口(`--cgroup-path` / `--controller`)。
+切换模式通过加 / 减 sandbox.yaml 字段。`control.controller`(动态控制模式开关)
+只能在 sandbox.yaml 里设;命令行只在 cgroup 维度给运维一个临时覆盖入口
+(`--cgroup-path` 覆盖 cgroup_path;`--cgroup-adopt` 采纳 sandbox-ctl 自身所在的
+cgroup,见 §2.2 / §9.2)。
 
 ### 4.2 资源量
 
@@ -1073,7 +1129,7 @@ T3  archive/zip.NewReader(ReaderAt, totalSize) → 解出 config.json / state.js
     file 模式:若 <ref> 是 <sid>.snapshot 符号链接,follow 解析出真实
     <sha256>.snapshot 名,作为本次的内容寻址名(供将来再保存时写入子快照
     from_refs);from_refs 各项在该 .snapshot 同目录定位
-T4  ApplyRestoreOverrides(host sandbox.yaml, snapshot.cfg, snapshotPath):
+T4  restore.ApplyRules(host sandbox.yaml, snapshot.cfg, snapshotPath):
     - 验证 capacity 一致(host 提供时)
     - 验证 boot.runtime / boot.root.base 协议 + basename + digest 匹配(host 提供时)
     - 未提供时从 snapshot.cfg 复制(file 模式解析为 .snapshot 同目录文件)
@@ -1345,6 +1401,20 @@ cpu.weight  ← clamp(round(allocatable.cpu × 100), 1, 10000)
 
 这套静态模型实现了"无竞争时给 capacity / 有竞争时给 floor",**完全不需要
 运行时调整 cpu.max,也不需要 CPU 维度的 burst/recover 状态机或 RPC**。
+
+**cgroup 归属:解耦(默认)vs 采纳(`--cgroup-adopt`)**。两种写法都把上面的
+memory/cpu 上限写到目标 cgroup,区别在于谁进这个 cgroup:
+
+- **解耦(默认,含 `--cgroup-path`)**:sandbox-ctl **从不**把自己加入沙箱
+  cgroup,只在 CH `exec.Start` 后用 `AddPID` 把 CH(且仅 CH)move 进去。
+  这样 guest 内存逼近 `memory.high` 触发的内核节流只压到 CH,sandbox-ctl 仍可
+  正常被调度、收发信号(否则 `mem_cgroup_handle_over_high` 会把 sandbox-ctl 卡在
+  TASK_KILLABLE D-state,既杀不了 CH 也 reap 不了 `cmd.Wait`,全盘死锁)。
+- **采纳(`--cgroup-adopt`)**:目标 cgroup 就是 sandbox-ctl 自身所在的(其
+  systemd 单元的)cgroup——上限写到该 cgroup,CH 作为 fork 出的子进程已是成员,
+  故 `AddPID` 成为 no-op。代价是 sandbox-ctl 与 CH 同处一个 cgroup,**重新暴露了
+  上面解耦路径所规避的 `memory.high` 节流死锁**(见 pkg/sandbox/cgroup.go 头注)。
+  面向 run-task 启动器路径(单元自身即沙箱 cgroup,无需预建)。
 
 ### 9.3 balloon 配置与 BalloonController
 
@@ -1791,10 +1861,11 @@ snapshot 路径要求 `/vm.pause` 之后内存内容稳定,但 backend worker �
 | exec:`--env` 必须是 `KEY=VALUE` 形式 | "--env must be KEY=VALUE" |
 | exec:沙箱正在 quiesce(snapshot 进行中)时拒绝 | "exec: sandbox quiescing (snapshot in progress)" |
 
-### 13.4 restore 模式校验(`ValidateRestore` + `ApplyRestoreOverrides`)
+### 13.4 restore 模式校验(`SandboxConfig.ValidateRestoreHostConfig` + `restore.ApplyRules`)
 
-`run --restore=<ref>` 触发。`ValidateCold` 的 file:// 绝对路径 + cgroup
-gating 规则仍生效;额外:
+`run --restore=<ref>` 触发。host yaml 先经 `ValidateRestoreHostConfig` 自校验
+(网络源、引用格式等),与 snapshot.cfg 的交叉校验(capacity 相等、runtime/base
+digest)随后在 `restore.ApplyRules` 拿到 bundle 时进行。额外:
 
 | 规则 | 错误消息 |
 |------|---------|
@@ -1805,7 +1876,7 @@ gating 规则仍生效;额外:
 | sandbox.yaml 提供 manifest:// runtime / base 时,manifest key 必须与 snapshot.cfg ref 一致 | "<field> manifest key mismatch with snapshot.cfg" |
 | sandbox.yaml 提供 `resources.capacity.{cpu,memory}` 时,与 snapshot.cfg 严格相等 | "capacity mismatch with snapshot.cfg" |
 | `boot.root.overlay.diff` 可选;空→落盘 base 目录新建(随沙箱销毁) | — |
-| sandbox.yaml 必须提供 `network.tap` | "network.tap is required in restore mode" |
+| sandbox.yaml 必须提供 `network.tap` 或 `network.tapfd`(二选一,tapfd 同样有效;与 §11.0 一致) | "network: exactly one of `tap` or `tapfd` is required in restore mode" |
 
 ## 14. 已知限制与扩展点
 
