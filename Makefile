@@ -132,7 +132,7 @@ endef
 .PHONY: all build erofs cloud-hypervisor vmlinux envd \
         ch-fetch ch-patches-apply ch-patches ch-patches-format ch-build \
         linux-fetch linux-patches-apply linux-patches linux-patches-format linux-build \
-        ch-patch-check clean help
+        clean help
 
 all: build
 
@@ -200,13 +200,6 @@ linux-build:
 vmlinux: linux-patches-apply linux-build
 	$(call link_bin,vmlinux)
 
-# --- CH patch verification probes (standalone nested Go module) ------------
-ch-patch-check:
-	@mkdir -p $(BINDIR)
-	cd tools/ch_patch_check && \
-	  GOOS=linux GOARCH=$(GO_ARCH) CGO_ENABLED=0 $(GO) build $(GO_BUILD_FLAGS) -o $(abspath $(BINDIR))/ch-patch-check .
-	$(call link_bin,ch-patch-check)
-
 clean:
 	# Preserve build/tarball/ (re-downloading source is expensive) and the
 	# arch-neutral source trees under build/src/ (may contain WIP patch dev
@@ -223,6 +216,5 @@ help:
 	@echo "  envd                  build the e2b guest agent (e2b-dev/infra; pin via ENVD_TARBALL)"
 	@echo "  ch-patches-format     extract HEAD CH commits back to deps/ch-patches/"
 	@echo "  linux-patches-format  extract HEAD linux commits back to deps/linux-patches/"
-	@echo "  ch-patch-check        build the CH patch verification probes (nested module)"
 	@echo "  clean                 wipe build artifacts (preserves tarball cache + source trees)"
 	@echo "  TARGET_ARCH           x86_64 (default) | aarch64; CROSS_PREFIX auto-derives"

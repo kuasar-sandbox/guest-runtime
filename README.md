@@ -28,7 +28,6 @@ make TARGET_ARCH=aarch64 ...    # 交叉编译（配合 CROSS_PREFIX）
 
 # CH / 内核 patch 开发循环
 make ch-fetch && (cd build/src/cloud-hypervisor && <edit+commit>) && make ch-patches-format
-make ch-patch-check             # 构建 CH patch 行为验证探针
 ```
 
 各产物有 `fetch` / `patches-apply` / `patches-format` / `build` 子阶段，幂等性在脚本内。
@@ -38,7 +37,6 @@ make ch-patch-check             # 构建 CH patch 行为验证探针
 - `deps/build-{erofs,vmlinux,cloud-hypervisor,envd}.sh` + `common.sh` — 构建脚本
 - `deps/ch-patches/`、`deps/linux-patches/` — 源码 patch（`git am` 应用）
 - `deps/vmlinux/*.config` — 内核 defconfig 片段（common + per-arch）
-- `tools/ch_patch_check/` — CH patch 的运行期行为验证探针
 
 平台 ABI 边界与定制要点见 `docs/sandbox-kernel.md`、`docs/cloud-hypervisor.md`；
 跨架构与 release 打包见 `docs/build.md`。
