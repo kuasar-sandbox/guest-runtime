@@ -106,6 +106,7 @@ sandbox-ctl 是 CH 的父进程。CH 退出 → sandbox-ctl 收 SIGCHLD → 优�
 | `exec` | 在运行中的 sandbox 内执行一条命令——应用的兄弟进程(不替换应用),加入应用的 mount + pid 命名空间,与 `run` 共用 stdio 模型 |
 | `config` | 产出 / 合并 / 校验 sandbox.yaml(`--config a.yaml[:b...]` 或 `--template`;`--mode default\|restore`、`--check skip\|strict`、`-o`) |
 | `info` | 打印 snapshot 内嵌的 `snapshot.cfg`(`manifest://<key>` 或本地 snapshot 路径;`--json`;`--manifest-config`) |
+| `upload-snapshot` | 把**本地**快照离线提升为远程 `manifest://` 快照(不启动沙箱;§3.5 本地层不变量) |
 
 ### 2.2 `sandbox-ctl run`
 
@@ -364,6 +365,25 @@ sandbox-ctl info <manifest://hex | snapshot-path> [flags]
   --manifest-config <p>   manifest 配置 YAML(MANIFEST_CONFIG env);仅 manifest://
                           输入需要,file/本地路径可省
 ```
+
+### 2.7 `sandbox-ctl upload-snapshot`
+
+把一个**本地** snapshot(`<sid>.snapshot` bundle + 同目录 `<sha>.overlay`,带 `snapshot.cfg`
+分层链)**离线提升**为远程 `manifest://` snapshot——**不启动沙箱、不需 /dev/kvm**。把本地
+顶层 overlay + 内存 ingest 进 store,远程下层链按引用带过,产出 0 本地层的全远程快照,
+在 stdout 打印其 `manifest://<key>`(可直接 `run --restore=manifest://<key>`)。
+
+```
+sandbox-ctl upload-snapshot <snapshot-path> [flags]
+
+  <snapshot-path>         本地 <sid>.snapshot(或其指向的 <sha>.snapshot)
+  --manifest-config <p>   manifest 配置 YAML(MANIFEST_CONFIG env);$MANIFEST_KEY 提供客户密钥
+  --quiet                 抑制 stderr 进度日志
+```
+
+校验(§3.5):每个**下层** `manifest://` 层必须存在且在当前 `MANIFEST_KEY` 下可解封
+(**仅取 manifest blob、不下载 chunk**);若下层含 `file://` 本地层(违反本地层不变量),
+拒绝并提示先 `snapshot --output` 本地导出把它折叠进顶层。
 
 ## 3. 配置
 
@@ -670,9 +690,29 @@ CoW diff,只有写过的块是数据。
 运行未触碰 ⇒ 其内容 = 恢复起点内容 = 父快照内容(或零),故穿透严格正确。
 
 **链的取舍**:不实现祖先 pin——某层缺失(被删/损坏)即视该快照**整体失效**,清晰
-报错而非部分恢复。不提供折叠(compaction)手段:链能长到多深就多深,深链恢复时
-每次缺页逐层查空洞(纯内存,无 RPC)直到命中层发一次取数;浅链(典型 s1→s3)
-无感,长链自行承担读放大。平台若在意代次深度,自行控制再保存的次数。
+报错而非部分恢复。**远程链**不做通用折叠(compaction):`manifest://` 链能长到多深
+就多深,深链恢复时每次缺页逐层查空洞(纯内存,无 RPC)直到命中层发一次取数;浅链
+(典型 s1→s3)无感,长链自行承担读放大。平台若在意代次深度,自行控制再保存的次数。
+
+#### 本地层不变量(至多一层、且在顶层)
+
+`file://` 本地层与 `manifest://` 远程层可在一条链内混用,但**任一快照链中本地层至多
+一个,且一定是顶层(self/最新)**;`from_refs`/`base_from_refs`(下层)只许远程。这保证
+一个快照要么「全远程」、要么「本地顶 + 远程下层链」,绝不出现埋在远程层下的本地层
+(那样的快照换主机恢复时必因本地文件缺失而失效)。两条机制维持它:
+
+- **本地导出 = 替换次新层(合并,非新增)**:若沙箱本身从**本地** `file://` 快照懒加载,
+  再次 `snapshot --output` 时把本次稀疏增量**叠加合并**进父本地层(顶层逐页优先、父层
+  穿透、两层皆空洞才穿透祖父),产出**一个**新本地顶层**替换**父层(`from_refs` 继承父层
+  的下层链、丢掉父 ref),而非在其上再压一层。如此反复「本地恢复→本地保存」本地层深
+  恒为 1,顶层自足于(远程)祖父链,仍是稀疏文件。(从**远程** `manifest://` 父恢复后
+  导出,仍是「新顶层压在父 ref 之上」的增量分层——远程父不触发合并。)`--upload` 路径
+  同样合并:从本地父恢复后 `snapshot --upload`,把父本地层一并 ingest 进上传的顶层,
+  产出 0 本地层的远程快照。
+- **离线提升 `sandbox-ctl upload-snapshot <本地快照>`**(§2.7):不启动沙箱,把本地顶层
+  overlay+内存 ingest 为远程 `manifest://`、远程下层链按引用带过,产出全远程快照(打印
+  其 `manifest://` 键)。要求下层全部已是远程且在当前 `MANIFEST_KEY` 下可解封(**仅校验
+  manifest、不下载 chunk**);埋藏的本地下层会被拒绝(提示先做本地导出折叠)。
 
 ## 4. 资源模型
 

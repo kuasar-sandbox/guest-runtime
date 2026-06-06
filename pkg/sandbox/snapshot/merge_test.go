@@ -1,0 +1,125 @@
+package snapshot
+
+import (
+	"bytes"
+	"io"
+	"testing"
+
+	"github.com/kuasar-sandbox/sandbox-accelerator/pkg/manifest/codec"
+)
+
+// oracle is the reference layering semantics (must match mergeSparse): top byte
+// where top is resident, else base byte where base is resident, else 0 (merged
+// hole). This is what fetch.Layered would resolve for a [top, base] chain.
+func oracle(top, base []byte, topHoles, baseHoles []codec.HoleExtent, size int64) []byte {
+	out := make([]byte, size)
+	for off := int64(0); off < size; off++ {
+		if th, _ := holeRun(off, topHoles, size); !th {
+			out[off] = top[off]
+		} else if bh, _ := holeRun(off, baseHoles, size); !bh {
+			out[off] = base[off]
+		} // else merged hole → 0
+	}
+	return out
+}
+
+func readAll(t *testing.T, rs io.ReadSeeker, size int64, holes []codec.HoleExtent) []byte {
+	t.Helper()
+	// Read exactly as the sink does: zero-fill holes, copy data segments.
+	out := make([]byte, size)
+	for _, seg := range dataSegments(size, holes) {
+		if _, err := rs.Seek(int64(seg.Offset), io.SeekStart); err != nil {
+			t.Fatalf("seek %d: %v", seg.Offset, err)
+		}
+		if _, err := io.ReadFull(rs, out[seg.Offset:seg.Offset+seg.Size]); err != nil {
+			t.Fatalf("read seg [%d,%d): %v", seg.Offset, seg.Offset+seg.Size, err)
+		}
+	}
+	return out
+}
+
+func TestMergeSparse_Equivalence(t *testing.T) {
+	const size = 16
+	cases := []struct {
+		name               string
+		topHoles, baseHoles []codec.HoleExtent
+		wantMergedHoles    []codec.HoleExtent
+	}{
+		{
+			name:      "no overlap → no merged hole",
+			topHoles:  []codec.HoleExtent{{Offset: 4, Size: 4}, {Offset: 12, Size: 4}},
+			baseHoles: []codec.HoleExtent{{Offset: 0, Size: 4}},
+		},
+		{
+			name:            "both-hole region → merged hole",
+			topHoles:        []codec.HoleExtent{{Offset: 4, Size: 8}},  // [4,12)
+			baseHoles:       []codec.HoleExtent{{Offset: 8, Size: 8}},  // [8,16)
+			wantMergedHoles: []codec.HoleExtent{{Offset: 8, Size: 4}},  // [8,12)
+		},
+		{
+			name:            "base fully holed → merged == top holes",
+			topHoles:        []codec.HoleExtent{{Offset: 8, Size: 8}},  // [8,16)
+			baseHoles:       []codec.HoleExtent{{Offset: 0, Size: 16}}, // all
+			wantMergedHoles: []codec.HoleExtent{{Offset: 8, Size: 8}},
+		},
+		{
+			name:     "top fully resident → base never shows, no merged hole",
+			topHoles: nil,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			top := make([]byte, size)
+			base := make([]byte, size)
+			for i := range top {
+				top[i] = 0xA0 | byte(i) // distinct from base
+				base[i] = 0xB0 | byte(i)
+			}
+			merged, mergedHoles := mergeSparse(bytes.NewReader(top), tc.topHoles, bytes.NewReader(base), tc.baseHoles, size)
+
+			if !equalHoles(mergedHoles, tc.wantMergedHoles) {
+				t.Errorf("mergedHoles = %v, want %v", mergedHoles, tc.wantMergedHoles)
+			}
+			got := readAll(t, merged, size, mergedHoles)
+			want := oracle(top, base, tc.topHoles, tc.baseHoles, size)
+			if !bytes.Equal(got, want) {
+				t.Errorf("merged bytes mismatch\n got=%v\nwant=%v", got, want)
+			}
+		})
+	}
+}
+
+func TestHoleIntersection(t *testing.T) {
+	cases := []struct {
+		a, b, want []codec.HoleExtent
+		size       int64
+	}{
+		{size: 8},
+		{a: hx(0, 8), b: hx(0, 8), want: hx(0, 8), size: 8},
+		{a: hx(0, 4), b: hx(4, 4), want: nil, size: 8}, // disjoint
+		{a: hx(2, 6), b: hx(0, 4), want: hx(2, 2), size: 8},
+		{a: []codec.HoleExtent{{Offset: 0, Size: 2}, {Offset: 6, Size: 2}}, b: hx(0, 8), want: []codec.HoleExtent{{Offset: 0, Size: 2}, {Offset: 6, Size: 2}}, size: 8},
+	}
+	for i, tc := range cases {
+		got := holeIntersection(tc.a, tc.b, tc.size)
+		if !equalHoles(got, tc.want) {
+			t.Errorf("case %d: holeIntersection = %v, want %v", i, got, tc.want)
+		}
+	}
+}
+
+func hx(offset, size uint64) []codec.HoleExtent {
+	return []codec.HoleExtent{{Offset: offset, Size: size}}
+}
+
+func equalHoles(a, b []codec.HoleExtent) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}

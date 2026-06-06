@@ -67,6 +67,15 @@ type SnapshotProvenance struct {
 	ParentFromRefs     []string // parent's from_refs (memory chain below the parent)
 	ParentOverlayBase  string   // parent's overlay.base (top disk diff); "" on cold start
 	ParentBaseFromRefs []string // parent's overlay.base_from_refs (disk chain below it)
+
+	// ParentSnapshot/OverlayPath are the absolute paths of the parent's local
+	// bundle + overlay files, set ONLY when this run was restored from a LOCAL
+	// file:// snapshot. They let a re-export MERGE this run's resident delta onto
+	// the parent local layer (replacing it) instead of stacking a second local
+	// layer — keeping the local-layer depth at 1 (docs/sandbox.md §3.5). Empty
+	// for manifest:// / cold-start restores (which stack via ParentSnapshotRef).
+	ParentSnapshotPath string
+	ParentOverlayPath  string
 }
 
 // ResourcesConfig follows Kubernetes-style capacity / allocatable split:

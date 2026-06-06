@@ -295,6 +295,11 @@ func dataSegments(size int64, holes []codec.HoleExtent) []codec.HoleExtent {
 	return segs
 }
 
+// WalkHolesCodec returns fd's holes over [0,size) as codec.HoleExtent (the type
+// the sink + ingest consume). Exported for callers that build a sink source from
+// a static local file (e.g. the offline snapshot upload path).
+func WalkHolesCodec(fd int, size int64) ([]codec.HoleExtent, error) { return walkHolesCodec(fd, size) }
+
 // walkHolesCodec returns fd's holes over [0,size) as codec.HoleExtent (the type
 // the sink + ingest consume). Thin adapter over WalkHoles.
 func walkHolesCodec(fd int, size int64) ([]codec.HoleExtent, error) {

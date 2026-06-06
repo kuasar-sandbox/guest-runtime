@@ -48,6 +48,16 @@ type Sources struct {
 	OwnedDiff  bool   // true iff the diff is the sandbox's own (auto-created) → eligible for zero-copy move
 	StagingDir string // CH /vm.snapshot dest for config.json/state.json (caller creates+removes)
 
+	// MergeBase{Snapshot,Overlay}: parent LOCAL files this run was restored from
+	// (both set, or neither). When set, Take flattens this run's resident delta
+	// ONTO them (top wins) and absorbs the MERGED result as the new top layer —
+	// replacing the next-newest local layer instead of stacking (docs §3.5). The
+	// caller must pair this with a snapshot.cfg whose from_refs/base_from_refs
+	// DROP the parent ref. Incompatible with the zero-copy overlay move (Take
+	// falls back to copy+merge). Empty ⇒ no merge (stack via the parent ref).
+	MergeBaseSnapshot string // parent <sha>.snapshot abs path; memory section = [0,MemfdSize)
+	MergeBaseOverlay  string // parent <sha>.overlay abs path
+
 	// SnapshotCfg renders snapshot.cfg given the final overlay.base ref.
 	SnapshotCfg func(overlayRef string) ([]byte, error)
 
@@ -138,7 +148,10 @@ func Take(s Sources, sink SnapshotSink, resumeAfter bool) (*Outputs, error) {
 	// destroyed (no resume), the diff is consumed — hand it to the sink's
 	// OverlayMover to rename (zero-copy) instead of sparse-copying multi-GiB.
 	// Falls back to the streaming copy on cross-fs rename or any other sink.
-	if mover, ok := sink.(OverlayMover); ok && s.OwnedDiff && !resumeAfter {
+	// merging: the sandbox was restored from a LOCAL snapshot; flatten this run's
+	// resident delta onto the parent local layer (replace, not stack — §3.5).
+	merging := s.MergeBaseSnapshot != "" && s.MergeBaseOverlay != ""
+	if mover, ok := sink.(OverlayMover); ok && s.OwnedDiff && !resumeAfter && !merging {
 		ref, path, mErr := mover.MoveOverlay(s.DiffPath)
 		if mErr == nil {
 			out.OverlayRef, out.OverlayPath = ref, path
@@ -146,7 +159,7 @@ func Take(s Sources, sink SnapshotSink, resumeAfter bool) (*Outputs, error) {
 			logf("snapshot: overlay move fell back to copy: %v", mErr)
 		}
 	}
-	if out.OverlayRef == "" { // not moved (no mover, not owned, resume, or move failed)
+	if out.OverlayRef == "" { // not moved (no mover, not owned, resume, merging, or move failed)
 		diff, err := os.Open(s.DiffPath)
 		if err != nil {
 			return nil, fmt.Errorf("open blk1.diff: %w", err)
@@ -160,7 +173,17 @@ func Take(s Sources, sink SnapshotSink, resumeAfter bool) (*Outputs, error) {
 		if err != nil {
 			return nil, fmt.Errorf("overlay holes: %w", err)
 		}
-		out.OverlayRef, out.OverlayPath, err = sink.AbsorbOverlay(ctx, diff, overlayHoles)
+		var src io.ReadSeeker = diff
+		holes := overlayHoles
+		if merging {
+			base, baseHoles, berr := openMergeBase(s.MergeBaseOverlay, dstat.Size())
+			if berr != nil {
+				return nil, fmt.Errorf("merge overlay base: %w", berr)
+			}
+			defer base.Close()
+			src, holes = mergeSparse(diff, overlayHoles, base, baseHoles, dstat.Size())
+		}
+		out.OverlayRef, out.OverlayPath, err = sink.AbsorbOverlay(ctx, src, holes)
 		if err != nil {
 			return nil, fmt.Errorf("absorb overlay: %w", err)
 		}
@@ -186,9 +209,19 @@ func Take(s Sources, sink SnapshotSink, resumeAfter bool) (*Outputs, error) {
 	if err != nil {
 		return nil, fmt.Errorf("memory holes: %w", err)
 	}
-	out.MemoryResident = residentBytes(s.MemfdSize, memHoles)
+	var memSrc io.ReadSeeker = memfdReader(s.MemfdFD, s.MemfdSize)
+	memSrcHoles := memHoles
+	if merging {
+		base, baseHoles, berr := openMergeBase(s.MergeBaseSnapshot, s.MemfdSize)
+		if berr != nil {
+			return nil, fmt.Errorf("merge memory base: %w", berr)
+		}
+		defer base.Close()
+		memSrc, memSrcHoles = mergeSparse(memSrc, memHoles, base, baseHoles, s.MemfdSize)
+	}
+	out.MemoryResident = residentBytes(s.MemfdSize, memSrcHoles) // bytes actually written (merged)
 	out.SnapshotRef, out.SnapshotPath, err = sink.AbsorbBundle(
-		ctx, memfdReader(s.MemfdFD, s.MemfdSize), memHoles, bytes.NewReader(zipBytes))
+		ctx, memSrc, memSrcHoles, bytes.NewReader(zipBytes))
 	if err != nil {
 		return nil, fmt.Errorf("absorb bundle: %w", err)
 	}

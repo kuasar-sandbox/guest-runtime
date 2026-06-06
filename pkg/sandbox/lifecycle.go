@@ -706,6 +706,18 @@ func handleSnapshotRequest(
 		Quiescer:    &pairQuiescer{a: srv0, b: srv1},
 		Logf:        logf,
 	}
+	// Restored from a LOCAL snapshot ⇒ MERGE this run's resident delta onto the
+	// parent local layer (replace the next-newest layer, not stack) for BOTH
+	// --output (→ new local top) and --upload (→ new manifest:// top, so the
+	// uploaded snapshot has NO buried file:// layer). buildSnapshotCfg drops the
+	// parent ref to match. Cold-start / manifest:// parents stack (no merge).
+	if prov := cfg.SnapshotProvenance; strings.HasPrefix(prov.ParentSnapshotRef, "file://") {
+		if prov.ParentSnapshotPath == "" || prov.ParentOverlayPath == "" {
+			return ctl.Response{}, fmt.Errorf("snapshot: local parent %q lacks merge paths", prov.ParentSnapshotRef)
+		}
+		src.MergeBaseSnapshot = prov.ParentSnapshotPath
+		src.MergeBaseOverlay = prov.ParentOverlayPath
+	}
 	out, err := snapshot.Take(src, sink, req.ResumeAfter)
 	if err != nil {
 		return ctl.Response{}, err
@@ -783,10 +795,23 @@ func buildSnapshotCfg(cfg *SandboxConfig, overlayRef string) ([]byte, error) {
 	doc.Boot.RuntimeRef = cfg.SnapshotRefs.RuntimeRef
 	doc.Boot.Root.BaseRef = cfg.SnapshotRefs.BaseRef
 	doc.Boot.Root.Overlay.Base = overlayRef
-	// Incremental layered chain (docs/sandbox.md §3.5): prepend the parent
-	// this run was restored from. Cold start ⇒ empty provenance ⇒ empty chains.
-	doc.FromRefs = prependRef(cfg.SnapshotProvenance.ParentSnapshotRef, cfg.SnapshotProvenance.ParentFromRefs)
-	doc.Boot.Root.Overlay.BaseFromRefs = prependRef(cfg.SnapshotProvenance.ParentOverlayBase, cfg.SnapshotProvenance.ParentBaseFromRefs)
+	// Incremental layered chain (docs/sandbox.md §3.5), keyed on the parent's
+	// scheme:
+	//   - LOCAL parent (file://): this run's resident delta was MERGED onto the
+	//     parent local layer (snapshot.Take's mergeSparse), so the new top
+	//     REPLACES the parent — inherit the parent's lower chain, drop the parent
+	//     ref. Keeps the local-layer depth at 1 (the local-layer invariant: at
+	//     most one file:// layer, always the top).
+	//   - REMOTE parent (manifest://) / cold start: prepend the parent ref to
+	//     stack a new top over it.
+	prov := cfg.SnapshotProvenance
+	if strings.HasPrefix(prov.ParentSnapshotRef, "file://") {
+		doc.FromRefs = prov.ParentFromRefs
+		doc.Boot.Root.Overlay.BaseFromRefs = prov.ParentBaseFromRefs
+	} else {
+		doc.FromRefs = prependRef(prov.ParentSnapshotRef, prov.ParentFromRefs)
+		doc.Boot.Root.Overlay.BaseFromRefs = prependRef(prov.ParentOverlayBase, prov.ParentBaseFromRefs)
+	}
 	return yaml.Marshal(&doc)
 }
 

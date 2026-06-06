@@ -226,6 +226,21 @@ func Run(ctx context.Context, opts Options) (int, error) {
 		ParentOverlayBase:  parsedSnap.Boot.Root.Overlay.Base,
 		ParentBaseFromRefs: parsedSnap.Boot.Root.Overlay.BaseFromRefs,
 	}
+	// Local restore: record the parent's on-disk bundle + overlay paths so a
+	// re-export merges this run's resident delta onto them (replace the
+	// next-newest local layer, not stack a second one) — docs §3.5. Paths
+	// resolve like openRefStream: overlay.base is a basename in the bundle dir.
+	if opts.SnapshotPath != "" {
+		if abs, err := filepath.Abs(opts.SnapshotPath); err == nil {
+			snapCfg.SnapshotProvenance.ParentSnapshotPath = abs
+		}
+		if sc, val, ok := sandbox.SchemeAndPath(parsedSnap.Boot.Root.Overlay.Base); ok && sc == "file" {
+			if !filepath.IsAbs(val) {
+				val = filepath.Join(filepath.Dir(opts.SnapshotPath), val)
+			}
+			snapCfg.SnapshotProvenance.ParentOverlayPath = val
+		}
+	}
 
 	// Derive allocatable_at_snapshot from CH state.json's balloon section
 	// (no separate resource-state.json file — see §13). When the bundle
