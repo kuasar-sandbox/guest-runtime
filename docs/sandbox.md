@@ -146,6 +146,11 @@ sandbox-ctl run [flags]
 
   # 诊断
   --stats-json <path>     退出时把各 backend + uffd 统计以 JSON 写到该路径
+  --stats-interval <dur>  周期打印懒加载实时统计(uffd 缺页/换入速率、在飞与排队
+                          fault 数、缺页换入取数时延 p50/p99/max、各 blk 读 IOPS/吞吐/
+                          p99),便于实时观察慢的远程/缓存或积压的 fault 队列;无活动的
+                          tick 跳过(warm 后自动安静)。0 = 关闭。flag >
+                          SANDBOX_STATS_INTERVAL env > 默认 30s
 
   # 可靠性兜底
   --ping-fatal-threshold N  连续 N 次 host→guest ping 失败后,sandbox-ctl 主动给 CH
@@ -468,6 +473,15 @@ launch:
   stop_grace_period: 10s      # 发停机信号后等应用退出的宽限,超时则 SIGKILL;默认 10s
   start_timeout: ""           # host 等待 launch_ack(含 init 全程)的超时;空 / 0 = 无限期(见 §阶段 2)
 
+# host 侧恢复/生命周期超时;全部默认 0 = 不强制(host 等待 guest/CH/懒加载所需的任意时长,
+# dial/connect 探测仍有界),便于慢速或降级环境部署:慢的远程仓库/缓存、或调试器暂停都不会
+# 误中止一个仍在健康推进的 restore。生产环境按 examples/timeouts-production.yaml 设正值快速失败。
+timeouts:
+  restore: ""       # 等 guest restore_ack(/vm.resume 之后);恢复时大量缺页换入会拉长此段
+  ch_api: ""        # CH HTTP API 单次响应(如 /vm.resume);dial 仍 5s 有界
+  api_ready: ""     # spawn 后等 CH API socket 可连接(轮询);0 = 轮询至 ctx 取消(如 CH 退出 / SIGINT)
+  va_report: ""     # CH→host 交接 uffd fd 的握手
+
 # 声明式挂载:在 rootfs 组装后、应用拉起前应用,顺序即列表序
 mounts:
   - { target: /tmp,     type: tmpfs, options: "nosuid,nodev,mode=1777" }
@@ -499,6 +513,17 @@ init:
 **guest 侧**解析(`/etc/passwd` 权威地在镜像 rootfs 内,host 不假设)。
 `stop_grace_period` 下发 guest 用于停机宽限;`start_timeout` 只在 host 侧约束
 launch 握手,不下发 guest。
+
+**`timeouts` 的设计取舍(为何默认不强制)**:uffd 缺页与 vhost 块读这两条懒加载
+取数路径**本身不设 runtime 超时**——它们阻塞在 accelerator 客户端上,而该客户端
+`cache.timeout` / `store.timeout` **`<=0` 即"无逐操作 deadline"**(dial 仍有界),
+故慢的远程/缓存只会让换入变慢、不会误超时;恶劣环境把这两个值调大或置 0 即可。会
+**非自愿误触发**的是 host 侧写死的管理/恢复面 deadline(restore 握手、CH `/vm.resume`
+响应、CH API socket 就绪、va_report 交接)——这些由 `timeouts` 统一接管,默认 0 =
+不强制(host 等待所需任意时长,dial/connect 探测仍有界,可经 SIGINT / CH 退出取消)。
+这样默认配置在慢速或降级环境下"开箱即用、不误杀";生产环境按
+[`examples/timeouts-production.yaml`](../examples/timeouts-production.yaml) 设正值,
+让 restore 在真正卡死时快速失败。`snapshot` 子命令另有 `--timeout` 自管上界(§2.3)。
 
 **`mounts` / `files` / `init` 的应用时机**:三者均在 guest 收到 LaunchSpec 后、
 应用进程拉起前生效(`init` 在 `launch_ack` 之前完成,故 host 的 "settled" 信号代表

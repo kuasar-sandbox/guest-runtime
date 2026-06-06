@@ -79,8 +79,9 @@ type VMParams struct {
 	Logf               func(string, ...any)
 	StdioMode          stdio.Mode
 	PingFatalThreshold int
-	StartUnixNs        int64  // T0 for the stats wallclock window
-	StatsJSONPath      string // if non-empty, dump the stats JSON on exit
+	StartUnixNs        int64         // T0 for the stats wallclock window
+	StatsJSONPath      string        // if non-empty, dump the stats JSON on exit
+	StatsInterval      time.Duration // if > 0, periodically log lazy-load stats (uffd + vhost); 0 = off
 
 	CapBytes   int64               // RAM capacity (memfd size); also stats UffdRAMSize
 	UffdSource uffd.SnapshotReader // ZeroSource (cold) | snapshot source (restore)
@@ -94,8 +95,11 @@ type VMParams struct {
 	LaunchSpec    *proto.LaunchSpec // cold: real spec; restore: &proto.LaunchSpec{} placeholder
 	WireLaunchMUX bool              // cold: true (launch conn → MUX); restore: false (MUX via PostSpawn)
 	StartTimeout  time.Duration     // host wait for launch_ack (covers guest init); 0 = indefinite
-	Balloon       *BalloonController
-	Hooks         *ControllerHooks
+	// VAReportDeadline bounds the CH→host uffd-fd handoff handshake (shared
+	// cold/restore); 0 = no forced timeout. From cfg.VAReportDeadline().
+	VAReportDeadline time.Duration
+	Balloon          *BalloonController
+	Hooks            *ControllerHooks
 
 	// TapFile, when non-nil, is a tap queue fd acquired via the tapfd handoff
 	// (docs/tapfd.md). ServeAndWait inherits it into CH after the memfd (CH
@@ -207,9 +211,10 @@ func ServeAndWait(p VMParams) (int, error) {
 	}()
 
 	vaReportSrv := &uffd.VAReportServer{
-		Path:    uffdSockPath,
-		AddrMap: addrMap,
-		Logf:    logf,
+		Path:              uffdSockPath,
+		AddrMap:           addrMap,
+		Logf:              logf,
+		HandshakeDeadline: p.VAReportDeadline,
 		OnReady: func(uffdFD int, vaStart, size uint64) error {
 			h, err := uffd.NewWithBackendUffd(uffdFD, addrMap, uffd.Config{
 				MemfdFD:   memfd.FD(),
@@ -358,6 +363,20 @@ func ServeAndWait(p VMParams) (int, error) {
 	go func() { defer backendWG.Done(); _ = launch.Serve(backendCtx) }()
 	go func() { defer backendWG.Done(); _ = vaReportSrv.Serve(backendCtx) }()
 	go func() { defer backendWG.Done(); _ = ctlSrv.Serve(backendCtx) }()
+
+	// Optional periodic lazy-load stats logger (observe a slow remote/cache or
+	// backed-up fault queue in real time; quiet once warm). Ends on backendCtx.
+	if p.StatsInterval > 0 {
+		backendWG.Add(1)
+		go func() {
+			defer backendWG.Done()
+			lazyStatsTicker(backendCtx, p.StatsInterval, func() *uffd.Handler {
+				uffdHandlerMu.Lock()
+				defer uffdHandlerMu.Unlock()
+				return uffdHandler
+			}, srv0, srv1, logf)
+		}()
+	}
 
 	// Port-forward accept loops run under backendCtx (they end when CH
 	// exits / the run unwinds). A bad listener (e.g. fd= not a socket)

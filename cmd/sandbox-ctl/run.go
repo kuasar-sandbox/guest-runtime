@@ -8,6 +8,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/kuasar-sandbox/sandbox-accelerator/pkg/manifest"
 	"github.com/kuasar-sandbox/sandbox-runtime/internal/util"
@@ -67,6 +68,12 @@ func runCmd(args []string) int {
 	pingFatal := fs.Int("ping-fatal-threshold", 0,
 		"consecutive ping failures before SIGTERMing CH (overrides SANDBOX_PING_FATAL_THRESHOLD env; 0 disables)")
 
+	// Periodic lazy-load stats: every interval, log uffd page-in + vhost read
+	// rates, in-flight/queue gauges, and fetch latency so a slow remote/cache
+	// is visible in real time. Idle intervals are skipped (quiet once warm).
+	statsInterval := fs.Duration("stats-interval", 30*time.Second,
+		"periodic lazy-load stats log interval (overrides SANDBOX_STATS_INTERVAL env; 0 disables)")
+
 	// --connect LOCAL:HOST:PORT — port-forward a host-local endpoint to a
 	// guest-side target (repeatable). LOCAL is a UDS path or fd=N (an
 	// inherited, already-listening socket).
@@ -93,6 +100,24 @@ func runCmd(args []string) int {
 				return 2
 			}
 			*pingFatal = n
+		}
+	}
+
+	// --stats-interval precedence: flag > SANDBOX_STATS_INTERVAL env > 30s default.
+	statsIntervalSet := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "stats-interval" {
+			statsIntervalSet = true
+		}
+	})
+	if !statsIntervalSet {
+		if s := os.Getenv("SANDBOX_STATS_INTERVAL"); s != "" {
+			d, err := time.ParseDuration(s)
+			if err != nil || d < 0 {
+				fmt.Fprintf(os.Stderr, "sandbox-ctl run: bad SANDBOX_STATS_INTERVAL=%q (want non-negative duration)\n", s)
+				return 2
+			}
+			*statsInterval = d
 		}
 	}
 
@@ -204,7 +229,7 @@ func runCmd(args []string) int {
 	// Restore mode dispatch.
 	if restoreR != "" {
 		return runRestore(ctx, cfg, manifestCfg, restoreR,
-			*sandboxID, chBin, rd, br, *statsJSON, stdioMode, *pingFatal, forwards)
+			*sandboxID, chBin, rd, br, *statsJSON, stdioMode, *pingFatal, *statsInterval, forwards)
 	}
 
 	exit, err := sandbox.Run(ctx, sandbox.RunOptions{
@@ -215,6 +240,7 @@ func runCmd(args []string) int {
 		RuntimeRoot:        rd,
 		BaseRoot:           br,
 		StatsJSONPath:      *statsJSON,
+		StatsInterval:      *statsInterval,
 		StdioMode:          stdioMode,
 		PingFatalThreshold: *pingFatal,
 		Forwards:           forwards,
@@ -229,7 +255,7 @@ func runCmd(args []string) int {
 // runRestore parses the snapshot reference and dispatches to restore.Run.
 func runRestore(ctx context.Context, cfg *sandbox.SandboxConfig, manifestCfg *sandbox.ManifestConfig,
 	ref, sandboxID, chBin, runDir, baseRoot, statsJSON string, stdioMode stdio.Mode, pingFatal int,
-	forwards []sandbox.ForwardSpec,
+	statsInterval time.Duration, forwards []sandbox.ForwardSpec,
 ) int {
 	const manifestPrefix = "manifest://"
 	var (
@@ -270,6 +296,7 @@ func runRestore(ctx context.Context, cfg *sandbox.SandboxConfig, manifestCfg *sa
 		RuntimeRoot:         runDir,
 		BaseRoot:            baseRoot,
 		StatsJSONPath:       statsJSON,
+		StatsInterval:       statsInterval,
 		StdioMode:           stdioMode,
 		PingFatalThreshold:  pingFatal,
 		Forwards:            forwards,

@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func writeYAML(t *testing.T, content string) string {
@@ -179,6 +180,43 @@ launch: { exec: /bin/true }
 	}
 	if got != 1<<30 {
 		t.Errorf("default diff size = %d, want 1GiB", got)
+	}
+}
+
+func TestTimeouts_Resolution(t *testing.T) {
+	// Empty / unset → 0 = no forced timeout (the deploy-in-degraded default).
+	var zero SandboxConfig
+	for _, got := range []time.Duration{
+		zero.RestoreDeadline(), zero.CHApiDeadline(),
+		zero.APIReadyDeadline(), zero.VAReportDeadline(),
+	} {
+		if got != 0 {
+			t.Errorf("unset timeout resolved to %v, want 0 (no forced timeout)", got)
+		}
+	}
+
+	// Explicit values parse; "0" and garbage both fall back to 0.
+	c := SandboxConfig{Timeouts: TimeoutsConfig{
+		Restore: "90s", CHApi: "0", APIReady: "", VAReport: "bogus",
+	}}
+	if c.RestoreDeadline() != 90*time.Second {
+		t.Errorf("restore = %v, want 90s", c.RestoreDeadline())
+	}
+	if c.CHApiDeadline() != 0 {
+		t.Errorf(`ch_api "0" = %v, want 0`, c.CHApiDeadline())
+	}
+	if c.VAReportDeadline() != 0 {
+		t.Errorf("va_report bogus = %v, want 0 (resolver tolerates; validate rejects)", c.VAReportDeadline())
+	}
+}
+
+func TestTimeouts_Validate(t *testing.T) {
+	if err := (TimeoutsConfig{Restore: "60s", CHApi: "", VAReport: "15s"}).validate(); err != nil {
+		t.Errorf("valid timeouts rejected: %v", err)
+	}
+	err := (TimeoutsConfig{Restore: "nope"}).validate()
+	if err == nil || !strings.Contains(err.Error(), "timeouts.restore") {
+		t.Errorf("malformed timeouts.restore: got err=%v, want mention of timeouts.restore", err)
 	}
 }
 

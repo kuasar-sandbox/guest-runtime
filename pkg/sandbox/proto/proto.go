@@ -334,16 +334,16 @@ const (
 
 // Default per-message deadlines (docs/sandbox-runtime.md §4.9). Callers
 // pass these to SetDeadline on the underlying conn covering dial+write+
-// read of the management exchange. For launch/restore/attach the deadline
-// covers only the handshake — the connection then lives on as the MUX.
+// read of the management exchange. For launch/attach the deadline covers
+// only the handshake — the connection then lives on as the MUX. (The restore
+// handshake deadline is host-configurable, supplied by the caller.)
 const (
 	DeadlineAppNotify = 200 * time.Millisecond // app_started / app_exited / launch_ack / mem_report
 	DeadlinePing      = 200 * time.Millisecond
 	DeadlineQuiesce   = 8 * time.Second // prep + stop-reading-app-pipes + MUX_CLOSE round-trip
-	DeadlineRestore   = 5 * time.Second
 	DeadlineAttach    = 5 * time.Second
 	// DeadlineExec covers the exec handshake only (dial + exec →
-	// exec_ack). Larger than restore/attach: the guest forks+execs the
+	// exec_ack). Larger than attach: the guest forks+execs the
 	// child and resolves argv via PATH before acking. The conn's
 	// deadline is cleared once it becomes the stdio MUX.
 	DeadlineExec = 10 * time.Second

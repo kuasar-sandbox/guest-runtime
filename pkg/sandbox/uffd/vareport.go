@@ -32,6 +32,11 @@ type VAReportServer struct {
 	AddrMap *AddressMap
 	Logf    func(string, ...any)
 
+	// HandshakeDeadline bounds the read of one va_report message (CH→host
+	// uffd-fd handoff). 0 = no deadline: the host waits as long as CH needs
+	// to issue the handoff. Set positive to fail fast.
+	HandshakeDeadline time.Duration
+
 	// OnReady is invoked synchronously on the FIRST va_report. The
 	// handler should adopt the uffd fd (the server passes ownership)
 	// and start its goroutines. Returning an error causes the
@@ -45,12 +50,12 @@ type VAReportServer struct {
 	// (single-region mode).
 	OnRegister func(uffdFD int, vaStart, size uint64) error
 
-	listener         *net.UnixListener
-	mu               sync.Mutex
+	listener          *net.UnixListener
+	mu                sync.Mutex
 	regionsRegistered int    // count of va_report messages handled successfully
-	nextMemfdOffset  uint64 // accumulator: each new region's memfd offset
-	stopOnce         sync.Once
-	stopped          chan struct{}
+	nextMemfdOffset   uint64 // accumulator: each new region's memfd offset
+	stopOnce          sync.Once
+	stopped           chan struct{}
 }
 
 // Listen binds the UDS socket. Must be called before CH spawns; CH's
@@ -125,7 +130,9 @@ type ackMsg struct {
 
 func (s *VAReportServer) handle(conn *net.UnixConn) {
 	defer conn.Close()
-	_ = conn.SetDeadline(time.Now().Add(15 * time.Second))
+	if s.HandshakeDeadline > 0 {
+		_ = conn.SetDeadline(time.Now().Add(s.HandshakeDeadline))
+	}
 
 	// Read u32 length prefix + JSON body, plus SCM_RIGHTS ancillary
 	// containing the uffd fd in the same recvmsg call.

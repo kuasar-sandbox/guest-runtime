@@ -33,6 +33,14 @@ type SandboxConfig struct {
 	Boot      BootConfig      `yaml:"boot"`
 	Launch    LaunchConfig    `yaml:"launch"`
 
+	// Timeouts tunes host-side restore/lifecycle deadlines. Every field
+	// defaults to 0 = NO FORCED TIMEOUT — the host waits as long as the
+	// guest, CH, or lazy page-in needs (dial/connect probes stay bounded),
+	// so a slow remote/cache or a debugger pause never aborts a restore.
+	// Set positive values (examples/timeouts-production.yaml) to fail fast
+	// in production.
+	Timeouts TimeoutsConfig `yaml:"timeouts,omitempty"`
+
 	// Mounts / Files / Init drive guest environment setup (applied before
 	// the app is forked). See docs/sandbox.md §3.1.
 	Mounts []MountConfig `yaml:"mounts,omitempty"`
@@ -534,6 +542,58 @@ func (c *SandboxConfig) StartTimeoutDuration() time.Duration {
 	return d
 }
 
+// TimeoutsConfig tunes host-side protocol/lifecycle deadlines, chiefly on the
+// restore path. Each is a Go duration string; empty / "0" / invalid → 0,
+// meaning NO FORCED TIMEOUT: the host waits as long as the
+// guest, CH, or lazy page-in needs, while dial/connect probes stay bounded.
+// This default eases deployment in slow or degraded environments (a stalled
+// remote/cache or a paused debugger never aborts a restore); set positive
+// values (examples/timeouts-production.yaml) to fail fast in production.
+type TimeoutsConfig struct {
+	Restore  string `yaml:"restore,omitempty"`   // wait for guest restore_ack after /vm.resume
+	CHApi    string `yaml:"ch_api,omitempty"`    // CH HTTP API response (e.g. /vm.resume); dial stays bounded
+	APIReady string `yaml:"api_ready,omitempty"` // wait for CH API socket to accept after spawn
+	VAReport string `yaml:"va_report,omitempty"` // CH→host uffd-fd handoff handshake
+}
+
+// parseTimeout parses a TimeoutsConfig field: empty / "0" / negative / invalid
+// → 0, meaning "no forced timeout" to the consumer.
+func parseTimeout(s string) time.Duration {
+	if s == "" {
+		return 0
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil || d <= 0 {
+		return 0
+	}
+	return d
+}
+
+// RestoreDeadline / CHApiDeadline / APIReadyDeadline / VAReportDeadline resolve
+// the corresponding timeouts.* field; 0 = no forced timeout.
+func (c *SandboxConfig) RestoreDeadline() time.Duration  { return parseTimeout(c.Timeouts.Restore) }
+func (c *SandboxConfig) CHApiDeadline() time.Duration    { return parseTimeout(c.Timeouts.CHApi) }
+func (c *SandboxConfig) APIReadyDeadline() time.Duration { return parseTimeout(c.Timeouts.APIReady) }
+func (c *SandboxConfig) VAReportDeadline() time.Duration { return parseTimeout(c.Timeouts.VAReport) }
+
+// validate rejects malformed (non-empty, unparseable) timeouts.* durations.
+func (t TimeoutsConfig) validate() error {
+	for _, f := range []struct{ name, val string }{
+		{"timeouts.restore", t.Restore},
+		{"timeouts.ch_api", t.CHApi},
+		{"timeouts.api_ready", t.APIReady},
+		{"timeouts.va_report", t.VAReport},
+	} {
+		if f.val == "" {
+			continue
+		}
+		if _, err := time.ParseDuration(f.val); err != nil {
+			return fmt.Errorf("%s: %w", f.name, err)
+		}
+	}
+	return nil
+}
+
 // CapacityMemoryBytes returns the parsed capacity memory in bytes.
 func (c *SandboxConfig) CapacityMemoryBytes() (uint64, error) {
 	if c.Resources.Capacity.Memory == "" {
@@ -859,6 +919,9 @@ func (c *SandboxConfig) ValidateCold() error {
 			return fmt.Errorf("launch.start_timeout: %w", err)
 		}
 	}
+	if err := c.Timeouts.validate(); err != nil {
+		return err
+	}
 
 	// launch.exec is no longer required: if the rootfs erofs has an
 	// appended config.json with Entrypoint or Cmd, those are used as
@@ -911,6 +974,9 @@ func (c *SandboxConfig) ValidateRestoreHostConfig() error {
 		if err := requireFileAbs("boot.root.overlay.diff_template", c.Boot.Root.Overlay.DiffTemplate); err != nil {
 			return err
 		}
+	}
+	if err := c.Timeouts.validate(); err != nil {
+		return err
 	}
 	return nil
 }

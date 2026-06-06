@@ -45,10 +45,11 @@ type Options struct {
 	Fetcher             fetch.Fetcher           // required when any URI is manifest://; caller owns lifecycle
 	SandboxID           string
 	CHBinary            string
-	RuntimeRoot         string     // tmpfs run root; "/run/sandbox" by default
-	BaseRoot            string     // on-disk base root (fresh overlay diff); "/var/lib/sandbox" by default
-	StatsJSONPath       string     // if non-empty, dump uffd + per-backend stats here on exit
-	StdioMode           stdio.Mode // CH process stdio wiring; see pkg/sandbox/stdio
+	RuntimeRoot         string        // tmpfs run root; "/run/sandbox" by default
+	BaseRoot            string        // on-disk base root (fresh overlay diff); "/var/lib/sandbox" by default
+	StatsJSONPath       string        // if non-empty, dump uffd + per-backend stats here on exit
+	StatsInterval       time.Duration // if > 0, periodically log lazy-load stats; 0 = off
+	StdioMode           stdio.Mode    // CH process stdio wiring; see pkg/sandbox/stdio
 
 	// PingFatalThreshold: same semantics as sandbox.RunOptions —
 	// SIGTERM CH after N consecutive ping failures. 0 disables.
@@ -490,6 +491,8 @@ func Run(ctx context.Context, opts Options) (int, error) {
 		PingFatalThreshold: opts.PingFatalThreshold,
 		StartUnixNs:        startUnixNs,
 		StatsJSONPath:      opts.StatsJSONPath,
+		StatsInterval:      opts.StatsInterval,
+		VAReportDeadline:   opts.HostCfg.VAReportDeadline(),
 
 		CapBytes:   int64(capBytes),
 		UffdSource: source,
@@ -548,16 +551,23 @@ func Run(ctx context.Context, opts Options) (int, error) {
 		// non-nil return aborts the run (ServeAndWait kills CH); we
 		// don't hand back a sandbox whose guest agent is unreachable.
 		PostSpawn: func(pc sandbox.PostSpawnCtx) error {
-			if err := waitAPI(pc.CHSock, 30*time.Second); err != nil {
+			if err := waitAPI(ctx, pc.CHSock, opts.HostCfg.APIReadyDeadline()); err != nil {
 				return fmt.Errorf("ch api not ready: %w", err)
 			}
-			if err := chAPI(pc.CHSock, "PUT", "/api/v1/vm.resume", ""); err != nil {
+			if err := chAPI(pc.CHSock, "PUT", "/api/v1/vm.resume", "", opts.HostCfg.CHApiDeadline()); err != nil {
 				return fmt.Errorf("vm.resume: %w", err)
 			}
 			pc.Logf("VM resumed, vCPU running")
 
 			tRestore := time.Now()
-			muxConn, muxSpec, err := sandbox.OpenMUXViaRestore(pc.Pinger.Client, 1, netSpec, snapCfg.ProtoFiles(), proto.DeadlineRestore)
+			// 0 = no forced timeout: DialRaw needs a finite value, so fall back
+			// to noForcedTimeout (effective-infinity; cancellation still flows
+			// via ctx → CH teardown closing the vsock conn).
+			restoreDeadline := opts.HostCfg.RestoreDeadline()
+			if restoreDeadline <= 0 {
+				restoreDeadline = noForcedTimeout
+			}
+			muxConn, muxSpec, err := sandbox.OpenMUXViaRestore(pc.Pinger.Client, 1, netSpec, snapCfg.ProtoFiles(), restoreDeadline)
 			if err != nil {
 				return fmt.Errorf("notify restore: %w (guest agent unreachable)", err)
 			}
@@ -620,9 +630,26 @@ func fileSnapshotRef(path string) string {
 	return "file://" + filepath.Base(real)
 }
 
-func waitAPI(sock string, deadline time.Duration) error {
-	end := time.Now().Add(deadline)
-	for time.Now().Before(end) {
+// noForcedTimeout is the effective-infinity used where an underlying call
+// (DialRaw) requires a finite deadline but the operator asked for no forced
+// timeout (timeouts.* = 0). Cancellation still flows via ctx → CH teardown.
+const noForcedTimeout = 365 * 24 * time.Hour
+
+// waitAPI polls the CH API socket until it accepts. deadline <= 0 means no
+// forced timeout: poll until ctx is cancelled (e.g. CH exit / SIGINT). A
+// positive deadline bounds the wait.
+func waitAPI(ctx context.Context, sock string, deadline time.Duration) error {
+	var end time.Time
+	if deadline > 0 {
+		end = time.Now().Add(deadline)
+	}
+	for {
+		if ctx.Err() != nil {
+			return fmt.Errorf("ch api socket not ready: %w", ctx.Err())
+		}
+		if !end.IsZero() && !time.Now().Before(end) {
+			return errors.New("ch api socket not ready")
+		}
 		c, err := net.DialTimeout("unix", sock, 200*time.Millisecond)
 		if err == nil {
 			_ = c.Close()
@@ -630,16 +657,20 @@ func waitAPI(sock string, deadline time.Duration) error {
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	return errors.New("ch api socket not ready")
 }
 
-func chAPI(sock, method, path, body string) error {
+// chAPI sends one HTTP/1.1 request to the CH API socket. respDeadline <= 0
+// means no read deadline (a slow CH response — e.g. a /vm.resume that triggers
+// heavy lazy page-in — never spuriously fails); the dial stays bounded.
+func chAPI(sock, method, path, body string, respDeadline time.Duration) error {
 	c, err := net.DialTimeout("unix", sock, 5*time.Second)
 	if err != nil {
 		return err
 	}
 	defer c.Close()
-	_ = c.SetDeadline(time.Now().Add(60 * time.Second))
+	if respDeadline > 0 {
+		_ = c.SetDeadline(time.Now().Add(respDeadline))
+	}
 	req := fmt.Sprintf("%s %s HTTP/1.1\r\nHost: ch\r\n", method, path)
 	if body != "" {
 		req += fmt.Sprintf("Content-Type: application/json\r\nContent-Length: %d\r\n", len(body))

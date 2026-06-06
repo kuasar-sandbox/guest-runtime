@@ -159,6 +159,9 @@ type handlerStats struct {
 	removeQDropped      atomic.Uint64 // events that fell back to sync flush (queue full)
 	removeEventsBatched atomic.Uint64 // events that went through the batch path (avg events/syscall = removeEventsBatched / madviseCalls)
 	backendLookupMiss   atomic.Uint64 // EVENT_REMOVE with no backend VMA covering the offset (registration bug)
+
+	inflight atomic.Int64 // faults currently being serviced (gauge; ≤ NumWorkers)
+	pageIn   latHist      // page-in FETCH latency (data Source.ReadAt; the slow-remote/cache signal)
 }
 
 type faultEvent struct {
@@ -659,6 +662,8 @@ func (h *Handler) recordBatch(pages uint64) {
 }
 
 func (h *Handler) handleFault(ev faultEvent, pageBuf []byte) {
+	h.stats.inflight.Add(1)
+	defer h.stats.inflight.Add(-1)
 	memfdOffset, ok := h.addrMap.Locate(ev.address)
 	if !ok {
 		h.logf("uffd: handleFault unknown va 0x%x", ev.address)
@@ -691,7 +696,14 @@ func (h *Handler) handleFault(ev faultEvent, pageBuf []byte) {
 			capBytes = rem
 		}
 
+		tFetch := time.Now()
 		n, isZero, err := h.cfg.Source.ReadAt(pageBuf[:capBytes], pageOffset)
+		// Record only DATA fetches (the RPC/IO path): zero-region serves are
+		// near-instant and would mask the slow-remote/cache tail. p99 here is
+		// the cold-fetch latency that reveals a degraded store.
+		if err == nil && !isZero {
+			h.stats.pageIn.record(uint64(time.Since(tFetch).Nanoseconds()))
+		}
 		if err != nil && !errors.Is(err, io.EOF) {
 			h.logf("uffd: source.ReadAt off=0x%x cap=%d: %v", pageOffset, capBytes, err)
 			h.stats.errors.Add(1)
@@ -931,5 +943,47 @@ func (h *Handler) Stats() map[string]uint64 {
 		"batch_pages_total":     pagesSum,
 		"batch_avg_pages":       avgBatch,
 		"batch_max_pages":       h.stats.batchMaxPages.Load(),
+	}
+}
+
+// Inflight is the number of faults currently being serviced (≤ NumWorkers).
+func (h *Handler) Inflight() int64 { return h.stats.inflight.Load() }
+
+// QueueDepth is the number of faults enqueued but not yet picked up by a
+// worker, summed across all per-worker queues.
+func (h *Handler) QueueDepth() int {
+	n := 0
+	for _, q := range h.queue {
+		n += len(q)
+	}
+	return n
+}
+
+// LazyStats is a point-in-time view of the lazy-load counters + live gauges +
+// page-in latency, for the periodic stats logger (and rate computation).
+type LazyStats struct {
+	FaultsAbsent   uint64
+	FaultsReleased uint64
+	FaultsLoaded   uint64
+	PagesCopied    uint64
+	PagesZeroed    uint64
+	Errors         uint64
+	Inflight       int64
+	QueueDepth     int
+	PageIn         latSnapshot // data-fetch latency histogram
+}
+
+// LazyStats snapshots the counters + gauges in one call.
+func (h *Handler) LazyStats() LazyStats {
+	return LazyStats{
+		FaultsAbsent:   h.stats.faultsAbsent.Load(),
+		FaultsReleased: h.stats.faultsReleased.Load(),
+		FaultsLoaded:   h.stats.faultsLoaded.Load(),
+		PagesCopied:    h.stats.pagesCopied.Load(),
+		PagesZeroed:    h.stats.pagesZeroed.Load(),
+		Errors:         h.stats.errors.Load(),
+		Inflight:       h.stats.inflight.Load(),
+		QueueDepth:     h.QueueDepth(),
+		PageIn:         h.stats.pageIn.snapshot(),
 	}
 }

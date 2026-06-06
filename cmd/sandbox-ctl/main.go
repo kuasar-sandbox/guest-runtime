@@ -74,7 +74,7 @@ Usage:
                         [--stdin] [--stdout=false] [--stderr=false]
                         [--stdin-from F] [--stdout-to F] [--stderr-to F]
                         [--tty] [--console off|default|file=PATH]
-                        [--ping-fatal-threshold N]
+                        [--ping-fatal-threshold N] [--stats-interval <dur>]
   sandbox-ctl snapshot  --sandbox-id <sid> (--output <out_dir> | --upload)
                         [--resume] [--run-root <dir>] [--timeout <sec>]
   sandbox-ctl exec      --sandbox-id <sid> [--run-root <dir>] [--cwd <dir>]

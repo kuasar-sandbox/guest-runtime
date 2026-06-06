@@ -37,6 +37,7 @@ type RunOptions struct {
 	RuntimeRoot   string          // tmpfs run root (sockets / snap staging); "/run/sandbox" by default
 	BaseRoot      string          // on-disk base root (overlay diff); "/var/lib/sandbox" by default
 	StatsJSONPath string          // if set, write vhost stats as JSON to this path on shutdown
+	StatsInterval time.Duration   // if > 0, periodically log lazy-load stats; 0 = off
 	StdioMode     stdio.Mode      // CH process stdio wiring; see pkg/sandbox/stdio
 
 	// PingFatalThreshold: after this many consecutive ping failures
@@ -324,6 +325,7 @@ func Run(ctx context.Context, opts RunOptions) (int, error) {
 		PingFatalThreshold: opts.PingFatalThreshold,
 		StartUnixNs:        startUnixNs,
 		StatsJSONPath:      opts.StatsJSONPath,
+		StatsInterval:      opts.StatsInterval,
 
 		CapBytes:   int64(capBytes),
 		UffdSource: uffd.ZeroSource{},
@@ -334,11 +336,12 @@ func Run(ctx context.Context, opts RunOptions) (int, error) {
 		Blk1Label:  "blk1",
 		Blk1Path:   opts.Cfg.Boot.Root.Overlay.Diff,
 
-		LaunchSpec:    launchSpec,
-		WireLaunchMUX: true,
-		StartTimeout:  opts.Cfg.StartTimeoutDuration(),
-		Balloon:       balloonCtl,
-		Hooks:         hooks,
+		LaunchSpec:       launchSpec,
+		WireLaunchMUX:    true,
+		StartTimeout:     opts.Cfg.StartTimeoutDuration(),
+		VAReportDeadline: opts.Cfg.VAReportDeadline(),
+		Balloon:          balloonCtl,
+		Hooks:            hooks,
 
 		TapFile:   tapFile, // nil in tap-name mode; CH inherits it at fd 4
 		NetMAC:    netMAC,
