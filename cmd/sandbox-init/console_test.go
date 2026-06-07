@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/kuasar-sandbox/sandbox-runtime/pkg/sandbox/mux"
+	"github.com/kuasar-sandbox/sandbox-runtime/pkg/mux"
 )
 
 // muxPair wires a guest-side and host-side mux.Session over a net.Pipe so

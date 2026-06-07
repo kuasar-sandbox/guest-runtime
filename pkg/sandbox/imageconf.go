@@ -11,7 +11,7 @@ import (
 	"strings"
 
 	"github.com/kuasar-sandbox/sandbox-builder/pkg/image"
-	"github.com/kuasar-sandbox/sandbox-runtime/pkg/sandbox/proto"
+	"github.com/kuasar-sandbox/sandbox-runtime/pkg/proto"
 	"golang.org/x/sys/unix"
 )
 

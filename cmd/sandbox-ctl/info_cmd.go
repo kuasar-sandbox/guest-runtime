@@ -12,7 +12,7 @@ import (
 
 	"github.com/kuasar-sandbox/sandbox-accelerator/pkg/manifest/fetch"
 	"github.com/kuasar-sandbox/sandbox-runtime/pkg/sandbox"
-	"github.com/kuasar-sandbox/sandbox-runtime/pkg/sandbox/restore"
+	"github.com/kuasar-sandbox/sandbox-runtime/pkg/restore"
 )
 
 // infoCmd implements `sandbox-ctl info` — print a snapshot's embedded

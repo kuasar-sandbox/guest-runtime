@@ -7,7 +7,7 @@ import (
 	"os"
 
 	"github.com/kuasar-sandbox/sandbox-runtime/pkg/sandbox"
-	"github.com/kuasar-sandbox/sandbox-runtime/pkg/sandbox/restore"
+	"github.com/kuasar-sandbox/sandbox-runtime/pkg/restore"
 )
 
 // uploadSnapshotCmd implements `sandbox-ctl upload-snapshot` — promote a LOCAL

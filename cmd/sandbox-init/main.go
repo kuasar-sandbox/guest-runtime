@@ -36,8 +36,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/kuasar-sandbox/sandbox-runtime/pkg/sandbox/mux"
-	"github.com/kuasar-sandbox/sandbox-runtime/pkg/sandbox/proto"
+	"github.com/kuasar-sandbox/sandbox-runtime/pkg/mux"
+	"github.com/kuasar-sandbox/sandbox-runtime/pkg/proto"
 	"golang.org/x/sys/unix"
 )
 

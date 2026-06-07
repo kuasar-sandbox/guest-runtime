@@ -17,14 +17,14 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/kuasar-sandbox/sandbox-accelerator/pkg/manifest"
-	"github.com/kuasar-sandbox/sandbox-runtime/pkg/sandbox/chapi"
-	"github.com/kuasar-sandbox/sandbox-runtime/pkg/sandbox/ctl"
-	"github.com/kuasar-sandbox/sandbox-runtime/pkg/sandbox/memory"
-	"github.com/kuasar-sandbox/sandbox-runtime/pkg/sandbox/proto"
-	"github.com/kuasar-sandbox/sandbox-runtime/pkg/sandbox/snapshot"
-	"github.com/kuasar-sandbox/sandbox-runtime/pkg/sandbox/stdio"
-	"github.com/kuasar-sandbox/sandbox-runtime/pkg/sandbox/tapfd"
-	"github.com/kuasar-sandbox/sandbox-runtime/pkg/sandbox/uffd"
+	"github.com/kuasar-sandbox/sandbox-runtime/pkg/chapi"
+	"github.com/kuasar-sandbox/sandbox-runtime/pkg/ctl"
+	"github.com/kuasar-sandbox/sandbox-runtime/pkg/memory"
+	"github.com/kuasar-sandbox/sandbox-runtime/pkg/proto"
+	"github.com/kuasar-sandbox/sandbox-runtime/pkg/snapshot"
+	"github.com/kuasar-sandbox/sandbox-runtime/pkg/stdio"
+	"github.com/kuasar-sandbox/sandbox-runtime/pkg/tapfd"
+	"github.com/kuasar-sandbox/sandbox-runtime/pkg/uffd"
 	"github.com/kuasar-sandbox/sandbox-runtime/pkg/vhost"
 )
 

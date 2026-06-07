@@ -24,7 +24,7 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/kuasar-sandbox/sandbox-runtime/pkg/sandbox/proto"
+	"github.com/kuasar-sandbox/sandbox-runtime/pkg/proto"
 )
 
 // Request is a control request on ctl.sock. Type selects which fields

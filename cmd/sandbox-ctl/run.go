@@ -13,8 +13,8 @@ import (
 	"github.com/kuasar-sandbox/sandbox-accelerator/pkg/manifest"
 	"github.com/kuasar-sandbox/sandbox-runtime/internal/util"
 	"github.com/kuasar-sandbox/sandbox-runtime/pkg/sandbox"
-	"github.com/kuasar-sandbox/sandbox-runtime/pkg/sandbox/restore"
-	"github.com/kuasar-sandbox/sandbox-runtime/pkg/sandbox/stdio"
+	"github.com/kuasar-sandbox/sandbox-runtime/pkg/restore"
+	"github.com/kuasar-sandbox/sandbox-runtime/pkg/stdio"
 )
 
 // runCmd implements `sandbox-ctl run`. With --restore=<ref> it switches

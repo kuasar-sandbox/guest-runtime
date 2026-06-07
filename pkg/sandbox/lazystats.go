@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/kuasar-sandbox/sandbox-runtime/pkg/sandbox/uffd"
+	"github.com/kuasar-sandbox/sandbox-runtime/pkg/uffd"
 	"github.com/kuasar-sandbox/sandbox-runtime/pkg/vhost"
 )
 

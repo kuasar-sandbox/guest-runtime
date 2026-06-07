@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"github.com/kuasar-sandbox/sandbox-runtime/pkg/sandbox/fwd"
-	"github.com/kuasar-sandbox/sandbox-runtime/pkg/sandbox/proto"
+	"github.com/kuasar-sandbox/sandbox-runtime/pkg/proto"
 )
 
 // The guest side of `sandbox-ctl run --connect` port forwarding: for each

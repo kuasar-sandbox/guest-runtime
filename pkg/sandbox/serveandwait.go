@@ -14,12 +14,12 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/kuasar-sandbox/sandbox-runtime/pkg/sandbox/ctl"
-	"github.com/kuasar-sandbox/sandbox-runtime/pkg/sandbox/memory"
-	"github.com/kuasar-sandbox/sandbox-runtime/pkg/sandbox/mux"
-	"github.com/kuasar-sandbox/sandbox-runtime/pkg/sandbox/proto"
-	"github.com/kuasar-sandbox/sandbox-runtime/pkg/sandbox/stdio"
-	"github.com/kuasar-sandbox/sandbox-runtime/pkg/sandbox/uffd"
+	"github.com/kuasar-sandbox/sandbox-runtime/pkg/ctl"
+	"github.com/kuasar-sandbox/sandbox-runtime/pkg/memory"
+	"github.com/kuasar-sandbox/sandbox-runtime/pkg/mux"
+	"github.com/kuasar-sandbox/sandbox-runtime/pkg/proto"
+	"github.com/kuasar-sandbox/sandbox-runtime/pkg/stdio"
+	"github.com/kuasar-sandbox/sandbox-runtime/pkg/uffd"
 	"github.com/kuasar-sandbox/sandbox-runtime/pkg/vhost"
 	"golang.org/x/sys/unix"
 )

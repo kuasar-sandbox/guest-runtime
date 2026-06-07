@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/kuasar-sandbox/sandbox-runtime/pkg/sandbox/fwd"
-	"github.com/kuasar-sandbox/sandbox-runtime/pkg/sandbox/proto"
+	"github.com/kuasar-sandbox/sandbox-runtime/pkg/proto"
 )
 
 func TestConnRegistry(t *testing.T) {
