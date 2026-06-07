@@ -7,12 +7,10 @@ import (
 	"io/fs"
 	"os"
 	"sort"
-	"strconv"
-	"strings"
 
 	"github.com/kuasar-sandbox/sandbox-builder/pkg/image"
+	"github.com/kuasar-sandbox/sandbox-runtime/pkg/config"
 	"github.com/kuasar-sandbox/sandbox-runtime/pkg/proto"
-	"golang.org/x/sys/unix"
 )
 
 // ImageConfig captures the container default launch settings the
@@ -104,7 +102,7 @@ func LoadImageConfigFrom(r io.ReaderAt, size int64) (*ImageConfig, error) {
 //
 // Env: image first, override on top (override keys win).
 // Workdir / Restart: override else image else default.
-func MergeLaunch(image *ImageConfig, override LaunchConfig) (*proto.LaunchSpec, error) {
+func MergeLaunch(image *ImageConfig, override config.LaunchConfig) (*proto.LaunchSpec, error) {
 	spec := &proto.LaunchSpec{
 		Workdir: "/",
 		Restart: "never",
@@ -175,7 +173,7 @@ func MergeLaunch(image *ImageConfig, override LaunchConfig) (*proto.LaunchSpec, 
 		sigName = image.StopSignal
 	}
 	if sigName != "" {
-		n, err := ParseStopSignal(sigName)
+		n, err := config.ParseStopSignal(sigName)
 		if err != nil {
 			return nil, fmt.Errorf("merge launch: stop_signal: %w", err)
 		}
@@ -185,30 +183,9 @@ func MergeLaunch(image *ImageConfig, override LaunchConfig) (*proto.LaunchSpec, 
 	return spec, nil
 }
 
-// ParseStopSignal resolves a signal name ("SIGTERM", "TERM") or decimal
-// number ("15") to its number. Used host-side so the guest receives a
-// plain int (signal names are arch-independent for the platform's
-// x86_64/arm64 targets where host and guest share the signal table).
-func ParseStopSignal(s string) (int, error) {
-	if n, err := strconv.Atoi(s); err == nil {
-		if n <= 0 {
-			return 0, fmt.Errorf("invalid signal number %q", s)
-		}
-		return n, nil
-	}
-	name := strings.ToUpper(s)
-	if !strings.HasPrefix(name, "SIG") {
-		name = "SIG" + name
-	}
-	if sig := unix.SignalNum(name); sig != 0 {
-		return int(sig), nil
-	}
-	return 0, fmt.Errorf("unknown signal %q", s)
-}
-
 // effectiveMounts converts config mounts and merges image Volumes as
 // implicit empty mounts (explicit config wins on the same target).
-func effectiveMounts(mounts []MountConfig, volumes map[string]struct{}) []proto.MountSpec {
+func effectiveMounts(mounts []config.MountConfig, volumes map[string]struct{}) []proto.MountSpec {
 	out := make([]proto.MountSpec, 0, len(mounts)+len(volumes))
 	seen := make(map[string]struct{}, len(mounts))
 	for _, m := range mounts {
@@ -237,24 +214,8 @@ func effectiveMounts(mounts []MountConfig, volumes map[string]struct{}) []proto.
 	return out
 }
 
-// ProtoFiles returns the configured files as a proto slice. Used by the
-// restore path (a different package) to push this instance's per-instance
-// files in the restore notify.
-func (c *SandboxConfig) ProtoFiles() []proto.FileSpec { return toProtoFiles(c.Files) }
-
-// toProtoFiles / toProtoInit convert config slices to proto slices.
-func toProtoFiles(files []FileConfig) []proto.FileSpec {
-	if len(files) == 0 {
-		return nil
-	}
-	out := make([]proto.FileSpec, len(files))
-	for i, f := range files {
-		out[i] = proto.FileSpec{Path: f.Path, Content: f.Content, Mode: f.Mode, Owner: f.Owner, ReadOnly: f.ReadOnly}
-	}
-	return out
-}
-
-func toProtoInit(init []InitConfig) []proto.InitSpec {
+// toProtoInit converts config init slices to proto slices.
+func toProtoInit(init []config.InitConfig) []proto.InitSpec {
 	if len(init) == 0 {
 		return nil
 	}

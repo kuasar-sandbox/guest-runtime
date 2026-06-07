@@ -1,6 +1,8 @@
-package sandbox
+package config
 
-import "testing"
+import (
+	"testing"
+)
 
 func TestEffectiveNetwork(t *testing.T) {
 	cases := []struct {

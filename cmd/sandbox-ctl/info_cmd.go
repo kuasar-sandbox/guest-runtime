@@ -6,13 +6,14 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"github.com/kuasar-sandbox/sandbox-runtime/pkg/config"
 	"io"
 	"os"
 	"strings"
 
 	"github.com/kuasar-sandbox/sandbox-accelerator/pkg/manifest/fetch"
-	"github.com/kuasar-sandbox/sandbox-runtime/pkg/sandbox"
 	"github.com/kuasar-sandbox/sandbox-runtime/pkg/restore"
+	"github.com/kuasar-sandbox/sandbox-runtime/pkg/sandbox"
 )
 
 // infoCmd implements `sandbox-ctl info` — print a snapshot's embedded
@@ -42,7 +43,7 @@ func infoCmd(args []string) int {
 	)
 	if strings.HasPrefix(input, "manifest://") {
 		key := strings.TrimPrefix(input, "manifest://")
-		mcfg, err := sandbox.LoadManifestConfig(*manifestPath)
+		mcfg, err := config.LoadManifestConfig(*manifestPath)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			return 1

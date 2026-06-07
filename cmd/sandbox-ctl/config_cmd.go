@@ -3,10 +3,10 @@ package main
 import (
 	"flag"
 	"fmt"
+	"github.com/kuasar-sandbox/sandbox-runtime/pkg/config"
 	"os"
 	"strings"
 
-	"github.com/kuasar-sandbox/sandbox-runtime/pkg/sandbox"
 	"gopkg.in/yaml.v3"
 )
 
@@ -66,7 +66,7 @@ func configCmd(args []string) int {
 		output = []byte(tmpl)
 
 	case src != "":
-		cfg, err := sandbox.LoadMerged(strings.Split(src, ":"))
+		cfg, err := config.LoadMerged(strings.Split(src, ":"))
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			return 1
@@ -108,7 +108,7 @@ func configCmd(args []string) int {
 }
 
 // validateForMode runs the validator appropriate to the output mode.
-func validateForMode(cfg *sandbox.SandboxConfig, mode string) error {
+func validateForMode(cfg *config.SandboxConfig, mode string) error {
 	if mode == "restore" {
 		return cfg.ValidateRestoreHostConfig()
 	}
@@ -129,7 +129,7 @@ func strictCheckBytes(b []byte, mode string) int {
 		return 1
 	}
 	tmp.Close()
-	cfg, err := sandbox.Load(tmp.Name())
+	cfg, err := config.Load(tmp.Name())
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 1

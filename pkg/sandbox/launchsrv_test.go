@@ -3,6 +3,7 @@ package sandbox
 import (
 	"context"
 	"errors"
+	"github.com/kuasar-sandbox/sandbox-runtime/pkg/config"
 	"io"
 	"net"
 	"path/filepath"
@@ -196,7 +197,7 @@ func TestMergeLaunch_OverrideTakesPrecedence(t *testing.T) {
 		Env:        []string{"FROM_IMAGE=1", "BOTH=image"},
 		WorkingDir: "/image-dir",
 	}
-	override := LaunchConfig{
+	override := config.LaunchConfig{
 		Exec:    "/override/exec",
 		Args:    []string{"override-arg"},
 		Env:     map[string]string{"BOTH": "override", "FROM_OVERRIDE": "1"},
@@ -235,7 +236,7 @@ func TestMergeLaunch_FallsBackToImageEntrypoint(t *testing.T) {
 		Entrypoint: []string{"/image/exec", "ep-arg"},
 		Cmd:        []string{"cmd-arg"},
 	}
-	override := LaunchConfig{} // empty override
+	override := config.LaunchConfig{} // empty override
 	got, err := MergeLaunch(image, override)
 	if err != nil {
 		t.Fatal(err)
@@ -250,7 +251,7 @@ func TestMergeLaunch_FallsBackToImageEntrypoint(t *testing.T) {
 }
 
 func TestMergeLaunch_ErrorWhenNoExecAnywhere(t *testing.T) {
-	_, err := MergeLaunch(&ImageConfig{}, LaunchConfig{})
+	_, err := MergeLaunch(&ImageConfig{}, config.LaunchConfig{})
 	if err == nil {
 		t.Fatal("expected error when neither image nor override provides exec")
 	}
@@ -262,7 +263,7 @@ func TestMergeLaunch_FallsBackToImageCmdWhenEntrypointEmpty(t *testing.T) {
 		Cmd: []string{"python3"},
 		Env: []string{"PATH=/usr/local/bin:/usr/bin"},
 	}
-	got, err := MergeLaunch(image, LaunchConfig{})
+	got, err := MergeLaunch(image, config.LaunchConfig{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -280,7 +281,7 @@ func TestMergeLaunch_OverrideArgsReplaceImageCmd(t *testing.T) {
 		Entrypoint: []string{"/usr/bin/wrap"},
 		Cmd:        []string{"image-cmd-arg"},
 	}
-	got, err := MergeLaunch(image, LaunchConfig{Args: []string{"new-arg"}})
+	got, err := MergeLaunch(image, config.LaunchConfig{Args: []string{"new-arg"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -295,7 +296,7 @@ func TestMergeLaunch_OverrideArgsReplaceImageCmd(t *testing.T) {
 func TestMergeLaunch_CmdOnlyImageWithOverrideArgs(t *testing.T) {
 	// python:3.12-slim + override args = "python3 -c 'print(...)'"
 	image := &ImageConfig{Cmd: []string{"python3"}}
-	got, err := MergeLaunch(image, LaunchConfig{
+	got, err := MergeLaunch(image, config.LaunchConfig{
 		Args: []string{"-c", "print('hi')"},
 	})
 	if err != nil {

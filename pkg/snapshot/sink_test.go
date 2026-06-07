@@ -42,7 +42,7 @@ func TestDataSegments(t *testing.T) {
 // ingest.Ingest can Seek to each data segment across the memory/ZIP boundary.
 func TestConcatReadSeeker(t *testing.T) {
 	mem := []byte("0123456789") // memSize = 10
-	tail := []byte("ABCDEF")     // 6
+	tail := []byte("ABCDEF")    // 6
 	full := append(append([]byte{}, mem...), tail...)
 	c := &concatReadSeeker{mem: bytes.NewReader(mem), memSize: int64(len(mem)), tail: tail}
 

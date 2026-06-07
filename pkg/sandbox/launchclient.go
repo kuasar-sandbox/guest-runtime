@@ -27,10 +27,10 @@ type HostClient struct {
 //
 // Wire sequence on a host→guest short conn:
 //
-//   host →  "CONNECT 5000\n"           (CH proxy directive)
-//   host ←  "OK <localPort>\n"         (CH proxy ack — must be drained!)
-//   host →  [4-byte LE length][JSON]   (proto request)
-//   host ←  [4-byte LE length][JSON]   (proto response)
+//	host →  "CONNECT 5000\n"           (CH proxy directive)
+//	host ←  "OK <localPort>\n"         (CH proxy ack — must be drained!)
+//	host →  [4-byte LE length][JSON]   (proto request)
+//	host ←  [4-byte LE length][JSON]   (proto response)
 //
 // The OK line comes from the CH proxy itself, not the guest, so it
 // must be consumed before proto.ReadMessage runs — otherwise the JSON
@@ -131,15 +131,15 @@ func drainLine(conn net.Conn) error {
 // All fields are read/written atomically so Snapshot can be called from
 // any goroutine while the ticker is still firing.
 type PingStats struct {
-	Attempts   atomic.Uint64
-	Success    atomic.Uint64
-	Timeout    atomic.Uint64 // ping write/read deadline exceeded
-	DialError  atomic.Uint64 // CH proxy unreachable / CONNECT rejected
+	Attempts  atomic.Uint64
+	Success   atomic.Uint64
+	Timeout   atomic.Uint64 // ping write/read deadline exceeded
+	DialError atomic.Uint64 // CH proxy unreachable / CONNECT rejected
 
 	// RTT histogram is kept compact: count + sum + max, plus the last
 	// RTTSampleN samples retained for percentile estimation in tests.
-	RTTSumNs   atomic.Int64
-	RTTMaxNs   atomic.Int64
+	RTTSumNs atomic.Int64
+	RTTMaxNs atomic.Int64
 
 	mu      sync.Mutex
 	samples []int64
@@ -171,15 +171,15 @@ func (p *PingStats) observeRTT(d time.Duration) {
 
 // Snapshot returns a copy safe for serialization.
 type PingSnapshot struct {
-	Attempts  uint64  `json:"attempts"`
-	Success   uint64  `json:"success"`
-	Timeout   uint64  `json:"timeout"`
-	DialError uint64  `json:"dial_error"`
-	RTTAvgNs  int64   `json:"rtt_avg_ns"`
-	RTTMaxNs  int64   `json:"rtt_max_ns"`
-	RTTP50Ns  int64   `json:"rtt_p50_ns"`
-	RTTP95Ns  int64   `json:"rtt_p95_ns"`
-	RTTP99Ns  int64   `json:"rtt_p99_ns"`
+	Attempts  uint64 `json:"attempts"`
+	Success   uint64 `json:"success"`
+	Timeout   uint64 `json:"timeout"`
+	DialError uint64 `json:"dial_error"`
+	RTTAvgNs  int64  `json:"rtt_avg_ns"`
+	RTTMaxNs  int64  `json:"rtt_max_ns"`
+	RTTP50Ns  int64  `json:"rtt_p50_ns"`
+	RTTP95Ns  int64  `json:"rtt_p95_ns"`
+	RTTP99Ns  int64  `json:"rtt_p99_ns"`
 }
 
 // Snapshot returns a serializable view of accumulated stats.

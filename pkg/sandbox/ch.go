@@ -2,6 +2,7 @@ package sandbox
 
 import (
 	"fmt"
+	"github.com/kuasar-sandbox/sandbox-runtime/pkg/config"
 	"strings"
 
 	"github.com/kuasar-sandbox/sandbox-runtime/pkg/proto"
@@ -33,7 +34,7 @@ import (
 // off` — no 8250 UART; cmdline pins `console=hvc0`. The application's
 // stdin/stdout/stderr do NOT travel via the console — they go over the
 // vsock stdio MUX (pkg/sandbox/mux). See docs/sandbox.md §5.2.
-func CHCommand(cfg *SandboxConfig, blk0Sock, blk1Sock, chSock, vsockSock, kernelPath, runtimePath, uffdSock, consoleArg string, tapFDNum int, netMAC string) ([]string, error) {
+func CHCommand(cfg *config.SandboxConfig, blk0Sock, blk1Sock, chSock, vsockSock, kernelPath, runtimePath, uffdSock, consoleArg string, tapFDNum int, netMAC string) ([]string, error) {
 	capBytes, err := cfg.CapacityMemoryBytes()
 	if err != nil {
 		return nil, err
@@ -130,7 +131,7 @@ func chNetArg(tapName string, tapFDNum int, mac string) string {
 // The launch spec (exec/args/env/workdir/restart/stdio) is **not** in
 // the cmdline — it travels over vsock at runtime via the launch protocol
 // (pkg/sandbox/proto), which also avoids cmdline length / quoting limits.
-func buildCmdline(cfg *SandboxConfig) string {
+func buildCmdline(cfg *config.SandboxConfig) string {
 	parts := []string{
 		"init=/sbin/init",
 		"root=/dev/pmem0",

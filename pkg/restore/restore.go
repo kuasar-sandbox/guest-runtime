@@ -10,6 +10,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/kuasar-sandbox/sandbox-runtime/pkg/config"
 	"io"
 	"log"
 	"net"
@@ -19,8 +20,8 @@ import (
 	"time"
 
 	"github.com/kuasar-sandbox/sandbox-accelerator/pkg/manifest/fetch"
-	"github.com/kuasar-sandbox/sandbox-runtime/pkg/sandbox"
 	"github.com/kuasar-sandbox/sandbox-runtime/pkg/proto"
+	"github.com/kuasar-sandbox/sandbox-runtime/pkg/sandbox"
 	"github.com/kuasar-sandbox/sandbox-runtime/pkg/stdio"
 	"github.com/kuasar-sandbox/sandbox-runtime/pkg/tapfd"
 	"github.com/kuasar-sandbox/sandbox-runtime/pkg/uffd"
@@ -38,11 +39,11 @@ import (
 // blk0 / overlay.base in the embedded sandbox.cfg likewise support
 // manifest:// when Fetcher is set.
 type Options struct {
-	SnapshotPath        string                  // file path; mutually exclusive with SnapshotManifestKey
-	SnapshotManifestKey string                  // hex content key; mutually exclusive with SnapshotPath
-	HostCfg             *sandbox.SandboxConfig  // host yaml: TAP, blk1.diff, etc.
-	ManifestCfg         *sandbox.ManifestConfig // for snapshot --upload from a restored sandbox
-	Fetcher             fetch.Fetcher           // required when any URI is manifest://; caller owns lifecycle
+	SnapshotPath        string                 // file path; mutually exclusive with SnapshotManifestKey
+	SnapshotManifestKey string                 // hex content key; mutually exclusive with SnapshotPath
+	HostCfg             *config.SandboxConfig  // host yaml: TAP, blk1.diff, etc.
+	ManifestCfg         *config.ManifestConfig // for snapshot --upload from a restored sandbox
+	Fetcher             fetch.Fetcher          // required when any URI is manifest://; caller owns lifecycle
 	SandboxID           string
 	CHBinary            string
 	RuntimeRoot         string        // tmpfs run root; "/run/sandbox" by default
@@ -213,7 +214,7 @@ func Run(ctx context.Context, opts Options) (int, error) {
 	// here they're already known + verified from the parent snapshot.cfg, so a
 	// re-hash is unnecessary). Without this, snapshots from a restored sandbox
 	// would have empty runtime_ref/base_ref and could not themselves be restored.
-	snapCfg.SnapshotRefs = sandbox.SnapshotRefs{
+	snapCfg.SnapshotRefs = config.SnapshotRefs{
 		RuntimeRef: parsedSnap.Boot.RuntimeRef,
 		BaseRef:    parsedSnap.Boot.Root.BaseRef,
 	}
@@ -221,7 +222,7 @@ func Run(ctx context.Context, opts Options) (int, error) {
 	// Record provenance so a snapshot taken by this restored run prepends this
 	// bundle and extends the chain (§3.5): child.from_refs = [selfRef] ++
 	// this.from_refs; child.base_from_refs = [this.overlay.base] ++ this.base_from_refs.
-	snapCfg.SnapshotProvenance = sandbox.SnapshotProvenance{
+	snapCfg.SnapshotProvenance = config.SnapshotProvenance{
 		ParentSnapshotRef:  selfRef,
 		ParentFromRefs:     parsedSnap.FromRefs,
 		ParentOverlayBase:  parsedSnap.Boot.Root.Overlay.Base,
@@ -235,7 +236,7 @@ func Run(ctx context.Context, opts Options) (int, error) {
 		if abs, err := filepath.Abs(opts.SnapshotPath); err == nil {
 			snapCfg.SnapshotProvenance.ParentSnapshotPath = abs
 		}
-		if sc, val, ok := sandbox.SchemeAndPath(parsedSnap.Boot.Root.Overlay.Base); ok && sc == "file" {
+		if sc, val, ok := config.SchemeAndPath(parsedSnap.Boot.Root.Overlay.Base); ok && sc == "file" {
 			if !filepath.IsAbs(val) {
 				val = filepath.Join(filepath.Dir(opts.SnapshotPath), val)
 			}
@@ -312,7 +313,7 @@ func Run(ctx context.Context, opts Options) (int, error) {
 	// goes through pkg/sandbox/disks.OpenManifestFetcher (same path as
 	// cold-start manifest:// disks).
 	diskRef := snapCfg.Boot.Root.Overlay.Base
-	scheme, diskValue, ok := sandbox.SchemeAndPath(diskRef)
+	scheme, diskValue, ok := config.SchemeAndPath(diskRef)
 	if !ok {
 		return -1, fmt.Errorf("invalid overlay.base in sandbox.cfg: %s", diskRef)
 	}
@@ -413,7 +414,7 @@ func Run(ctx context.Context, opts Options) (int, error) {
 			_ = os.Remove(baseDir)
 		}()
 	}
-	_, diffPath, ok := sandbox.SchemeAndPath(diffURI)
+	_, diffPath, ok := config.SchemeAndPath(diffURI)
 	if !ok {
 		return -1, fmt.Errorf("bad overlay.diff: %s", diffURI)
 	}
@@ -567,7 +568,7 @@ func Run(ctx context.Context, opts Options) (int, error) {
 			// via ctx → CH teardown closing the vsock conn).
 			restoreDeadline := opts.HostCfg.RestoreDeadline()
 			if restoreDeadline <= 0 {
-				restoreDeadline = sandbox.NoForcedTimeout
+				restoreDeadline = config.NoForcedTimeout
 			}
 			muxConn, muxSpec, err := sandbox.OpenMUXViaRestore(pc.Pinger.Client, 1, netSpec, snapCfg.ProtoFiles(), restoreDeadline)
 			if err != nil {
@@ -610,7 +611,7 @@ func Run(ctx context.Context, opts Options) (int, error) {
 // to the snapshot bundle dir (local mode); manifest:// refs go through the
 // fetcher. Shared by the memory and disk layered chains.
 func openRefStream(ctx context.Context, ref string, opts Options) (fetch.Stream, error) {
-	scheme, value, ok := sandbox.SchemeAndPath(ref)
+	scheme, value, ok := config.SchemeAndPath(ref)
 	if !ok {
 		return nil, fmt.Errorf("invalid ref %q", ref)
 	}

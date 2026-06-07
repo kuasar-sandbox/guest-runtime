@@ -3,6 +3,7 @@ package sandbox
 import (
 	"context"
 	"fmt"
+	"github.com/kuasar-sandbox/sandbox-runtime/pkg/config"
 	"net"
 	"net/http"
 	"path/filepath"
@@ -107,8 +108,10 @@ func TestBalloon_KickFiresImmediatelyWhenElapsed(t *testing.T) {
 	b.Interval = 200 * time.Millisecond
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	b.SetAllocatable(256 << 20)             // target = (8G - 256M)
-	if err := b.Start(ctx); err != nil { t.Fatalf("Start: %v", err) }
+	b.SetAllocatable(256 << 20) // target = (8G - 256M)
+	if err := b.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
 	defer b.Stop()
 
 	// Initial reconcile during Start. Wait long enough for the next-allowed
@@ -149,7 +152,9 @@ func TestBalloon_KickRateLimited(t *testing.T) {
 	defer cancel()
 
 	b.SetAllocatable(256 << 20) // target 0
-	if err := b.Start(ctx); err != nil { t.Fatalf("Start: %v", err) }
+	if err := b.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
 	defer b.Stop()
 
 	// Two kicks back-to-back, well within MinInterval of the Start
@@ -188,13 +193,13 @@ func TestBalloon_KickRateLimited(t *testing.T) {
 // HTTP path).
 func TestHooks_OnAllocatableChangedTouchesBalloon(t *testing.T) {
 	b := NewBalloonController("/dev/null", 8<<30, nil)
-	cfg := &SandboxConfig{
-		Resources: ResourcesConfig{
-			Capacity:    CapacityConfig{Memory: "8GiB"},
-			Allocatable: AllocatableConfig{Memory: "1GiB"},
+	cfg := &config.SandboxConfig{
+		Resources: config.ResourcesConfig{
+			Capacity:    config.CapacityConfig{Memory: "8GiB"},
+			Allocatable: config.AllocatableConfig{Memory: "1GiB"},
 		},
 	}
-	cfg.applyDefaults()
+	cfg.ApplyDefaults()
 	h := &ControllerHooks{
 		opts: ControllerHookOptions{Balloon: b, Logf: func(string, ...any) {}},
 		cfg:  cfg,
@@ -232,13 +237,13 @@ func TestHooks_SetAllocatableNowDoesNotTouchBalloon(t *testing.T) {
 // should issue a balloon correction only when the locally-decided
 // allocatable differs from allocAtSnap.
 func TestHooks_SettledRestoreBalloonCorrectionOnlyOnMismatch(t *testing.T) {
-	cfg := &SandboxConfig{
-		Resources: ResourcesConfig{
-			Capacity:    CapacityConfig{Memory: "8GiB"},
-			Allocatable: AllocatableConfig{Memory: "1GiB"},
+	cfg := &config.SandboxConfig{
+		Resources: config.ResourcesConfig{
+			Capacity:    config.CapacityConfig{Memory: "8GiB"},
+			Allocatable: config.AllocatableConfig{Memory: "1GiB"},
 		},
 	}
-	cfg.applyDefaults()
+	cfg.ApplyDefaults()
 
 	// Case 1: match → no correction.
 	b1 := NewBalloonController("/dev/null", 8<<30, nil)

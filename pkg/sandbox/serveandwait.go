@@ -3,6 +3,7 @@ package sandbox
 import (
 	"context"
 	"fmt"
+	"github.com/kuasar-sandbox/sandbox-runtime/pkg/config"
 	"log"
 	"net"
 	"os"
@@ -99,7 +100,7 @@ type VMParams struct {
 	// cold/restore); 0 = no forced timeout. From cfg.VAReportDeadline().
 	VAReportDeadline time.Duration
 	// PingTimeout bounds the host→guest ping round-trip; 0 → no forced timeout
-	// (resolved to NoForcedTimeout, since DialRaw needs a value). cfg.PingDeadline().
+	// (resolved to config.NoForcedTimeout, since DialRaw needs a value). cfg.PingDeadline().
 	PingTimeout time.Duration
 	// AppNotifyDeadline bounds the host read of one guest→host launch-port
 	// message (hello / app_started / app_exited / mem_report); 0 = no forced
@@ -127,8 +128,8 @@ type VMParams struct {
 	// this fd (it's not an ExtraFile); the caller closes it after the run.
 	NetnsFile *os.File
 
-	SnapCfg     *SandboxConfig // ctl.sock SnapshotHandler.Cfg
-	ManifestCfg *ManifestConfig
+	SnapCfg     *config.SandboxConfig // ctl.sock SnapshotHandler.Cfg
+	ManifestCfg *config.ManifestConfig
 	DiffPath    string
 	OwnedDiff   bool // diff is auto-created (ours) → eligible for zero-copy move on destroy-snapshot
 
@@ -314,11 +315,11 @@ func ServeAndWait(p VMParams) (int, error) {
 
 	// Pinger drives the host→guest health probe. Started by PostSpawn
 	// (cold: after launch handshake; restore: after restore_ack). 0 ping
-	// timeout → no forced timeout (resolved to NoForcedTimeout, since the
+	// timeout → no forced timeout (resolved to config.NoForcedTimeout, since the
 	// ping RoundTrip dials and DialRaw needs a finite value).
 	pingTO := p.PingTimeout
 	if pingTO <= 0 {
-		pingTO = NoForcedTimeout
+		pingTO = config.NoForcedTimeout
 	}
 	pinger := &Pinger{
 		Client: &HostClient{BasePath: vsockBase, Logf: logf},

@@ -2,6 +2,7 @@ package sandbox
 
 import (
 	"fmt"
+	"github.com/kuasar-sandbox/sandbox-runtime/pkg/config"
 	"log"
 	"os"
 	"path/filepath"
@@ -186,12 +187,12 @@ func (c *CgroupController) Cleanup() error {
 }
 
 // JoinCgroupForConfig is the convenience entry point used by restore.Run.
-// Derives a CgroupConfig from a SandboxConfig and joins, but with
+// Derives a CgroupConfig from a config.SandboxConfig and joins, but with
 // MemoryHighBytes zeroed so the boot-transient page-fault burst is not
 // PSI-throttled — Settled/SettledRestore writes memory.high once the
 // transient is over (Issue 4). Returns a zero-value controller (Cleanup
 // no-op) when CgroupPath is unset (no-cgroup mode).
-func JoinCgroupForConfig(cfg *SandboxConfig) (*CgroupController, error) {
+func JoinCgroupForConfig(cfg *config.SandboxConfig) (*CgroupController, error) {
 	cgCfg, err := buildCgroupConfig(cfg)
 	if err != nil {
 		return nil, err
@@ -200,7 +201,7 @@ func JoinCgroupForConfig(cfg *SandboxConfig) (*CgroupController, error) {
 	return JoinCgroup(cgCfg)
 }
 
-// buildCgroupConfig translates a SandboxConfig into a CgroupConfig.
+// buildCgroupConfig translates a config.SandboxConfig into a CgroupConfig.
 // Returns a zero-Path config when CgroupPath is unset (no-cgroup mode); JoinCgroup
 // will then no-op.
 //
@@ -208,7 +209,7 @@ func JoinCgroupForConfig(cfg *SandboxConfig) (*CgroupController, error) {
 // up to allocatable does not cgroup-OOM the CH process. Memory.high is
 // the watermark (default allocatable * 0.875). cpu.max = capacity *
 // 100000us per 100000us period; cpu.weight from allocatable.cpu.
-func buildCgroupConfig(cfg *SandboxConfig) (CgroupConfig, error) {
+func buildCgroupConfig(cfg *config.SandboxConfig) (CgroupConfig, error) {
 	if cfg.Resources.Control.CgroupPath == "" {
 		return CgroupConfig{}, nil
 	}

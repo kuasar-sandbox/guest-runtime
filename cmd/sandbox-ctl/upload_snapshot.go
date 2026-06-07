@@ -4,9 +4,9 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"github.com/kuasar-sandbox/sandbox-runtime/pkg/config"
 	"os"
 
-	"github.com/kuasar-sandbox/sandbox-runtime/pkg/sandbox"
 	"github.com/kuasar-sandbox/sandbox-runtime/pkg/restore"
 )
 
@@ -35,7 +35,7 @@ func uploadSnapshotCmd(args []string) int {
 		return 2
 	}
 
-	mcfg, err := sandbox.LoadManifestConfig(*manifestPath)
+	mcfg, err := config.LoadManifestConfig(*manifestPath)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 1

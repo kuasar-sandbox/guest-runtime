@@ -2,6 +2,7 @@ package sandbox
 
 import (
 	"fmt"
+	"github.com/kuasar-sandbox/sandbox-runtime/pkg/config"
 	"io"
 	"os"
 	"path/filepath"
@@ -41,7 +42,7 @@ func PrepareDiff(diffPath, templateURI string, baseSize, diffSize int64) (create
 	}
 	switch {
 	case templateURI != "":
-		_, tpl, ok := SchemeAndPath(templateURI)
+		_, tpl, ok := config.SchemeAndPath(templateURI)
 		if !ok {
 			return 0, fmt.Errorf("diff_template invalid URI: %s", templateURI)
 		}

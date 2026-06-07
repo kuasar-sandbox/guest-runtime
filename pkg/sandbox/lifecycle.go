@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"github.com/kuasar-sandbox/sandbox-runtime/pkg/config"
 	"io"
 	"log"
 	"os"
@@ -30,15 +31,15 @@ import (
 
 // RunOptions controls a single sandbox-ctl run invocation.
 type RunOptions struct {
-	Cfg           *SandboxConfig
-	ManifestCfg   *ManifestConfig // for manifest:// resolution; may be nil if all file://
-	SandboxID     string          // generated if empty
-	CHBinary      string          // path to bin/cloud-hypervisor
-	RuntimeRoot   string          // tmpfs run root (sockets / snap staging); "/run/sandbox" by default
-	BaseRoot      string          // on-disk base root (overlay diff); "/var/lib/sandbox" by default
-	StatsJSONPath string          // if set, write vhost stats as JSON to this path on shutdown
-	StatsInterval time.Duration   // if > 0, periodically log lazy-load stats; 0 = off
-	StdioMode     stdio.Mode      // CH process stdio wiring; see pkg/sandbox/stdio
+	Cfg           *config.SandboxConfig
+	ManifestCfg   *config.ManifestConfig // for manifest:// resolution; may be nil if all file://
+	SandboxID     string                 // generated if empty
+	CHBinary      string                 // path to bin/cloud-hypervisor
+	RuntimeRoot   string                 // tmpfs run root (sockets / snap staging); "/run/sandbox" by default
+	BaseRoot      string                 // on-disk base root (overlay diff); "/var/lib/sandbox" by default
+	StatsJSONPath string                 // if set, write vhost stats as JSON to this path on shutdown
+	StatsInterval time.Duration          // if > 0, periodically log lazy-load stats; 0 = off
+	StdioMode     stdio.Mode             // CH process stdio wiring; see pkg/sandbox/stdio
 
 	// PingFatalThreshold: after this many consecutive ping failures
 	// the host SIGTERMs CH so cmd.Wait() returns. 0 = disabled
@@ -251,7 +252,7 @@ func Run(ctx context.Context, opts RunOptions) (int, error) {
 	// before the app forks): mounts (incl. image Volumes → empty mounts),
 	// injected files, one-shot init, and the shutdown grace.
 	launchSpec.Mounts = effectiveMounts(opts.Cfg.Mounts, imageCfg.Volumes)
-	launchSpec.Files = toProtoFiles(opts.Cfg.Files)
+	launchSpec.Files = opts.Cfg.ProtoFiles()
 	launchSpec.Init = toProtoInit(opts.Cfg.Init)
 	launchSpec.StopGraceSec = opts.Cfg.StopGraceSeconds()
 
@@ -288,7 +289,7 @@ func Run(ctx context.Context, opts RunOptions) (int, error) {
 			_ = os.Remove(baseDir)
 		}()
 	}
-	_, diffPath, ok := SchemeAndPath(diffURI)
+	_, diffPath, ok := config.SchemeAndPath(diffURI)
 	if !ok {
 		return -1, fmt.Errorf("boot.root.overlay.diff invalid URI: %s", diffURI)
 	}
@@ -357,8 +358,8 @@ func Run(ctx context.Context, opts RunOptions) (int, error) {
 		Cgroup:      cg,
 
 		BuildCmd: func(e CmdEnv) (*exec.Cmd, func(), error) {
-			_, kernelPath, _ := SchemeAndPath(opts.Cfg.Boot.Kernel)
-			_, runtimePath, _ := SchemeAndPath(opts.Cfg.Boot.Runtime)
+			_, kernelPath, _ := config.SchemeAndPath(opts.Cfg.Boot.Kernel)
+			_, runtimePath, _ := config.SchemeAndPath(opts.Cfg.Boot.Runtime)
 			// CH process stdio (docs/sandbox.md §5.2): stdin = /dev/null
 			// (so CH's `--console tty` never raw-izes a terminal), stderr
 			// = our stderr (CH WARN), stdout = the kernel-dmesg sink per
@@ -546,9 +547,9 @@ func (p *pairQuiescer) Resume() {
 // that owns the bundle holds references; the snapshot path consumes
 // them when a request arrives.
 type SnapshotHandler struct {
-	Cfg         *SandboxConfig
-	ManifestCfg *ManifestConfig // required for --upload; the Ingester is built lazily per snapshot
-	SandboxID   string          // required: snapshot.Take rejects empty
+	Cfg         *config.SandboxConfig
+	ManifestCfg *config.ManifestConfig // required for --upload; the Ingester is built lazily per snapshot
+	SandboxID   string                 // required: snapshot.Take rejects empty
 	Memfd       *memory.Memfd
 	DiffPath    string
 	OwnedDiff   bool // diff is auto-created (ours) → eligible for zero-copy move on destroy-snapshot
@@ -790,10 +791,10 @@ func destroyAfterSnapshot(chSock string, logf func(string, ...any)) {
 
 // buildSnapshotCfg renders the snapshot.cfg YAML body per docs §3.4.
 // runtime_ref / base_ref are pre-computed by sandbox-ctl at boot
-// (file SHA256 is hashed once at startup; see SnapshotRefs in
-// SandboxConfig). overlayRef is filled in by Take() after overlay
+// (file SHA256 is hashed once at startup; see config.SnapshotRefs in
+// config.SandboxConfig). overlayRef is filled in by Take() after overlay
 // digest is known, or by Upload() after overlay manifest key is known.
-func buildSnapshotCfg(cfg *SandboxConfig, overlayRef string) ([]byte, error) {
+func buildSnapshotCfg(cfg *config.SandboxConfig, overlayRef string) ([]byte, error) {
 	doc := snapshotCfgYAML{}
 	doc.Resources.Capacity.CPU = cfg.Resources.Capacity.CPU
 	doc.Resources.Capacity.Memory = cfg.Resources.Capacity.Memory
@@ -859,7 +860,7 @@ type snapshotCfgYAML struct {
 // can render snapshot.cfg without re-hashing on each request. Called once
 // during Run() startup; cost is one streamed read per artifact (typical
 // runtime ≈ 5 MiB, base ≈ 100 MiB).
-func populateSnapshotRefs(cfg *SandboxConfig) error {
+func populateSnapshotRefs(cfg *config.SandboxConfig) error {
 	rRef, err := buildBootRef(cfg.Boot.Runtime, false /* fileOnly=false; runtime is file:// only but caller fields enforce */)
 	if err != nil {
 		return fmt.Errorf("boot.runtime: %w", err)

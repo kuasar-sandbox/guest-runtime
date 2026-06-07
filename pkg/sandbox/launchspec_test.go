@@ -1,6 +1,7 @@
 package sandbox
 
 import (
+	"github.com/kuasar-sandbox/sandbox-runtime/pkg/config"
 	"testing"
 
 	"golang.org/x/sys/unix"
@@ -22,19 +23,19 @@ func TestParseStopSignal(t *testing.T) {
 		{"-3", 0, true},
 	}
 	for _, c := range cases {
-		got, err := ParseStopSignal(c.in)
+		got, err := config.ParseStopSignal(c.in)
 		if c.err {
 			if err == nil {
-				t.Errorf("ParseStopSignal(%q): want error, got %d", c.in, got)
+				t.Errorf("config.ParseStopSignal(%q): want error, got %d", c.in, got)
 			}
 			continue
 		}
 		if err != nil {
-			t.Errorf("ParseStopSignal(%q): %v", c.in, err)
+			t.Errorf("config.ParseStopSignal(%q): %v", c.in, err)
 			continue
 		}
 		if got != c.want {
-			t.Errorf("ParseStopSignal(%q) = %d, want %d", c.in, got, c.want)
+			t.Errorf("config.ParseStopSignal(%q) = %d, want %d", c.in, got, c.want)
 		}
 	}
 }
@@ -42,7 +43,7 @@ func TestParseStopSignal(t *testing.T) {
 func TestMergeLaunch_UserAndStopSignal(t *testing.T) {
 	// override wins over image.
 	img := &ImageConfig{Cmd: []string{"/bin/sh"}, User: "1000:1000", StopSignal: "SIGQUIT"}
-	spec, err := MergeLaunch(img, LaunchConfig{User: "app:app", StopSignal: "SIGUSR1"})
+	spec, err := MergeLaunch(img, config.LaunchConfig{User: "app:app", StopSignal: "SIGUSR1"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -54,7 +55,7 @@ func TestMergeLaunch_UserAndStopSignal(t *testing.T) {
 	}
 
 	// fall back to image when override empty.
-	spec, err = MergeLaunch(img, LaunchConfig{})
+	spec, err = MergeLaunch(img, config.LaunchConfig{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -66,21 +67,21 @@ func TestMergeLaunch_UserAndStopSignal(t *testing.T) {
 	}
 
 	// neither set → zero (guest defaults to SIGTERM).
-	spec, _ = MergeLaunch(&ImageConfig{Cmd: []string{"/bin/sh"}}, LaunchConfig{})
+	spec, _ = MergeLaunch(&ImageConfig{Cmd: []string{"/bin/sh"}}, config.LaunchConfig{})
 	if spec.StopSignal != 0 || spec.User != "" {
 		t.Errorf("unset: User=%q StopSignal=%d, want empty/0", spec.User, spec.StopSignal)
 	}
 }
 
 func TestMergeLaunch_BadStopSignal(t *testing.T) {
-	_, err := MergeLaunch(&ImageConfig{Cmd: []string{"/bin/sh"}}, LaunchConfig{StopSignal: "NOPE"})
+	_, err := MergeLaunch(&ImageConfig{Cmd: []string{"/bin/sh"}}, config.LaunchConfig{StopSignal: "NOPE"})
 	if err == nil {
 		t.Fatal("want error on bad stop_signal")
 	}
 }
 
 func TestEffectiveMounts_VolumesMerge(t *testing.T) {
-	mounts := []MountConfig{
+	mounts := []config.MountConfig{
 		{Target: "/tmp", Type: "tmpfs", Options: "mode=1777"},
 		{Target: "/data", Type: ""}, // default → empty
 	}
@@ -109,7 +110,7 @@ func TestEffectiveMounts_VolumesMerge(t *testing.T) {
 type MountSpecView struct{ Type, Options string }
 
 func TestStopGraceAndStartTimeoutAccessors(t *testing.T) {
-	c := &SandboxConfig{}
+	c := &config.SandboxConfig{}
 	if c.StopGraceSeconds() != 10 {
 		t.Errorf("default StopGraceSeconds = %d, want 10", c.StopGraceSeconds())
 	}
@@ -127,8 +128,8 @@ func TestStopGraceAndStartTimeoutAccessors(t *testing.T) {
 }
 
 func TestValidateCold_MountsFilesInit(t *testing.T) {
-	load := func(t *testing.T) *SandboxConfig {
-		cfg, err := Load(writeYAML(t, minimalCold))
+	load := func(t *testing.T) *config.SandboxConfig {
+		cfg, err := config.Load(writeYAML(t, minimalCold))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -137,12 +138,12 @@ func TestValidateCold_MountsFilesInit(t *testing.T) {
 
 	t.Run("valid", func(t *testing.T) {
 		cfg := load(t)
-		cfg.Mounts = []MountConfig{{Target: "/tmp", Type: "tmpfs"}, {Target: "/v"}}
-		cfg.Files = []FileConfig{{Path: "/etc/resolv.conf", Mode: "0644"}}
-		cfg.Init = []InitConfig{{Exec: "/bin/sh", Args: []string{"-c", "true"}}}
+		cfg.Mounts = []config.MountConfig{{Target: "/tmp", Type: "tmpfs"}, {Target: "/v"}}
+		cfg.Files = []config.FileConfig{{Path: "/etc/resolv.conf", Mode: "0644"}}
+		cfg.Init = []config.InitConfig{{Exec: "/bin/sh", Args: []string{"-c", "true"}}}
 		cfg.Launch.StopSignal = "SIGTERM"
 		cfg.Launch.StopGracePeriod = "5s"
-		cfg.applyDefaults()
+		cfg.ApplyDefaults()
 		if err := cfg.ValidateCold(); err != nil {
 			t.Fatalf("ValidateCold: %v", err)
 		}
@@ -153,18 +154,18 @@ func TestValidateCold_MountsFilesInit(t *testing.T) {
 
 	bad := []struct {
 		name   string
-		mutate func(*SandboxConfig)
+		mutate func(*config.SandboxConfig)
 		substr string
 	}{
-		{"rel mount target", func(c *SandboxConfig) { c.Mounts = []MountConfig{{Target: "tmp", Type: "tmpfs"}} }, "absolute"},
-		{"nfs mount", func(c *SandboxConfig) { c.Mounts = []MountConfig{{Target: "/d", Type: "nfs"}} }, "not yet implemented"},
-		{"unknown mount", func(c *SandboxConfig) { c.Mounts = []MountConfig{{Target: "/d", Type: "bind"}} }, "unknown"},
-		{"rel file path", func(c *SandboxConfig) { c.Files = []FileConfig{{Path: "etc/x"}} }, "absolute"},
-		{"bad file mode", func(c *SandboxConfig) { c.Files = []FileConfig{{Path: "/etc/x", Mode: "99x"}} }, "octal"},
-		{"empty init exec", func(c *SandboxConfig) { c.Init = []InitConfig{{Exec: ""}} }, "init[0].exec"},
-		{"bad signal", func(c *SandboxConfig) { c.Launch.StopSignal = "NOPE" }, "stop_signal"},
-		{"bad grace", func(c *SandboxConfig) { c.Launch.StopGracePeriod = "abc" }, "stop_grace_period"},
-		{"bad start_timeout", func(c *SandboxConfig) { c.Launch.StartTimeout = "abc" }, "start_timeout"},
+		{"rel mount target", func(c *config.SandboxConfig) { c.Mounts = []config.MountConfig{{Target: "tmp", Type: "tmpfs"}} }, "absolute"},
+		{"nfs mount", func(c *config.SandboxConfig) { c.Mounts = []config.MountConfig{{Target: "/d", Type: "nfs"}} }, "not yet implemented"},
+		{"unknown mount", func(c *config.SandboxConfig) { c.Mounts = []config.MountConfig{{Target: "/d", Type: "bind"}} }, "unknown"},
+		{"rel file path", func(c *config.SandboxConfig) { c.Files = []config.FileConfig{{Path: "etc/x"}} }, "absolute"},
+		{"bad file mode", func(c *config.SandboxConfig) { c.Files = []config.FileConfig{{Path: "/etc/x", Mode: "99x"}} }, "octal"},
+		{"empty init exec", func(c *config.SandboxConfig) { c.Init = []config.InitConfig{{Exec: ""}} }, "init[0].exec"},
+		{"bad signal", func(c *config.SandboxConfig) { c.Launch.StopSignal = "NOPE" }, "stop_signal"},
+		{"bad grace", func(c *config.SandboxConfig) { c.Launch.StopGracePeriod = "abc" }, "stop_grace_period"},
+		{"bad start_timeout", func(c *config.SandboxConfig) { c.Launch.StartTimeout = "abc" }, "start_timeout"},
 	}
 	for _, b := range bad {
 		t.Run(b.name, func(t *testing.T) {

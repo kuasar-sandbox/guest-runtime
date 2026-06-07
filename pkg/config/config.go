@@ -1,9 +1,7 @@
-// Package sandbox holds the host-side control plane for one sandbox VM.
-// It builds the cloud-hypervisor command line, spawns the VMM, manages
-// vhost-user-blk backends, and handles cgroup + lifecycle.
-//
-// One sandbox-ctl process owns one sandbox. Restart = relaunch.
-package sandbox
+// Package config is the sandbox.yaml schema: parsing, defaults, validation,
+// the per-field timeout resolvers, the file:// / manifest:// URI helper, and
+// the ManifestConfig alias. It is the leaf every other sandbox package reads.
+package config
 
 import (
 	"errors"
@@ -18,8 +16,30 @@ import (
 	"github.com/kuasar-sandbox/sandbox-accelerator/pkg/manifest"
 	"github.com/kuasar-sandbox/sandbox-runtime/internal/util"
 	"github.com/kuasar-sandbox/sandbox-runtime/pkg/proto"
+	"golang.org/x/sys/unix"
 	"gopkg.in/yaml.v3"
 )
+
+// ParseStopSignal resolves a signal name ("SIGTERM", "TERM") or decimal
+// number ("15") to its number. Used host-side so the guest receives a plain
+// int (signal names are arch-independent for the x86_64/arm64 targets where
+// host and guest share the signal table).
+func ParseStopSignal(s string) (int, error) {
+	if n, err := strconv.Atoi(s); err == nil {
+		if n <= 0 {
+			return 0, fmt.Errorf("invalid signal number %q", s)
+		}
+		return n, nil
+	}
+	name := strings.ToUpper(s)
+	if !strings.HasPrefix(name, "SIG") {
+		name = "SIG" + name
+	}
+	if sig := unix.SignalNum(name); sig != 0 {
+		return int(sig), nil
+	}
+	return 0, fmt.Errorf("unknown signal %q", s)
+}
 
 // SandboxConfig is the schema parsed from sandbox.yaml.
 //
@@ -474,7 +494,7 @@ func LoadMerged(paths []string) (*SandboxConfig, error) {
 			return nil, fmt.Errorf("sandbox: parse %s: %w", p, err)
 		}
 	}
-	cfg.applyDefaults()
+	cfg.ApplyDefaults()
 	return &cfg, nil
 }
 
@@ -486,11 +506,11 @@ func LoadConfigBytes(data []byte) (*SandboxConfig, error) {
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return nil, fmt.Errorf("sandbox: parse config bytes: %w", err)
 	}
-	cfg.applyDefaults()
+	cfg.ApplyDefaults()
 	return &cfg, nil
 }
 
-func (c *SandboxConfig) applyDefaults() {
+func (c *SandboxConfig) ApplyDefaults() {
 	if c.Resources.Capacity.CPU == 0 {
 		c.Resources.Capacity.CPU = 1
 	}
@@ -1038,6 +1058,20 @@ func SchemeAndPath(uri string) (scheme, value string, ok bool) {
 		return "manifest", strings.TrimPrefix(uri, manifestPrefix), true
 	}
 	return "", "", false
+}
+
+// ProtoFiles returns the configured files as a proto slice — used by the
+// restore path to push this instance's per-instance files in the restore
+// notify, and by cold start to seed the launch spec.
+func (c *SandboxConfig) ProtoFiles() []proto.FileSpec {
+	if len(c.Files) == 0 {
+		return nil
+	}
+	out := make([]proto.FileSpec, len(c.Files))
+	for i, f := range c.Files {
+		out[i] = proto.FileSpec{Path: f.Path, Content: f.Content, Mode: f.Mode, Owner: f.Owner, ReadOnly: f.ReadOnly}
+	}
+	return out
 }
 
 // ManifestConfig is the shared manifest/store/cache/crypto config the

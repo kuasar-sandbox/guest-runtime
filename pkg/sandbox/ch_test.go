@@ -1,37 +1,38 @@
 package sandbox
 
 import (
+	"github.com/kuasar-sandbox/sandbox-runtime/pkg/config"
 	"strings"
 	"testing"
 )
 
-func makeMinimalCfg() *SandboxConfig {
-	cfg := &SandboxConfig{
-		Resources: ResourcesConfig{
-			Capacity:    CapacityConfig{CPU: 2, Memory: "4GiB"},
-			Allocatable: AllocatableConfig{CPU: 1.5, Memory: "2GiB"},
+func makeMinimalCfg() *config.SandboxConfig {
+	cfg := &config.SandboxConfig{
+		Resources: config.ResourcesConfig{
+			Capacity:    config.CapacityConfig{CPU: 2, Memory: "4GiB"},
+			Allocatable: config.AllocatableConfig{CPU: 1.5, Memory: "2GiB"},
 		},
-		Network: NetworkConfig{TAP: "tap0"},
-		Boot: BootConfig{
+		Network: config.NetworkConfig{TAP: "tap0"},
+		Boot: config.BootConfig{
 			Kernel:  "file:///vmlinux",
 			Runtime: "file:///sandbox-runtime.erofs",
 			Cmdline: "console=hvc0",
-			Root: RootConfig{
+			Root: config.RootConfig{
 				Base: "file:///c.erofs",
-				Overlay: OverlayConfig{
+				Overlay: config.OverlayConfig{
 					Diff:     "file:///d.ext4",
 					DiffSize: "1GiB",
 				},
 			},
 		},
-		Launch: LaunchConfig{
+		Launch: config.LaunchConfig{
 			Exec:    "/usr/bin/echo",
 			Args:    []string{"hello", "world"},
 			Workdir: "/",
 			Restart: "never",
 		},
 	}
-	cfg.applyDefaults()
+	cfg.ApplyDefaults()
 	return cfg
 }
 
@@ -79,7 +80,7 @@ func TestCHCommand_HasExpectedFlags(t *testing.T) {
 
 func TestCHCommand_TapFDMode(t *testing.T) {
 	cfg := makeMinimalCfg()
-	cfg.Network = NetworkConfig{TapFD: &TapFDConfig{Exec: []string{"helper"}}}
+	cfg.Network = config.NetworkConfig{TapFD: &config.TapFDConfig{Exec: []string{"helper"}}}
 	args, err := CHCommand(cfg,
 		"/run/sb/blk0.sock", "/run/sb/blk1.sock", "/run/sb/ch.sock", "/run/sb/vsock.sock",
 		"/vmlinux", "/sandbox-runtime.erofs", "/run/sb/uffd.sock", "tty",

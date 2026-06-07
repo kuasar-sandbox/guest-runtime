@@ -5,6 +5,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"github.com/kuasar-sandbox/sandbox-runtime/pkg/config"
 	"os"
 	"strconv"
 	"strings"
@@ -12,8 +13,8 @@ import (
 
 	"github.com/kuasar-sandbox/sandbox-accelerator/pkg/manifest"
 	"github.com/kuasar-sandbox/sandbox-runtime/internal/util"
-	"github.com/kuasar-sandbox/sandbox-runtime/pkg/sandbox"
 	"github.com/kuasar-sandbox/sandbox-runtime/pkg/restore"
+	"github.com/kuasar-sandbox/sandbox-runtime/pkg/sandbox"
 	"github.com/kuasar-sandbox/sandbox-runtime/pkg/stdio"
 )
 
@@ -190,12 +191,12 @@ func runCmd(args []string) int {
 		return 2
 	}
 	// --config accepts ':'-separated paths, deep-merged front-to-back.
-	cfg, err := sandbox.LoadMerged(strings.Split(*configPath, ":"))
+	cfg, err := config.LoadMerged(strings.Split(*configPath, ":"))
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
-	manifestCfg, err := sandbox.LoadManifestConfig(*manifestPath)
+	manifestCfg, err := config.LoadManifestConfig(*manifestPath)
 	if err != nil {
 		if !errors.Is(err, manifest.ErrConfigNotProvided) {
 			fmt.Fprintf(os.Stderr, "[sandbox-ctl] manifest config: %v\n", err)
@@ -253,7 +254,7 @@ func runCmd(args []string) int {
 }
 
 // runRestore parses the snapshot reference and dispatches to restore.Run.
-func runRestore(ctx context.Context, cfg *sandbox.SandboxConfig, manifestCfg *sandbox.ManifestConfig,
+func runRestore(ctx context.Context, cfg *config.SandboxConfig, manifestCfg *config.ManifestConfig,
 	ref, sandboxID, chBin, runDir, baseRoot, statsJSON string, stdioMode stdio.Mode, pingFatal int,
 	statsInterval time.Duration, forwards []sandbox.ForwardSpec,
 ) int {

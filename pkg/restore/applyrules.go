@@ -5,14 +5,13 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"github.com/kuasar-sandbox/sandbox-runtime/pkg/config"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
 
 	"gopkg.in/yaml.v3"
-
-	"github.com/kuasar-sandbox/sandbox-runtime/pkg/sandbox"
 )
 
 // SnapshotCfg mirrors the on-disk snapshot.cfg schema (docs/sandbox.md
@@ -112,8 +111,8 @@ func ParseRef(s string) (Ref, error) {
 // bundle came from manifest:// — host yaml must then provide all
 // runtime/base ref fields explicitly.
 //
-// Returns the merged SandboxConfig the lifecycle should run with.
-func ApplyRules(host *sandbox.SandboxConfig, snap *SnapshotCfg, snapshotPath string) (*sandbox.SandboxConfig, error) {
+// Returns the merged config.SandboxConfig the lifecycle should run with.
+func ApplyRules(host *config.SandboxConfig, snap *SnapshotCfg, snapshotPath string) (*config.SandboxConfig, error) {
 	if host == nil {
 		return nil, errors.New("ApplyRules: host config is nil")
 	}

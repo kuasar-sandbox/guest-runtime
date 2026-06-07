@@ -2,6 +2,7 @@ package sandbox
 
 import (
 	"context"
+	"github.com/kuasar-sandbox/sandbox-runtime/pkg/config"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,7 +11,7 @@ import (
 )
 
 func TestSensorRuntime_Defaults(t *testing.T) {
-	c := &SandboxConfig{}
+	c := &config.SandboxConfig{}
 	mode, stall, win, dbnc := c.SensorRuntime()
 	if mode != SensorModePSI {
 		t.Errorf("default mode: want %q, got %q", SensorModePSI, mode)
@@ -27,8 +28,8 @@ func TestSensorRuntime_Defaults(t *testing.T) {
 }
 
 func TestSensorRuntime_FromConfig(t *testing.T) {
-	c := &SandboxConfig{}
-	c.Resources.Control.Sensor = &SensorConfig{
+	c := &config.SandboxConfig{}
+	c.Resources.Control.Sensor = &config.SensorConfig{
 		Mode:            "events_poll",
 		PSISomeStallUs:  20_000,
 		PSISomeWindowUs: 500_000,
@@ -48,8 +49,8 @@ func TestSensorRuntime_FromConfig(t *testing.T) {
 
 func TestSensorRuntime_PartialConfig(t *testing.T) {
 	// Only override mode; other fields keep defaults.
-	c := &SandboxConfig{}
-	c.Resources.Control.Sensor = &SensorConfig{Mode: "none"}
+	c := &config.SandboxConfig{}
+	c.Resources.Control.Sensor = &config.SensorConfig{Mode: "none"}
 	mode, stall, win, dbnc := c.SensorRuntime()
 	if mode != "none" {
 		t.Errorf("mode: want none, got %q", mode)
@@ -75,7 +76,7 @@ func TestValidateCold_SensorMode(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.mode, func(t *testing.T) {
 			c := minimalValidConfig(t)
-			c.Resources.Control.Sensor = &SensorConfig{Mode: tc.mode}
+			c.Resources.Control.Sensor = &config.SensorConfig{Mode: tc.mode}
 			err := c.ValidateCold()
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("mode=%q wantErr=%v, got err=%v", tc.mode, tc.wantErr, err)
@@ -90,8 +91,8 @@ func TestValidateCold_SensorPSITriggerCoherence(t *testing.T) {
 		win     uint64
 		wantErr bool
 	}{
-		{0, 0, false},                // both unset → default
-		{20_000, 1_000_000, false},   // valid
+		{0, 0, false},                 // both unset → default
+		{20_000, 1_000_000, false},    // valid
 		{1_000_000, 1_000_000, false}, // equal allowed
 		{1_000_000, 0, true},          // stall set, window unset
 		{500_000, 100_000, true},      // stall > window
@@ -99,7 +100,7 @@ func TestValidateCold_SensorPSITriggerCoherence(t *testing.T) {
 	for _, tc := range cases {
 		t.Run("", func(t *testing.T) {
 			c := minimalValidConfig(t)
-			c.Resources.Control.Sensor = &SensorConfig{
+			c.Resources.Control.Sensor = &config.SensorConfig{
 				PSISomeStallUs:  tc.stall,
 				PSISomeWindowUs: tc.win,
 			}
@@ -125,7 +126,7 @@ func TestRunPSI_SetupWritesTrigger(t *testing.T) {
 	}
 
 	hooks := &ControllerHooks{
-		cfg: &SandboxConfig{},
+		cfg: &config.SandboxConfig{},
 	}
 	s := NewPressureSensor(hooks, cgDir, 4<<20, nil)
 	s.runtime.StallUs = 25_000
@@ -149,7 +150,7 @@ func TestRunPSI_SetupWritesTrigger(t *testing.T) {
 // TestRunPSI_MissingPressureFile returns error (caller falls back).
 func TestRunPSI_MissingPressureFile(t *testing.T) {
 	cgDir := t.TempDir() // no memory.pressure inside
-	hooks := &ControllerHooks{cfg: &SandboxConfig{}}
+	hooks := &ControllerHooks{cfg: &config.SandboxConfig{}}
 	s := NewPressureSensor(hooks, cgDir, 4<<20, nil)
 	err := s.runPSI(t.Context())
 	if err == nil {
@@ -180,7 +181,7 @@ func TestRunEventsPoll_NoHigh_NoOOM_NoDispatch(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	hooks := &ControllerHooks{cfg: &SandboxConfig{}}
+	hooks := &ControllerHooks{cfg: &config.SandboxConfig{}}
 	s := NewPressureSensor(hooks, cgDir, 4<<20, nil)
 
 	ctx, cancel := contextWithTimeout(t, 250*time.Millisecond)
@@ -188,13 +189,13 @@ func TestRunEventsPoll_NoHigh_NoOOM_NoDispatch(t *testing.T) {
 	s.runEventsPoll(ctx) // returns when ctx done; no panic = pass
 }
 
-// minimalValidConfig returns a SandboxConfig that passes ValidateCold
+// minimalValidConfig returns a config.SandboxConfig that passes ValidateCold
 // (network/boot/launch all set per minimalCold). Tests apply their
-// own SensorConfig + cgroup_path on top to exercise sensor validation
+// own config.SensorConfig + cgroup_path on top to exercise sensor validation
 // in isolation.
-func minimalValidConfig(t *testing.T) *SandboxConfig {
+func minimalValidConfig(t *testing.T) *config.SandboxConfig {
 	t.Helper()
-	cfg, err := Load(writeYAML(t, minimalCold))
+	cfg, err := config.Load(writeYAML(t, minimalCold))
 	if err != nil {
 		t.Fatal(err)
 	}

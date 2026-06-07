@@ -3,12 +3,11 @@ package restore
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"github.com/kuasar-sandbox/sandbox-runtime/pkg/config"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
-
-	"github.com/kuasar-sandbox/sandbox-runtime/pkg/sandbox"
 )
 
 // helper: creates a file at path with body, returns hex(sha256).
@@ -75,7 +74,7 @@ func TestApplyRules_CapacityMustMatchWhenProvided(t *testing.T) {
 	bsDigest := writeFile(t, bsPath, []byte("base body"))
 	snap := baseSnap("file://runtime.erofs@sha256:"+rtDigest, "file://base.erofs@sha256:"+bsDigest, "file://abc.overlay")
 
-	host := &sandbox.SandboxConfig{}
+	host := &config.SandboxConfig{}
 	host.Resources.Capacity.CPU = 1 // mismatch
 	host.Resources.Capacity.Memory = "2GiB"
 	host.Network.TAP = "tap0"
@@ -100,7 +99,7 @@ func TestApplyRules_CapacityAutoFilledWhenAbsent(t *testing.T) {
 	bsDigest := writeFile(t, bsPath, []byte("base body"))
 	snap := baseSnap("file://runtime.erofs@sha256:"+rtDigest, "file://base.erofs@sha256:"+bsDigest, "file://abc.overlay")
 
-	host := &sandbox.SandboxConfig{}
+	host := &config.SandboxConfig{}
 	host.Network.TAP = "tap0"
 	host.Boot.Root.Overlay.Diff = "file:///tmp/diff"
 
@@ -121,7 +120,7 @@ func TestApplyRules_NetworkTAPRequired(t *testing.T) {
 	bsDigest := writeFile(t, bsPath, []byte("base body"))
 	snap := baseSnap("file://runtime.erofs@sha256:"+rtDigest, "file://base.erofs@sha256:"+bsDigest, "file://abc.overlay")
 
-	host := &sandbox.SandboxConfig{}
+	host := &config.SandboxConfig{}
 	host.Boot.Root.Overlay.Diff = "file:///tmp/diff"
 
 	if _, err := ApplyRules(host, snap, filepath.Join(dir, "x.snapshot")); err == nil || !strings.Contains(err.Error(), "exactly one of") {
@@ -137,7 +136,7 @@ func TestApplyRules_OverlayDiffOptional(t *testing.T) {
 	bsDigest := writeFile(t, bsPath, []byte("base body"))
 	snap := baseSnap("file://runtime.erofs@sha256:"+rtDigest, "file://base.erofs@sha256:"+bsDigest, "file://abc.overlay")
 
-	host := &sandbox.SandboxConfig{}
+	host := &config.SandboxConfig{}
 	host.Network.TAP = "tap0"
 
 	// An empty overlay.diff is now allowed: restore auto-defaults a fresh diff
@@ -160,7 +159,7 @@ func TestApplyRules_RuntimeFileAutoResolveAndDigest(t *testing.T) {
 	snapPath := filepath.Join(dir, "x.snapshot")
 	snap := baseSnap("file://runtime.erofs@sha256:"+rtDigest, "file://base.erofs@sha256:"+bsDigest, "file://abc.overlay")
 
-	host := &sandbox.SandboxConfig{}
+	host := &config.SandboxConfig{}
 	host.Network.TAP = "tap0"
 	host.Boot.Root.Overlay.Diff = "file:///tmp/diff"
 
@@ -186,7 +185,7 @@ func TestApplyRules_RuntimeProvidedDigestMustMatch(t *testing.T) {
 	bsDigest := writeFile(t, bsPath, []byte("base body"))
 	snap := baseSnap("file://runtime.erofs@sha256:"+rtDigest, "file://base.erofs@sha256:"+bsDigest, "file://abc.overlay")
 
-	host := &sandbox.SandboxConfig{}
+	host := &config.SandboxConfig{}
 	host.Network.TAP = "tap0"
 	host.Boot.Root.Overlay.Diff = "file:///tmp/diff"
 	host.Boot.Runtime = "file://" + rtPath
@@ -219,7 +218,7 @@ func TestApplyRules_BasenameMismatchRejected(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	host := &sandbox.SandboxConfig{}
+	host := &config.SandboxConfig{}
 	host.Network.TAP = "tap0"
 	host.Boot.Root.Overlay.Diff = "file:///tmp/diff"
 	host.Boot.Runtime = "file://" + otherPath
@@ -240,7 +239,7 @@ func TestApplyRules_SchemeMismatchRejected(t *testing.T) {
 	_ = rtPath
 	_ = bsPath
 
-	host := &sandbox.SandboxConfig{}
+	host := &config.SandboxConfig{}
 	host.Network.TAP = "tap0"
 	host.Boot.Root.Overlay.Diff = "file:///tmp/diff"
 	host.Boot.Root.Base = "manifest://abcdef" // host says manifest, snap says file
@@ -256,7 +255,7 @@ func TestApplyRules_ManifestBaseMatchesKey(t *testing.T) {
 	rtDigest := writeFile(t, rtPath, []byte("runtime body"))
 	snap := baseSnap("file://runtime.erofs@sha256:"+rtDigest, "manifest://abcdef", "manifest://9999")
 
-	host := &sandbox.SandboxConfig{}
+	host := &config.SandboxConfig{}
 	host.Network.TAP = "tap0"
 	host.Boot.Root.Overlay.Diff = "file:///tmp/diff"
 
@@ -293,7 +292,7 @@ func TestApplyRules_OverlayBaseFromSnapshotIgnoresHost(t *testing.T) {
 	bsDigest := writeFile(t, bsPath, []byte("base body"))
 	snap := baseSnap("file://runtime.erofs@sha256:"+rtDigest, "file://base.erofs@sha256:"+bsDigest, "manifest://overlay-key-from-snap")
 
-	host := &sandbox.SandboxConfig{}
+	host := &config.SandboxConfig{}
 	host.Network.TAP = "tap0"
 	host.Boot.Root.Overlay.Diff = "file:///tmp/diff"
 	host.Boot.Root.Overlay.Base = "manifest://something-else" // should be silently ignored
@@ -310,7 +309,7 @@ func TestApplyRules_OverlayBaseFromSnapshotIgnoresHost(t *testing.T) {
 func TestApplyRules_RuntimeManifestRejected(t *testing.T) {
 	// runtime_ref must always be file:// per docs (boot.runtime is file://-only)
 	snap := baseSnap("manifest://shouldnotbeallowed", "manifest://x", "manifest://y")
-	host := &sandbox.SandboxConfig{}
+	host := &config.SandboxConfig{}
 	host.Network.TAP = "tap0"
 	host.Boot.Root.Overlay.Diff = "file:///tmp/diff"
 
@@ -326,7 +325,7 @@ func TestApplyRules_ManifestBundleEmptyPathRejectsFileRefs(t *testing.T) {
 	bsDigest := strings.Repeat("cd", 32)
 	snap := baseSnap("file://runtime.erofs@sha256:"+rtDigest, "file://base.erofs@sha256:"+bsDigest, "manifest://overlay-key")
 
-	host := &sandbox.SandboxConfig{}
+	host := &config.SandboxConfig{}
 	host.Network.TAP = "tap0"
 	host.Boot.Root.Overlay.Diff = "file:///tmp/diff"
 

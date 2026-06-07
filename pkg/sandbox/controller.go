@@ -3,6 +3,7 @@ package sandbox
 import (
 	"context"
 	"fmt"
+	"github.com/kuasar-sandbox/sandbox-runtime/pkg/config"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -46,7 +47,7 @@ type ControllerHookOptions struct {
 // call into hooks without branching on mode.
 type ControllerHooks struct {
 	opts ControllerHookOptions
-	cfg  *SandboxConfig
+	cfg  *config.SandboxConfig
 
 	mu                sync.Mutex
 	client            *resource.Client
@@ -59,7 +60,7 @@ type ControllerHooks struct {
 // NewControllerHooks dials the controller and returns hooks ready for
 // Admit. Returns hooks with no client (static-mode no-op for RPC calls)
 // when SocketPath is empty.
-func NewControllerHooks(opts ControllerHookOptions, cfg *SandboxConfig) (*ControllerHooks, error) {
+func NewControllerHooks(opts ControllerHookOptions, cfg *config.SandboxConfig) (*ControllerHooks, error) {
 	h := &ControllerHooks{opts: opts, cfg: cfg}
 	if h.opts.Logf == nil {
 		h.opts.Logf = func(string, ...any) {}

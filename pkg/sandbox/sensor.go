@@ -13,7 +13,7 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// Sensor mode constants. See SensorConfig in config.go.
+// Sensor mode constants. See config.SensorConfig in config.go.
 const (
 	SensorModePSI        = "psi"
 	SensorModeEventsPoll = "events_poll"
@@ -24,7 +24,7 @@ const (
 // signals and turns them into RequestBudget calls against the
 // controller. See docs/sandbox.md §10.3.
 //
-// Two data sources are supported (selected by SensorConfig.Mode):
+// Two data sources are supported (selected by config.SensorConfig.Mode):
 //
 //   - "psi" (default): epoll on cgroup memory.pressure with a "some"
 //     trigger. The kernel wakes the sensor as soon as accumulated
@@ -236,7 +236,7 @@ func (s *PressureSensor) runOOMSidecar(ctx context.Context) {
 }
 
 // runEventsPoll is the legacy 100ms poll path. Used as fallback when
-// PSI trigger setup fails OR when SensorConfig.Mode is "events_poll".
+// PSI trigger setup fails OR when config.SensorConfig.Mode is "events_poll".
 func (s *PressureSensor) runEventsPoll(ctx context.Context) {
 	s.logf("sensor: events_poll mode active (100ms tick step=%d)", s.step)
 	t := time.NewTicker(100 * time.Millisecond)

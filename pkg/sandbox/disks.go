@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/kuasar-sandbox/sandbox-runtime/pkg/config"
 
 	"github.com/kuasar-sandbox/sandbox-accelerator/pkg/manifest"
 	"github.com/kuasar-sandbox/sandbox-accelerator/pkg/manifest/fetch"
@@ -38,7 +39,7 @@ func OpenBlockReader(ctx context.Context, uri string, fetcher fetch.Fetcher) (vh
 // pkg/sandbox/restore) can share the same code path. The caller owns the
 // returned stream and must Close it (directly or via a StreamReader).
 func OpenDiskStream(ctx context.Context, uri string, fetcher fetch.Fetcher) (fetch.Stream, int64, error) {
-	scheme, value, ok := SchemeAndPath(uri)
+	scheme, value, ok := config.SchemeAndPath(uri)
 	if !ok {
 		return nil, 0, fmt.Errorf("invalid disk URI: %s", uri)
 	}
@@ -81,7 +82,7 @@ func OpenManifestStream(ctx context.Context, keyRef string, fetcher fetch.Fetche
 // needsManifestFetcher returns true if any disk URI in cfg uses the
 // manifest:// scheme. The result decides whether sandbox-ctl must
 // dial store-ctl / cache-ctl on this run.
-func needsManifestFetcher(cfg *SandboxConfig) bool {
+func needsManifestFetcher(cfg *config.SandboxConfig) bool {
 	candidates := []string{
 		cfg.Boot.Root.Base,
 		cfg.Boot.Root.Overlay.Base,
@@ -90,7 +91,7 @@ func needsManifestFetcher(cfg *SandboxConfig) bool {
 		if uri == "" {
 			continue
 		}
-		if scheme, _, ok := SchemeAndPath(uri); ok && scheme == "manifest" {
+		if scheme, _, ok := config.SchemeAndPath(uri); ok && scheme == "manifest" {
 			return true
 		}
 	}

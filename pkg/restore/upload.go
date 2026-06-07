@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/hex"
 	"fmt"
+	"github.com/kuasar-sandbox/sandbox-runtime/pkg/config"
 	"io"
 	"os"
 	"path/filepath"
@@ -14,7 +15,6 @@ import (
 	"github.com/kuasar-sandbox/sandbox-accelerator/pkg/manifest"
 	"github.com/kuasar-sandbox/sandbox-accelerator/pkg/store"
 	"github.com/kuasar-sandbox/sandbox-runtime/internal/util"
-	"github.com/kuasar-sandbox/sandbox-runtime/pkg/sandbox"
 	"github.com/kuasar-sandbox/sandbox-runtime/pkg/snapshot"
 	"gopkg.in/yaml.v3"
 )
@@ -82,7 +82,7 @@ func UploadLocal(ctx context.Context, snapshotPath string, mcfg *manifest.Config
 	}
 
 	// 2. The top overlay must be a local file:// in the bundle dir.
-	ovScheme, ovVal, ok := sandbox.SchemeAndPath(parsed.Boot.Root.Overlay.Base)
+	ovScheme, ovVal, ok := config.SchemeAndPath(parsed.Boot.Root.Overlay.Base)
 	if !ok || ovScheme != "file" {
 		return "", fmt.Errorf("upload-snapshot: top overlay.base %q is not a local file:// (already remote? nothing to upload)", parsed.Boot.Root.Overlay.Base)
 	}
@@ -95,7 +95,7 @@ func UploadLocal(ctx context.Context, snapshotPath string, mcfg *manifest.Config
 	//    key-consistent. Reject buried local layers (invariant).
 	lower := append(append([]string{}, parsed.FromRefs...), parsed.Boot.Root.Overlay.BaseFromRefs...)
 	for _, ref := range lower {
-		sc, val, ok := sandbox.SchemeAndPath(ref)
+		sc, val, ok := config.SchemeAndPath(ref)
 		if !ok {
 			return "", fmt.Errorf("upload-snapshot: malformed lower ref %q", ref)
 		}

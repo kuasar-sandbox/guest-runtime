@@ -41,9 +41,9 @@ func readAll(t *testing.T, rs io.ReadSeeker, size int64, holes []codec.HoleExten
 func TestMergeSparse_Equivalence(t *testing.T) {
 	const size = 16
 	cases := []struct {
-		name               string
+		name                string
 		topHoles, baseHoles []codec.HoleExtent
-		wantMergedHoles    []codec.HoleExtent
+		wantMergedHoles     []codec.HoleExtent
 	}{
 		{
 			name:      "no overlap → no merged hole",
@@ -52,9 +52,9 @@ func TestMergeSparse_Equivalence(t *testing.T) {
 		},
 		{
 			name:            "both-hole region → merged hole",
-			topHoles:        []codec.HoleExtent{{Offset: 4, Size: 8}},  // [4,12)
-			baseHoles:       []codec.HoleExtent{{Offset: 8, Size: 8}},  // [8,16)
-			wantMergedHoles: []codec.HoleExtent{{Offset: 8, Size: 4}},  // [8,12)
+			topHoles:        []codec.HoleExtent{{Offset: 4, Size: 8}}, // [4,12)
+			baseHoles:       []codec.HoleExtent{{Offset: 8, Size: 8}}, // [8,16)
+			wantMergedHoles: []codec.HoleExtent{{Offset: 8, Size: 4}}, // [8,12)
 		},
 		{
 			name:            "base fully holed → merged == top holes",
