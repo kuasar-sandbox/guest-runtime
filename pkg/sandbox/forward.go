@@ -3,6 +3,7 @@ package sandbox
 import (
 	"context"
 	"fmt"
+	"github.com/kuasar-sandbox/sandbox-runtime/pkg/guestlink"
 	"net"
 	"os"
 	"strconv"
@@ -73,9 +74,9 @@ func ParseForwardSpec(s string) (ForwardSpec, error) {
 
 // OpenForward opens a reverse channel to the guest and asks it to dial spec
 // (proto.TypeConnect → connect_ack), returning the live conn ready for the
-// fwd frame relay. Mirrors OpenMUXViaExec but yields a raw conn (no stdio
+// fwd frame relay. Mirrors guestlink.OpenMUXViaExec but yields a raw conn (no stdio
 // MUX). On any error the conn is closed.
-func OpenForward(client *HostClient, spec *proto.ConnectSpec, deadline time.Duration) (net.Conn, error) {
+func OpenForward(client *guestlink.HostClient, spec *proto.ConnectSpec, deadline time.Duration) (net.Conn, error) {
 	conn, err := client.DialRaw(deadline)
 	if err != nil {
 		return nil, err
@@ -120,7 +121,7 @@ type Forwarder struct {
 }
 
 // NewForwarder builds a forwarder dialing the guest via vsockBase
-// (<run-dir>/<sid>/vsock.sock — the same base HostClient uses).
+// (<run-dir>/<sid>/vsock.sock — the same base guestlink.HostClient uses).
 func NewForwarder(vsockBase string, logf func(string, ...any)) *Forwarder {
 	return &Forwarder{vsockBase: vsockBase, logf: logf, relays: make(map[*fwd.Relay]struct{})}
 }
@@ -197,7 +198,7 @@ func (f *Forwarder) serve(local net.Conn, spec ForwardSpec) {
 		_ = local.Close()
 		return
 	}
-	client := &HostClient{BasePath: f.vsockBase, Logf: f.logf}
+	client := &guestlink.HostClient{BasePath: f.vsockBase, Logf: f.logf}
 	vconn, err := OpenForward(client, &proto.ConnectSpec{Network: spec.Network, Address: spec.Address}, proto.DeadlineConnect)
 	if err != nil {
 		f.logf("port-forward %s → %s: %v", spec.Raw, spec.Address, err)
@@ -230,7 +231,7 @@ func (f *Forwarder) untrack(r *fwd.Relay) {
 }
 
 // Pause gates new forwards (a snapshot is quiescing); Resume re-enables.
-// Symmetric with Pinger.Pause/Resume around snapshot.Take.
+// Symmetric with guestlink.Pinger.Pause/Resume around snapshot.Take.
 func (f *Forwarder) Pause()  { f.mu.Lock(); f.quiescing = true; f.mu.Unlock() }
 func (f *Forwarder) Resume() { f.mu.Lock(); f.quiescing = false; f.mu.Unlock() }
 

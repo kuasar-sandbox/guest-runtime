@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/kuasar-sandbox/sandbox-runtime/pkg/config"
+	"github.com/kuasar-sandbox/sandbox-runtime/pkg/guestlink"
 	"github.com/kuasar-sandbox/sandbox-runtime/pkg/resctl"
 	"io"
 	"log"
@@ -571,7 +572,7 @@ func Run(ctx context.Context, opts Options) (int, error) {
 			if restoreDeadline <= 0 {
 				restoreDeadline = config.NoForcedTimeout
 			}
-			muxConn, muxSpec, err := sandbox.OpenMUXViaRestore(pc.Pinger.Client, 1, netSpec, snapCfg.ProtoFiles(), restoreDeadline)
+			muxConn, muxSpec, err := guestlink.OpenMUXViaRestore(pc.Pinger.Client, 1, netSpec, snapCfg.ProtoFiles(), restoreDeadline)
 			if err != nil {
 				return fmt.Errorf("notify restore: %w (guest agent unreachable)", err)
 			}

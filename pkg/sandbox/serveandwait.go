@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"github.com/kuasar-sandbox/sandbox-runtime/pkg/config"
+	"github.com/kuasar-sandbox/sandbox-runtime/pkg/guestlink"
 	"github.com/kuasar-sandbox/sandbox-runtime/pkg/resctl"
 	"log"
 	"net"
@@ -55,14 +56,14 @@ type CmdEnv struct {
 //   - cold start: spawn a goroutine that gates pinger.Start on
 //     Launch.HelloDone and Hooks.Settled + Balloon.Start on
 //     Launch.LaunchAckDone, then return nil (fire-and-forget).
-//   - restore: synchronously waitAPI → /vm.resume → OpenMUXViaRestore →
-//     EstablishMUX → Pinger.Start → Balloon.Start → Hooks.SettledRestore;
+//   - restore: synchronously waitAPI → /vm.resume → guestlink.OpenMUXViaRestore →
+//     EstablishMUX → guestlink.Pinger.Start → Balloon.Start → Hooks.SettledRestore;
 //     a non-nil return aborts the run (ServeAndWait kills CH).
 type PostSpawnCtx struct {
 	Ctx          context.Context
 	Cmd          *exec.Cmd
-	Pinger       *Pinger
-	Launch       *LaunchServer
+	Pinger       *guestlink.Pinger
+	Launch       *guestlink.LaunchServer
 	EstablishMUX func(net.Conn, proto.StdioSpec) error
 	Hooks        *resctl.ControllerHooks
 	Balloon      *resctl.BalloonController
@@ -173,9 +174,9 @@ func ServeAndWait(p VMParams) (int, error) {
 	// Exactly one stdio MUX at a time; which conn backs it changes across
 	// launch → restore → attach. muxLink guards the pair so the snapshot
 	// handler can re-attach (snapshot --resume) without racing teardown.
-	var muxLink MUXLink
+	var muxLink guestlink.MUXLink
 	reattach := func() error {
-		return muxLink.Reattach(backendCtx, &HostClient{BasePath: vsockBase, Logf: logf}, p.StdioMode)
+		return muxLink.Reattach(backendCtx, &guestlink.HostClient{BasePath: vsockBase, Logf: logf}, p.StdioMode)
 	}
 	establishMUX := func(conn net.Conn, spec proto.StdioSpec) error {
 		ss := stdio.StreamSetFor(spec)
@@ -276,15 +277,15 @@ func ServeAndWait(p VMParams) (int, error) {
 		return -1, err
 	}
 
-	// LaunchServer: guest→host management short-conns on
+	// guestlink.LaunchServer: guest→host management short-conns on
 	// <vsock-base>_5000. Both cold and restore need this for the
 	// periodic mem_report (host-side resctl.BalloonController) and app_exited.
 	// Cold additionally upgrades the hello/launch_ack conn to the stdio
 	// MUX (OnMUXReady); restore's MUX comes from the reverse channel
-	// (PostSpawn → OpenMUXViaRestore), so OnMUXReady stays nil there and
+	// (PostSpawn → guestlink.OpenMUXViaRestore), so OnMUXReady stays nil there and
 	// the placeholder Spec is never sent (guest doesn't re-hello after a
 	// restore).
-	launch := &LaunchServer{
+	launch := &guestlink.LaunchServer{
 		Path:              launchSock,
 		Spec:              p.LaunchSpec,
 		StartTimeout:      p.StartTimeout,
@@ -314,7 +315,7 @@ func ServeAndWait(p VMParams) (int, error) {
 		return -1, err
 	}
 
-	// Pinger drives the host→guest health probe. Started by PostSpawn
+	// guestlink.Pinger drives the host→guest health probe. Started by PostSpawn
 	// (cold: after launch handshake; restore: after restore_ack). 0 ping
 	// timeout → no forced timeout (resolved to config.NoForcedTimeout, since the
 	// ping RoundTrip dials and DialRaw needs a finite value).
@@ -322,10 +323,10 @@ func ServeAndWait(p VMParams) (int, error) {
 	if pingTO <= 0 {
 		pingTO = config.NoForcedTimeout
 	}
-	pinger := &Pinger{
-		Client: &HostClient{BasePath: vsockBase, Logf: logf},
-		Cfg:    PingerConfig{FatalThreshold: p.PingFatalThreshold, Timeout: pingTO},
-		Stats:  &PingStats{},
+	pinger := &guestlink.Pinger{
+		Client: &guestlink.HostClient{BasePath: vsockBase, Logf: logf},
+		Cfg:    guestlink.PingerConfig{FatalThreshold: p.PingFatalThreshold, Timeout: pingTO},
+		Stats:  &guestlink.PingStats{},
 		Logf:   logf,
 	}
 
@@ -357,7 +358,7 @@ func ServeAndWait(p VMParams) (int, error) {
 		Logf:            logf,
 		SnapshotHandler: snapHandler.Handle,
 		ExecHandler: func(conn net.Conn, req ctl.Request) {
-			serveExecRequest(backendCtx, conn, req, vsockBase, logf)
+			guestlink.ServeExecRequest(backendCtx, conn, req, vsockBase, logf)
 		},
 	}
 	if err := ctlSrv.Listen(); err != nil {

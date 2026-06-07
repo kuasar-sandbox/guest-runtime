@@ -1,4 +1,4 @@
-package sandbox
+package guestlink
 
 import (
 	"context"
@@ -9,14 +9,14 @@ import (
 	"github.com/kuasar-sandbox/sandbox-runtime/pkg/proto"
 )
 
-// serveExecRequest is the run-process side of `sandbox-ctl exec`. It
+// ServeExecRequest is the run-process side of `sandbox-ctl exec`. It
 // runs on the ctl.sock server goroutine for one exec_request: open a
 // fresh guest reverse-channel session (exec → exec_ack), relay the
 // established stdio spec back to the CLI, then transparently pipe bytes
 // both ways. The stdio MUX — including FrameExitStatus and the
 // MUX_CLOSE handshake — runs end-to-end between `sandbox-ctl exec` and
 // the guest; the run process is a dumb byte relay after the handshake.
-func serveExecRequest(ctx context.Context, conn net.Conn, req ctl.Request, vsockBase string, logf func(string, ...any)) {
+func ServeExecRequest(ctx context.Context, conn net.Conn, req ctl.Request, vsockBase string, logf func(string, ...any)) {
 	defer conn.Close()
 	if req.Exec == nil || len(req.Exec.Argv) == 0 {
 		_ = ctl.WriteMessage(conn, ctl.Response{Type: ctl.TypeError, Msg: "exec: empty argv"})

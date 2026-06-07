@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"github.com/kuasar-sandbox/sandbox-runtime/pkg/config"
+	"github.com/kuasar-sandbox/sandbox-runtime/pkg/guestlink"
 	"github.com/kuasar-sandbox/sandbox-runtime/pkg/resctl"
 	"io"
 	"log"
@@ -259,7 +260,7 @@ func Run(ctx context.Context, opts RunOptions) (int, error) {
 
 	// App stdio: tell sandbox-init what to wire (pty vs pipe channels);
 	// the launch-handshake connection becomes the stdio MUX after
-	// launch_ack (LaunchServer.OnMUXReady below).
+	// launch_ack (guestlink.LaunchServer.OnMUXReady below).
 	launchSpec.Stdio = opts.StdioMode.ProtoSpec()
 	if cols, rows, ok := opts.StdioMode.InitialWinsize(); ok {
 		launchSpec.Stdio.Winsize = &proto.Winsize{Cols: cols, Rows: rows}
@@ -558,9 +559,9 @@ type SnapshotHandler struct {
 	Srv1        *vhost.Server
 	CHSock      string
 	RunDir      string
-	Pinger      *Pinger      // optional; if non-nil, paused around quiesce/Take
-	Forwarder   *Forwarder   // optional; if non-nil, paused + active relays collapsed around quiesce
-	Reattach    func() error // optional; re-establishes the stdio MUX after --resume
+	Pinger      *guestlink.Pinger // optional; if non-nil, paused around quiesce/Take
+	Forwarder   *Forwarder        // optional; if non-nil, paused + active relays collapsed around quiesce
+	Reattach    func() error      // optional; re-establishes the stdio MUX after --resume
 	Logf        func(string, ...any)
 }
 
@@ -583,7 +584,7 @@ func handleSnapshotRequest(
 	ownedDiff bool,
 	srv0, srv1 *vhost.Server,
 	chSock, runDir string,
-	pinger *Pinger,
+	pinger *guestlink.Pinger,
 	forwarder *Forwarder, // gates new forwards + collapses active relays around quiesce; may be nil
 	reattachMUX func() error, // re-establishes the stdio MUX after --resume; may be nil
 	logf func(string, ...any),
@@ -637,9 +638,9 @@ func handleSnapshotRequest(
 		}()
 		client := pinger.Client
 		if client == nil {
-			client = &HostClient{BasePath: filepath.Join(runDir, "vsock.sock"), Logf: logf}
+			client = &guestlink.HostClient{BasePath: filepath.Join(runDir, "vsock.sock"), Logf: logf}
 		}
-		if err := SendQuiesce(client); err != nil {
+		if err := guestlink.SendQuiesce(client); err != nil {
 			logf("quiesce: %v (aborting snapshot)", err)
 			return ctl.Response{}, fmt.Errorf("quiesce: %w", err)
 		}

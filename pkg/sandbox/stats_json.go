@@ -3,6 +3,7 @@ package sandbox
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/kuasar-sandbox/sandbox-runtime/pkg/guestlink"
 	"os"
 	"runtime"
 	"time"
@@ -15,12 +16,12 @@ import (
 // backend's lat_buckets array. The last element of lat_buckets is the
 // >max-bucket-bound overflow (latency exceeded all named bounds).
 type statsReport struct {
-	BucketsNs []uint64           `json:"latency_bucket_bounds_ns"`
-	Backends  []statsBackendJSON `json:"backends"`
-	Uffd      *uffdStatsJSON     `json:"uffd,omitempty"`
-	Runtime   *runtimeStatsJSON  `json:"runtime,omitempty"`
-	Ping      *PingSnapshot      `json:"ping,omitempty"`
-	Wallclock wallclockJSON      `json:"wallclock"`
+	BucketsNs []uint64                `json:"latency_bucket_bounds_ns"`
+	Backends  []statsBackendJSON      `json:"backends"`
+	Uffd      *uffdStatsJSON          `json:"uffd,omitempty"`
+	Runtime   *runtimeStatsJSON       `json:"runtime,omitempty"`
+	Ping      *guestlink.PingSnapshot `json:"ping,omitempty"`
+	Wallclock wallclockJSON           `json:"wallclock"`
 }
 
 // uffdStatsJSON captures the page-fault handler counters plus a
@@ -123,11 +124,11 @@ func toReqJSON(r vhost.ReqSnapshot) reqJSON {
 // 6 separate args through callers — single struct, easy to extend.
 type statsBundle struct {
 	Servers     []*vhost.Server
-	Uffd        map[string]uint64 // counter snapshot from uffd.Handler.Stats()
-	UffdRAMSize int64             // total RAM in bytes; 0 ⇒ skip lazy-ratio
-	Ping        *PingSnapshot     // host→guest health probe stats; nil ⇒ omit
-	StartUnixNs int64             // sandbox.Run T0
-	EndUnixNs   int64             // sandbox.Run T_exit
+	Uffd        map[string]uint64       // counter snapshot from uffd.Handler.Stats()
+	UffdRAMSize int64                   // total RAM in bytes; 0 ⇒ skip lazy-ratio
+	Ping        *guestlink.PingSnapshot // host→guest health probe stats; nil ⇒ omit
+	StartUnixNs int64                   // sandbox.Run T0
+	EndUnixNs   int64                   // sandbox.Run T_exit
 }
 
 // writeStatsJSON renders the bundle as a single JSON document at path.
