@@ -1,4 +1,4 @@
-package sandbox
+package resctl
 
 import (
 	"fmt"
@@ -193,7 +193,7 @@ func (c *CgroupController) Cleanup() error {
 // transient is over (Issue 4). Returns a zero-value controller (Cleanup
 // no-op) when CgroupPath is unset (no-cgroup mode).
 func JoinCgroupForConfig(cfg *config.SandboxConfig) (*CgroupController, error) {
-	cgCfg, err := buildCgroupConfig(cfg)
+	cgCfg, err := BuildCgroupConfig(cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -201,7 +201,7 @@ func JoinCgroupForConfig(cfg *config.SandboxConfig) (*CgroupController, error) {
 	return JoinCgroup(cgCfg)
 }
 
-// buildCgroupConfig translates a config.SandboxConfig into a CgroupConfig.
+// BuildCgroupConfig translates a config.SandboxConfig into a CgroupConfig.
 // Returns a zero-Path config when CgroupPath is unset (no-cgroup mode); JoinCgroup
 // will then no-op.
 //
@@ -209,7 +209,7 @@ func JoinCgroupForConfig(cfg *config.SandboxConfig) (*CgroupController, error) {
 // up to allocatable does not cgroup-OOM the CH process. Memory.high is
 // the watermark (default allocatable * 0.875). cpu.max = capacity *
 // 100000us per 100000us period; cpu.weight from allocatable.cpu.
-func buildCgroupConfig(cfg *config.SandboxConfig) (CgroupConfig, error) {
+func BuildCgroupConfig(cfg *config.SandboxConfig) (CgroupConfig, error) {
 	if cfg.Resources.Control.CgroupPath == "" {
 		return CgroupConfig{}, nil
 	}

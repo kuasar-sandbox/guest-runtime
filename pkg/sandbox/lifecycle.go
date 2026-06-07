@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"github.com/kuasar-sandbox/sandbox-runtime/pkg/config"
+	"github.com/kuasar-sandbox/sandbox-runtime/pkg/resctl"
 	"io"
 	"log"
 	"os"
@@ -95,14 +96,14 @@ func Run(ctx context.Context, opts RunOptions) (int, error) {
 	}
 	defer os.RemoveAll(runDir)
 
-	// chSock is needed here (front-half) because BalloonController is
+	// chSock is needed here (front-half) because resctl.BalloonController is
 	// constructed before ServeAndWait; the remaining socket paths are
 	// owned by ServeAndWait, which derives them identically from runDir.
 	chSock := filepath.Join(runDir, "ch.sock")
 
 	logf := func(format string, a ...any) { log.Printf("[sandbox-ctl] "+format, a...) }
 
-	// Resolve capacity / floor up front so we can build the BalloonController
+	// Resolve capacity / floor up front so we can build the resctl.BalloonController
 	// before hooks (hooks owns "alloc change → balloon target" routing,
 	// which needs balloonCtl in hand). Both are cheap yaml lookups; the
 	// memfd-creation block below reuses capBytes.
@@ -112,14 +113,14 @@ func Run(ctx context.Context, opts RunOptions) (int, error) {
 	}
 	allocBytes, _ := opts.Cfg.AllocatableMemoryBytes()
 
-	// BalloonController is the sole writer of /api/v1/vm.resize. Created
+	// resctl.BalloonController is the sole writer of /api/v1/vm.resize. Created
 	// only when alloc < cap (no balloon device when alloc == cap).
 	// SetAllocatable(allocBytes) here matches the --balloon size= value
 	// passed to CH in ch.go, so the in-memory target agrees with CH from
 	// the start without an extra round-trip after launch.
-	var balloonCtl *BalloonController
+	var balloonCtl *resctl.BalloonController
 	if allocBytes < capBytes {
-		balloonCtl = NewBalloonController(chSock, capBytes, logf)
+		balloonCtl = resctl.NewBalloonController(chSock, capBytes, logf)
 		balloonCtl.SetAllocatable(allocBytes)
 	}
 
@@ -128,7 +129,7 @@ func Run(ctx context.Context, opts RunOptions) (int, error) {
 	// the static startup-burst value when degraded. Balloon is injected
 	// here so any later OnAllocatableChanged / SettledRestore call routes
 	// through balloonCtl rather than opening its own HTTP path.
-	hooks, err := NewControllerHooks(ControllerHookOptions{
+	hooks, err := resctl.NewControllerHooks(resctl.ControllerHookOptions{
 		SocketPath: opts.Cfg.Resources.Control.Controller,
 		CgroupPath: opts.Cfg.Resources.Control.CgroupPath,
 		Logf:       logf,
@@ -149,7 +150,7 @@ func Run(ctx context.Context, opts RunOptions) (int, error) {
 	// cgroup join. CgroupPath empty → no-cgroup mode, no cgroup operations.
 	// CgroupPath set → join existing cgroup (must already exist; not
 	// created by sandbox-ctl). See docs/sandbox.md §4.1.
-	cgCfg, err := buildCgroupConfig(opts.Cfg)
+	cgCfg, err := resctl.BuildCgroupConfig(opts.Cfg)
 	if err != nil {
 		return -1, err
 	}
@@ -162,7 +163,7 @@ func Run(ctx context.Context, opts RunOptions) (int, error) {
 	// memory.max remains the hard ceiling during boot; memory.high gets
 	// written by Settled() once the boot transient is past.
 	cgCfg.MemoryHighBytes = 0
-	cg, err := JoinCgroup(cgCfg)
+	cg, err := resctl.JoinCgroup(cgCfg)
 	if err != nil {
 		return -1, fmt.Errorf("cgroup: %w", err)
 	}

@@ -1,4 +1,4 @@
-package sandbox
+package resctl
 
 import (
 	"bytes"

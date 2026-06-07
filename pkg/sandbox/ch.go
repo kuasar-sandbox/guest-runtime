@@ -74,7 +74,7 @@ func CHCommand(cfg *config.SandboxConfig, blk0Sock, blk1Sock, chSock, vsockSock,
 		// size = capacity − allocatable at boot: balloon device starts
 		// pre-inflated to the static minimum, so the guest sees exactly
 		// `allocatable` MiB visible from the moment it boots. No
-		// post-Settled inflate transition; the host BalloonController
+		// post-Settled inflate transition; the host resctl.BalloonController
 		// (pkg/sandbox/balloon.go) seeds its in-memory target to the
 		// same value and reconciles a no-op on Start, then handles
 		// runtime adjustments via /api/v1/vm.resize on mem_report

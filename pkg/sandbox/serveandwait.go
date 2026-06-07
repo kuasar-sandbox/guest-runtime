@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"github.com/kuasar-sandbox/sandbox-runtime/pkg/config"
+	"github.com/kuasar-sandbox/sandbox-runtime/pkg/resctl"
 	"log"
 	"net"
 	"os"
@@ -63,8 +64,8 @@ type PostSpawnCtx struct {
 	Pinger       *Pinger
 	Launch       *LaunchServer
 	EstablishMUX func(net.Conn, proto.StdioSpec) error
-	Hooks        *ControllerHooks
-	Balloon      *BalloonController
+	Hooks        *resctl.ControllerHooks
+	Balloon      *resctl.BalloonController
 	CHSock       string
 	Logf         func(string, ...any)
 }
@@ -106,8 +107,8 @@ type VMParams struct {
 	// message (hello / app_started / app_exited / mem_report); 0 = no forced
 	// timeout. From cfg.AppNotifyDeadline().
 	AppNotifyDeadline time.Duration
-	Balloon           *BalloonController
-	Hooks             *ControllerHooks
+	Balloon           *resctl.BalloonController
+	Hooks             *resctl.ControllerHooks
 
 	// TapFile, when non-nil, is a tap queue fd acquired via the tapfd handoff
 	// (docs/tapfd.md). ServeAndWait inherits it into CH after the memfd (CH
@@ -120,7 +121,7 @@ type VMParams struct {
 	// the only process in the per-sandbox cgroup. sandbox-ctl deliberately
 	// stays in its parent cgroup — see pkg/sandbox/cgroup.go header for the
 	// memcg-throttle deadlock that caused.
-	Cgroup *CgroupController
+	Cgroup *resctl.CgroupController
 
 	// NetnsFile, when non-nil, is the tap's network-namespace fd from the same
 	// handoff (docs/tapfd.md §4.6). ServeAndWait fork/execs CH on a thread that
@@ -277,7 +278,7 @@ func ServeAndWait(p VMParams) (int, error) {
 
 	// LaunchServer: guest→host management short-conns on
 	// <vsock-base>_5000. Both cold and restore need this for the
-	// periodic mem_report (host-side BalloonController) and app_exited.
+	// periodic mem_report (host-side resctl.BalloonController) and app_exited.
 	// Cold additionally upgrades the hello/launch_ack conn to the stdio
 	// MUX (OnMUXReady); restore's MUX comes from the reverse channel
 	// (PostSpawn → OpenMUXViaRestore), so OnMUXReady stays nil there and

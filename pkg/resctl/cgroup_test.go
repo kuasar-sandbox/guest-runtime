@@ -1,4 +1,4 @@
-package sandbox
+package resctl
 
 import (
 	"os"
@@ -80,7 +80,7 @@ func TestJoinCgroupForConfig_DefersMemoryHigh(t *testing.T) {
 func TestBuildCgroupConfig_ModeA(t *testing.T) {
 	cfg := makeMinimalCfg()
 	// makeMinimalCfg leaves CgroupPath empty.
-	got, err := buildCgroupConfig(cfg)
+	got, err := BuildCgroupConfig(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -94,7 +94,7 @@ func TestBuildCgroupConfig_ModeB(t *testing.T) {
 	cfg := makeMinimalCfg()
 	cfg.Resources.Control.CgroupPath = dir
 	// capacity=4GiB, allocatable.memory=2GiB, allocatable.cpu=1.5
-	got, err := buildCgroupConfig(cfg)
+	got, err := BuildCgroupConfig(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}

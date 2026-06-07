@@ -135,7 +135,7 @@ func TestCHCommand_BalloonDeflateOnOOMDisabled(t *testing.T) {
 	}
 	// free_page_reporting is now intentionally OFF (its mmu_notifier
 	// traffic deadlocks the guest vsock kthread; replaced by the
-	// host-side BalloonController + sandbox-init mem_report).
+	// host-side resctl.BalloonController + sandbox-init mem_report).
 	if strings.Contains(joined, "free_page_reporting") {
 		t.Errorf("balloon must not advertise free_page_reporting (replaced by mem_report-driven vm.resize), got: %s", joined)
 	}

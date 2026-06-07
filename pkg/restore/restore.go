@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/kuasar-sandbox/sandbox-runtime/pkg/config"
+	"github.com/kuasar-sandbox/sandbox-runtime/pkg/resctl"
 	"io"
 	"log"
 	"net"
@@ -97,7 +98,7 @@ func Run(ctx context.Context, opts Options) (int, error) {
 	// Initial memory.high uses the configured allocatable; the value gets
 	// bumped after we derive allocatable_at_snapshot from the bundle's
 	// state.json balloon (below).
-	cg, err := sandbox.JoinCgroupForConfig(opts.HostCfg)
+	cg, err := resctl.JoinCgroupForConfig(opts.HostCfg)
 	if err != nil {
 		return -1, fmt.Errorf("cgroup: %w", err)
 	}
@@ -128,7 +129,7 @@ func Run(ctx context.Context, opts Options) (int, error) {
 	// then late-injected via hooks.SetBalloon. Until then, hooks balloon-
 	// related entry points (SettledRestore, OnAllocatableChanged) treat
 	// Balloon-nil as no-op on the balloon side.
-	hooks, err := sandbox.NewControllerHooks(sandbox.ControllerHookOptions{
+	hooks, err := resctl.NewControllerHooks(resctl.ControllerHookOptions{
 		SocketPath: opts.HostCfg.Resources.Control.Controller,
 		CgroupPath: opts.HostCfg.Resources.Control.CgroupPath,
 		Logf:       logf,
@@ -264,9 +265,9 @@ func Run(ctx context.Context, opts Options) (int, error) {
 	// the in-memory state matches what CH will load from state.json when
 	// it starts with --restore. Subsequent SettledRestore decides whether
 	// a runtime correction is needed (initialAlloc != allocAtSnap).
-	var balloonCtl *sandbox.BalloonController
+	var balloonCtl *resctl.BalloonController
 	if allocAtSnap < snapCap {
-		balloonCtl = sandbox.NewBalloonController(chSock, snapCap, logf)
+		balloonCtl = resctl.NewBalloonController(chSock, snapCap, logf)
 		balloonCtl.SetAllocatable(allocAtSnap)
 		hooks.SetBalloon(balloonCtl)
 	}

@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"github.com/kuasar-sandbox/sandbox-runtime/pkg/config"
+	"github.com/kuasar-sandbox/sandbox-runtime/pkg/resctl"
 	"os"
 	"strconv"
 	"strings"
@@ -210,7 +211,7 @@ func runCmd(args []string) int {
 		cfg.Resources.Control.CgroupPath = *cgroupPath
 	}
 	if *cgroupAdopt {
-		p, perr := sandbox.SelfCgroupV2Path()
+		p, perr := resctl.SelfCgroupV2Path()
 		if perr != nil {
 			fmt.Fprintf(os.Stderr, "[sandbox-ctl] --cgroup-adopt: %v\n", perr)
 			return 1
