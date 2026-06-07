@@ -679,7 +679,7 @@ SO_LINGER 阻塞至移除完成——`quiesced`(§3.4)时连接确已彻底拆�
 
 ### 4.7 connect 转发帧子协议(fwd)
 
-`connect` 连接在 `connect_ack` 后切到 fwd 帧子协议(包 `pkg/sandbox/fwd`,host 与
+`connect` 连接在 `connect_ack` 后切到 fwd 帧子协议(包 `pkg/fwd`,host 与
 guest 共享),把这条转发的本地连接与 guest 目标连接双向 splice。**单流**——一条
 vsock 连接只承载一条转发流,故无流 ID、无应用窗口;流控就是 vsock 连接自身的内核
 缓冲背压(与 §4.5 MUX 多流共享一条连接才需窗口不同)。

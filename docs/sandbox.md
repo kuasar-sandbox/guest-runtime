@@ -141,7 +141,7 @@ sandbox-ctl run [flags]
                           cgroup 路径从 /proc/self/cgroup 解析(SelfCgroupV2Path),
                           置 control.adopt(YAML `adopt: true`)。注意:adopt 模式
                           让 sandbox-ctl 与 CH 同处一个 cgroup,重新暴露了常规解耦
-                          路径所规避的 memory.high 节流死锁(见 pkg/sandbox/cgroup.go
+                          路径所规避的 memory.high 节流死锁(见 pkg/resctl/cgroup.go
                           头注)——面向 run-task 启动器路径
 
   # 诊断
@@ -252,7 +252,7 @@ sandbox-ctl 控制终端的前台进程组——终端产生的 `^C` / `^\` / `^
 
 **配置交付(文件 vs 内存)与 run-task 启动模型**:上面的 `--config` / `SANDBOX_CONFIG`
 是文件路径形态。除此之外,sandbox-ctl 还能在无 config-socket 的前提下接收**内存内**
-交付的单份 sandbox.yaml:`pkg/sandbox.LoadConfigBytes` 解析一份在内存中持有的
+交付的单份 sandbox.yaml:`pkg/config.LoadConfigBytes` 解析一份在内存中持有的
 `SANDBOX_CONFIG` YAML 文档(不从磁盘读),敏感的 manifest 根密钥经 `MANIFEST_KEY`
 env 传入(由 `pkg/manifest` 解析)。编排侧的 `orchestrator-ctl run-task` 启动器即按此
 模型工作:它在 `execve` 成 sandbox-ctl 之前,先把非密的 per-sandbox 配置(文件或内存)
@@ -1492,7 +1492,7 @@ memory/cpu 上限写到目标 cgroup,区别在于谁进这个 cgroup:
 - **采纳(`--cgroup-adopt`)**:目标 cgroup 就是 sandbox-ctl 自身所在的(其
   systemd 单元的)cgroup——上限写到该 cgroup,CH 作为 fork 出的子进程已是成员,
   故 `AddPID` 成为 no-op。代价是 sandbox-ctl 与 CH 同处一个 cgroup,**重新暴露了
-  上面解耦路径所规避的 `memory.high` 节流死锁**(见 pkg/sandbox/cgroup.go 头注)。
+  上面解耦路径所规避的 `memory.high` 节流死锁**(见 pkg/resctl/cgroup.go 头注)。
   面向 run-task 启动器路径(单元自身即沙箱 cgroup,无需预建)。
 
 ### 9.3 balloon 配置与 BalloonController
