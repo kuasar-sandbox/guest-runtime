@@ -970,7 +970,7 @@ type LazyStats struct {
 	Errors         uint64
 	Inflight       int64
 	QueueDepth     int
-	PageIn         latSnapshot // data-fetch latency histogram
+	PageIn         LatSnapshot // data-fetch latency histogram (cumulative; .Sub for a window)
 }
 
 // LazyStats snapshots the counters + gauges in one call.

@@ -34,3 +34,14 @@ timeouts:
   # CH→host uffd-fd handoff handshake (va_report). CH issues this early in
   # boot/restore; a small bound is fine.
   va_report: 15s
+
+  # Host→guest ping round-trip. 200ms is the tight liveness probe. IMPORTANT:
+  # if you also set --ping-fatal-threshold, this MUST be bounded (as here) —
+  # the default (unset) is no-forced, under which a wedged-but-connected guest
+  # would never trip the fatal threshold (the ping waits instead of failing).
+  ping: 200ms
+
+  # Host read of one guest→host launch-port message (hello / app_started /
+  # app_exited / mem_report). 200ms is tight; raise it if your guests send
+  # mem_report while a slow page-in still blocks the vCPU.
+  app_notify: 200ms

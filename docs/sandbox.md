@@ -481,6 +481,12 @@ timeouts:
   ch_api: ""        # CH HTTP API 单次响应(如 /vm.resume);dial 仍 5s 有界
   api_ready: ""     # spawn 后等 CH API socket 可连接(轮询);0 = 轮询至 ctx 取消(如 CH 退出 / SIGINT)
   va_report: ""     # CH→host 交接 uffd fd 的握手
+  ping: ""          # host→guest ping 往返;默认不强制=vCPU 被慢缺页短暂阻塞时不误判。
+                    #   注意:若启用 --ping-fatal-threshold,须设有界值(生产档 200ms),
+                    #   否则卡死但仍连通的 guest 不会触发兜底(ping 会一直等而非失败)
+  app_notify: ""    # host 读一条 guest→host launch 端口消息(hello / app_started /
+                    #   app_exited / mem_report)的死线;默认不强制=慢 guest 的 mem_report
+                    #   连接不会在 restore 中途被丢弃
 
 # 声明式挂载:在 rootfs 组装后、应用拉起前应用,顺序即列表序
 mounts:
@@ -519,11 +525,19 @@ launch 握手,不下发 guest。
 `cache.timeout` / `store.timeout` **`<=0` 即"无逐操作 deadline"**(dial 仍有界),
 故慢的远程/缓存只会让换入变慢、不会误超时;恶劣环境把这两个值调大或置 0 即可。会
 **非自愿误触发**的是 host 侧写死的管理/恢复面 deadline(restore 握手、CH `/vm.resume`
-响应、CH API socket 就绪、va_report 交接)——这些由 `timeouts` 统一接管,默认 0 =
-不强制(host 等待所需任意时长,dial/connect 探测仍有界,可经 SIGINT / CH 退出取消)。
-这样默认配置在慢速或降级环境下"开箱即用、不误杀";生产环境按
+响应、CH API socket 就绪、va_report 交接,以及 **host→guest ping** 与 **guest→host
+管理消息(mem_report / app_started / app_exited)** 的读死线——后两者原为 200ms,在 vCPU
+被慢缺页阻塞时会刷 ping 超时、mem_report broken-pipe、CH vsock BrokenPipe)——这些一律由
+`timeouts` 接管,默认 0 = 不强制(host 等待所需任意时长,dial/connect 探测仍有界,可经
+SIGINT / CH 退出取消)。这样默认配置在慢速或降级环境下"开箱即用、不误杀";生产环境按
 [`examples/timeouts-production.yaml`](../examples/timeouts-production.yaml) 设正值,
-让 restore 在真正卡死时快速失败。`snapshot` 子命令另有 `--timeout` 自管上界(§2.3)。
+让 restore 在真正卡死时快速失败。
+
+> **`ping` 与 `--ping-fatal-threshold` 的配合**:`ping` 默认不强制时,卡死但仍连通的
+> guest 不会触发 fatal 兜底(ping 一直等而非失败)。若启用 `--ping-fatal-threshold`,
+> 须同时把 `timeouts.ping` 设为有界值(生产档为 200ms)。`app_notify` 只约束 host 读;
+> guest 侧(sandbox-init)写通知仍保留短的有界写死线作为"host 已死"的快速失败。
+> `snapshot` 子命令另有 `--timeout` 自管上界(§2.3)。
 
 **`mounts` / `files` / `init` 的应用时机**:三者均在 guest 收到 LaunchSpec 后、
 应用进程拉起前生效(`init` 在 `launch_ack` 之前完成,故 host 的 "settled" 信号代表

@@ -98,8 +98,15 @@ type VMParams struct {
 	// VAReportDeadline bounds the CH→host uffd-fd handoff handshake (shared
 	// cold/restore); 0 = no forced timeout. From cfg.VAReportDeadline().
 	VAReportDeadline time.Duration
-	Balloon          *BalloonController
-	Hooks            *ControllerHooks
+	// PingTimeout bounds the host→guest ping round-trip; 0 → no forced timeout
+	// (resolved to NoForcedTimeout, since DialRaw needs a value). cfg.PingDeadline().
+	PingTimeout time.Duration
+	// AppNotifyDeadline bounds the host read of one guest→host launch-port
+	// message (hello / app_started / app_exited / mem_report); 0 = no forced
+	// timeout. From cfg.AppNotifyDeadline().
+	AppNotifyDeadline time.Duration
+	Balloon           *BalloonController
+	Hooks             *ControllerHooks
 
 	// TapFile, when non-nil, is a tap queue fd acquired via the tapfd handoff
 	// (docs/tapfd.md). ServeAndWait inherits it into CH after the memfd (CH
@@ -276,12 +283,13 @@ func ServeAndWait(p VMParams) (int, error) {
 	// the placeholder Spec is never sent (guest doesn't re-hello after a
 	// restore).
 	launch := &LaunchServer{
-		Path:         launchSock,
-		Spec:         p.LaunchSpec,
-		StartTimeout: p.StartTimeout,
-		Logf:         logf,
-		OnAppStarted: func(pid int) { logf("guest reports user app pid=%d", pid) },
-		OnAppExited:  func(code int) { logf("guest reports user app exited code=%d", code) },
+		Path:              launchSock,
+		Spec:              p.LaunchSpec,
+		StartTimeout:      p.StartTimeout,
+		AppNotifyDeadline: p.AppNotifyDeadline,
+		Logf:              logf,
+		OnAppStarted:      func(pid int) { logf("guest reports user app pid=%d", pid) },
+		OnAppExited:       func(code int) { logf("guest reports user app exited code=%d", code) },
 		OnMemReport: func(memAvail, memTotal uint64) {
 			if p.Balloon != nil && os.Getenv("SANDBOX_BALLOON_NO_HINT") == "" {
 				p.Balloon.Hint(memAvail, memTotal)
@@ -305,10 +313,16 @@ func ServeAndWait(p VMParams) (int, error) {
 	}
 
 	// Pinger drives the host→guest health probe. Started by PostSpawn
-	// (cold: after launch handshake; restore: after restore_ack).
+	// (cold: after launch handshake; restore: after restore_ack). 0 ping
+	// timeout → no forced timeout (resolved to NoForcedTimeout, since the
+	// ping RoundTrip dials and DialRaw needs a finite value).
+	pingTO := p.PingTimeout
+	if pingTO <= 0 {
+		pingTO = NoForcedTimeout
+	}
 	pinger := &Pinger{
 		Client: &HostClient{BasePath: vsockBase, Logf: logf},
-		Cfg:    PingerConfig{FatalThreshold: p.PingFatalThreshold},
+		Cfg:    PingerConfig{FatalThreshold: p.PingFatalThreshold, Timeout: pingTO},
 		Stats:  &PingStats{},
 		Logf:   logf,
 	}

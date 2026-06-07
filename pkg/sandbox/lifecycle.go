@@ -336,12 +336,14 @@ func Run(ctx context.Context, opts RunOptions) (int, error) {
 		Blk1Label:  "blk1",
 		Blk1Path:   opts.Cfg.Boot.Root.Overlay.Diff,
 
-		LaunchSpec:       launchSpec,
-		WireLaunchMUX:    true,
-		StartTimeout:     opts.Cfg.StartTimeoutDuration(),
-		VAReportDeadline: opts.Cfg.VAReportDeadline(),
-		Balloon:          balloonCtl,
-		Hooks:            hooks,
+		LaunchSpec:        launchSpec,
+		WireLaunchMUX:     true,
+		StartTimeout:      opts.Cfg.StartTimeoutDuration(),
+		VAReportDeadline:  opts.Cfg.VAReportDeadline(),
+		PingTimeout:       opts.Cfg.PingDeadline(),
+		AppNotifyDeadline: opts.Cfg.AppNotifyDeadline(),
+		Balloon:           balloonCtl,
+		Hooks:             hooks,
 
 		TapFile:   tapFile, // nil in tap-name mode; CH inherits it at fd 4
 		NetMAC:    netMAC,

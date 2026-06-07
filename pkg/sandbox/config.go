@@ -554,7 +554,24 @@ type TimeoutsConfig struct {
 	CHApi    string `yaml:"ch_api,omitempty"`    // CH HTTP API response (e.g. /vm.resume); dial stays bounded
 	APIReady string `yaml:"api_ready,omitempty"` // wait for CH API socket to accept after spawn
 	VAReport string `yaml:"va_report,omitempty"` // CH→host uffd-fd handoff handshake
+	// Ping is the host→guest ping round-trip deadline. Default no-forced means
+	// a guest whose vCPU is briefly blocked on a slow page-in still answers
+	// instead of the ping spuriously timing out. NOTE: if you enable
+	// --ping-fatal-threshold, set this to a bounded value (the production
+	// profile uses 200ms) — otherwise a wedged-but-connected guest is never
+	// detected (the ping waits rather than failing).
+	Ping string `yaml:"ping,omitempty"`
+	// AppNotify is the host read deadline for one guest→host launch-port
+	// message (hello / launch_ack first read / app_started / app_exited /
+	// mem_report). Default no-forced so a slow guest (faulting in pages)
+	// doesn't get its mem_report connection dropped mid-restore.
+	AppNotify string `yaml:"app_notify,omitempty"`
 }
+
+// NoForcedTimeout is the effective-infinity used where an underlying call needs
+// a finite deadline (DialRaw) but the operator asked for no forced timeout
+// (timeouts.* = 0). Cancellation still flows via ctx / CH teardown.
+const NoForcedTimeout = 365 * 24 * time.Hour
 
 // parseTimeout parses a TimeoutsConfig field: empty / "0" / negative / invalid
 // → 0, meaning "no forced timeout" to the consumer.
@@ -571,10 +588,12 @@ func parseTimeout(s string) time.Duration {
 
 // RestoreDeadline / CHApiDeadline / APIReadyDeadline / VAReportDeadline resolve
 // the corresponding timeouts.* field; 0 = no forced timeout.
-func (c *SandboxConfig) RestoreDeadline() time.Duration  { return parseTimeout(c.Timeouts.Restore) }
-func (c *SandboxConfig) CHApiDeadline() time.Duration    { return parseTimeout(c.Timeouts.CHApi) }
-func (c *SandboxConfig) APIReadyDeadline() time.Duration { return parseTimeout(c.Timeouts.APIReady) }
-func (c *SandboxConfig) VAReportDeadline() time.Duration { return parseTimeout(c.Timeouts.VAReport) }
+func (c *SandboxConfig) RestoreDeadline() time.Duration   { return parseTimeout(c.Timeouts.Restore) }
+func (c *SandboxConfig) CHApiDeadline() time.Duration     { return parseTimeout(c.Timeouts.CHApi) }
+func (c *SandboxConfig) APIReadyDeadline() time.Duration  { return parseTimeout(c.Timeouts.APIReady) }
+func (c *SandboxConfig) VAReportDeadline() time.Duration  { return parseTimeout(c.Timeouts.VAReport) }
+func (c *SandboxConfig) PingDeadline() time.Duration      { return parseTimeout(c.Timeouts.Ping) }
+func (c *SandboxConfig) AppNotifyDeadline() time.Duration { return parseTimeout(c.Timeouts.AppNotify) }
 
 // validate rejects malformed (non-empty, unparseable) timeouts.* durations.
 func (t TimeoutsConfig) validate() error {
@@ -583,6 +602,8 @@ func (t TimeoutsConfig) validate() error {
 		{"timeouts.ch_api", t.CHApi},
 		{"timeouts.api_ready", t.APIReady},
 		{"timeouts.va_report", t.VAReport},
+		{"timeouts.ping", t.Ping},
+		{"timeouts.app_notify", t.AppNotify},
 	} {
 		if f.val == "" {
 			continue

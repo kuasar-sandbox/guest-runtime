@@ -276,6 +276,37 @@ func (r ReqSnapshot) Percentile(p float64) uint64 {
 func (r ReqSnapshot) P50() uint64 { return r.Percentile(0.50) }
 func (r ReqSnapshot) P99() uint64 { return r.Percentile(0.99) }
 
+// Sub returns the per-window delta between this (newer) snapshot and prev:
+// counts/bytes/sum/buckets subtract. The window LatMaxNs is exact when a new
+// peak was recorded this window (r.LatMaxNs > prev.LatMaxNs); otherwise it
+// falls back to the upper bound of the highest non-empty window bucket. Lets a
+// periodic reporter show per-interval latency rather than cumulative.
+func (r ReqSnapshot) Sub(prev ReqSnapshot) ReqSnapshot {
+	w := ReqSnapshot{
+		Count:    r.Count - prev.Count,
+		Bytes:    r.Bytes - prev.Bytes,
+		ErrCount: r.ErrCount - prev.ErrCount,
+		LatSumNs: r.LatSumNs - prev.LatSumNs,
+	}
+	var hi uint64
+	for i := range r.LatBuckets {
+		w.LatBuckets[i] = r.LatBuckets[i] - prev.LatBuckets[i]
+		if w.LatBuckets[i] > 0 {
+			if i < numLatencyBuckets {
+				hi = latencyBucketsNs[i]
+			} else {
+				hi = latencyBucketsNs[numLatencyBuckets-1] * 2
+			}
+		}
+	}
+	if r.LatMaxNs > prev.LatMaxNs {
+		w.LatMaxNs = r.LatMaxNs
+	} else {
+		w.LatMaxNs = hi
+	}
+	return w
+}
+
 // StatsSnapshot is an immutable view of a Stats.
 type StatsSnapshot struct {
 	Name          string

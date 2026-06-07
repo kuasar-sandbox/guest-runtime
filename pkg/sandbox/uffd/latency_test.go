@@ -54,6 +54,46 @@ func TestLatHist_Percentiles(t *testing.T) {
 	}
 }
 
+func TestLatSnapshot_Sub_NewPeak(t *testing.T) {
+	var h latHist
+	for range 10 {
+		h.record(1_000) // 10 @ 1µs
+	}
+	prev := h.snapshot()
+	for range 5 {
+		h.record(500_000_000) // 5 @ 500ms — a new peak this window
+	}
+	w := h.snapshot().Sub(prev)
+	if w.Count != 5 {
+		t.Errorf("window count = %d, want 5 (only the new samples)", w.Count)
+	}
+	// The window excludes the old fast samples, so p50 sits in the slow band.
+	if w.P50() < 100_000_000 {
+		t.Errorf("window p50 = %dns, want ≥100ms (old 1µs samples must not count)", w.P50())
+	}
+	if w.MaxNs != 500_000_000 {
+		t.Errorf("window max = %dns, want exactly 500ms (new peak)", w.MaxNs)
+	}
+}
+
+func TestLatSnapshot_Sub_NoNewPeak(t *testing.T) {
+	var h latHist
+	h.record(800_000_000) // cumulative peak 800ms
+	prev := h.snapshot()
+	for range 3 {
+		h.record(2_000) // 3 @ 2µs — no new peak this window
+	}
+	w := h.snapshot().Sub(prev)
+	if w.Count != 3 {
+		t.Errorf("window count = %d, want 3", w.Count)
+	}
+	// No new peak → window max falls back to the highest non-empty bucket bound
+	// (2µs), NOT the stale cumulative 800ms.
+	if w.MaxNs != 2_000 {
+		t.Errorf("window max = %dns, want 2000 (2µs bucket bound, not the cumulative peak)", w.MaxNs)
+	}
+}
+
 func TestLatHist_Overflow(t *testing.T) {
 	var h latHist
 	h.record(5_000_000_000) // 5s → overflow bucket (>1s)

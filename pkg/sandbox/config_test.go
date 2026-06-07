@@ -189,6 +189,7 @@ func TestTimeouts_Resolution(t *testing.T) {
 	for _, got := range []time.Duration{
 		zero.RestoreDeadline(), zero.CHApiDeadline(),
 		zero.APIReadyDeadline(), zero.VAReportDeadline(),
+		zero.PingDeadline(), zero.AppNotifyDeadline(),
 	} {
 		if got != 0 {
 			t.Errorf("unset timeout resolved to %v, want 0 (no forced timeout)", got)
@@ -198,6 +199,7 @@ func TestTimeouts_Resolution(t *testing.T) {
 	// Explicit values parse; "0" and garbage both fall back to 0.
 	c := SandboxConfig{Timeouts: TimeoutsConfig{
 		Restore: "90s", CHApi: "0", APIReady: "", VAReport: "bogus",
+		Ping: "2s", AppNotify: "200ms",
 	}}
 	if c.RestoreDeadline() != 90*time.Second {
 		t.Errorf("restore = %v, want 90s", c.RestoreDeadline())
@@ -207,6 +209,12 @@ func TestTimeouts_Resolution(t *testing.T) {
 	}
 	if c.VAReportDeadline() != 0 {
 		t.Errorf("va_report bogus = %v, want 0 (resolver tolerates; validate rejects)", c.VAReportDeadline())
+	}
+	if c.PingDeadline() != 2*time.Second {
+		t.Errorf("ping = %v, want 2s", c.PingDeadline())
+	}
+	if c.AppNotifyDeadline() != 200*time.Millisecond {
+		t.Errorf("app_notify = %v, want 200ms", c.AppNotifyDeadline())
 	}
 }
 

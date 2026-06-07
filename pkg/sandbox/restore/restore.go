@@ -493,6 +493,8 @@ func Run(ctx context.Context, opts Options) (int, error) {
 		StatsJSONPath:      opts.StatsJSONPath,
 		StatsInterval:      opts.StatsInterval,
 		VAReportDeadline:   opts.HostCfg.VAReportDeadline(),
+		PingTimeout:        opts.HostCfg.PingDeadline(),
+		AppNotifyDeadline:  opts.HostCfg.AppNotifyDeadline(),
 
 		CapBytes:   int64(capBytes),
 		UffdSource: source,
@@ -565,7 +567,7 @@ func Run(ctx context.Context, opts Options) (int, error) {
 			// via ctx → CH teardown closing the vsock conn).
 			restoreDeadline := opts.HostCfg.RestoreDeadline()
 			if restoreDeadline <= 0 {
-				restoreDeadline = noForcedTimeout
+				restoreDeadline = sandbox.NoForcedTimeout
 			}
 			muxConn, muxSpec, err := sandbox.OpenMUXViaRestore(pc.Pinger.Client, 1, netSpec, snapCfg.ProtoFiles(), restoreDeadline)
 			if err != nil {
@@ -629,11 +631,6 @@ func fileSnapshotRef(path string) string {
 	}
 	return "file://" + filepath.Base(real)
 }
-
-// noForcedTimeout is the effective-infinity used where an underlying call
-// (DialRaw) requires a finite deadline but the operator asked for no forced
-// timeout (timeouts.* = 0). Cancellation still flows via ctx → CH teardown.
-const noForcedTimeout = 365 * 24 * time.Hour
 
 // waitAPI polls the CH API socket until it accepts. deadline <= 0 means no
 // forced timeout: poll until ctx is cancelled (e.g. CH exit / SIGINT). A

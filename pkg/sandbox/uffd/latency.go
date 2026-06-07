@@ -63,26 +63,53 @@ func (h *latHist) record(latNs uint64) {
 	h.buckets[bkt].Add(1)
 }
 
-// latSnapshot is an immutable view of a latHist.
-type latSnapshot struct {
+// LatSnapshot is an immutable view of a latency histogram (cumulative when
+// taken from a latHist; a windowed delta when produced by Sub).
+type LatSnapshot struct {
 	Count   uint64
 	SumNs   uint64
 	MaxNs   uint64
 	Buckets [numLatencyBuckets + 1]uint64
 }
 
-func (h *latHist) snapshot() latSnapshot {
-	s := latSnapshot{Count: h.count.Load(), SumNs: h.sumNs.Load(), MaxNs: h.maxNs.Load()}
+func (h *latHist) snapshot() LatSnapshot {
+	s := LatSnapshot{Count: h.count.Load(), SumNs: h.sumNs.Load(), MaxNs: h.maxNs.Load()}
 	for i := range h.buckets {
 		s.Buckets[i] = h.buckets[i].Load()
 	}
 	return s
 }
 
+// Sub returns the per-window delta between this (newer) snapshot and prev: the
+// counts/sum/buckets subtract. The window MaxNs is exact when a new peak was
+// recorded this window (s.MaxNs > prev.MaxNs); otherwise it falls back to the
+// upper bound of the highest non-empty window bucket (the cumulative max can't
+// be subtracted). This makes each periodic report cover only the last interval.
+func (s LatSnapshot) Sub(prev LatSnapshot) LatSnapshot {
+	w := LatSnapshot{Count: s.Count - prev.Count, SumNs: s.SumNs - prev.SumNs}
+	var hi uint64
+	for i := range s.Buckets {
+		w.Buckets[i] = s.Buckets[i] - prev.Buckets[i]
+		if w.Buckets[i] > 0 {
+			if i < numLatencyBuckets {
+				hi = latencyBucketsNs[i]
+			} else {
+				hi = latencyBucketsNs[numLatencyBuckets-1] * 2
+			}
+		}
+	}
+	if s.MaxNs > prev.MaxNs {
+		w.MaxNs = s.MaxNs // a new peak occurred this window — exact
+	} else {
+		w.MaxNs = hi // no new peak; coarse (bucket upper bound)
+	}
+	return w
+}
+
 // Percentile estimates the requested percentile (0..1) by linear interpolation
 // across the buckets, clamped to the observed max. Returns 0 with no samples.
 // Same algorithm as pkg/vhost ReqSnapshot.Percentile.
-func (s latSnapshot) Percentile(p float64) uint64 {
+func (s LatSnapshot) Percentile(p float64) uint64 {
 	var total uint64
 	for _, v := range s.Buckets {
 		total += v
@@ -128,5 +155,5 @@ func (s latSnapshot) Percentile(p float64) uint64 {
 	return result
 }
 
-func (s latSnapshot) P50() uint64 { return s.Percentile(0.50) }
-func (s latSnapshot) P99() uint64 { return s.Percentile(0.99) }
+func (s LatSnapshot) P50() uint64 { return s.Percentile(0.50) }
+func (s LatSnapshot) P99() uint64 { return s.Percentile(0.99) }

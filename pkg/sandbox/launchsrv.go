@@ -41,9 +41,17 @@ type LaunchServer struct {
 	// StartTimeout bounds the wait for launch_ack after the launch spec is
 	// sent. The guest sends launch_ack only after applying the whole spec
 	// (network, mounts, files, and possibly long-running init), so this
-	// must accommodate init. 0 → no deadline (wait indefinitely). The
-	// hello read keeps a short probe deadline regardless.
+	// must accommodate init. 0 → no deadline (wait indefinitely). The first
+	// read (hello / app notifications) uses AppNotifyDeadline.
 	StartTimeout time.Duration
+
+	// AppNotifyDeadline bounds the read of ONE guest→host launch-port message
+	// (the hello probe, and each app_started / app_exited / mem_report). 0 = no
+	// forced timeout: the host blocks reading until the guest sends or the conn
+	// closes, so a guest briefly blocked on a slow page-in isn't dropped
+	// mid-message. Each connection has its own goroutine, so a hung conn is
+	// isolated (and unblocks on CH teardown).
+	AppNotifyDeadline time.Duration
 
 	// OnLaunchAck fires when the guest reports it has applied the launch
 	// spec (network configured, ready to fork the app). Optional; nil →
@@ -159,11 +167,14 @@ func (s *LaunchServer) LaunchAckDone() <-chan struct{} { return s.launchAckDone 
 // handleConn services one connection. It returns true iff it handed the
 // connection off (to OnMUXReady) and the caller must NOT close it.
 func (s *LaunchServer) handleConn(conn *net.UnixConn) (handedOff bool) {
-	// Short probe deadline for the first read (hello). Catches a guest that
-	// connects but never speaks. The launch_ack read below uses a separate,
-	// configurable deadline because it spans the guest's whole spec-apply
-	// (incl. init). Cleared before hand-off.
-	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+	// Deadline for the first read (hello / app notification). AppNotifyDeadline
+	// = 0 → no forced timeout (don't drop a guest that's briefly blocked on a
+	// slow page-in before it sends); a positive value catches a guest that
+	// connects but never speaks. The launch_ack read below uses StartTimeout
+	// (spans the guest's whole spec-apply). Cleared before hand-off.
+	if s.AppNotifyDeadline > 0 {
+		_ = conn.SetDeadline(time.Now().Add(s.AppNotifyDeadline))
+	}
 
 	msg, err := proto.ReadMessage(conn)
 	if err != nil {

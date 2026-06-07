@@ -10,61 +10,74 @@ import (
 )
 
 // lazyStatsTicker periodically logs lazy-load progress so a slow remote store
-// or cache (or a backed-up fault queue) is visible in real time rather than
-// only in the on-exit stats dump. Each tick reports, since the previous tick:
-// uffd page-in fault/page rates, the live in-flight + queued-fault gauges, the
-// page-in FETCH latency distribution (p50/p99/max, cumulative), and per vhost
-// backend the read IOPS / throughput / p99. Ticks with no activity since the
-// last one are skipped, so a warm, fully-paged sandbox stays quiet. Stops when
-// ctx is cancelled (CH exit / run unwind).
+// or cache (or a backed-up fault queue) is visible in real time. Each printed
+// line covers ONLY the interval since the previous line — windowed rates and
+// windowed page-in / block-read latency percentiles, never since-start.
 //
-// getUffd returns the uffd handler or nil (it is constructed asynchronously on
-// the first va_report); the ticker tolerates nil until then.
-func lazyStatsTicker(ctx context.Context, interval time.Duration, getUffd func() *uffd.Handler, srv0, srv1 *vhost.Server, logf func(string, ...any)) {
-	t := time.NewTicker(interval)
-	defer t.Stop()
-	secs := interval.Seconds()
+// Cadence is adaptive: it polls at `fast` (min(base,2s)) while there is
+// activity — so a busy or slow phase reports promptly — and backs off to `base`
+// (the configured --stats-interval) after a couple of idle polls. A poll whose
+// window saw no faults, no reads, and nothing in flight prints nothing, so a
+// warm, fully-paged sandbox is silent. The first poll starts in fast mode to
+// catch the cold-start / restore page-in burst. Stops when ctx is cancelled.
+//
+// getUffd returns the uffd handler or nil (constructed asynchronously on the
+// first va_report); the ticker tolerates nil until then. Baselines advance
+// every poll, so windows are contiguous and idle (zero-delta) gaps lose nothing.
+func lazyStatsTicker(ctx context.Context, base time.Duration, getUffd func() *uffd.Handler, srv0, srv1 *vhost.Server, logf func(string, ...any)) {
+	fast := min(base, 2*time.Second)
+	const idleBackoffPolls = 2 // consecutive idle polls before backing off to base
+
+	sleep := fast
 	var prevU uffd.LazyStats
 	var prev0, prev1 vhost.StatsSnapshot
-	haveU := false
+	last := time.Now()
+	idle := 0
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-t.C:
+		case <-time.After(sleep):
+		}
+		now := time.Now()
+		elapsed := now.Sub(last).Seconds()
+		if elapsed <= 0 {
+			elapsed = sleep.Seconds()
 		}
 
+		// Sample, then compute the window against the PREVIOUS baseline
+		// before advancing it.
 		s0 := srv0.SnapshotStats()
 		s1 := srv1.SnapshotStats()
+		var u uffd.LazyStats
+		if h := getUffd(); h != nil {
+			u = h.LazyStats()
+		}
+
 		d0, b0 := s0.Read.Count-prev0.Read.Count, s0.Read.Bytes-prev0.Read.Bytes
 		d1, b1 := s1.Read.Count-prev1.Read.Count, s1.Read.Bytes-prev1.Read.Bytes
-		prev0, prev1 = s0, s1
+		w0, w1 := s0.Read.Sub(prev0.Read), s1.Read.Sub(prev1.Read)
+		faultDelta := (u.FaultsAbsent + u.FaultsReleased + u.FaultsLoaded) -
+			(prevU.FaultsAbsent + prevU.FaultsReleased + prevU.FaultsLoaded)
+		pageDelta := (u.PagesCopied + u.PagesZeroed) - (prevU.PagesCopied + prevU.PagesZeroed)
+		win := u.PageIn.Sub(prevU.PageIn)
+		active := faultDelta > 0 || d0 > 0 || d1 > 0 || u.Inflight > 0 || u.QueueDepth > 0
 
-		var faultRate, pageRate uint64
-		var inflight int64
-		var queued int
-		var p50, p99, pmax uint64
-		if h := getUffd(); h != nil {
-			u := h.LazyStats()
-			if haveU {
-				faultRate = (u.FaultsAbsent + u.FaultsReleased + u.FaultsLoaded) -
-					(prevU.FaultsAbsent + prevU.FaultsReleased + prevU.FaultsLoaded)
-				pageRate = (u.PagesCopied + u.PagesZeroed) - (prevU.PagesCopied + prevU.PagesZeroed)
+		prevU, prev0, prev1, last = u, s0, s1, now
+
+		if !active {
+			idle++
+			if idle >= idleBackoffPolls {
+				sleep = base
 			}
-			inflight, queued = u.Inflight, u.QueueDepth
-			p50, p99, pmax = u.PageIn.P50(), u.PageIn.P99(), u.PageIn.MaxNs
-			prevU, haveU = u, true
-		}
-
-		// Quiet once warm: nothing paged or read this interval and nothing in flight.
-		if faultRate == 0 && d0 == 0 && d1 == 0 && inflight == 0 && queued == 0 {
 			continue
 		}
+		idle, sleep = 0, fast
 		logf("[lazy] uffd %.0f fault/s %.0f pgin/s inflight=%d queued=%d fetch_p50=%s p99=%s max=%s | %s %.0f rd/s %.1fMB/s p99=%s | %s %.0f rd/s %.1fMB/s p99=%s",
-			float64(faultRate)/secs, float64(pageRate)/secs, inflight, queued,
-			fmtNs(p50), fmtNs(p99), fmtNs(pmax),
-			s0.Name, float64(d0)/secs, float64(b0)/secs/1e6, fmtNs(s0.Read.P99()),
-			s1.Name, float64(d1)/secs, float64(b1)/secs/1e6, fmtNs(s1.Read.P99()))
+			float64(faultDelta)/elapsed, float64(pageDelta)/elapsed, u.Inflight, u.QueueDepth,
+			fmtNs(win.P50()), fmtNs(win.P99()), fmtNs(win.MaxNs),
+			s0.Name, float64(d0)/elapsed, float64(b0)/elapsed/1e6, fmtNs(w0.P99()),
+			s1.Name, float64(d1)/elapsed, float64(b1)/elapsed/1e6, fmtNs(w1.P99()))
 	}
 }
 
