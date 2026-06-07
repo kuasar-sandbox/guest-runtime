@@ -32,7 +32,7 @@ const MaxBatchPages = 256
 const MaxBatchBytes = MaxBatchPages * PageSize
 
 // Config gathers everything the handler needs from the caller. Memfd /
-// BackendVA / Size come from pkg/sandbox/memory.Memfd.
+// BackendVA / Size come from pkg/memory.Memfd.
 type Config struct {
 	// Underlying memfd fd (for pread on the rare Loaded fault path).
 	MemfdFD int

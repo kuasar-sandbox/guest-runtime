@@ -52,7 +52,7 @@ type Options struct {
 	BaseRoot            string        // on-disk base root (fresh overlay diff); "/var/lib/sandbox" by default
 	StatsJSONPath       string        // if non-empty, dump uffd + per-backend stats here on exit
 	StatsInterval       time.Duration // if > 0, periodically log lazy-load stats; 0 = off
-	StdioMode           stdio.Mode    // CH process stdio wiring; see pkg/sandbox/stdio
+	StdioMode           stdio.Mode    // CH process stdio wiring; see pkg/stdio
 
 	// PingFatalThreshold: same semantics as sandbox.RunOptions —
 	// SIGTERM CH after N consecutive ping failures. 0 disables.

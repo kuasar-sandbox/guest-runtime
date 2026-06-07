@@ -4,7 +4,7 @@
 //
 // The ctl.sock wire protocol + listener that carries snapshot_request
 // from `sandbox-ctl snapshot` to the run process lives in
-// pkg/sandbox/ctl (shared with the exec path).
+// pkg/ctl (shared with the exec path).
 //
 // See sandbox.md §6 for the file format and timing.
 package snapshot

@@ -36,7 +36,7 @@ func OpenBlockReader(ctx context.Context, uri string, fetcher fetch.Fetcher) (vh
 
 // OpenDiskStream resolves a file:// or manifest:// disk URI into a fetch.Stream
 // and its size. Exported so callers outside this package (notably
-// pkg/sandbox/restore) can share the same code path. The caller owns the
+// pkg/restore) can share the same code path. The caller owns the
 // returned stream and must Close it (directly or via a StreamReader).
 func OpenDiskStream(ctx context.Context, uri string, fetcher fetch.Fetcher) (fetch.Stream, int64, error) {
 	scheme, value, ok := config.SchemeAndPath(uri)
@@ -59,7 +59,7 @@ func OpenDiskStream(ctx context.Context, uri string, fetcher fetch.Fetcher) (fet
 
 // OpenManifestStream resolves a manifest:// key reference (one key, or
 // several ':'-joined keys that overlay as layers) into a fetch.Stream and its
-// image size. Exported so callers (notably pkg/sandbox/restore for snapshot
+// image size. Exported so callers (notably pkg/restore for snapshot
 // memory bundles) can share the code path.
 //
 // fetcher's underlying store/cache client is shared with every read it

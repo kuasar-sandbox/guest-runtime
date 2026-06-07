@@ -1,6 +1,6 @@
 // Package proto defines the wire protocol for the sandbox-ctl ↔
 // sandbox-init control channel that runs over virtio-vsock, plus the
-// constants shared with the stdio MUX sub-protocol (pkg/sandbox/mux).
+// constants shared with the stdio MUX sub-protocol (pkg/mux).
 //
 // Two kinds of connections (docs/sandbox-runtime.md §4):
 //
@@ -18,14 +18,14 @@
 //	(2) The MUX long connection — at most one. The launch / restore /
 //	    attach operations DON'T close their connection after the *_ack:
 //	    it stays open and switches to the framed MUX sub-protocol
-//	    (pkg/sandbox/mux) which carries the app's stdin/stdout/stderr
+//	    (pkg/mux) which carries the app's stdin/stdout/stderr
 //	    (or a pty). See StdioSpec for what's negotiated in the *_ack.
 //
 //	(3) Forward long connections — 0..N. Each `sandbox-ctl run --connect`
 //	    port forward opens one reverse-channel conn per accepted local
 //	    connection: a `connect{ConnectSpec}` → `connect_ack` handshake,
 //	    then the conn switches to the fwd frame sub-protocol
-//	    (pkg/sandbox/fwd) which splices the bytes to a guest-side dial
+//	    (pkg/fwd) which splices the bytes to a guest-side dial
 //	    target with TCP half-close preserved (docs/sandbox-runtime.md §3.7).
 //
 // This package is dependency-light (stdlib only) so the guest
@@ -208,7 +208,7 @@ type ExecSpec struct {
 // the host-side listener that accepted the local connection. It backs
 // `sandbox-ctl run --connect` port forwarding. After connect_ack the
 // reverse-channel conn switches to the fwd frame sub-protocol
-// (pkg/sandbox/fwd), which carries the spliced bytes with TCP half-close
+// (pkg/fwd), which carries the spliced bytes with TCP half-close
 // preserved. Each accepted local connection gets its own ConnectSpec /
 // reverse-channel conn — forwards are concurrent and independent (the
 // port-forward analogue of exec sessions).

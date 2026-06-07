@@ -41,7 +41,7 @@ type RunOptions struct {
 	BaseRoot      string                 // on-disk base root (overlay diff); "/var/lib/sandbox" by default
 	StatsJSONPath string                 // if set, write vhost stats as JSON to this path on shutdown
 	StatsInterval time.Duration          // if > 0, periodically log lazy-load stats; 0 = off
-	StdioMode     stdio.Mode             // CH process stdio wiring; see pkg/sandbox/stdio
+	StdioMode     stdio.Mode             // CH process stdio wiring; see pkg/stdio
 
 	// PingFatalThreshold: after this many consecutive ping failures
 	// the host SIGTERMs CH so cmd.Wait() returns. 0 = disabled
@@ -572,7 +572,7 @@ func (h *SnapshotHandler) Handle(req ctl.Request) (ctl.Response, error) {
 }
 
 // handleSnapshotRequest executes one snapshot_request received via
-// ctl.sock. Wraps pkg/sandbox/snapshot.Take with the runtime state
+// ctl.sock. Wraps pkg/snapshot.Take with the runtime state
 // owned by Run. Upload mode opens a fresh manifest.IngesterCloser
 // here (per request) so the snapshot write path never shares a
 // connection pool with the long-lived disk read path.

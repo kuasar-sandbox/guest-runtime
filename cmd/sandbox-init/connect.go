@@ -5,7 +5,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/kuasar-sandbox/sandbox-runtime/pkg/sandbox/fwd"
+	"github.com/kuasar-sandbox/sandbox-runtime/pkg/fwd"
 	"github.com/kuasar-sandbox/sandbox-runtime/pkg/proto"
 )
 
@@ -13,7 +13,7 @@ import (
 // host-accepted local connection the host opens one reverse-channel conn
 // carrying `connect{ConnectSpec}`; this side dials the requested guest-side
 // target, acks, then splices the conn to the target via the fwd frame
-// sub-protocol (pkg/sandbox/fwd), which preserves TCP half-close. Sessions
+// sub-protocol (pkg/fwd), which preserves TCP half-close. Sessions
 // are concurrent (one goroutine per reverse conn) and independent of the
 // app and of each other — the port-forward analogue of exec sessions.
 

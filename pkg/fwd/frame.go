@@ -2,7 +2,7 @@
 // carries `sandbox-ctl run --connect` port-forward traffic over a
 // reverse-channel vsock connection (docs/sandbox-runtime.md §3.7 / §4).
 //
-// Unlike the stdio MUX (pkg/sandbox/mux), which multiplexes several
+// Unlike the stdio MUX (pkg/mux), which multiplexes several
 // fixed streams over one connection and therefore needs per-stream
 // windows, a forward connection is 1:1 with its vsock connection — one
 // logical byte stream per conn — so no stream IDs and no application

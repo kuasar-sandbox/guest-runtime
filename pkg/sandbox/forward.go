@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"github.com/kuasar-sandbox/sandbox-runtime/pkg/proto"
-	"github.com/kuasar-sandbox/sandbox-runtime/pkg/sandbox/fwd"
+	"github.com/kuasar-sandbox/sandbox-runtime/pkg/fwd"
 )
 
 // ForwardSpec is one parsed `--connect` directive: accept connections on

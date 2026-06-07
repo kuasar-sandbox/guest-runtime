@@ -18,7 +18,7 @@ import (
 // mmapBytes is the backend-process slice covering this region, sub-sliced
 // from a caller-supplied memfd-mapped slab (unified-memfd invariant,
 // §10.3). The backend does NOT own the mmap; the slab is provided by
-// pkg/sandbox/memory.
+// pkg/memory.
 type MemRegion struct {
 	GuestPhysAddr uint64
 	MemorySize    uint64
@@ -138,7 +138,7 @@ func ParseSetMemTable(payload []byte, fds []int) ([]MemRegion, error) {
 // BindRegions verifies each region's fd matches the expected memfd
 // inode and binds the region's mmapBytes slice as a sub-range of the
 // caller-supplied memfd slab (= sandbox-ctl's backendVA mmap of the
-// same memfd, see pkg/sandbox/memory.Memfd).
+// same memfd, see pkg/memory.Memfd).
 //
 // Returns an error if any fd's inode differs from expectedInode (the
 // unified-memfd invariant; §10.3) or if a region's [mmap_offset,

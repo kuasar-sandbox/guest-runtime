@@ -1,7 +1,7 @@
 // Package chapi provides a tiny HTTP/1.1 client over the cloud-hypervisor
 // api-socket (Unix Domain Socket). It is intentionally a leaf package
 // (only stdlib deps) so both pkg/sandbox (lifecycle, balloon) and
-// pkg/sandbox/snapshot can import it without creating a cycle.
+// pkg/snapshot can import it without creating a cycle.
 //
 // CH speaks plain HTTP/1.1 on the UDS exposed by --api-socket. The call
 // rate is low (one-shot per snapshot/shutdown), so a hand-rolled

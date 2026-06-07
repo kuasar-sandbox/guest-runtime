@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/kuasar-sandbox/sandbox-runtime/pkg/sandbox/fwd"
+	"github.com/kuasar-sandbox/sandbox-runtime/pkg/fwd"
 	"github.com/kuasar-sandbox/sandbox-runtime/pkg/proto"
 )
 

@@ -3,7 +3,7 @@
 // .md §3.5 / §4.5):
 //
 //  1. The application's stdin/stdout/stderr — or a single pty in tty
-//     mode — travel over the vsock stdio MUX (pkg/sandbox/mux). The host
+//     mode — travel over the vsock stdio MUX (pkg/mux). The host
 //     side: in tty mode put the controlling terminal in raw mode and
 //     bridge it byte-for-byte with the PTY stream (+ SIGWINCH →
 //     SET_WINSIZE); in pipe mode copy stdin → STDIN stream and STDOUT /

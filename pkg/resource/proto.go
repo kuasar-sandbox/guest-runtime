@@ -73,7 +73,7 @@ const (
 
 // Message is the typed envelope. Only fields relevant to Type are
 // populated. Length-prefix-JSON wire format matches the launch protocol
-// in pkg/sandbox/proto for consistency.
+// in pkg/proto for consistency.
 type Message struct {
 	Type  string `json:"type"`
 	Token string `json:"token,omitempty"`

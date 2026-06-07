@@ -4,7 +4,7 @@
 // process that owns the VMM.
 //
 // Wire format: [4 bytes LE length][JSON] — identical framing to the
-// vsock management protocol (pkg/sandbox/proto), kept separate because
+// vsock management protocol (pkg/proto), kept separate because
 // ctl.sock is a host-local UDS carrying host-side request types, not a
 // guest channel.
 //
@@ -13,7 +13,7 @@
 //   - snapshot_request — one request, one response, conn closes. The
 //     run process handles it via Server.SnapshotHandler.
 //   - exec_request — handshake (exec_request → exec_ack|error), then
-//     the SAME connection switches to the stdio MUX (pkg/sandbox/mux)
+//     the SAME connection switches to the stdio MUX (pkg/mux)
 //     end-to-end between `sandbox-ctl exec` and the guest. The run
 //     process pipes bytes through transparently after the ack.
 package ctl
