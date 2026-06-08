@@ -240,6 +240,9 @@ func TestRoundTrip_Connect(t *testing.T) {
 	cases := []*Message{
 		{Type: TypeConnect, Connect: &ConnectSpec{Address: "127.0.0.1:49983"}},
 		{Type: TypeConnect, Connect: &ConnectSpec{Network: "tcp6", Address: "[::1]:8080"}},
+		{Type: TypeConnect, Connect: &ConnectSpec{Network: "unix", Address: "/run/up.sock"}},
+		{Type: TypeConnect, Connect: &ConnectSpec{Network: "tcp", Address: "0.0.0.0:8080", Accept: true}},
+		{Type: TypeConnect, Connect: &ConnectSpec{Network: "unix", Address: "/run/up.sock", Accept: true}},
 		{Type: TypeConnectAck},
 	}
 	for _, m := range cases {

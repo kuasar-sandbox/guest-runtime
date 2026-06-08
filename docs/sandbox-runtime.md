@@ -301,7 +301,8 @@ quiesce 是 host `/vm.pause` 之前的最后一次清理机会,目标两件事:
 4. 拆除所有 `connect` 端口转发中继(§3.7):标记 quiescing 拒绝新 connect,逐条
    关闭 target 连接 + 反向通道 vsock 连接,后者带 SO_LINGER **阻塞至 socket 移除**
    ——与 MUX 同理,不留半开 vsock 残留。多会话**并发**关闭,有界于 quiesce 预算。
-   host 侧 Forwarder 同步暂停新建并收拢活跃中继的 host 半边
+   accept 模式额外关闭缓存的 guest listener(唤醒 park 中的 Accept,清空缓存,resume
+   后懒重建)。host 侧 Forwarder 同步暂停新建并收拢活跃中继 + pending accept 反向连接的 host 半边
 5. 在 MUX 连接上发起优雅关闭握手(§4.6):MUX_CLOSE → 收 MUX_CLOSE_ACK → close(MUX)。
    close 带 SO_LINGER,**阻塞至该 vsock socket 真正从内核移除**(host 响应方回 ACK
    后立即关闭其连接,RST 回到 guest → 这端 socket 移除),而非"发起关闭即返回"——
@@ -410,11 +411,29 @@ restore(§4.3 `attach` / `restore`)后解除拒绝、重新受理。
 
 ### 3.7 connect 端口转发会话(`sandbox-ctl run --connect`)
 
-`sandbox-ctl run --connect LOCAL:HOST:PORT`(可重复)把一个 **host 本地端点**转发
-到沙箱内的一个目标地址:host 在 `LOCAL` 上 listen,对**每条**被接受的本地连接开一条
-反向通道发 `connect{ConnectSpec}`(§4.3);sandbox-init `net.Dial` 目标地址,回
-`connect_ack`,该连接随即成为这条转发的**独立长连接数据通道**。一本地连接 ↔ 一反向
-vsock 连接 ↔ 一目标连接,全程 1:1;多条转发并发独立——是 exec 会话的端口转发类比。
+`sandbox-ctl run --connect`(可重复)把一个 **host 本地端点** `LOCAL` 与沙箱内一个
+端点对接。**host 侧四种模式完全一致**:在 `LOCAL` 上 listen,对**每条**被接受的本地
+连接开一条反向通道发 `connect{ConnectSpec}`(§4.3),该连接握手(`connect_ack`)后成为
+这条转发的**独立长连接数据通道**(fwd 帧子协议,§4.7,保留 TCP 半关闭)。模式只区分
+**guest 侧拿到那条目标连接的方式**——dial 一个已存在的服务,还是 listen 等一个连入:
+
+| 写法 | guest 目标动作 | 用途 |
+|---|---|---|
+| `LOCAL:host:port` | `Dial` tcp | host 客户端 → 沙箱内已 listen 的 tcp 服务 |
+| `LOCAL:/path`、`LOCAL:@n` | `Dial` unix | host 客户端 → 沙箱内已 listen 的 uds 服务 |
+| `LOCAL::host:port` | `Listen`+`Accept` tcp | host 客户端 ↔ 沙箱内主动连入的 tcp 客户端 |
+| `LOCAL::/path`、`LOCAL::@n` | `Listen`+`Accept` unix | host 客户端 ↔ 沙箱内主动连入的 uds 客户端 |
+
+**语法**。`LOCAL` 在第一个 `:` 处切出(自身不得含 `:`):`fd=N`(继承来的**已 listen**
+socket,host 用 `net.FileListener` 包装后关掉原 fd,避免泄漏进 CH)或 UDS 路径(`@name`
+抽象;非抽象先删陈旧节点)。其后以 `:` 起头(即 `LOCAL::TARGET`)选 **accept 模式**,
+否则 **dial 模式**。`TARGET` 以 `/` 或 `@` 起头 ⇒ **unix**(绝对/抽象路径),否则 ⇒ **tcp**
+`host:port`(`net.SplitHostPort`,支持 `[::1]:port`;相对路径 unix 不支持)。一本地连接 ↔
+一反向 vsock 连接 ↔ 一目标连接,全程 1:1;多条并发独立——是 exec 会话的端口转发类比。
+
+**dial 模式**(`LOCAL:TARGET`)。guest 收 `connect` 即 `net.Dial(network, address)`
+(5s 内,须 < `proto.DeadlineConnect`),成功回 `connect_ack`;host 用 `DeadlineConnect`
+覆盖整个握手。
 
 ```
  本地客户端       sandbox-ctl run (host)         CH proxy      sandbox-init (guest)       目标
@@ -429,10 +448,30 @@ vsock 连接 ↔ 一目标连接,全程 1:1;多条转发并发独立——是 ex
     │ ◄═══════════ fwd 帧子协议(§4.7),保留 TCP 半关闭 ════════════════════►│
 ```
 
-**LOCAL 端点**。`LOCAL` 在第一个 `:` 处切出,故其自身不得含 `:`:要么是 `fd=N`
-(继承来的**已 listen** socket,host 用 `net.FileListener` 包装后关掉原 fd,避免泄漏
-进 CH),要么是 UDS 路径(`@name` 为抽象命名空间;非抽象则先删陈旧节点再 listen)。
-目标 `HOST:PORT` 用 `net.SplitHostPort` 解析,支持 `[::1]:port` IPv6 字面量。
+**accept 模式**(`LOCAL::TARGET`)。guest 收 `connect{accept}` 时在 `address` 上 `Listen`
+(**懒创建**:首条用到时建,按 `(network,address)` 缓存复用)并 `Accept` 一条;`Accept`
+返回(沙箱内有 client 连入)**才**回 `connect_ack`。`Accept` 可**无限期阻塞**,故:host 发完
+`connect` 即清握手 deadline、**无限期 park** 等 `connect_ack`,并把这条 pre-relay 反向连接
+登记进 `Forwarder.pending`,使快照/关停能收拢它;guest 把这条**驻留中**会话登记进 connReg
+(relay 暂空),待 `Accept` 返回再 promote 为中继。
+
+```
+ 本地客户端       sandbox-ctl run (host)         CH proxy      sandbox-init (guest)    沙箱内 client
+    │ connect        │                                            │ Listen(address) 懒建+缓存
+    ├───────────────►│ accept(UDS/fd)                             │
+    │                │ DialRaw vsock + "CONNECT 5000\n"           │
+    │                ├──────────────────────────────►│ accept :5000│
+    │                │ connect{accept,addr:"/run/up.sock"}│──────►│ Accept(address) ◄────────┤ connect
+    │                │  (park,无 deadline)             │          │  └ 返回 connB            │
+    │                │ connect_ack │ (或 error)        │◄──────────┤                          │
+    │                │◄──────────────────────────────┤            │
+    │ ◄═══════════ fwd 帧子协议(§4.7),保留 TCP 半关闭 ═══════════════════════════════════►│
+```
+
+**host-leads 语义**。accept 模式 guest 侧 listener **懒创建**——某条转发首次收到 host 的
+`connect{accept}` 才 bind,此后常驻(直到 quiesce)。故每条转发的**首次配对须 host 先到**;
+此后 listener 常驻,其 backlog 可吸收"沙箱内 client 先连"的情形。沙箱内 client 在 listener
+尚未建立时连 `address` 会被拒(`ECONNREFUSED`)。
 
 **数据通道为何加帧**。转发要做**通用**端口转发,须忠实保留 TCP 半关闭
 (`shutdown(SHUT_WR)`:一端发完仍可继续收)。但 CH hybrid vsock proxy 是用户态字节
@@ -444,10 +483,12 @@ vsock 连接 ↔ 一目标连接,全程 1:1;多条转发并发独立——是 ex
 
 **与 snapshot 的关系**。转发中继与应用 MUX 同列入 quiesce 拆除(§3.4 step 4):
 快照不能带在飞的转发连接,否则 restore 出来无对端、成半开 vsock 残留。quiesce 时
-guest 标记 quiescing 拒绝新 connect,逐条关 target + vsock(后者 SO_LINGER 确认拆除),
-host 侧 Forwarder 暂停新建并收拢活跃中继;`resume`/`restore`/`attach`(§4.3)后解除
-拒绝、重新受理。host 的转发 listener 本身**不**随 quiesce 关闭——同 guest 的反向通道
-listener,跨快照存活,restore 进程以同样 `--connect` 重新接管。
+guest 标记 quiescing 拒绝新 connect,逐条关 target + vsock(后者 SO_LINGER 确认拆除);
+**accept 模式额外**关闭所有缓存的 accept listener(唤醒 park 中的 `Accept`,其会话已在
+connReg 中一并拆除)并清空缓存——listener 不随快照留存,resume 后**懒重建**。host 侧
+Forwarder 暂停新建,并收拢活跃中继**与 pending 的 accept 反向连接**;`resume`/`restore`/
+`attach`(§4.3)后解除拒绝、重新受理(并 reopen accept listener 缓存)。host 的转发
+listener 本身**不**随 quiesce 关闭——跨快照存活,restore 进程以同样 `--connect` 重新接管。
 
 ## 4. vsock 控制面 + console MUX 协议
 
@@ -466,8 +507,9 @@ listener,跨快照存活,restore 进程以同样 `--connect` 重新接管。
         │  each exec: its own independent short-lived MUX — 0..N concurrent (§3.6)
         │  wire: [stream:u8][type:u8][len:u16 BE][payload]   ·   per-stream flow control
 
-  (3) forward long-conn      — splices one port-forward connection to a guest target
-        │  born from a `connect` conn, which stays open after connect_ack and
+  (3) forward long-conn      — splices one port-forward connection to a guest endpoint
+        │  born from a `connect` conn (guest dials the target, or accepts on it
+        │  for `LOCAL::TARGET`), which stays open after connect_ack and
         │  switches to the fwd frame sub-protocol                     (§3.7 / §4.7)
         │  one per accepted `--connect` local connection — 0..N concurrent
         │  wire: [type:u8][len:u16 BE][payload]   ·   TCP half-close preserved, no window
@@ -524,7 +566,7 @@ vsock 端口固定 `5000`,**两个方向都复用同一端口号**,身份按方�
 | **恢复后** | host→guest | `restore{epoch, wallclock_ns, network?, files?}` → `restore_ack{stdio, app_state}` | **升级 MUX** | 快照恢复 vCPU 起跑后 host 通知 guest;应用此时仍处 freezer 冻结态(冻结态随快照保存,`/vm.resume` 不解冻);`restore` 携带 host 发送前一刻的墙钟 `wallclock_ns`,guest 收到后先 `clock_settime` 把 `CLOCK_REALTIME` 跳到该值(CH 把快照里的旧钟原样载回,不纠正则落后整个静置区间;单调钟不受影响);若带 `network`,以 **flush-and-replace** 重配 L3(克隆取新 IP/MTU/nexthop/hostname;MAC 沿用快照设备状态不变);若带 `files`,把该实例专属文件(per-instance secret / resolv.conf)注入(同冷启动的内存盘 + bind 机制,仅落克隆内存、不入黄金快照)。两者均 best-effort + 记日志、thaw 前完成;回 `restore_ack`(ATTACH_ACK 的超集 + "恢复完成"信号,host 据此判定 restore 完成)、重连 MUX,**最后 thaw 应用**(write `cgroup.freeze=0`)——故应用绝不会观察到旧墙钟、错误网络、缺失的 per-instance 文件或未重连的 MUX。**RNG 重播种仍 deferred(未实现)**;该连接成为新 MUX |
 | **MUX 重连** | host→guest | `attach{epoch}` → `attach_ack{stdio, app_state}` | **升级 MUX** | 纯 stdio-MUX 传输重连:MUX 因 vsock 异常断了,host 拨新连接重建;guest 优雅关旧 MUX(已断则硬丢)、回 ack,该连接成为新 MUX(§4.6)。**attach ≠ 快照后 resume**——活 VM 上从未 quiesce 的断线兜底也走它。thaw 不属 attach 语义,而属 quiesce 生命周期(freeze 的逆),**由 guest 自身冻结状态驱动**:仍冻结才补 thaw(仅 `resume_after=true` 同进程续跑路径——VM 原地 resume,attach 恰为首个 post-resume 接触),活 VM 重连本未冻结即跳过 |
 | **执行命令** | host→guest | `exec{spec}` → `exec_ack{stdio}` | **升级 MUX(独立会话)** | guest 为这条 `exec` 起一个兄弟进程并准备其 stdio,回 `exec_ack`,该连接成为这次 exec 会话**独立**的 MUX;并发多条互不影响;命令结束 guest 在 MUX 上发 EXIT_STATUS 再走 §4.6 关闭。详见 §3.6 |
-| **端口转发** | host→guest | `connect{spec}` → `connect_ack` | **升级转发数据通道** | guest 为这条 `connect` 拨 `ConnectSpec.address` 目标并准备中继,回 `connect_ack`,该连接成为这条转发的 fwd 帧数据通道(§4.7),保留 TCP 半关闭;并发多条互不影响;quiesce 时主动拆除(§3.4)。详见 §3.7 |
+| **端口转发** | host→guest | `connect{spec}` → `connect_ack` | **升级转发数据通道** | guest 为这条 `connect` 取得 `ConnectSpec.address` 上的目标连接——dial(默认)或 `Accept`(`spec.accept`,accept 模式可无限期阻塞,host 无 deadline park)——回 `connect_ack`,该连接成为这条转发的 fwd 帧数据通道(§4.7),保留 TCP 半关闭;并发多条互不影响;quiesce 时主动拆除(§3.4)。详见 §3.7 |
 | `error` | 任意 | (终止) | 关 | 任一端拒绝/出错的兜底响应,`msg` 人类可读 |
 
 `ATTACH` 仅用于 sandbox-ctl 自身的可靠性兜底(同一进程在 MUX 连接坏掉后重建转发),
@@ -541,7 +583,7 @@ JSON 可读、调试友好;消息量极少,无需 protobuf 工具链。
   "phase":    "ready",                 // hello: optional hint
   "launch":   { ... LaunchSpec ... },  // launch (含 stdio 节,见 §5.1)
   "exec":     { "argv":[...], "env":{}, "cwd":"", "stdio":{} },  // exec: ExecSpec(§3.6)
-  "connect":  { "network":"tcp", "address":"127.0.0.1:49983" },  // connect: ConnectSpec(§3.7)
+  "connect":  { "network":"tcp", "address":"127.0.0.1:49983", "accept":false },  // connect: ConnectSpec(§3.7; accept=true ⇒ guest Listen+Accept)
   "stdio":    { ... },                 // launch_ack / restore_ack / attach_ack / exec_ack: 实际启用的 channel 集合
   "app_state":"running",               // restore_ack / attach_ack: running | exited{code,term_signal}
   "pid":      4711,                    // app_started

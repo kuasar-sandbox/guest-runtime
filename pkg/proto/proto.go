@@ -203,22 +203,36 @@ type ExecSpec struct {
 
 // --- ConnectSpec ------------------------------------------------------
 
-// ConnectSpec is the payload of a `connect` reverse-channel op: open a
-// stream connection from inside the sandbox to Address and splice it to
-// the host-side listener that accepted the local connection. It backs
-// `sandbox-ctl run --connect` port forwarding. After connect_ack the
-// reverse-channel conn switches to the fwd frame sub-protocol
-// (pkg/fwd), which carries the spliced bytes with TCP half-close
-// preserved. Each accepted local connection gets its own ConnectSpec /
-// reverse-channel conn — forwards are concurrent and independent (the
-// port-forward analogue of exec sessions).
+// ConnectSpec is the payload of a `connect` reverse-channel op: obtain one
+// guest-side stream connection at Address and splice it to the host-side
+// listener that accepted the local connection. It backs `sandbox-ctl run
+// --connect` port forwarding. How the guest obtains that connection is set
+// by Accept (docs/sandbox-runtime.md §3.7):
+//
+//   - Accept == false (dial mode, `LOCAL:TARGET`): guest `net.Dial`s
+//     Address — reaches a server already listening inside the sandbox.
+//   - Accept == true (accept mode, `LOCAL::TARGET`): guest `Listen`s on
+//     Address (lazily, once per address, cached) and `Accept`s one
+//     connection — pairs the host client with a guest client that connects
+//     out to Address. The accept may block arbitrarily long, so the host
+//     parks for connect_ack without the dial deadline.
+//
+// After connect_ack the reverse-channel conn switches to the fwd frame
+// sub-protocol (pkg/fwd), which carries the spliced bytes with TCP
+// half-close preserved. Each accepted local connection gets its own
+// ConnectSpec / reverse-channel conn — forwards are concurrent and
+// independent (the port-forward analogue of exec sessions).
 type ConnectSpec struct {
-	// Network is the guest-side dial network: "tcp" (default), "tcp4",
-	// "tcp6", or "unix".
+	// Network is the guest-side network: "tcp" (default), "tcp4", "tcp6",
+	// or "unix".
 	Network string `json:"network,omitempty"`
-	// Address is the guest-side dial target, e.g. "127.0.0.1:49983" (or a
-	// path for network "unix").
+	// Address is the guest-side target: a dial target (Accept==false) or a
+	// listen address (Accept==true), e.g. "127.0.0.1:49983" (or a path for
+	// network "unix").
 	Address string `json:"address"`
+	// Accept selects accept mode: the guest Listen+Accepts on Address
+	// instead of dialing it. Default false (dial mode).
+	Accept bool `json:"accept,omitempty"`
 }
 
 // App lifecycle state reported in restore_ack / attach_ack.

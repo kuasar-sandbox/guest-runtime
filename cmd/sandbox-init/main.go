@@ -165,6 +165,7 @@ func main() {
 		stopGrace:  time.Duration(spec.StopGraceSec) * time.Second,
 		execReg:    newExecRegistry(),
 		connReg:    newConnRegistry(),
+		acceptLn:   newAcceptListeners(),
 	}
 
 	// Reverse-channel dispatch goroutine. Lives until reboot. It carries
@@ -584,10 +585,11 @@ func runExecChild(cred, workdir, appPath string, args []string, joined bool) {
 type supervisorState struct {
 	appPid     int
 	restart    string
-	stopSignal syscall.Signal // signal forwarded to app on host SIGTERM/SIGINT; 0 → SIGTERM
-	stopGrace  time.Duration  // grace before SIGKILL; 0 → gracefulShutdown default
-	execReg    *execRegistry  // exec-session child reaping + quiesce gating
-	connReg    *connRegistry  // port-forward session tracking + quiesce teardown
+	stopSignal syscall.Signal   // signal forwarded to app on host SIGTERM/SIGINT; 0 → SIGTERM
+	stopGrace  time.Duration    // grace before SIGKILL; 0 → gracefulShutdown default
+	execReg    *execRegistry    // exec-session child reaping + quiesce gating
+	connReg    *connRegistry    // port-forward session tracking + quiesce teardown
+	acceptLn   *acceptListeners // accept-mode (`LOCAL::TARGET`) guest listener cache
 }
 
 // phase3Supervise reaps children. On user-app exit it drains the stdio

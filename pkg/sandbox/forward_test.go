@@ -13,13 +13,26 @@ func TestParseForwardSpec(t *testing.T) {
 		in      string
 		udsPath string
 		fd      int
+		network string
 		addr    string
+		accept  bool
 	}{
-		{"/run/envd.sock:127.0.0.1:49983", "/run/envd.sock", 0, "127.0.0.1:49983"},
-		{"fd=3:127.0.0.1:49983", "", 3, "127.0.0.1:49983"},
-		{"@envd:[::1]:8080", "@envd", 0, "[::1]:8080"},
-		{"fd=7:localhost:80", "", 7, "localhost:80"},
-		{"./rel.sock:10.0.0.1:5432", "./rel.sock", 0, "10.0.0.1:5432"},
+		// dial mode, tcp target (LOCAL:host:port)
+		{"/run/envd.sock:127.0.0.1:49983", "/run/envd.sock", 0, "tcp", "127.0.0.1:49983", false},
+		{"fd=3:127.0.0.1:49983", "", 3, "tcp", "127.0.0.1:49983", false},
+		{"@envd:[::1]:8080", "@envd", 0, "tcp", "[::1]:8080", false},
+		{"fd=7:localhost:80", "", 7, "tcp", "localhost:80", false},
+		{"./rel.sock:10.0.0.1:5432", "./rel.sock", 0, "tcp", "10.0.0.1:5432", false},
+		// dial mode, unix target (①): '/' or '@' prefix ⇒ unix
+		{"/run/db.sock:/var/run/pg.sock", "/run/db.sock", 0, "unix", "/var/run/pg.sock", false},
+		{"/run/db.sock:@pg", "/run/db.sock", 0, "unix", "@pg", false},
+		// accept mode, tcp target (②): LOCAL::host:port
+		{"/run/api.sock::0.0.0.0:8080", "/run/api.sock", 0, "tcp", "0.0.0.0:8080", true},
+		{"/run/api.sock::[::1]:8080", "/run/api.sock", 0, "tcp", "[::1]:8080", true},
+		{"fd=3::0.0.0.0:8080", "", 3, "tcp", "0.0.0.0:8080", true}, // fd= local is valid in accept mode
+		// accept mode, unix target (③): LOCAL::/path or ::@abstract
+		{"/run/api.sock::/run/up.sock", "/run/api.sock", 0, "unix", "/run/up.sock", true},
+		{"@api::@up", "@api", 0, "unix", "@up", true},
 	}
 	for _, tc := range ok {
 		got, err := ParseForwardSpec(tc.in)
@@ -27,12 +40,11 @@ func TestParseForwardSpec(t *testing.T) {
 			t.Errorf("ParseForwardSpec(%q): unexpected error %v", tc.in, err)
 			continue
 		}
-		if got.UDSPath != tc.udsPath || got.ListenFD != tc.fd || got.Address != tc.addr {
-			t.Errorf("ParseForwardSpec(%q) = {uds:%q fd:%d addr:%q}, want {uds:%q fd:%d addr:%q}",
-				tc.in, got.UDSPath, got.ListenFD, got.Address, tc.udsPath, tc.fd, tc.addr)
-		}
-		if got.Network != "tcp" {
-			t.Errorf("ParseForwardSpec(%q): network %q, want tcp", tc.in, got.Network)
+		if got.UDSPath != tc.udsPath || got.ListenFD != tc.fd || got.Network != tc.network ||
+			got.Address != tc.addr || got.Accept != tc.accept {
+			t.Errorf("ParseForwardSpec(%q) = {uds:%q fd:%d net:%q addr:%q accept:%v}, want {uds:%q fd:%d net:%q addr:%q accept:%v}",
+				tc.in, got.UDSPath, got.ListenFD, got.Network, got.Address, got.Accept,
+				tc.udsPath, tc.fd, tc.network, tc.addr, tc.accept)
 		}
 	}
 
@@ -46,6 +58,10 @@ func TestParseForwardSpec(t *testing.T) {
 		"fd=0:127.0.0.1:80",     // fd must be > 0
 		"fd=x:127.0.0.1:80",     // non-numeric fd
 		"fd=-1:127.0.0.1:80",    // negative fd
+		"/p:",                   // empty target (dial)
+		"/p::",                  // empty target (accept)
+		"/p:rel/sock",           // relative unix target (not '/' or '@') parses as bad host:port
+		"/p::rel.sock",          // relative unix target in accept mode
 	}
 	for _, in := range bad {
 		if _, err := ParseForwardSpec(in); err == nil {

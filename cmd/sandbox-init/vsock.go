@@ -204,6 +204,7 @@ func handleReverseConn(c *vsockConn, sup *supervisorState, bridge *consoleBridge
 		logf("reverse-channel: restore epoch=%d — re-establishing stdio MUX", req.Epoch)
 		sup.execReg.endQuiesce() // sandbox live again — allow exec
 		sup.connReg.endQuiesce() // and allow port-forward connects
+		sup.acceptLn.reopen()    // and re-enable accept-mode listener binds
 		bridge.closeLiveMUX()    // drop any stale session first (normally already gone via quiesce)
 		// CH reloaded the snapshot's CLOCK_REALTIME verbatim, so the
 		// guest wall clock is stale by the whole dormant interval. Jump
@@ -262,6 +263,7 @@ func handleReverseConn(c *vsockConn, sup *supervisorState, bridge *consoleBridge
 		logf("reverse-channel: attach epoch=%d — re-establishing stdio MUX", req.Epoch)
 		sup.execReg.endQuiesce() // sandbox live again (post-resume) — allow exec
 		sup.connReg.endQuiesce() // and allow port-forward connects
+		sup.acceptLn.reopen()    // and re-enable accept-mode listener binds
 		bridge.closeLiveMUX()    // gracefully close the old session, then switch
 		spec := bridge.protoSpec()
 		resp := &proto.Message{Type: proto.TypeAttachAck, Epoch: req.Epoch, Stdio: &spec, AppState: proto.AppStateRunning}
@@ -309,8 +311,9 @@ func handleReverseConn(c *vsockConn, sup *supervisorState, bridge *consoleBridge
 		// Tear down port-forward relays the same way as the stdio MUX: a
 		// live forward left open would be captured as a half-open vsock
 		// remnant. Each vsock conn closes with SO_LINGER so the teardown is
-		// confirmed before `quiesced` (deterministic steady state, §3.4).
-		closeConnectSessions(sup.connReg)
+		// confirmed before `quiesced` (deterministic steady state, §3.4). Also
+		// closes the cached accept-mode listeners (unblocking parked accepts).
+		closeConnectSessions(sup.connReg, sup.acceptLn)
 		bridge.closeLiveMUX() // stop forwarding app output, then the MUX_CLOSE handshake
 		if err := proto.WriteMessage(c, &proto.Message{Type: proto.TypeQuiesced}); err != nil {
 			logf("reverse-channel: write quiesced: %v", err)

@@ -76,12 +76,15 @@ func runCmd(args []string) int {
 	statsInterval := fs.Duration("stats-interval", 30*time.Second,
 		"periodic lazy-load stats log interval (overrides SANDBOX_STATS_INTERVAL env; 0 disables)")
 
-	// --connect LOCAL:HOST:PORT — port-forward a host-local endpoint to a
-	// guest-side target (repeatable). LOCAL is a UDS path or fd=N (an
-	// inherited, already-listening socket).
+	// --connect LOCAL:TARGET (guest dials) or LOCAL::TARGET (guest accepts)
+	// — port-forward a host-local endpoint to a guest-side endpoint
+	// (repeatable). LOCAL is a UDS path or fd=N (an inherited, already-
+	// listening socket); TARGET is host:port (tcp) or an absolute/abstract
+	// path (unix, when it starts with '/' or '@').
 	var forwards forwardFlags
 	fs.Var(&forwards, "connect",
-		"port-forward LOCAL:HOST:PORT to a guest target; LOCAL = UDS path or fd=N (repeatable)")
+		"port-forward LOCAL:TARGET (guest dials) or LOCAL::TARGET (guest accepts); "+
+			"LOCAL = UDS path or fd=N; TARGET = host:port or /path|@abstract (repeatable)")
 
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -310,8 +313,8 @@ func runRestore(ctx context.Context, cfg *config.SandboxConfig, manifestCfg *con
 	return exit
 }
 
-// forwardFlags collects repeated `--connect LOCAL:HOST:PORT` directives,
-// parsing each into a sandbox.ForwardSpec as it is seen.
+// forwardFlags collects repeated `--connect LOCAL:TARGET` / `LOCAL::TARGET`
+// directives, parsing each into a sandbox.ForwardSpec as it is seen.
 type forwardFlags []sandbox.ForwardSpec
 
 func (f *forwardFlags) String() string {

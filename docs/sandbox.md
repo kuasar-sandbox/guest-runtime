@@ -195,11 +195,13 @@ sandbox-ctl run [flags]
                           模式下做 \n→\r\n 转换);file=<path>:写 <path>
 
   # 端口转发(冷启动 + 恢复模式都生效;详见 docs/sandbox-runtime.md §3.7)
-  --connect <L:H:P>       把 host 本地端点 L 转发到沙箱内目标 H:P,可重复。L = UDS
-                          路径(@name 抽象命名空间)或 fd=N(继承的已 listen socket);
-                          H:P 用 net.SplitHostPort 解析,支持 [::1]:port。每条被接受
-                          的本地连接经一条反向通道发 connect、guest 拨 H:P 后双向中继
-                          (保留 TCP 半关闭);quiesce 时主动拆除、resume/restore 后恢复
+  --connect <L:TARGET>    dial 模式:host 本地端点 L 转发到沙箱内 TARGET,可重复。
+  --connect <L::TARGET>   accept 模式:guest 在 TARGET 上 Listen+Accept,与 L 的每条
+                          本地连接配对。L = UDS 路径(@name 抽象)或 fd=N(继承的已
+                          listen socket);TARGET = host:port(tcp)或 /path|@abstract
+                          (unix,以 / 或 @ 起头)。每条被接受的本地连接经一条反向通道
+                          发 connect、guest 拨号或 accept 后双向中继(保留 TCP 半关闭);
+                          quiesce 时主动拆除、resume/restore 后恢复
 ```
 
 **行为**:阻塞前台运行,直到 CH 退出或收到 SIGTERM/SIGINT。退出码:应用正常退出 →
