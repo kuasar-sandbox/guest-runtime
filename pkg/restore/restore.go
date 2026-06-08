@@ -15,13 +15,13 @@ import (
 	"github.com/kuasar-sandbox/sandbox-runtime/pkg/resctl"
 	"io"
 	"log"
-	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"time"
 
 	"github.com/kuasar-sandbox/sandbox-accelerator/pkg/manifest/fetch"
+	"github.com/kuasar-sandbox/sandbox-runtime/pkg/chapi"
 	"github.com/kuasar-sandbox/sandbox-runtime/pkg/proto"
 	"github.com/kuasar-sandbox/sandbox-runtime/pkg/sandbox"
 	"github.com/kuasar-sandbox/sandbox-runtime/pkg/stdio"
@@ -556,10 +556,10 @@ func Run(ctx context.Context, opts Options) (int, error) {
 		// non-nil return aborts the run (ServeAndWait kills CH); we
 		// don't hand back a sandbox whose guest agent is unreachable.
 		PostSpawn: func(pc sandbox.PostSpawnCtx) error {
-			if err := waitAPI(ctx, pc.CHSock, opts.HostCfg.APIReadyDeadline()); err != nil {
+			if err := chapi.WaitReady(ctx, pc.CHSock, opts.HostCfg.APIReadyDeadline()); err != nil {
 				return fmt.Errorf("ch api not ready: %w", err)
 			}
-			if err := chAPI(pc.CHSock, "PUT", "/api/v1/vm.resume", "", opts.HostCfg.CHApiDeadline()); err != nil {
+			if err := (chapi.Client{Sock: pc.CHSock, RespDeadline: opts.HostCfg.CHApiDeadline()}).Resume(); err != nil {
 				return fmt.Errorf("vm.resume: %w", err)
 			}
 			pc.Logf("VM resumed, vCPU running")
@@ -633,61 +633,4 @@ func fileSnapshotRef(path string) string {
 		real = resolved
 	}
 	return "file://" + filepath.Base(real)
-}
-
-// waitAPI polls the CH API socket until it accepts. deadline <= 0 means no
-// forced timeout: poll until ctx is cancelled (e.g. CH exit / SIGINT). A
-// positive deadline bounds the wait.
-func waitAPI(ctx context.Context, sock string, deadline time.Duration) error {
-	var end time.Time
-	if deadline > 0 {
-		end = time.Now().Add(deadline)
-	}
-	for {
-		if ctx.Err() != nil {
-			return fmt.Errorf("ch api socket not ready: %w", ctx.Err())
-		}
-		if !end.IsZero() && !time.Now().Before(end) {
-			return errors.New("ch api socket not ready")
-		}
-		c, err := net.DialTimeout("unix", sock, 200*time.Millisecond)
-		if err == nil {
-			_ = c.Close()
-			return nil
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-}
-
-// chAPI sends one HTTP/1.1 request to the CH API socket. respDeadline <= 0
-// means no read deadline (a slow CH response — e.g. a /vm.resume that triggers
-// heavy lazy page-in — never spuriously fails); the dial stays bounded.
-func chAPI(sock, method, path, body string, respDeadline time.Duration) error {
-	c, err := net.DialTimeout("unix", sock, 5*time.Second)
-	if err != nil {
-		return err
-	}
-	defer c.Close()
-	if respDeadline > 0 {
-		_ = c.SetDeadline(time.Now().Add(respDeadline))
-	}
-	req := fmt.Sprintf("%s %s HTTP/1.1\r\nHost: ch\r\n", method, path)
-	if body != "" {
-		req += fmt.Sprintf("Content-Type: application/json\r\nContent-Length: %d\r\n", len(body))
-	}
-	req += "Connection: close\r\n\r\n" + body
-	if _, err := c.Write([]byte(req)); err != nil {
-		return err
-	}
-	buf := make([]byte, 4096)
-	n, _ := c.Read(buf)
-	resp := string(buf[:n])
-	if len(resp) < 12 {
-		return fmt.Errorf("short response %q", resp)
-	}
-	status := resp[9:12]
-	if status[0] != '2' {
-		return fmt.Errorf("non-2xx %s %s: %q", method, path, resp)
-	}
-	return nil
 }

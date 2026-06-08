@@ -184,16 +184,19 @@ launch: { exec: /bin/true }
 }
 
 func TestTimeouts_Resolution(t *testing.T) {
-	// Empty / unset → 0 = no forced timeout (the deploy-in-degraded default).
+	// Empty / unset → 0 = no forced timeout for the guest/remote-coupled fields.
 	var zero SandboxConfig
 	for _, got := range []time.Duration{
-		zero.RestoreDeadline(), zero.CHApiDeadline(),
-		zero.APIReadyDeadline(), zero.VAReportDeadline(),
+		zero.RestoreDeadline(), zero.APIReadyDeadline(), zero.VAReportDeadline(),
 		zero.PingDeadline(), zero.AppNotifyDeadline(),
 	} {
 		if got != 0 {
 			t.Errorf("unset timeout resolved to %v, want 0 (no forced timeout)", got)
 		}
+	}
+	// ch_api is the exception: unset → DefaultCHApiDeadline (local fast call).
+	if zero.CHApiDeadline() != DefaultCHApiDeadline {
+		t.Errorf("unset ch_api = %v, want %v (default safety net)", zero.CHApiDeadline(), DefaultCHApiDeadline)
 	}
 
 	// Explicit values parse; "0" and garbage both fall back to 0.

@@ -606,11 +606,25 @@ func parseTimeout(s string) time.Duration {
 	return d
 }
 
-// RestoreDeadline / CHApiDeadline / APIReadyDeadline / VAReportDeadline resolve
-// the corresponding timeouts.* field; 0 = no forced timeout.
-func (c *SandboxConfig) RestoreDeadline() time.Duration   { return parseTimeout(c.Timeouts.Restore) }
-func (c *SandboxConfig) CHApiDeadline() time.Duration     { return parseTimeout(c.Timeouts.CHApi) }
-func (c *SandboxConfig) APIReadyDeadline() time.Duration  { return parseTimeout(c.Timeouts.APIReady) }
+// DefaultCHApiDeadline is the response deadline used for every cloud-hypervisor
+// API call when timeouts.ch_api is unset. Unlike the guest/remote-coupled
+// timeouts (which default to no-forced), CH API calls are local management ops
+// over the UDS — fast and immune to remote/cache slowness — so a generous fixed
+// bound is the right default: it catches a wedged CH without ever being a hot
+// limit. Set timeouts.ch_api to override, or to "0" for no forced timeout.
+const DefaultCHApiDeadline = 60 * time.Second
+
+// RestoreDeadline / APIReadyDeadline / VAReportDeadline / PingDeadline /
+// AppNotifyDeadline resolve the corresponding timeouts.* field; 0 = no forced
+// timeout. CHApiDeadline is the exception: unset → DefaultCHApiDeadline (see above).
+func (c *SandboxConfig) RestoreDeadline() time.Duration { return parseTimeout(c.Timeouts.Restore) }
+func (c *SandboxConfig) CHApiDeadline() time.Duration {
+	if c.Timeouts.CHApi == "" {
+		return DefaultCHApiDeadline
+	}
+	return parseTimeout(c.Timeouts.CHApi) // explicit "0"/"off"/invalid → 0 (no forced)
+}
+func (c *SandboxConfig) APIReadyDeadline() time.Duration { return parseTimeout(c.Timeouts.APIReady) }
 func (c *SandboxConfig) VAReportDeadline() time.Duration  { return parseTimeout(c.Timeouts.VAReport) }
 func (c *SandboxConfig) PingDeadline() time.Duration      { return parseTimeout(c.Timeouts.Ping) }
 func (c *SandboxConfig) AppNotifyDeadline() time.Duration { return parseTimeout(c.Timeouts.AppNotify) }

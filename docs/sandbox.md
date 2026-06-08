@@ -473,12 +473,14 @@ launch:
   stop_grace_period: 10s      # 发停机信号后等应用退出的宽限,超时则 SIGKILL;默认 10s
   start_timeout: ""           # host 等待 launch_ack(含 init 全程)的超时;空 / 0 = 无限期(见 §阶段 2)
 
-# host 侧恢复/生命周期超时;全部默认 0 = 不强制(host 等待 guest/CH/懒加载所需的任意时长,
-# dial/connect 探测仍有界),便于慢速或降级环境部署:慢的远程仓库/缓存、或调试器暂停都不会
+# host 侧恢复/生命周期超时;guest/远程耦合项默认 0 = 不强制(host 等待 guest/懒加载所需的
+# 任意时长,dial/connect 探测仍有界),便于慢速/降级环境:慢的远程仓库/缓存、或调试器暂停都不会
 # 误中止一个仍在健康推进的 restore。生产环境按 examples/timeouts-production.yaml 设正值快速失败。
 timeouts:
   restore: ""       # 等 guest restore_ack(/vm.resume 之后);恢复时大量缺页换入会拉长此段
-  ch_api: ""        # CH HTTP API 单次响应(如 /vm.resume);dial 仍 5s 有界
+  ch_api: ""        # 所有 CH HTTP API 调用(pause/resume/snapshot/shutdown)的单次响应死线;
+                    #   dial 仍 5s 有界。**例外:默认 60s**(CH API 是本地管理调用、快且不受远程/
+                    #   缓存影响,60s 是安全网而非热限);置 "0" 表示不强制
   api_ready: ""     # spawn 后等 CH API socket 可连接(轮询);0 = 轮询至 ctx 取消(如 CH 退出 / SIGINT)
   va_report: ""     # CH→host 交接 uffd fd 的握手
   ping: ""          # host→guest ping 往返;默认不强制=vCPU 被慢缺页短暂阻塞时不误判。
@@ -532,6 +534,11 @@ launch 握手,不下发 guest。
 SIGINT / CH 退出取消)。这样默认配置在慢速或降级环境下"开箱即用、不误杀";生产环境按
 [`examples/timeouts-production.yaml`](../examples/timeouts-production.yaml) 设正值,
 让 restore 在真正卡死时快速失败。
+
+所有 CH API 调用(restore 的 /vm.resume、snapshot 的 pause/snapshot/resume、关停的
+vmm.shutdown)统一经**单一 `pkg/chapi` 客户端**(`chapi.Client`,`timeouts.ch_api` 作
+其响应死线),不再有 restore 自带的重复实现。`ch_api` 是唯一**默认有界(60s)**的项:
+CH API 是本地管理调用、快且不受远程/缓存慢影响,60s 是安全网而非热限;置 `"0"` 才不强制。
 
 > **`ping` 与 `--ping-fatal-threshold` 的配合**:`ping` 默认不强制时,卡死但仍连通的
 > guest 不会触发 fatal 兜底(ping 一直等而非失败)。若启用 `--ping-fatal-threshold`,

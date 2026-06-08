@@ -48,7 +48,7 @@ func TestWaitForCH_NoSignals(t *testing.T) {
 	proc := &fakeSignaler{}
 
 	doneCh <- nil
-	err := waitForCHWithSignalEscalation(doneCh, sigCh, proc, 1234, "", time.Second, discardLogf)
+	err := waitForCHWithSignalEscalation(doneCh, sigCh, proc, 1234, "", 0, time.Second, discardLogf)
 	if err != nil {
 		t.Fatalf("expected nil error, got %v", err)
 	}
@@ -70,7 +70,7 @@ func TestWaitForCH_SIGTERM_GracefulExit(t *testing.T) {
 		doneCh <- &exitErrStub{code: 0}
 	}()
 
-	err := waitForCHWithSignalEscalation(doneCh, sigCh, proc, 1234, "", 5*time.Second, discardLogf)
+	err := waitForCHWithSignalEscalation(doneCh, sigCh, proc, 1234, "", 0, 5*time.Second, discardLogf)
 	if err == nil {
 		t.Fatal("expected non-nil exit err stub")
 	}
@@ -117,7 +117,7 @@ func TestWaitForCH_SIGTERM_EscalatesToSIGKILL(t *testing.T) {
 
 	t0 := time.Now()
 	sigCh <- syscall.SIGTERM
-	err := waitForCHWithSignalEscalation(doneCh, sigCh, proc, 1234, "", grace, discardLogf)
+	err := waitForCHWithSignalEscalation(doneCh, sigCh, proc, 1234, "", 0, grace, discardLogf)
 	elapsed := time.Since(t0)
 	if err == nil {
 		t.Fatal("expected exit err stub")
@@ -168,7 +168,7 @@ func TestWaitForCH_DoubleSIGTERM_EscalatesImmediately(t *testing.T) {
 	sigCh <- syscall.SIGTERM
 	time.Sleep(50 * time.Millisecond) // first SIGTERM arms timer
 	sigCh <- syscall.SIGINT           // second signal escalates
-	_ = waitForCHWithSignalEscalation(doneCh, sigCh, proc, 1234, "", grace, discardLogf)
+	_ = waitForCHWithSignalEscalation(doneCh, sigCh, proc, 1234, "", 0, grace, discardLogf)
 	elapsed := time.Since(t0)
 
 	if proc.sentCount(syscall.SIGKILL) != 1 {

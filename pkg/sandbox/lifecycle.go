@@ -451,6 +451,7 @@ func waitForCHWithSignalEscalation(
 	proc processSignaler,
 	chPid int,
 	chSock string,
+	chRespDeadline time.Duration,
 	grace time.Duration,
 	logf func(format string, args ...any),
 ) error {
@@ -463,7 +464,7 @@ func waitForCHWithSignalEscalation(
 			if !shutdownInitiated {
 				usedAPI := false
 				if chSock != "" {
-					if err := chapi.CHShutdownVMM(chSock); err == nil {
+					if err := (chapi.Client{Sock: chSock, RespDeadline: chRespDeadline}).ShutdownVMM(); err == nil {
 						logf("received %v, requested vmm.shutdown via API (will SIGKILL after %s if CH still alive)", sig, grace)
 						usedAPI = true
 					} else {
@@ -606,7 +607,7 @@ func handleSnapshotRequest(
 	// that is what makes `sandbox-ctl run` return (docs/sandbox.md §6.2 T8).
 	defer func() {
 		if err == nil && !req.ResumeAfter {
-			go destroyAfterSnapshot(chSock, logf)
+			go destroyAfterSnapshot(chSock, opts.Cfg.CHApiDeadline(), logf)
 		}
 	}()
 	// Gate new port-forward connects for the whole quiesce→snapshot window;
@@ -703,16 +704,17 @@ func handleSnapshotRequest(
 	}
 
 	src := snapshot.Sources{
-		SandboxID:   sandboxID,
-		APISock:     chSock,
-		MemfdFD:     mfd.FD(),
-		MemfdSize:   int64(mfd.Size()),
-		DiffPath:    diffPath,
-		OwnedDiff:   ownedDiff,
-		StagingDir:  stagingDir,
-		SnapshotCfg: snapCfgBuilder,
-		Quiescer:    &pairQuiescer{a: srv0, b: srv1},
-		Logf:        logf,
+		SandboxID:     sandboxID,
+		APISock:       chSock,
+		MemfdFD:       mfd.FD(),
+		MemfdSize:     int64(mfd.Size()),
+		DiffPath:      diffPath,
+		OwnedDiff:     ownedDiff,
+		StagingDir:    stagingDir,
+		CHApiDeadline: cfg.CHApiDeadline(),
+		SnapshotCfg:   snapCfgBuilder,
+		Quiescer:      &pairQuiescer{a: srv0, b: srv1},
+		Logf:          logf,
 	}
 	// Restored from a LOCAL snapshot ⇒ MERGE this run's resident delta onto the
 	// parent local layer (replace the next-newest layer, not stack) for BOTH
@@ -782,9 +784,9 @@ const destroyAfterSnapshotDelay = 300 * time.Millisecond
 // goroutine on the resume_after=false ("destroy") path: by the time the
 // delay elapses the snapshot_done response has been queued + sent. Errors
 // are only logged — the sandbox is being torn down regardless.
-func destroyAfterSnapshot(chSock string, logf func(string, ...any)) {
+func destroyAfterSnapshot(chSock string, respDeadline time.Duration, logf func(string, ...any)) {
 	time.Sleep(destroyAfterSnapshotDelay)
-	if err := chapi.CHShutdownVMM(chSock); err != nil {
+	if err := (chapi.Client{Sock: chSock, RespDeadline: respDeadline}).ShutdownVMM(); err != nil {
 		logf("snapshot: destroy mode — vmm.shutdown: %v", err)
 		return
 	}

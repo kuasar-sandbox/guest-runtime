@@ -48,6 +48,10 @@ type Sources struct {
 	OwnedDiff  bool   // true iff the diff is the sandbox's own (auto-created) → eligible for zero-copy move
 	StagingDir string // CH /vm.snapshot dest for config.json/state.json (caller creates+removes)
 
+	// CHApiDeadline bounds each CH API call (pause/snapshot/resume); 0 = no
+	// forced. From config.SandboxConfig.CHApiDeadline() (timeouts.ch_api).
+	CHApiDeadline time.Duration
+
 	// MergeBase{Snapshot,Overlay}: parent LOCAL files this run was restored from
 	// (both set, or neither). When set, Take flattens this run's resident delta
 	// ONTO them (top wins) and absorbs the MERGED result as the new top layer —
@@ -104,10 +108,11 @@ func Take(s Sources, sink SnapshotSink, resumeAfter bool) (*Outputs, error) {
 	}
 	ctx := context.Background()
 	out := &Outputs{MemorySize: uint64(s.MemfdSize)}
+	ch := chapi.Client{Sock: s.APISock, RespDeadline: s.CHApiDeadline}
 
 	// T2a: pause CH.
 	pauseStart := time.Now()
-	if err := chapi.CHPause(s.APISock); err != nil {
+	if err := ch.Pause(); err != nil {
 		return nil, fmt.Errorf("CH pause: %w", err)
 	}
 	pausedAt := time.Now()
@@ -117,7 +122,7 @@ func Take(s Sources, sink SnapshotSink, resumeAfter bool) (*Outputs, error) {
 		// /vm.shutdown after Take returns; here we only resume on the
 		// resume_after=true path.
 		if !resumed && resumeAfter {
-			_ = chapi.CHResume(s.APISock)
+			_ = ch.Resume()
 		}
 	}()
 	defer s.Quiescer.Resume() // unconditional
@@ -129,7 +134,7 @@ func Take(s Sources, sink SnapshotSink, resumeAfter bool) (*Outputs, error) {
 	// there (small); the multi-GiB memory + disk never touch the staging tmpfs —
 	// they stream straight to the sink.
 	dumpStart := time.Now()
-	if err := chapi.CHSnapshot(s.APISock, "file://"+s.StagingDir); err != nil {
+	if err := ch.Snapshot("file://" + s.StagingDir); err != nil {
 		return nil, fmt.Errorf("CH snapshot: %w", err)
 	}
 	configJSON, err := os.ReadFile(filepath.Join(s.StagingDir, "config.json"))
@@ -229,7 +234,7 @@ func Take(s Sources, sink SnapshotSink, resumeAfter bool) (*Outputs, error) {
 
 	// T8: resume (destroy path handled by caller).
 	if resumeAfter {
-		if err := chapi.CHResume(s.APISock); err != nil {
+		if err := ch.Resume(); err != nil {
 			return nil, fmt.Errorf("CH resume: %w", err)
 		}
 		resumed = true

@@ -11,8 +11,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/kuasar-sandbox/sandbox-runtime/pkg/proto"
 	"github.com/kuasar-sandbox/sandbox-runtime/pkg/fwd"
+	"github.com/kuasar-sandbox/sandbox-runtime/pkg/proto"
 )
 
 // ForwardSpec is one parsed `--connect` directive: accept connections on

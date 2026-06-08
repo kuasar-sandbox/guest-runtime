@@ -497,7 +497,7 @@ func ServeAndWait(p VMParams) (int, error) {
 	doneCh := make(chan error, 1)
 	go func() { doneCh <- cmd.Wait() }()
 
-	waitErr := waitForCHWithSignalEscalation(doneCh, sigCh, cmd.Process, chPid, chSock, chShutdownGrace, logf)
+	waitErr := waitForCHWithSignalEscalation(doneCh, sigCh, cmd.Process, chPid, chSock, p.SnapCfg.CHApiDeadline(), chShutdownGrace, logf)
 	cancelBackends()
 	backendWG.Wait()
 	exit := 0
