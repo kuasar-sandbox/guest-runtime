@@ -28,7 +28,7 @@ func baseSnap(runtimeRef, baseRef, overlayBase string) *SnapshotCfg {
 	cfg.Resources.Capacity.Memory = "4GiB"
 	cfg.Boot.RuntimeRef = runtimeRef
 	cfg.Boot.Root.BaseRef = baseRef
-	cfg.Boot.Root.Overlay.Base = overlayBase
+	cfg.Boot.Root.Overlay = &SnapOverlayCfg{Base: overlayBase}
 	return cfg
 }
 
@@ -78,7 +78,7 @@ func TestApplyRules_CapacityMustMatchWhenProvided(t *testing.T) {
 	host.Resources.Capacity.CPU = 1 // mismatch
 	host.Resources.Capacity.Memory = "2GiB"
 	host.Network.TAP = "tap0"
-	host.Boot.Root.Overlay.Diff = "file:///tmp/diff"
+	host.Boot.Root.Overlay = &config.OverlayConfig{Diff: "file:///tmp/diff"}
 
 	if _, err := ApplyRules(host, snap, filepath.Join(dir, "ignored.snapshot")); err == nil || !strings.Contains(err.Error(), "capacity mismatch") {
 		t.Fatalf("expected capacity mismatch error, got %v", err)
@@ -101,7 +101,7 @@ func TestApplyRules_CapacityAutoFilledWhenAbsent(t *testing.T) {
 
 	host := &config.SandboxConfig{}
 	host.Network.TAP = "tap0"
-	host.Boot.Root.Overlay.Diff = "file:///tmp/diff"
+	host.Boot.Root.Overlay = &config.OverlayConfig{Diff: "file:///tmp/diff"}
 
 	out, err := ApplyRules(host, snap, filepath.Join(dir, "x.snapshot"))
 	if err != nil {
@@ -121,7 +121,7 @@ func TestApplyRules_NetworkTAPRequired(t *testing.T) {
 	snap := baseSnap("file://runtime.erofs@sha256:"+rtDigest, "file://base.erofs@sha256:"+bsDigest, "file://abc.overlay")
 
 	host := &config.SandboxConfig{}
-	host.Boot.Root.Overlay.Diff = "file:///tmp/diff"
+	host.Boot.Root.Overlay = &config.OverlayConfig{Diff: "file:///tmp/diff"}
 
 	if _, err := ApplyRules(host, snap, filepath.Join(dir, "x.snapshot")); err == nil || !strings.Contains(err.Error(), "exactly one of") {
 		t.Fatalf("expected network source required error, got %v", err)
@@ -150,6 +150,40 @@ func TestApplyRules_OverlayDiffOptional(t *testing.T) {
 	}
 }
 
+func TestApplyRules_SingleDisk(t *testing.T) {
+	dir := t.TempDir()
+	rtPath := filepath.Join(dir, "runtime.erofs")
+	rtDigest := writeFile(t, rtPath, []byte("runtime body"))
+
+	// Single-disk snapshot.cfg: no base_ref, no overlay node; the captured root
+	// diff is recorded at root.base with its chain at root.base_from_refs.
+	snap := &SnapshotCfg{}
+	snap.Resources.Capacity.CPU = 2
+	snap.Resources.Capacity.Memory = "4GiB"
+	snap.Boot.RuntimeRef = "file://runtime.erofs@sha256:" + rtDigest
+	snap.Boot.Root.Base = "manifest://captured-diff"
+	snap.Boot.Root.BaseFromRefs = []string{"manifest://lower1"}
+	if !snap.SingleDisk() {
+		t.Fatal("snapshot with no overlay node should report SingleDisk")
+	}
+
+	host := &config.SandboxConfig{}
+	host.Network.TAP = "tap0"
+	out, err := ApplyRules(host, snap, filepath.Join(dir, "x.snapshot"))
+	if err != nil {
+		t.Fatalf("ApplyRules single-disk: %v", err)
+	}
+	if !out.SingleDisk() {
+		t.Error("merged config should be single-disk (Overlay nil)")
+	}
+	if out.Boot.Root.Base != "manifest://captured-diff" {
+		t.Errorf("root.base = %q, want the captured diff", out.Boot.Root.Base)
+	}
+	if len(out.Boot.Root.BaseFromRefs) != 1 || out.Boot.Root.BaseFromRefs[0] != "manifest://lower1" {
+		t.Errorf("root.base_from_refs = %v, want [manifest://lower1]", out.Boot.Root.BaseFromRefs)
+	}
+}
+
 func TestApplyRules_RuntimeFileAutoResolveAndDigest(t *testing.T) {
 	dir := t.TempDir()
 	rtPath := filepath.Join(dir, "runtime.erofs")
@@ -161,7 +195,7 @@ func TestApplyRules_RuntimeFileAutoResolveAndDigest(t *testing.T) {
 
 	host := &config.SandboxConfig{}
 	host.Network.TAP = "tap0"
-	host.Boot.Root.Overlay.Diff = "file:///tmp/diff"
+	host.Boot.Root.Overlay = &config.OverlayConfig{Diff: "file:///tmp/diff"}
 
 	out, err := ApplyRules(host, snap, snapPath)
 	if err != nil {
@@ -187,7 +221,7 @@ func TestApplyRules_RuntimeProvidedDigestMustMatch(t *testing.T) {
 
 	host := &config.SandboxConfig{}
 	host.Network.TAP = "tap0"
-	host.Boot.Root.Overlay.Diff = "file:///tmp/diff"
+	host.Boot.Root.Overlay = &config.OverlayConfig{Diff: "file:///tmp/diff"}
 	host.Boot.Runtime = "file://" + rtPath
 	host.Boot.Root.Base = "file://" + bsPath
 
@@ -220,7 +254,7 @@ func TestApplyRules_BasenameMismatchRejected(t *testing.T) {
 
 	host := &config.SandboxConfig{}
 	host.Network.TAP = "tap0"
-	host.Boot.Root.Overlay.Diff = "file:///tmp/diff"
+	host.Boot.Root.Overlay = &config.OverlayConfig{Diff: "file:///tmp/diff"}
 	host.Boot.Runtime = "file://" + otherPath
 	host.Boot.Root.Base = "file://" + bsPath
 
@@ -241,7 +275,7 @@ func TestApplyRules_SchemeMismatchRejected(t *testing.T) {
 
 	host := &config.SandboxConfig{}
 	host.Network.TAP = "tap0"
-	host.Boot.Root.Overlay.Diff = "file:///tmp/diff"
+	host.Boot.Root.Overlay = &config.OverlayConfig{Diff: "file:///tmp/diff"}
 	host.Boot.Root.Base = "manifest://abcdef" // host says manifest, snap says file
 
 	if _, err := ApplyRules(host, snap, filepath.Join(dir, "x.snapshot")); err == nil || !strings.Contains(err.Error(), "scheme mismatch") {
@@ -257,7 +291,7 @@ func TestApplyRules_ManifestBaseMatchesKey(t *testing.T) {
 
 	host := &config.SandboxConfig{}
 	host.Network.TAP = "tap0"
-	host.Boot.Root.Overlay.Diff = "file:///tmp/diff"
+	host.Boot.Root.Overlay = &config.OverlayConfig{Diff: "file:///tmp/diff"}
 
 	// host empty: should auto-fill manifest://abcdef
 	out, err := ApplyRules(host, snap, filepath.Join(dir, "x.snapshot"))
@@ -294,7 +328,7 @@ func TestApplyRules_OverlayBaseFromSnapshotIgnoresHost(t *testing.T) {
 
 	host := &config.SandboxConfig{}
 	host.Network.TAP = "tap0"
-	host.Boot.Root.Overlay.Diff = "file:///tmp/diff"
+	host.Boot.Root.Overlay = &config.OverlayConfig{Diff: "file:///tmp/diff"}
 	host.Boot.Root.Overlay.Base = "manifest://something-else" // should be silently ignored
 
 	out, err := ApplyRules(host, snap, filepath.Join(dir, "x.snapshot"))
@@ -311,7 +345,7 @@ func TestApplyRules_RuntimeManifestRejected(t *testing.T) {
 	snap := baseSnap("manifest://shouldnotbeallowed", "manifest://x", "manifest://y")
 	host := &config.SandboxConfig{}
 	host.Network.TAP = "tap0"
-	host.Boot.Root.Overlay.Diff = "file:///tmp/diff"
+	host.Boot.Root.Overlay = &config.OverlayConfig{Diff: "file:///tmp/diff"}
 
 	if _, err := ApplyRules(host, snap, ""); err == nil || !strings.Contains(err.Error(), "runtime_ref") {
 		t.Fatalf("expected runtime_ref scheme error, got %v", err)
@@ -327,7 +361,7 @@ func TestApplyRules_ManifestBundleEmptyPathRejectsFileRefs(t *testing.T) {
 
 	host := &config.SandboxConfig{}
 	host.Network.TAP = "tap0"
-	host.Boot.Root.Overlay.Diff = "file:///tmp/diff"
+	host.Boot.Root.Overlay = &config.OverlayConfig{Diff: "file:///tmp/diff"}
 
 	if _, err := ApplyRules(host, snap, ""); err == nil || !strings.Contains(err.Error(), "boot.runtime") {
 		t.Fatalf("expected boot.runtime explicit-required error, got %v", err)

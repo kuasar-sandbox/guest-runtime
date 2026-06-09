@@ -62,12 +62,20 @@ func CHCommand(cfg *config.SandboxConfig, blk0Sock, blk1Sock, chSock, vsockSock,
 		"--memory", "size=0,shared=on",
 		"--memory-zone", memZone,
 		"--cpus", fmt.Sprintf("boot=%d", cfg.Resources.Capacity.CPU),
-		"--disk",
-		fmt.Sprintf("vhost_user=on,socket=%s,readonly=on", blk0Sock),
-		fmt.Sprintf("vhost_user=on,socket=%s", blk1Sock),
 		"--vsock", fmt.Sprintf("cid=%d,socket=%s", proto.VsockGuestCID, vsockSock),
 		"--console", consoleArg,
 		"--serial", "off",
+	}
+
+	// Disks: single-disk mode is one writable vhost-user-blk (blk0 = the rw
+	// root, mounted directly); overlay mode is the read-only erofs base (blk0)
+	// + the writable ext4 upper (blk1).
+	if cfg.SingleDisk() {
+		args = append(args, "--disk", fmt.Sprintf("vhost_user=on,socket=%s", blk0Sock))
+	} else {
+		args = append(args, "--disk",
+			fmt.Sprintf("vhost_user=on,socket=%s,readonly=on", blk0Sock),
+			fmt.Sprintf("vhost_user=on,socket=%s", blk1Sock))
 	}
 
 	if allocBytes < capBytes {
@@ -148,6 +156,13 @@ func buildCmdline(cfg *config.SandboxConfig) string {
 		// appears after, so `panic=0` in yaml still wins if you want to
 		// freeze the guest for debugging.
 		"panic=-1",
+	}
+	// Single-disk mode: tell sandbox-init to mount the single rw root disk
+	// directly (ext4) instead of assembling the two-disk overlayfs. Read from
+	// /proc/cmdline in phase 1 (before the launch handshake, so it can't ride
+	// the launch spec). Overlay mode adds nothing (the default).
+	if cfg.SingleDisk() {
+		parts = append(parts, "sandbox.root.layout=single")
 	}
 	if cfg.Boot.Cmdline != "" {
 		parts = append(parts, cfg.Boot.Cmdline)

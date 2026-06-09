@@ -197,25 +197,35 @@ func Run(ctx context.Context, opts RunOptions) (int, error) {
 			opts.ManifestCfg.Crypto.Chunk, opts.ManifestCfg.Crypto.Manifest)
 	}
 
-	// Resolve disk URIs. blk0 (boot.root.base) is read-only base;
-	// blk1 (boot.root.overlay) is the writable layer.
-	blk0Reader, _, err := OpenBlockReader(ctx, opts.Cfg.Boot.Root.Base, fetcher)
-	if err != nil {
-		return -1, fmt.Errorf("blk0 base: %w", err)
+	// Resolve the root disk(s) and image config by mode (docs/sandbox-runtime
+	// .md §3.x):
+	//   - overlay mode: blk0 is the read-only erofs image (boot.root.base);
+	//     the launch defaults (image config) are read from its appended ZIP.
+	//   - single-disk mode: blk0 is the writable ext4 CoW built below; there
+	//     is no erofs image and thus no image config, so launch.exec must be
+	//     set (enforced by config.validate). blk0Reader stays nil.
+	var blk0Reader vhost.BlockReader // overlay mode only (ro erofs base)
+	var imageCfg *ImageConfig
+	if opts.Cfg.SingleDisk() {
+		imageCfg = &ImageConfig{}
+	} else {
+		r, _, err := OpenBlockReader(ctx, opts.Cfg.Boot.Root.Base, fetcher)
+		if err != nil {
+			return -1, fmt.Errorf("blk0 base: %w", err)
+		}
+		blk0Reader = r
+		defer blk0Reader.Close()
+		// Both file:// and manifest:// blk0 produce a vhost.BlockReader that is
+		// also a concurrent-safe io.ReaderAt; LoadImageConfigFrom does the
+		// ZIP-trailer scan over either source uniformly.
+		imageCfg, err = LoadImageConfigFrom(blk0Reader, blk0Reader.Size())
+		if err != nil {
+			return -1, fmt.Errorf("load rootfs image config: %w", err)
+		}
+		logf("image config: cmd=%v entrypoint=%v workdir=%q env-keys=%d",
+			imageCfg.Cmd, imageCfg.Entrypoint, imageCfg.WorkingDir, len(imageCfg.Env))
 	}
-	defer blk0Reader.Close()
-
-	// Resolve the launch spec for sandbox-init: image config defaults
-	// merged with sandbox.yaml `launch:` overrides. Both file:// and
-	// manifest:// blk0 produce a vhost.BlockReader that is also a
-	// concurrent-safe io.ReaderAt; LoadImageConfigFrom does the ZIP-
-	// trailer scan over either source uniformly.
-	imageCfg, err := LoadImageConfigFrom(blk0Reader, blk0Reader.Size())
-	if err != nil {
-		return -1, fmt.Errorf("load rootfs image config: %w", err)
-	}
-	logf("image config: cmd=%v entrypoint=%v workdir=%q env-keys=%d",
-		imageCfg.Cmd, imageCfg.Entrypoint, imageCfg.WorkingDir, len(imageCfg.Env))
+	// Merge image config defaults with sandbox.yaml `launch:` overrides.
 	launchSpec, err := MergeLaunch(imageCfg, opts.Cfg.Launch)
 	if err != nil {
 		return -1, fmt.Errorf("launch spec: %w", err)
@@ -266,19 +276,35 @@ func Run(ctx context.Context, opts RunOptions) (int, error) {
 		launchSpec.Stdio.Winsize = &proto.Winsize{Cols: cols, Rows: rows}
 	}
 
-	var overlayBase vhost.BlockReader
-	if opts.Cfg.Boot.Root.Overlay.Base != "" {
-		r, _, err := OpenBlockReader(ctx, opts.Cfg.Boot.Root.Overlay.Base, fetcher)
-		if err != nil {
-			return -1, fmt.Errorf("blk1 overlay base: %w", err)
+	// Build the writable CoW disk. In overlay mode it is blk1 (the ext4 upper
+	// over the erofs blk0); in single-disk mode it IS blk0 (the root disk).
+	// Either way: an optional read-only CoW base + a writable sparse diff.
+	var cowBase vhost.BlockReader
+	var diffURI, diffTemplate string
+	if opts.Cfg.SingleDisk() {
+		diffURI, diffTemplate = opts.Cfg.Boot.Root.Diff, opts.Cfg.Boot.Root.DiffTemplate
+		if opts.Cfg.Boot.Root.Base != "" {
+			r, _, err := OpenBlockReader(ctx, opts.Cfg.Boot.Root.Base, fetcher)
+			if err != nil {
+				return -1, fmt.Errorf("single-disk root base: %w", err)
+			}
+			cowBase = r
+			defer cowBase.Close()
 		}
-		overlayBase = r
-		defer overlayBase.Close()
+	} else {
+		diffURI, diffTemplate = opts.Cfg.Boot.Root.Overlay.Diff, opts.Cfg.Boot.Root.Overlay.DiffTemplate
+		if opts.Cfg.Boot.Root.Overlay.Base != "" {
+			r, _, err := OpenBlockReader(ctx, opts.Cfg.Boot.Root.Overlay.Base, fetcher)
+			if err != nil {
+				return -1, fmt.Errorf("blk1 overlay base: %w", err)
+			}
+			cowBase = r
+			defer cowBase.Close()
+		}
 	}
-	// Resolve the overlay diff path. Empty → auto-default to the on-disk
-	// base dir (NOT the tmpfs run dir — the writable layer must be on disk).
-	// An auto-defaulted diff is ours: removed when the sandbox ends.
-	diffURI := opts.Cfg.Boot.Root.Overlay.Diff
+	// Resolve the diff path. Empty → auto-default to the on-disk base dir (NOT
+	// the tmpfs run dir — the writable layer must be on disk). An auto-defaulted
+	// diff is ours: removed when the sandbox ends.
 	ownedDiff := diffURI == ""
 	if ownedDiff {
 		baseDir := DefaultBaseDir(opts.BaseRoot, opts.SandboxID)
@@ -293,25 +319,34 @@ func Run(ctx context.Context, opts RunOptions) (int, error) {
 	}
 	_, diffPath, ok := config.SchemeAndPath(diffURI)
 	if !ok {
-		return -1, fmt.Errorf("boot.root.overlay.diff invalid URI: %s", diffURI)
+		return -1, fmt.Errorf("boot.root diff invalid URI: %s", diffURI)
 	}
 	var baseSize int64
-	if overlayBase != nil {
-		baseSize = overlayBase.Size()
+	if cowBase != nil {
+		baseSize = cowBase.Size()
 	}
 	diffSize, err := opts.Cfg.DiffSizeBytes()
 	if err != nil {
 		return -1, err
 	}
-	createSize, err := PrepareDiff(diffPath, opts.Cfg.Boot.Root.Overlay.DiffTemplate, baseSize, diffSize)
+	createSize, err := PrepareDiff(diffPath, diffTemplate, baseSize, diffSize)
 	if err != nil {
-		return -1, fmt.Errorf("prepare overlay diff: %w", err)
+		return -1, fmt.Errorf("prepare diff: %w", err)
 	}
-	cow, err := vhost.OpenBlockCOW(diffPath, overlayBase, createSize)
+	cow, err := vhost.OpenBlockCOW(diffPath, cowBase, createSize)
 	if err != nil {
-		return -1, fmt.Errorf("overlay COW: %w", err)
+		return -1, fmt.Errorf("root COW: %w", err)
 	}
 	defer cow.Close()
+
+	// Disk labels/paths for stats by mode: single-disk's blk0 IS the writable
+	// diff (no blk1); overlay's blk0 is the erofs base and blk1 the diff.
+	blk0Path, blk1Path := opts.Cfg.Boot.Root.Base, ""
+	if opts.Cfg.SingleDisk() {
+		blk0Path = diffPath
+	} else {
+		blk1Path = opts.Cfg.Boot.Root.Overlay.Diff
+	}
 
 	// The shared back-half (memfd, uffd va_report handler, vhost-blk
 	// backends, launch server, pinger, ctl.sock, signal escalation,
@@ -332,12 +367,13 @@ func Run(ctx context.Context, opts RunOptions) (int, error) {
 
 		CapBytes:   int64(capBytes),
 		UffdSource: uffd.ZeroSource{},
-		Blk0Reader: blk0Reader,
+		SingleDisk: opts.Cfg.SingleDisk(),
+		Blk0Reader: blk0Reader, // nil in single-disk (blk0 is the Cow)
 		Blk0Label:  "blk0",
-		Blk0Path:   opts.Cfg.Boot.Root.Base,
+		Blk0Path:   blk0Path,
 		Cow:        cow,
 		Blk1Label:  "blk1",
-		Blk1Path:   opts.Cfg.Boot.Root.Overlay.Diff,
+		Blk1Path:   blk1Path,
 
 		LaunchSpec:        launchSpec,
 		WireLaunchMUX:     true,
@@ -530,17 +566,22 @@ func writeUffdStats(w io.Writer, s map[string]uint64) {
 	}
 }
 
-// pairQuiescer drives Quiesce/Resume on both vhost backends together.
+// pairQuiescer drives Quiesce/Resume on both vhost backends together. b is
+// nil in single-disk mode (only blk0 = a exists).
 type pairQuiescer struct{ a, b *vhost.Server }
 
 func (p *pairQuiescer) Quiesce() {
 	p.a.Quiesce()
-	p.b.Quiesce()
+	if p.b != nil {
+		p.b.Quiesce()
+	}
 }
 func (p *pairQuiescer) Resume() {
 	// LIFO so callers of Quiesce see fully-paused state before any
 	// resume kicks the backends.
-	p.b.Resume()
+	if p.b != nil {
+		p.b.Resume()
+	}
 	p.a.Resume()
 }
 
@@ -803,8 +844,6 @@ func buildSnapshotCfg(cfg *config.SandboxConfig, overlayRef string) ([]byte, err
 	doc.Resources.Capacity.CPU = cfg.Resources.Capacity.CPU
 	doc.Resources.Capacity.Memory = cfg.Resources.Capacity.Memory
 	doc.Boot.RuntimeRef = cfg.SnapshotRefs.RuntimeRef
-	doc.Boot.Root.BaseRef = cfg.SnapshotRefs.BaseRef
-	doc.Boot.Root.Overlay.Base = overlayRef
 	// Incremental layered chain (docs/sandbox.md §3.5), keyed on the parent's
 	// scheme:
 	//   - LOCAL parent (file://): this run's resident delta was MERGED onto the
@@ -815,12 +854,29 @@ func buildSnapshotCfg(cfg *config.SandboxConfig, overlayRef string) ([]byte, err
 	//   - REMOTE parent (manifest://) / cold start: prepend the parent ref to
 	//     stack a new top over it.
 	prov := cfg.SnapshotProvenance
+	var diskChain []string
 	if strings.HasPrefix(prov.ParentSnapshotRef, "file://") {
 		doc.FromRefs = prov.ParentFromRefs
-		doc.Boot.Root.Overlay.BaseFromRefs = prov.ParentBaseFromRefs
+		diskChain = prov.ParentBaseFromRefs
 	} else {
 		doc.FromRefs = prependRef(prov.ParentSnapshotRef, prov.ParentFromRefs)
-		doc.Boot.Root.Overlay.BaseFromRefs = prependRef(prov.ParentOverlayBase, prov.ParentBaseFromRefs)
+		diskChain = prependRef(prov.ParentOverlayBase, prov.ParentBaseFromRefs)
+	}
+	if cfg.SingleDisk() {
+		// single-disk: the captured root diff is the child's read-only base;
+		// no erofs base_ref, no overlay node. The diff is sparse (CoW writes
+		// only), so on COLD start the config's root.base (the ext4 CoW lower the
+		// diff sits on) must be chained below it, else restore loses the unwritten
+		// base blocks. A self-contained diff (diff_template) has no base — chain
+		// stays empty. On restore-derived snapshots the chain already carries it.
+		if prov.ParentSnapshotRef == "" && cfg.Boot.Root.Base != "" {
+			diskChain = prependRef(cfg.Boot.Root.Base, diskChain)
+		}
+		doc.Boot.Root.Base = overlayRef
+		doc.Boot.Root.BaseFromRefs = diskChain
+	} else {
+		doc.Boot.Root.BaseRef = cfg.SnapshotRefs.BaseRef
+		doc.Boot.Root.Overlay = &overlayCfgYAML{Base: overlayRef, BaseFromRefs: diskChain}
 	}
 	return yaml.Marshal(&doc)
 }
@@ -850,13 +906,21 @@ type snapshotCfgYAML struct {
 	Boot     struct {
 		RuntimeRef string `yaml:"runtime_ref"`
 		Root       struct {
-			BaseRef string `yaml:"base_ref"`
-			Overlay struct {
-				Base         string   `yaml:"base"`
-				BaseFromRefs []string `yaml:"base_from_refs,omitempty"`
-			} `yaml:"overlay"`
+			// overlay mode: erofs image + the captured upper diff (+ its chain).
+			BaseRef string          `yaml:"base_ref,omitempty"`
+			Overlay *overlayCfgYAML `yaml:"overlay,omitempty"`
+			// single-disk mode: the captured root diff is the child's read-only
+			// base; chain below it. (Mutually exclusive with base_ref/overlay.)
+			Base         string   `yaml:"base,omitempty"`
+			BaseFromRefs []string `yaml:"base_from_refs,omitempty"`
 		} `yaml:"root"`
 	} `yaml:"boot"`
+}
+
+// overlayCfgYAML is the overlay-mode disk sub-node of snapshotCfgYAML.
+type overlayCfgYAML struct {
+	Base         string   `yaml:"base"`
+	BaseFromRefs []string `yaml:"base_from_refs,omitempty"`
 }
 
 // populateSnapshotRefs hashes boot.runtime + boot.root.base (when file://)

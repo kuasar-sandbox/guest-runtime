@@ -28,14 +28,27 @@ type SnapshotCfg struct {
 	Boot     struct {
 		RuntimeRef string `yaml:"runtime_ref"`
 		Root       struct {
-			BaseRef string `yaml:"base_ref"`
-			Overlay struct {
-				Base         string   `yaml:"base"`
-				BaseFromRefs []string `yaml:"base_from_refs"` // disk chain below base (§3.5)
-			} `yaml:"overlay"`
+			// overlay mode: BaseRef is the erofs image; Overlay carries the
+			// captured upper diff + its chain.
+			BaseRef string          `yaml:"base_ref,omitempty"`
+			Overlay *SnapOverlayCfg `yaml:"overlay,omitempty"`
+			// single-disk mode (Overlay nil): the captured root diff is the
+			// child's read-only Base; BaseFromRefs is the disk chain below it.
+			Base         string   `yaml:"base,omitempty"`
+			BaseFromRefs []string `yaml:"base_from_refs,omitempty"`
 		} `yaml:"root"`
 	} `yaml:"boot"`
 }
+
+// SnapOverlayCfg is the overlay-mode disk sub-node of a snapshot.cfg.
+type SnapOverlayCfg struct {
+	Base         string   `yaml:"base"`
+	BaseFromRefs []string `yaml:"base_from_refs"` // disk chain below base (§3.5)
+}
+
+// SingleDisk reports whether the snapshot was taken in single-disk mode (no
+// boot.root.overlay node).
+func (c *SnapshotCfg) SingleDisk() bool { return c.Boot.Root.Overlay == nil }
 
 // ParseSnapshotCfg parses the YAML body of a snapshot.cfg ZIP entry.
 func ParseSnapshotCfg(body []byte) (*SnapshotCfg, error) {
@@ -156,24 +169,38 @@ func ApplyRules(host *config.SandboxConfig, snap *SnapshotCfg, snapshotPath stri
 	}
 	out.Boot.Runtime = resolvedRuntime
 
-	// 4. boot.root.base: either file:// or manifest://.
-	snapBaseRef, err := ParseRef(snap.Boot.Root.BaseRef)
-	if err != nil {
-		return nil, fmt.Errorf("snapshot.cfg.base_ref: %w", err)
+	// 4. boot.root disk layout, by snapshot mode.
+	if snap.SingleDisk() {
+		// Single-disk: the captured root diff (snap.boot.root.base) is the new
+		// read-only base; the chain below it is base_from_refs. No erofs image,
+		// no overlay. Used raw via OpenDiskStream (restore.go), like overlay.base.
+		out.Boot.Root.Overlay = nil
+		out.Boot.Root.Base = snap.Boot.Root.Base
+		out.Boot.Root.BaseFromRefs = snap.Boot.Root.BaseFromRefs
+		// boot.root.diff stays as host yaml (optional override); empty → restore
+		// auto-defaults a fresh diff sized to the base.
+	} else {
+		// Overlay: base_ref is the erofs image (file:// or manifest://); the
+		// captured upper diff (overlay.base) is used raw via OpenDiskStream.
+		snapBaseRef, err := ParseRef(snap.Boot.Root.BaseRef)
+		if err != nil {
+			return nil, fmt.Errorf("snapshot.cfg.base_ref: %w", err)
+		}
+		resolvedBase, err := resolveAnyRef(host.Boot.Root.Base, snapBaseRef, snapshotPath, "boot.root.base")
+		if err != nil {
+			return nil, err
+		}
+		out.Boot.Root.Base = resolvedBase
+		// Fresh Overlay pointer so we never mutate host's (out is a shallow copy);
+		// inherit the host's optional diff override, force overlay.base from the
+		// snapshot (host yaml's overlay.base is ignored).
+		ov := config.OverlayConfig{}
+		if host.Boot.Root.Overlay != nil {
+			ov = *host.Boot.Root.Overlay
+		}
+		ov.Base = snap.Boot.Root.Overlay.Base
+		out.Boot.Root.Overlay = &ov
 	}
-	resolvedBase, err := resolveAnyRef(host.Boot.Root.Base, snapBaseRef, snapshotPath, "boot.root.base")
-	if err != nil {
-		return nil, err
-	}
-	out.Boot.Root.Base = resolvedBase
-
-	// 5. boot.root.overlay.base: silently ignore host yaml; always use
-	//    snapshot.cfg.
-	out.Boot.Root.Overlay.Base = snap.Boot.Root.Overlay.Base
-
-	// 6. boot.root.overlay.diff: optional (host-localized). Empty → restore
-	// auto-defaults a fresh diff under the on-disk base dir (restore.go),
-	// sized to the snapshot's overlay base.
 
 	// boot.kernel / boot.cmdline / launch.* silently ignored — fields
 	// stay as host yaml provided, but lifecycle.go won't use them on

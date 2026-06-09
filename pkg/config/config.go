@@ -390,13 +390,47 @@ type BootConfig struct {
 }
 
 type RootConfig struct {
-	// Base is the read-only container image (flattened erofs).
-	// Auto-mounted as disk0 (vhost-user-blk readonly).
+	// Base is the read-only bottom layer of the root.
+	//   - overlay mode (Overlay != nil): the flattened container image
+	//     (erofs), mounted read-only as disk0 and used as the overlayfs lower.
+	//   - single-disk mode (Overlay == nil): an OPTIONAL ext4 CoW base under
+	//     the writable root diff (file:// or manifest://). Omit it when
+	//     diff_template / diff already provide the filesystem.
 	Base string `yaml:"base"`
-	// Overlay is the writable upper layer (ext4 base + sparse diff).
-	// Auto-mounted as disk1 (vhost-user-blk read-write).
-	Overlay OverlayConfig `yaml:"overlay"`
+
+	// Overlay, when present, selects two-disk overlay mode: a separate
+	// writable ext4 upper layer (disk1) is overlaid on Base. When OMITTED
+	// (nil), the sandbox runs in single-disk mode — the root disk (disk0)
+	// is itself a writable ext4 CoW built from Base + Diff/DiffTemplate below,
+	// mounted directly with no overlayfs and no disk1 (SandboxConfig.SingleDisk).
+	Overlay *OverlayConfig `yaml:"overlay"`
+
+	// The fields below apply ONLY in single-disk mode (Overlay == nil); they
+	// are the root-disk analogue of overlay.* and are mutually exclusive with
+	// Overlay. The root disk is always writable ext4, so a mountable ext4
+	// source is required (Diff/DiffTemplate/Base) — see validate.
+
+	// Diff is the local sparse ext4 file collecting writes since boot
+	// (file:// only). Empty → auto-default to
+	// file://<base-dir>/<sid>.overlay.diff; an auto-defaulted diff is removed
+	// when the sandbox ends, an explicitly set one is never removed.
+	Diff string `yaml:"diff"`
+	// DiffTemplate (file:// only) seeds a freshly-created Diff by sparse-copying
+	// this pre-formatted ext4 image, so a single-disk cold boot gets a mountable
+	// rw root without mkfs. Ignored if Diff already exists.
+	DiffTemplate string `yaml:"diff_template"`
+	// DiffSize sizes a freshly-created Diff over Base (no template). Applied
+	// only at creation; an existing diff keeps its own size. Empty → 1 GiB.
+	DiffSize string `yaml:"diff_size"`
+	// BaseFromRefs is the single-disk snapshot chain below Base (§3.5),
+	// populated from snapshot.cfg on restore. Not set in a hand-written cold cfg.
+	BaseFromRefs []string `yaml:"base_from_refs,omitempty"`
 }
+
+// SingleDisk reports whether the sandbox runs in single-disk mode (no
+// boot.root.overlay): the root disk is a writable ext4 CoW mounted directly,
+// with no overlayfs and no second disk. The negation is two-disk overlay mode.
+func (c *SandboxConfig) SingleDisk() bool { return c.Boot.Root.Overlay == nil }
 
 type OverlayConfig struct {
 	// Base is an optional read-only ext4 layer (e.g. a snapshot's prior dirty
@@ -745,12 +779,16 @@ func (c *SandboxConfig) CPUWeight() uint64 {
 // its own on-disk size (truncating it would corrupt its filesystem). If
 // unset, defaults to 1 GiB.
 func (c *SandboxConfig) DiffSizeBytes() (int64, error) {
-	if c.Boot.Root.Overlay.DiffSize == "" {
+	raw, field := c.Boot.Root.DiffSize, "boot.root.diff_size"
+	if c.Boot.Root.Overlay != nil {
+		raw, field = c.Boot.Root.Overlay.DiffSize, "boot.root.overlay.diff_size"
+	}
+	if raw == "" {
 		return 1 << 30, nil
 	}
-	v, err := util.ParseSize(c.Boot.Root.Overlay.DiffSize)
+	v, err := util.ParseSize(raw)
 	if err != nil {
-		return 0, fmt.Errorf("boot.root.overlay.diff_size: %w", err)
+		return 0, fmt.Errorf("%s: %w", field, err)
 	}
 	return int64(v), nil
 }
@@ -884,41 +922,8 @@ func (c *SandboxConfig) ValidateCold() error {
 		return err
 	}
 
-	if c.Boot.Root.Base == "" {
-		return errors.New("boot.root.base is required")
-	}
-	if err := requireAbsIfFile("boot.root.base", c.Boot.Root.Base); err != nil {
+	if err := c.validateRoot(true); err != nil {
 		return err
-	}
-	if c.Boot.Root.Overlay.Base != "" {
-		if err := requireAbsIfFile("boot.root.overlay.base", c.Boot.Root.Overlay.Base); err != nil {
-			return err
-		}
-	}
-	// Diff is optional: empty → auto-defaulted to <base-dir>/<sid>.overlay.diff
-	// at runtime (lifecycle.go). If set, it must be an absolute file://.
-	if c.Boot.Root.Overlay.Diff != "" {
-		if err := requireFileAbs("boot.root.overlay.diff", c.Boot.Root.Overlay.Diff); err != nil {
-			return err
-		}
-	}
-	if c.Boot.Root.Overlay.DiffTemplate != "" {
-		if err := requireFileAbs("boot.root.overlay.diff_template", c.Boot.Root.Overlay.DiffTemplate); err != nil {
-			return err
-		}
-	}
-	if _, err := c.DiffSizeBytes(); err != nil {
-		return err
-	}
-	// Cold boot needs a mountable ext4 source for the upper layer: a fresh
-	// blank diff is not a valid filesystem. Require at least one of
-	// diff_template, overlay.base, or an explicitly-provided diff path
-	// (assumed pre-formatted). The auto-default empty diff with neither is
-	// rejected here rather than failing as a guest mount error.
-	if c.Boot.Root.Overlay.DiffTemplate == "" &&
-		c.Boot.Root.Overlay.Base == "" &&
-		c.Boot.Root.Overlay.Diff == "" {
-		return errors.New("cold boot needs an ext4 source for the overlay upper: set boot.root.overlay.diff_template, boot.root.overlay.base, or an explicit boot.root.overlay.diff")
 	}
 
 	if (c.Network.TAP == "") == (c.Network.TapFD == nil) {
@@ -1015,23 +1020,96 @@ func (c *SandboxConfig) ValidateRestoreHostConfig() error {
 			return err
 		}
 	}
-	if c.Boot.Root.Base != "" {
-		if err := requireAbsIfFile("boot.root.base", c.Boot.Root.Base); err != nil {
-			return err
-		}
-	}
-	if c.Boot.Root.Overlay.Diff != "" {
-		if err := requireFileAbs("boot.root.overlay.diff", c.Boot.Root.Overlay.Diff); err != nil {
-			return err
-		}
-	}
-	if c.Boot.Root.Overlay.DiffTemplate != "" {
-		if err := requireFileAbs("boot.root.overlay.diff_template", c.Boot.Root.Overlay.DiffTemplate); err != nil {
-			return err
-		}
+	if err := c.validateRoot(false); err != nil {
+		return err
 	}
 	if err := c.Timeouts.validate(); err != nil {
 		return err
+	}
+	return nil
+}
+
+// validateRoot checks boot.root for both disk modes. cold=true enforces the
+// cold-start requirements (a mountable source, and — in single-disk mode —
+// an explicit launch.exec since there is no erofs image config); cold=false
+// (restore) is lenient: base / sources come from the snapshot.cfg.
+//
+//   - overlay mode (Overlay != nil): Base is the erofs image (required cold),
+//     the writable upper is overlay.{base,diff,diff_template}.
+//   - single-disk mode (Overlay == nil): the root disk is a writable ext4 CoW
+//     of Base (optional) + Diff/DiffTemplate; root.* are mutually exclusive
+//     with overlay.
+func (c *SandboxConfig) validateRoot(cold bool) error {
+	r := &c.Boot.Root
+	if r.Overlay != nil {
+		// root.* single-disk fields are mutually exclusive with overlay.
+		if r.Diff != "" || r.DiffTemplate != "" || r.DiffSize != "" || len(r.BaseFromRefs) > 0 {
+			return errors.New("boot.root.{diff,diff_template,diff_size,base_from_refs} are single-disk only — remove them, or remove boot.root.overlay to select single-disk mode")
+		}
+		if cold && r.Base == "" {
+			return errors.New("boot.root.base is required (overlay mode)")
+		}
+		if r.Base != "" {
+			if err := requireAbsIfFile("boot.root.base", r.Base); err != nil {
+				return err
+			}
+		}
+		ov := r.Overlay
+		if ov.Base != "" {
+			if err := requireAbsIfFile("boot.root.overlay.base", ov.Base); err != nil {
+				return err
+			}
+		}
+		if ov.Diff != "" {
+			if err := requireFileAbs("boot.root.overlay.diff", ov.Diff); err != nil {
+				return err
+			}
+		}
+		if ov.DiffTemplate != "" {
+			if err := requireFileAbs("boot.root.overlay.diff_template", ov.DiffTemplate); err != nil {
+				return err
+			}
+		}
+		if _, err := c.DiffSizeBytes(); err != nil {
+			return err
+		}
+		// Cold boot needs a mountable ext4 source for the upper layer — a
+		// fresh blank diff is not a valid filesystem.
+		if cold && ov.DiffTemplate == "" && ov.Base == "" && ov.Diff == "" {
+			return errors.New("cold boot needs an ext4 source for the overlay upper: set boot.root.overlay.diff_template, boot.root.overlay.base, or an explicit boot.root.overlay.diff")
+		}
+		return nil
+	}
+
+	// single-disk mode (boot.root.overlay omitted).
+	if r.Diff != "" {
+		if err := requireFileAbs("boot.root.diff", r.Diff); err != nil {
+			return err
+		}
+	}
+	if r.DiffTemplate != "" {
+		if err := requireFileAbs("boot.root.diff_template", r.DiffTemplate); err != nil {
+			return err
+		}
+	}
+	if r.Base != "" {
+		if err := requireAbsIfFile("boot.root.base", r.Base); err != nil {
+			return err
+		}
+	}
+	if _, err := c.DiffSizeBytes(); err != nil {
+		return err
+	}
+	if cold {
+		// The single root disk is always writable ext4; with no overlayfs lower
+		// and no guest-side mkfs it needs a mountable ext4 source.
+		if r.DiffTemplate == "" && r.Base == "" && r.Diff == "" {
+			return errors.New("single-disk cold boot needs an ext4 source for the root: set boot.root.diff_template, boot.root.base, or an explicit boot.root.diff")
+		}
+		// No erofs image ⇒ no appended image config; the launch must be explicit.
+		if c.Launch.Exec == "" {
+			return errors.New("single-disk mode has no image config (boot.root.overlay omitted): set launch.exec")
+		}
 	}
 	return nil
 }

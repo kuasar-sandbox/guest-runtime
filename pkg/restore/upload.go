@@ -81,10 +81,17 @@ func UploadLocal(ctx context.Context, snapshotPath string, mcfg *manifest.Config
 		return "", err
 	}
 
-	// 2. The top overlay must be a local file:// in the bundle dir.
-	ovScheme, ovVal, ok := config.SchemeAndPath(parsed.Boot.Root.Overlay.Base)
+	// 2. The top disk layer must be a local file:// in the bundle dir. Single
+	//    -disk records it at root.base; overlay at overlay.base.
+	topDiskBase := parsed.Boot.Root.Base
+	diskChain := parsed.Boot.Root.BaseFromRefs
+	if !parsed.SingleDisk() {
+		topDiskBase = parsed.Boot.Root.Overlay.Base
+		diskChain = parsed.Boot.Root.Overlay.BaseFromRefs
+	}
+	ovScheme, ovVal, ok := config.SchemeAndPath(topDiskBase)
 	if !ok || ovScheme != "file" {
-		return "", fmt.Errorf("upload-snapshot: top overlay.base %q is not a local file:// (already remote? nothing to upload)", parsed.Boot.Root.Overlay.Base)
+		return "", fmt.Errorf("upload-snapshot: top disk layer %q is not a local file:// (already remote? nothing to upload)", topDiskBase)
 	}
 	overlayPath := ovVal
 	if !filepath.IsAbs(overlayPath) {
@@ -93,7 +100,7 @@ func UploadLocal(ctx context.Context, snapshotPath string, mcfg *manifest.Config
 
 	// 3. Validate every LOWER layer (memory + disk chains): remote, present,
 	//    key-consistent. Reject buried local layers (invariant).
-	lower := append(append([]string{}, parsed.FromRefs...), parsed.Boot.Root.Overlay.BaseFromRefs...)
+	lower := append(append([]string{}, parsed.FromRefs...), diskChain...)
 	for _, ref := range lower {
 		sc, val, ok := config.SchemeAndPath(ref)
 		if !ok {
@@ -144,9 +151,13 @@ func UploadLocal(ctx context.Context, snapshotPath string, mcfg *manifest.Config
 		return "", fmt.Errorf("ingest overlay: %w", err)
 	}
 
-	// Re-render snapshot.cfg: overlay.base → the ingested manifest:// ref; the
-	// remote lower chain (from_refs / base_from_refs) carried by reference.
-	parsed.Boot.Root.Overlay.Base = overlayRef
+	// Re-render snapshot.cfg: the top disk layer → the ingested manifest:// ref;
+	// the remote lower chain (from_refs / base_from_refs) carried by reference.
+	if parsed.SingleDisk() {
+		parsed.Boot.Root.Base = overlayRef
+	} else {
+		parsed.Boot.Root.Overlay.Base = overlayRef
+	}
 	newCfg, err := yaml.Marshal(&parsed)
 	if err != nil {
 		return "", fmt.Errorf("render snapshot.cfg: %w", err)

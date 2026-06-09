@@ -100,9 +100,9 @@ func main() {
 	hsCh := make(chan handshakeResult, 1)
 	go runHandshake(hsCh)
 
-	// Spec-independent overlay assembly (base mounts + overlay → sysroot).
-	if err := phase1aAssembleOverlay(); err != nil {
-		die("phase 1a overlay assembly: %v", err)
+	// Spec-independent root assembly (base mounts + overlay/single → sysroot).
+	if err := phase1aAssembleRoot(); err != nil {
+		die("phase 1a root assembly: %v", err)
 	}
 
 	hr := <-hsCh
@@ -184,13 +184,43 @@ func main() {
 	// phase3Supervise does not return.
 }
 
-// phase1aAssembleOverlay mounts /proc /sys /dev, waits for vda/vdb, assembles
-// the overlay at /sysroot (lower=blk0 ro, upper=blk1 rw), and binds the
-// guest-side runtime payload (/opt/sandbox-runtime) into it. It is
-// spec-independent, so it runs concurrently with the launch handshake; the
-// chroot itself is deferred to phase1bSwitchRoot (after the join), where it
-// can run single-threaded.
-func phase1aAssembleOverlay() error {
+// singleDiskRoot records the disk mode resolved from /proc/cmdline in phase1a
+// (single-disk vs two-disk overlay). Read later by applyVolumeMounts to place
+// `empty` volume sources correctly. The guest is a single process, so a package
+// var is adequate.
+var singleDiskRoot bool
+
+// singleDiskFromCmdline reports whether the kernel cmdline selects single-disk
+// mode (sandbox.root.layout=single, set by the host's CHCommand). /proc must be
+// mounted. Absent ⇒ two-disk overlay mode (the default).
+func singleDiskFromCmdline() bool {
+	b, err := os.ReadFile("/proc/cmdline")
+	if err != nil {
+		logf("phase1a: read /proc/cmdline: %v (assuming overlay mode)", err)
+		return false
+	}
+	for _, tok := range strings.Fields(string(b)) {
+		if tok == "sandbox.root.layout=single" {
+			return true
+		}
+	}
+	return false
+}
+
+// phase1aAssembleRoot mounts /proc /sys /dev, then assembles the container root
+// at /sysroot per disk mode (read from /proc/cmdline — the mode must be known
+// before the launch spec arrives, so it rides the kernel cmdline):
+//
+//   - overlay mode (default): wait vda+vdb, mount the erofs base (vda, ro) as
+//     the overlayfs lower over the ext4 upper (vdb, rw), overlay → /sysroot.
+//   - single-disk mode: wait vda only, mount it (ext4, rw) directly as /sysroot
+//     — no overlayfs, no vdb.
+//
+// Finally it binds the guest-side runtime payload (/opt/sandbox-runtime) into
+// /sysroot. Spec-independent, so it runs concurrently with the launch
+// handshake; the chroot is deferred to phase1bSwitchRoot (after the join),
+// where it can run single-threaded.
+func phase1aAssembleRoot() error {
 	for _, m := range []struct {
 		source, target, fstype string
 		flags                  uintptr
@@ -206,32 +236,46 @@ func phase1aAssembleOverlay() error {
 			return fmt.Errorf("mount %s on %s: %w", m.source, m.target, err)
 		}
 	}
-	logf("phase1a: base mounts done; waiting for vda/vdb")
 
-	if err := waitForDevice("/dev/vda", devicePollTimeout); err != nil {
-		return fmt.Errorf("wait /dev/vda: %w", err)
-	}
-	if err := waitForDevice("/dev/vdb", devicePollTimeout); err != nil {
-		return fmt.Errorf("wait /dev/vdb: %w", err)
-	}
-	logf("phase1a: vda+vdb present")
+	singleDiskRoot = singleDiskFromCmdline() // /proc is mounted now
+	if singleDiskRoot {
+		logf("phase1a: base mounts done; single-disk mode, waiting for vda")
+		if err := waitForDevice("/dev/vda", devicePollTimeout); err != nil {
+			return fmt.Errorf("wait /dev/vda: %w", err)
+		}
+		// The single root disk is a writable ext4 CoW; mount it directly.
+		if err := unix.Mount("/dev/vda", "/sysroot", "ext4", 0, ""); err != nil {
+			return fmt.Errorf("mount blk0 (ext4 rw) on /sysroot: %w", err)
+		}
+		logf("phase1a: single-disk root mounted at /sysroot")
+	} else {
+		logf("phase1a: base mounts done; waiting for vda/vdb")
+		if err := waitForDevice("/dev/vda", devicePollTimeout); err != nil {
+			return fmt.Errorf("wait /dev/vda: %w", err)
+		}
+		if err := waitForDevice("/dev/vdb", devicePollTimeout); err != nil {
+			return fmt.Errorf("wait /dev/vdb: %w", err)
+		}
+		logf("phase1a: vda+vdb present")
 
-	if err := unix.Mount("/dev/vda", "/overlay/lower", "erofs", unix.MS_RDONLY, ""); err != nil {
-		return fmt.Errorf("mount blk0 (erofs ro) on /overlay/lower: %w", err)
-	}
-	if err := unix.Mount("/dev/vdb", "/overlay/upper", "ext4", 0, ""); err != nil {
-		return fmt.Errorf("mount blk1 (ext4 rw) on /overlay/upper: %w", err)
-	}
-	if err := os.MkdirAll("/overlay/upper/upperdir", 0o755); err != nil {
-		return fmt.Errorf("mkdir upperdir: %w", err)
-	}
-	if err := os.MkdirAll("/overlay/upper/workdir", 0o755); err != nil {
-		return fmt.Errorf("mkdir workdir: %w", err)
-	}
+		if err := unix.Mount("/dev/vda", "/overlay/lower", "erofs", unix.MS_RDONLY, ""); err != nil {
+			return fmt.Errorf("mount blk0 (erofs ro) on /overlay/lower: %w", err)
+		}
+		if err := unix.Mount("/dev/vdb", "/overlay/upper", "ext4", 0, ""); err != nil {
+			return fmt.Errorf("mount blk1 (ext4 rw) on /overlay/upper: %w", err)
+		}
+		if err := os.MkdirAll("/overlay/upper/upperdir", 0o755); err != nil {
+			return fmt.Errorf("mkdir upperdir: %w", err)
+		}
+		if err := os.MkdirAll("/overlay/upper/workdir", 0o755); err != nil {
+			return fmt.Errorf("mkdir workdir: %w", err)
+		}
 
-	overlayOpts := "lowerdir=/overlay/lower,upperdir=/overlay/upper/upperdir,workdir=/overlay/upper/workdir"
-	if err := unix.Mount("overlay", "/sysroot", "overlay", 0, overlayOpts); err != nil {
-		return fmt.Errorf("mount overlay on /sysroot: %w", err)
+		overlayOpts := "lowerdir=/overlay/lower,upperdir=/overlay/upper/upperdir,workdir=/overlay/upper/workdir"
+		if err := unix.Mount("overlay", "/sysroot", "overlay", 0, overlayOpts); err != nil {
+			return fmt.Errorf("mount overlay on /sysroot: %w", err)
+		}
+		logf("phase1a: overlay assembled at /sysroot")
 	}
 
 	for _, dir := range []string{"/sysroot/proc", "/sysroot/sys", "/sysroot/dev"} {
@@ -252,7 +296,7 @@ func phase1aAssembleOverlay() error {
 		return fmt.Errorf("bind /opt/sandbox-runtime into sysroot: %w", err)
 	}
 
-	logf("phase1a: overlay assembled at /sysroot")
+	logf("phase1a: /sysroot ready (runtime payload bound)")
 	return nil
 }
 

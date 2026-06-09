@@ -48,7 +48,10 @@ func lazyStatsTicker(ctx context.Context, base time.Duration, getUffd func() *uf
 		// Sample, then compute the window against the PREVIOUS baseline
 		// before advancing it.
 		s0 := srv0.SnapshotStats()
-		s1 := srv1.SnapshotStats()
+		var s1 vhost.StatsSnapshot // zero in single-disk mode (no blk1)
+		if srv1 != nil {
+			s1 = srv1.SnapshotStats()
+		}
 		var u uffd.LazyStats
 		if h := getUffd(); h != nil {
 			u = h.LazyStats()

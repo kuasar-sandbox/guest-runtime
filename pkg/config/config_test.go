@@ -277,6 +277,93 @@ func TestValidateCold_MissingFields(t *testing.T) {
 	}
 }
 
+const minimalSingle = `
+resources:
+  capacity:
+    cpu: 2
+    memory: 2GiB
+network:
+  tap: tap0
+boot:
+  kernel: file:///opt/sandbox/vmlinux
+  runtime: file:///opt/sandbox/sandbox-runtime.erofs
+  root:
+    diff_template: file:///opt/root.ext4
+launch:
+  exec: /usr/bin/echo
+`
+
+func TestSingleDiskMode(t *testing.T) {
+	cfg, err := Load(writeYAML(t, minimalSingle))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.SingleDisk() {
+		t.Fatal("SingleDisk() = false, want true when boot.root.overlay is omitted")
+	}
+	if cfg.Boot.Root.DiffTemplate != "file:///opt/root.ext4" {
+		t.Errorf("DiffTemplate = %q", cfg.Boot.Root.DiffTemplate)
+	}
+	if err := cfg.ValidateCold(); err != nil {
+		t.Errorf("single-disk ValidateCold: %v", err)
+	}
+	// Overlay mode for comparison: minimalCold has an overlay node.
+	ov, err := Load(writeYAML(t, minimalCold))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ov.SingleDisk() {
+		t.Error("SingleDisk() = true, want false when boot.root.overlay is present")
+	}
+}
+
+func TestValidateCold_SingleDisk(t *testing.T) {
+	cases := []struct {
+		name      string
+		mutate    func(c *SandboxConfig)
+		wantSubst string
+	}{
+		{"no exec (no image config)", func(c *SandboxConfig) { c.Launch.Exec = "" }, "launch.exec"},
+		{"no ext4 source", func(c *SandboxConfig) { c.Boot.Root.DiffTemplate = "" }, "ext4 source for the root"},
+		{"manifest diff", func(c *SandboxConfig) { c.Boot.Root.Diff = "manifest://abc" }, "must be file"},
+		{"base ok (ext4 cow lower)", func(c *SandboxConfig) {
+			c.Boot.Root.DiffTemplate = ""
+			c.Boot.Root.Base = "file:///opt/base.ext4"
+		}, ""}, // valid: base is a mountable ext4 source
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := Load(writeYAML(t, minimalSingle))
+			if err != nil {
+				t.Fatal(err)
+			}
+			tc.mutate(cfg)
+			err = cfg.ValidateCold()
+			if tc.wantSubst == "" {
+				if err != nil {
+					t.Fatalf("expected no error, got %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantSubst) {
+				t.Fatalf("got %v, want substring %q", err, tc.wantSubst)
+			}
+		})
+	}
+}
+
+func TestValidateCold_DiskModeMutualExclusion(t *testing.T) {
+	// overlay present + a root-level single-disk field → error.
+	cfg, err := Load(writeYAML(t, minimalCold)) // has boot.root.overlay
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Boot.Root.DiffTemplate = "file:///opt/x.ext4"
+	if err := cfg.ValidateCold(); err == nil || !strings.Contains(err.Error(), "single-disk only") {
+		t.Fatalf("expected mutual-exclusion error, got %v", err)
+	}
+}
+
 func TestValidateCold_ResourceControl(t *testing.T) {
 	// Helper: write a minimal config and apply mutator before validating.
 	run := func(t *testing.T, mutate func(c *SandboxConfig), wantErrSubstr string) {

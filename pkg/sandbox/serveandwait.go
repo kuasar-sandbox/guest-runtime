@@ -86,9 +86,14 @@ type VMParams struct {
 	StatsJSONPath      string        // if non-empty, dump the stats JSON on exit
 	StatsInterval      time.Duration // if > 0, periodically log lazy-load stats (uffd + vhost); 0 = off
 
-	CapBytes   int64               // RAM capacity (memfd size); also stats UffdRAMSize
+	CapBytes int64 // RAM capacity (memfd size); also stats UffdRAMSize
+	// SingleDisk selects single-disk mode: blk0 is the writable Cow (mounted
+	// directly as the rw root), there is no blk1, and Blk0Reader is nil. In
+	// two-disk overlay mode (default) blk0 is Blk0Reader (ro erofs) and blk1
+	// is the Cow (ext4 upper).
+	SingleDisk bool
 	UffdSource uffd.SnapshotReader // ZeroSource (cold) | snapshot source (restore)
-	Blk0Reader vhost.BlockReader
+	Blk0Reader vhost.BlockReader   // overlay mode only; nil in single-disk
 	Blk0Label  string
 	Blk0Path   string
 	Cow        *vhost.BlockCOW
@@ -262,19 +267,28 @@ func ServeAndWait(p VMParams) (int, error) {
 	}
 	defer vaReportSrv.Stop()
 
-	// vhost-blk backends.
-	srv0 := vhost.NewServer(blk0Sock, &vhost.ReadOnlyBackend{R: p.Blk0Reader}, logf)
+	// vhost-blk backends. Single-disk: blk0 is the writable Cow (mounted
+	// directly as rw root), no blk1. Overlay: blk0 is the ro erofs base and
+	// blk1 the writable Cow.
+	var srv0, srv1 *vhost.Server
+	if p.SingleDisk {
+		srv0 = vhost.NewServer(blk0Sock, &vhost.CowBackend{C: p.Cow}, logf)
+	} else {
+		srv0 = vhost.NewServer(blk0Sock, &vhost.ReadOnlyBackend{R: p.Blk0Reader}, logf)
+	}
 	srv0.EnableStats(p.Blk0Label, p.Blk0Path)
 	srv0.SetMemfd(memfd.Inode(), memfd.Bytes())
 	if err := srv0.Listen(); err != nil {
 		return -1, err
 	}
-	srv1 := vhost.NewServer(blk1Sock, &vhost.CowBackend{C: p.Cow}, logf)
-	srv1.EnableStats(p.Blk1Label, p.Blk1Path)
-	srv1.SetMemfd(memfd.Inode(), memfd.Bytes())
-	if err := srv1.Listen(); err != nil {
-		srv0.Stop()
-		return -1, err
+	if !p.SingleDisk {
+		srv1 = vhost.NewServer(blk1Sock, &vhost.CowBackend{C: p.Cow}, logf)
+		srv1.EnableStats(p.Blk1Label, p.Blk1Path)
+		srv1.SetMemfd(memfd.Inode(), memfd.Bytes())
+		if err := srv1.Listen(); err != nil {
+			srv0.Stop()
+			return -1, err
+		}
 	}
 
 	// guestlink.LaunchServer: guest→host management short-conns on
@@ -311,7 +325,9 @@ func ServeAndWait(p VMParams) (int, error) {
 	}
 	if err := launch.Listen(); err != nil {
 		srv0.Stop()
-		srv1.Stop()
+		if srv1 != nil {
+			srv1.Stop()
+		}
 		return -1, err
 	}
 
@@ -363,7 +379,9 @@ func ServeAndWait(p VMParams) (int, error) {
 	}
 	if err := ctlSrv.Listen(); err != nil {
 		srv0.Stop()
-		srv1.Stop()
+		if srv1 != nil {
+			srv1.Stop()
+		}
 		return -1, fmt.Errorf("ctl.sock listen: %w", err)
 	}
 	defer ctlSrv.Stop()
@@ -374,9 +392,12 @@ func ServeAndWait(p VMParams) (int, error) {
 	defer muxLink.Teardown()
 
 	var backendWG sync.WaitGroup
-	backendWG.Add(5)
+	backendWG.Add(4)
 	go func() { defer backendWG.Done(); _ = srv0.Serve(backendCtx) }()
-	go func() { defer backendWG.Done(); _ = srv1.Serve(backendCtx) }()
+	if srv1 != nil { // overlay mode only
+		backendWG.Add(1)
+		go func() { defer backendWG.Done(); _ = srv1.Serve(backendCtx) }()
+	}
 	go func() { defer backendWG.Done(); _ = launch.Serve(backendCtx) }()
 	go func() { defer backendWG.Done(); _ = vaReportSrv.Serve(backendCtx) }()
 	go func() { defer backendWG.Done(); _ = ctlSrv.Serve(backendCtx) }()
@@ -418,11 +439,17 @@ func ServeAndWait(p VMParams) (int, error) {
 	if p.TapFile != nil {
 		tapFDNum = 4
 	}
+	// Single-disk: no blk1 socket — the BuildCmd closure (CHCommand / restore
+	// config rewrite) emits a single disk when Blk1Sock is empty.
+	cmdBlk1Sock := blk1Sock
+	if p.SingleDisk {
+		cmdBlk1Sock = ""
+	}
 	cmd, chStdioCleanup, err := p.BuildCmd(CmdEnv{
 		Memfd:     memfd,
 		CHSock:    chSock,
 		Blk0Sock:  blk0Sock,
-		Blk1Sock:  blk1Sock,
+		Blk1Sock:  cmdBlk1Sock,
 		VsockBase: vsockBase,
 		UffdSock:  uffdSockPath,
 		RunDir:    runDir,
@@ -515,7 +542,9 @@ func ServeAndWait(p VMParams) (int, error) {
 	// these multi-line blocks don't stairstep on a still-raw terminal.
 	statsW := log.Default().Writer()
 	_, _ = srv0.WriteStatsTo(statsW)
-	_, _ = srv1.WriteStatsTo(statsW)
+	if srv1 != nil {
+		_, _ = srv1.WriteStatsTo(statsW)
+	}
 	uffdHandlerMu.Lock()
 	h := uffdHandler
 	uffdHandlerMu.Unlock()
@@ -523,8 +552,12 @@ func ServeAndWait(p VMParams) (int, error) {
 		writeUffdStats(statsW, h.Stats())
 	}
 	if p.StatsJSONPath != "" {
+		servers := []*vhost.Server{srv0}
+		if srv1 != nil {
+			servers = append(servers, srv1)
+		}
 		bundle := statsBundle{
-			Servers:     []*vhost.Server{srv0, srv1},
+			Servers:     servers,
 			StartUnixNs: p.StartUnixNs,
 			EndUnixNs:   time.Now().UnixNano(),
 		}

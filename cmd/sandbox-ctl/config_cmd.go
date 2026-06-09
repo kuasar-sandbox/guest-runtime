@@ -215,8 +215,12 @@ boot:
     overlay:
       # diff omitted → auto-default to /var/lib/sandbox/<sid>/<sid>.overlay.diff
       diff_template: file:///opt/sandbox/overlay-templates/basic-1G.ext4
+    # Single-disk mode: omit the overlay block above and give the root disk
+    # write capability directly (writable ext4, no overlayfs, no second disk):
+    #   diff_template: file:///opt/sandbox/root-templates/app-2G.ext4
+    # (base optional; launch.exec required — single-disk has no image config.)
 launch:
-  exec: /usr/bin/app                       # or omit to use the image's Entrypoint/Cmd
+  exec: /usr/bin/app                       # or omit to use the image's Entrypoint/Cmd (overlay mode only)
   args: []
   restart: never                           # never | on-failure | always
   # user: "0:0"                            # uid:gid or name:group

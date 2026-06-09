@@ -165,6 +165,15 @@ target;switch-root 的 `MS_MOVE /sysroot → /` 会把该 bind 随整棵子树�
 重挂),故恢复出来的 sandbox 看到同一份 payload、无版本偏斜。代价是 payload 与 runtime 镜像同
 生命周期、无法独立热补丁(需独立版本时改用独立只读 EROFS 设备,见 §6)。
 
+**单磁盘模式**(`boot.root.overlay` 省略时)。host 不建 blk1、只发一个可写 `--disk`(blk0=
+root 盘的 ext4 CoW),并在 cmdline 加 `sandbox.root.layout=single`。phase1a 读 `/proc/cmdline`
+(/proc 已在最前挂好)判定模式——因组盘与 launch 握手并发、早于 launch spec 到达,模式只能走
+cmdline,不能走 spec。单盘路径:只 wait `/dev/vda`,`mount -t ext4 /dev/vda /sysroot` 直接挂为
+可写根(无 `/overlay/lower`、`/overlay/upper`、无 overlayfs、无 vdb),其余(`/opt/sandbox-runtime`
+bind、switch-root、phase1b 基础挂载)不变。`empty` 卷的 source 改落在写根自身的
+`/sysroot/.sandbox-volumes/<i>`(无独立 ext4 upper),仍 bind 遮蔽 target、随 switch-root 子树搬运。
+单盘根盘恒为可写 ext4,无 erofs 镜像 ⇒ 无内嵌 config.json ⇒ launch.exec 必填(host 侧 validate 强制)。
+
 ### 3.2 阶段 2:spec 应用 + stdio 接线 + 应用拉起
 
 阶段 1 的 JOIN 已拿到 LaunchSpec 与那条 vsock 连接(hello/launch 已收发)。阶段 2

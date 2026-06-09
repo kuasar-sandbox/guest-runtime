@@ -460,8 +460,17 @@ boot:
                                               # 已存在的 diff 忽略此项
       diff_size: 1GiB                         # 可选,默认 1GiB。仅在"创建空白 diff"(无模板、
                                               # 无 base)时用于定尺寸;已有 diff 保持自身大小
+    # —— 单磁盘模式:省略上面的 overlay 即启用(详见 docs/sandbox-runtime.md §3.x)——
+    # 不写 boot.root.overlay 时,root 盘本身是可写 ext4,直接挂为 disk0(无 overlayfs、无 disk1)。
+    # 下面三项是 overlay.{diff,diff_template,diff_size} 的 root 层等价物,给 root 盘写能力;
+    # 与 overlay.* 互斥。base 可选(须是 ext4 镜像作 CoW 下层);无 erofs 镜像 ⇒ 无内嵌
+    # config.json ⇒ launch.exec 必填。
+    #   diff:          file:///var/lib/sandbox/<sid>/<sid>.overlay.diff  # 可写盘;空→自动落盘
+    #   diff_template: file:///opt/sandbox/root-templates/app-2G.ext4    # 预格式化 ext4,seed 新盘
+    #   diff_size:     2GiB                                              # 同 overlay.diff_size
+    #   base_from_refs: []                                              # 单盘快照链(snapshot.cfg 自动填)
 
-# 容器应用启动配置(覆盖 boot.root.base 内嵌的 config.json 默认值)
+# 容器应用启动配置(覆盖 boot.root.base 内嵌的 config.json 默认值;单磁盘模式无内嵌配置,exec 必填)
 launch:
   exec: /usr/bin/foo
   args: ["arg1", "arg2"]
@@ -605,10 +614,13 @@ sandbox-init 以 flush-and-replace 重配网卡(克隆取新 L3 身份,见 §恢
 |------|-----------|---------------|------|
 | `boot.kernel` | ✓ | ✗ | vmlinux 体积小且节点级共享,manifest 化没有收益 |
 | `boot.runtime` | ✓ | ✗ | sandbox-runtime.erofs 节点级共享,DAX 直接用 host 文件 |
-| `boot.root.base` | ✓ | ✓ | 跨 sandbox 复用率高,manifest 化收益最大 |
+| `boot.root.base` | ✓ | ✓ | overlay 模式:erofs 镜像;单盘模式:可选 ext4 CoW 下层。跨 sandbox 复用率高,manifest 化收益最大 |
 | `boot.root.overlay.base` | ✓ | ✓ | 快照恢复时常用 manifest:// |
 | `boot.root.overlay.diff` | ✓ (only) | ✗ | 运行时 dirty 数据,本地 sparse 文件;可选,空→落盘 base 目录 |
 | `boot.root.overlay.diff_template` | ✓ (only) | ✗ | 预格式化 ext4 模板,seed 新建 diff |
+| `boot.root.diff`(单盘) | ✓ (only) | ✗ | 单盘可写根盘,overlay.diff 的 root 层等价;省略 overlay 时启用 |
+| `boot.root.diff_template`(单盘) | ✓ (only) | ✗ | 单盘根盘的预格式化 ext4 模板;与 overlay.* 互斥 |
+| `boot.root.base_from_refs`(单盘) | ✓ | ✓ | 单盘快照链(snapshot.cfg 自动填,§3.5) |
 | `run --restore=<ref>` | ✓ | ✓ | `<sid>.snapshot` 文件路径 / manifest://<key> |
 
 ### 3.3 flattened image 内嵌 config.json
@@ -672,6 +684,11 @@ boot:
       base_from_refs: []
                  # 磁盘 diff 链(base 之下,自顶向下,不含 base)。与 from_refs 对称:
                  # s1 = [];s2 = [s1.ext4];s3 = [s2.ext4, s1.ext4]
+
+  # 单磁盘模式(快照取自单盘 sandbox):无 base_ref、无 overlay 节,改用 root 层:
+  # root:
+  #   base:           file://<sha256>.overlay   # 本快照捕获的 root diff = 链顶(或 manifest://)
+  #   base_from_refs: []                         # 单盘磁盘链;冷启动会把 root.base(CoW 下层)入链
 ```
 
 **字段说明**:

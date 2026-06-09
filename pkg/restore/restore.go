@@ -224,21 +224,29 @@ func Run(ctx context.Context, opts Options) (int, error) {
 	// Record provenance so a snapshot taken by this restored run prepends this
 	// bundle and extends the chain (§3.5): child.from_refs = [selfRef] ++
 	// this.from_refs; child.base_from_refs = [this.overlay.base] ++ this.base_from_refs.
+	// The parent's "top disk layer" + chain below it: overlay.base/overlay
+	// .base_from_refs in overlay mode, root.base/root.base_from_refs in
+	// single-disk mode (the captured diff is recorded at root level there).
+	parentDiskBase, parentDiskChain := parsedSnap.Boot.Root.Base, parsedSnap.Boot.Root.BaseFromRefs
+	if !parsedSnap.SingleDisk() {
+		parentDiskBase = parsedSnap.Boot.Root.Overlay.Base
+		parentDiskChain = parsedSnap.Boot.Root.Overlay.BaseFromRefs
+	}
 	snapCfg.SnapshotProvenance = config.SnapshotProvenance{
 		ParentSnapshotRef:  selfRef,
 		ParentFromRefs:     parsedSnap.FromRefs,
-		ParentOverlayBase:  parsedSnap.Boot.Root.Overlay.Base,
-		ParentBaseFromRefs: parsedSnap.Boot.Root.Overlay.BaseFromRefs,
+		ParentOverlayBase:  parentDiskBase,
+		ParentBaseFromRefs: parentDiskChain,
 	}
-	// Local restore: record the parent's on-disk bundle + overlay paths so a
-	// re-export merges this run's resident delta onto them (replace the
+	// Local restore: record the parent's on-disk bundle + top-disk-layer paths
+	// so a re-export merges this run's resident delta onto them (replace the
 	// next-newest local layer, not stack a second one) — docs §3.5. Paths
-	// resolve like openRefStream: overlay.base is a basename in the bundle dir.
+	// resolve like openRefStream: the disk layer is a basename in the bundle dir.
 	if opts.SnapshotPath != "" {
 		if abs, err := filepath.Abs(opts.SnapshotPath); err == nil {
 			snapCfg.SnapshotProvenance.ParentSnapshotPath = abs
 		}
-		if sc, val, ok := config.SchemeAndPath(parsedSnap.Boot.Root.Overlay.Base); ok && sc == "file" {
+		if sc, val, ok := config.SchemeAndPath(parentDiskBase); ok && sc == "file" {
 			if !filepath.IsAbs(val) {
 				val = filepath.Join(filepath.Dir(opts.SnapshotPath), val)
 			}
@@ -311,13 +319,17 @@ func Run(ctx context.Context, opts Options) (int, error) {
 		hooks.SetAllocatableNow(initialAlloc)
 	}
 
-	// Resolve disk reference. file:// is opened directly; manifest://
-	// goes through pkg/sandbox/disks.OpenManifestFetcher (same path as
-	// cold-start manifest:// disks).
-	diskRef := snapCfg.Boot.Root.Overlay.Base
+	// Resolve disk reference (the snapshot's top disk layer). file:// is opened
+	// directly; manifest:// goes through pkg/sandbox/disks.OpenManifestFetcher
+	// (same path as cold-start manifest:// disks). Single-disk records it at
+	// root.base; overlay at overlay.base.
+	diskRef := snapCfg.Boot.Root.Base
+	if !snapCfg.SingleDisk() {
+		diskRef = snapCfg.Boot.Root.Overlay.Base
+	}
 	scheme, diskValue, ok := config.SchemeAndPath(diskRef)
 	if !ok {
-		return -1, fmt.Errorf("invalid overlay.base in sandbox.cfg: %s", diskRef)
+		return -1, fmt.Errorf("invalid disk base ref in snapshot.cfg: %s", diskRef)
 	}
 	if scheme == "file" && !filepath.IsAbs(diskValue) && opts.SnapshotPath != "" {
 		// Resolve relative to snapshot file (local mode only).
@@ -380,16 +392,18 @@ func Run(ctx context.Context, opts Options) (int, error) {
 	}
 	logf("snapshot source: %d memory layer(s)", len(memLayers))
 
-	// Open disk as base+diff: the read-only base is [overlay.base] ++
+	// Open disk as base+diff: the read-only base is [top disk layer] ++
 	// base_from_refs (§3.5) layered into one Stream, the new diff CoW'd on top.
 	// baseReader.Close (deferred) closes the layered base and all its layers.
+	// In single-disk mode this layered base IS blk0 (mounted rw directly); in
+	// overlay mode it is blk1's lower (the erofs blk0 is opened separately below).
 	diskLayers := []fetch.Stream{}
 	topDisk, _, err := sandbox.OpenDiskStream(ctx, scheme+"://"+diskValue, opts.Fetcher)
 	if err != nil {
 		return -1, fmt.Errorf("open disk base: %w", err)
 	}
 	diskLayers = append(diskLayers, topDisk)
-	for i, ref := range parsedSnap.Boot.Root.Overlay.BaseFromRefs {
+	for i, ref := range parentDiskChain {
 		s, err := openRefStream(ctx, ref, opts)
 		if err != nil {
 			return -1, fmt.Errorf("base_from_refs[%d] %q: %w", i, ref, err)
@@ -403,7 +417,10 @@ func Run(ctx context.Context, opts Options) (int, error) {
 	// overlay (baseReader). Empty diff path → auto-default to the on-disk base
 	// dir; an auto-defaulted diff is removed when this run ends. The base
 	// provides the ext4, so a blank diff sized to it is mountable.
-	diffURI := snapCfg.Boot.Root.Overlay.Diff
+	diffURI, diffTemplate := snapCfg.Boot.Root.Diff, snapCfg.Boot.Root.DiffTemplate
+	if !snapCfg.SingleDisk() {
+		diffURI, diffTemplate = snapCfg.Boot.Root.Overlay.Diff, snapCfg.Boot.Root.Overlay.DiffTemplate
+	}
 	ownedDiff := diffURI == ""
 	if ownedDiff {
 		baseDir := sandbox.DefaultBaseDir(opts.BaseRoot, opts.SandboxID)
@@ -418,15 +435,15 @@ func Run(ctx context.Context, opts Options) (int, error) {
 	}
 	_, diffPath, ok := config.SchemeAndPath(diffURI)
 	if !ok {
-		return -1, fmt.Errorf("bad overlay.diff: %s", diffURI)
+		return -1, fmt.Errorf("bad root diff uri: %s", diffURI)
 	}
 	diffSize, err := snapCfg.DiffSizeBytes()
 	if err != nil {
 		return -1, err
 	}
-	createSize, err := sandbox.PrepareDiff(diffPath, snapCfg.Boot.Root.Overlay.DiffTemplate, baseReader.Size(), diffSize)
+	createSize, err := sandbox.PrepareDiff(diffPath, diffTemplate, baseReader.Size(), diffSize)
 	if err != nil {
-		return -1, fmt.Errorf("prepare overlay diff: %w", err)
+		return -1, fmt.Errorf("prepare diff: %w", err)
 	}
 	cow, err := vhost.OpenBlockCOW(diffPath, baseReader, createSize)
 	if err != nil {
@@ -434,17 +451,29 @@ func Run(ctx context.Context, opts Options) (int, error) {
 	}
 	defer cow.Close()
 
-	// blk0 — same rootfs as cold-start (from host yaml or snap.cfg).
-	// file:// → local stream; manifest:// → fetch.Fetcher via cache-ctl.
-	blk0Path := snapCfg.Boot.Root.Base
-	if opts.HostCfg.Boot.Root.Base != "" {
-		blk0Path = opts.HostCfg.Boot.Root.Base
+	// blk0. Overlay mode: the ro erofs base (from host yaml or snap.cfg);
+	// file:// → local stream, manifest:// → fetch.Fetcher via cache-ctl.
+	// Single-disk mode: blk0 IS the writable cow above (mounted rw directly),
+	// so there is no separate erofs base — blk0Reader stays nil and blk0Path
+	// labels the diff for stats.
+	var blk0Reader vhost.BlockReader
+	blk0Path := diffPath
+	if !snapCfg.SingleDisk() {
+		blk0Path = snapCfg.Boot.Root.Base
+		if opts.HostCfg.Boot.Root.Base != "" {
+			blk0Path = opts.HostCfg.Boot.Root.Base
+		}
+		r, _, err := sandbox.OpenBlockReader(ctx, blk0Path, opts.Fetcher)
+		if err != nil {
+			return -1, fmt.Errorf("open blk0: %w", err)
+		}
+		blk0Reader = r
+		defer blk0Reader.Close()
 	}
-	blk0Reader, _, err := sandbox.OpenBlockReader(ctx, blk0Path, opts.Fetcher)
-	if err != nil {
-		return -1, fmt.Errorf("open blk0: %w", err)
+	blk1Path := ""
+	if !snapCfg.SingleDisk() {
+		blk1Path = snapCfg.Boot.Root.Overlay.Diff
 	}
-	defer blk0Reader.Close()
 
 	// Network: re-acquire the host side for this restore. tapfd mode re-runs
 	// the handoff (docs/tapfd.md §6, idempotent) for a fresh queue fd, passed
@@ -501,12 +530,13 @@ func Run(ctx context.Context, opts Options) (int, error) {
 
 		CapBytes:   int64(capBytes),
 		UffdSource: source,
-		Blk0Reader: blk0Reader,
+		SingleDisk: snapCfg.SingleDisk(),
+		Blk0Reader: blk0Reader, // nil in single-disk (blk0 is the Cow)
 		Blk0Label:  "blk0",
 		Blk0Path:   blk0Path,
 		Cow:        cow,
 		Blk1Label:  "blk1",
-		Blk1Path:   snapCfg.Boot.Root.Overlay.Diff,
+		Blk1Path:   blk1Path,
 
 		LaunchSpec:    &proto.LaunchSpec{},
 		WireLaunchMUX: false,

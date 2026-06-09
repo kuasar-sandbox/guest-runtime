@@ -19,7 +19,7 @@ func makeMinimalCfg() *config.SandboxConfig {
 			Cmdline: "console=hvc0",
 			Root: config.RootConfig{
 				Base: "file:///c.erofs",
-				Overlay: config.OverlayConfig{
+				Overlay: &config.OverlayConfig{
 					Diff:     "file:///d.ext4",
 					DiffSize: "1GiB",
 				},
@@ -75,6 +75,35 @@ func TestCHCommand_HasExpectedFlags(t *testing.T) {
 		if strings.Contains(joined, banned) {
 			t.Errorf("CH cmdline must not contain %q (launch goes via vsock now)", banned)
 		}
+	}
+}
+
+func TestCHCommand_SingleDisk(t *testing.T) {
+	cfg := makeMinimalCfg()
+	// Single-disk: drop the overlay; the root disk is a writable ext4 CoW.
+	cfg.Boot.Root = config.RootConfig{DiffTemplate: "file:///root.ext4"}
+	if !cfg.SingleDisk() {
+		t.Fatal("cfg should be single-disk after removing overlay")
+	}
+	args, err := CHCommand(cfg,
+		"/run/sb/blk0.sock", "" /* no blk1 */, "/run/sb/ch.sock", "/run/sb/vsock.sock",
+		"/vmlinux", "/sandbox-runtime.erofs", "/run/sb/uffd.sock", "tty", 0, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(args, " ")
+	// Exactly one writable disk (blk0, no readonly), no blk1, single-disk cmdline.
+	if !strings.Contains(joined, "--disk vhost_user=on,socket=/run/sb/blk0.sock") {
+		t.Errorf("single-disk should emit one writable blk0 disk, got: %s", joined)
+	}
+	if strings.Contains(joined, "readonly=on") {
+		t.Errorf("single-disk blk0 must not be readonly, got: %s", joined)
+	}
+	if strings.Contains(joined, "blk1") {
+		t.Errorf("single-disk must not emit blk1, got: %s", joined)
+	}
+	if !strings.Contains(joined, "sandbox.root.layout=single") {
+		t.Errorf("single-disk cmdline must select single layout, got: %s", joined)
 	}
 }
 
