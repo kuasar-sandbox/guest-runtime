@@ -202,10 +202,12 @@ func handleReverseConn(c *vsockConn, sup *supervisorState, bridge *consoleBridge
 
 	case proto.TypeRestore:
 		logf("reverse-channel: restore epoch=%d — re-establishing stdio MUX", req.Epoch)
-		sup.execReg.endQuiesce() // sandbox live again — allow exec
-		sup.connReg.endQuiesce() // and allow port-forward connects
-		sup.acceptLn.reopen()    // and re-enable accept-mode listener binds
-		bridge.closeLiveMUX()    // drop any stale session first (normally already gone via quiesce)
+		sup.execReg.endQuiesce()   // sandbox live again — allow exec
+		sup.connReg.endQuiesce()   // and allow port-forward connects
+		sup.acceptLn.reopen()      // and re-enable accept-mode listener binds
+		sup.pluginReg.endQuiesce() // and resume plugin restarts
+		sup.quiescing.Store(false) // and app in-place restarts
+		bridge.closeLiveMUX()      // drop any stale session first (normally already gone via quiesce)
 		// CH reloaded the snapshot's CLOCK_REALTIME verbatim, so the
 		// guest wall clock is stale by the whole dormant interval. Jump
 		// it to the host's now before the post-reattach thaw, so the
@@ -261,10 +263,12 @@ func handleReverseConn(c *vsockConn, sup *supervisorState, bridge *consoleBridge
 
 	case proto.TypeAttach:
 		logf("reverse-channel: attach epoch=%d — re-establishing stdio MUX", req.Epoch)
-		sup.execReg.endQuiesce() // sandbox live again (post-resume) — allow exec
-		sup.connReg.endQuiesce() // and allow port-forward connects
-		sup.acceptLn.reopen()    // and re-enable accept-mode listener binds
-		bridge.closeLiveMUX()    // gracefully close the old session, then switch
+		sup.execReg.endQuiesce()   // sandbox live again (post-resume) — allow exec
+		sup.connReg.endQuiesce()   // and allow port-forward connects
+		sup.acceptLn.reopen()      // and re-enable accept-mode listener binds
+		sup.pluginReg.endQuiesce() // and resume plugin restarts
+		sup.quiescing.Store(false) // and app in-place restarts
+		bridge.closeLiveMUX()      // gracefully close the old session, then switch
 		spec := bridge.protoSpec()
 		resp := &proto.Message{Type: proto.TypeAttachAck, Epoch: req.Epoch, Stdio: &spec, AppState: proto.AppStateRunning}
 		if err := proto.WriteMessage(c, resp); err != nil {
@@ -292,6 +296,12 @@ func handleReverseConn(c *vsockConn, sup *supervisorState, bridge *consoleBridge
 
 	case proto.TypeQuiesce:
 		logf("reverse-channel: quiesce — freeze + prep + MUX/forward close")
+		// Gate restarts: the snapshot must not fork a new app/plugin into the
+		// freeze window. Running plugins stay frozen with the app cgroup; the
+		// app's own restart goroutine waits this out (restartApp). Cleared at
+		// endQuiesce (restore/attach).
+		sup.quiescing.Store(true)
+		sup.pluginReg.beginQuiesce()
 		// Reject new exec + SIGKILL in-flight exec children so the
 		// snapshot captures no running exec siblings (their sessions
 		// tear down once the reaper delivers).

@@ -266,6 +266,8 @@ func Run(ctx context.Context, opts RunOptions) (int, error) {
 	launchSpec.Mounts = effectiveMounts(opts.Cfg.Mounts, imageCfg.Volumes)
 	launchSpec.Files = opts.Cfg.ProtoFiles()
 	launchSpec.Init = toProtoInit(opts.Cfg.Init)
+	launchSpec.Plugins = toProtoPlugins(opts.Cfg.Launch.Plugin)
+	launchSpec.SharePID = opts.Cfg.Launch.PIDNamespace == "shared"
 	launchSpec.StopGraceSec = opts.Cfg.StopGraceSeconds()
 
 	// App stdio: tell sandbox-init what to wire (pty vs pipe channels);

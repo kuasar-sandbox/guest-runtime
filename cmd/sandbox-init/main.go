@@ -33,6 +33,7 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -55,17 +56,18 @@ const (
 
 func main() {
 	// Re-entry as the user-app exec helper (after fork+clone in phase 2).
-	// argv: [self, "exec-child", cred, workdir, appPath, args...]
+	// argv: [self, "exec-child", isolated("1"/"0"), cred, workdir, appPath, args...]
+	// isolated reports whether the app got its own PID ns (→ remount /proc);
 	// cred ("uid:gid:sg,..." or "-") is dropped just before execve.
-	if len(os.Args) >= 5 && os.Args[1] == "exec-child" {
-		runExecChild(os.Args[2], os.Args[3], os.Args[4], os.Args[5:], false)
+	if len(os.Args) >= 6 && os.Args[1] == "exec-child" {
+		runExecChild(os.Args[2] == "1", os.Args[3], os.Args[4], os.Args[5], os.Args[6:], false)
 		return
 	}
 	// Joined exec command (sandbox-ctl exec): forked by the exec-join
 	// helper after it has entered the app's mount + pid namespaces. No
 	// run-as drop here (exec sessions keep the app's identity).
 	if len(os.Args) >= 4 && os.Args[1] == "exec-child-joined" {
-		runExecChild("-", os.Args[2], os.Args[3], os.Args[4:], true)
+		runExecChild(false, "-", os.Args[2], os.Args[3], os.Args[4:], true)
 		return
 	}
 	// nsenter helper for sandbox-ctl exec.
@@ -159,14 +161,20 @@ func main() {
 	}
 
 	supervisor := &supervisorState{
-		appPid:     appPid,
-		restart:    spec.Restart,
+		spec:       spec,
 		stopSignal: syscall.Signal(spec.StopSignal), // 0 → SIGTERM (handled in phase3)
 		stopGrace:  time.Duration(spec.StopGraceSec) * time.Second,
 		execReg:    newExecRegistry(),
 		connReg:    newConnRegistry(),
 		acceptLn:   newAcceptListeners(),
+		pluginReg:  newPluginRegistry(),
 	}
+	supervisor.appPid.Store(int64(appPid))
+	supervisor.appBackoff.onStart(time.Now()) // app start instant for restart backoff reset
+
+	// Launch companion plugins (launch.plugin[]) once the app is up + in its
+	// cgroup; each is supervised independently and never reboots the sandbox.
+	supervisor.pluginReg.start(spec.Plugins)
 
 	// Reverse-channel dispatch goroutine. Lives until reboot. It carries
 	// the consoleBridge so host-initiated restore / attach can swap a
@@ -520,11 +528,22 @@ func phase2ForkApp(spec *proto.LaunchSpec, cs childStdio) (int, error) {
 		}
 		credStr = c.encode()
 	}
-	args := append([]string{self, "exec-child", credStr, spec.Workdir, spec.Exec}, spec.Args...)
-
-	sysAttr := &syscall.SysProcAttr{
-		Cloneflags: syscall.CLONE_NEWPID | syscall.CLONE_NEWNS,
+	// PID namespace: isolated (default) gives the app its own (CLONE_NEWPID,
+	// app = PID 1 there); shared (spec.SharePID) keeps the app in sandbox-init's
+	// PID ns so PID 1's reaper collects the app's orphaned descendants. Mount ns
+	// is always private (file-injection rslave propagation + private /proc).
+	isolated := !spec.SharePID
+	isoArg := "0"
+	if isolated {
+		isoArg = "1"
 	}
+	args := append([]string{self, "exec-child", isoArg, credStr, spec.Workdir, spec.Exec}, spec.Args...)
+
+	cloneflags := uintptr(syscall.CLONE_NEWNS)
+	if isolated {
+		cloneflags |= syscall.CLONE_NEWPID
+	}
+	sysAttr := &syscall.SysProcAttr{Cloneflags: cloneflags}
 	if cs.tty {
 		sysAttr.Setsid = true
 		sysAttr.Setctty = true // Ctty defaults to 0 = Stdin = the pty slave
@@ -555,18 +574,19 @@ func phase2ForkApp(spec *proto.LaunchSpec, cs childStdio) (int, error) {
 	return cmd.Process.Pid, nil
 }
 
-// runExecChild runs in the forked child after CLONE_NEWPID|CLONE_NEWNS.
-// We are pid=1 in the new pid ns. Remount /proc so it reflects the
-// new ns, chdir to workdir, then exec the real app.
+// runExecChild runs in the forked child after CLONE_NEWNS (+ CLONE_NEWPID
+// when isolated). For an isolated app it is pid 1 in the new pid ns and
+// remounts /proc so it reflects that ns; a shared-PID app stays in
+// sandbox-init's pid ns, where /proc is already correct, so no remount.
+// Then chdir to workdir and exec the real app.
 //
 // If appPath has no '/', resolve via PATH lookup (image config Cmd
 // often holds bare names like "python3" or "node", expecting standard
 // PATH search semantics like sh/cmd would do).
-func runExecChild(cred, workdir, appPath string, args []string, joined bool) {
-	// Independent children (the user app) get a fresh pid namespace and
-	// need their own procfs. A joined exec command already runs in the
-	// app's mount + pid namespace, where /proc is mounted for that pid
-	// ns — remounting it would disrupt the shared view.
+func runExecChild(isolated bool, cred, workdir, appPath string, args []string, joined bool) {
+	// Independent children (the user app) get a private mount namespace. A
+	// joined exec command already runs in the app's mount + pid namespace, so
+	// it touches neither the rslave nor /proc (would disrupt the shared view).
 	if !joined {
 		// Make this app's private mount namespace an rslave of PID 1's
 		// rshared tree: restore-time injections (binds in PID 1) propagate
@@ -576,9 +596,13 @@ func runExecChild(cred, workdir, appPath string, args []string, joined bool) {
 		if err := unix.Mount("", "/", "", unix.MS_REC|unix.MS_SLAVE, ""); err != nil {
 			die("exec-child: make-rslave /: %v", err)
 		}
-		if err := unix.Mount("proc", "/proc", "proc", 0, ""); err != nil {
-			if errRemount := unix.Mount("none", "/proc", "", unix.MS_REMOUNT, ""); errRemount != nil {
-				die("exec-child: remount /proc: %v / %v", err, errRemount)
+		// Only an isolated app (its own pid ns) needs a fresh /proc; a
+		// shared-PID app's /proc (sandbox-init's) already reflects its ns.
+		if isolated {
+			if err := unix.Mount("proc", "/proc", "proc", 0, ""); err != nil {
+				if errRemount := unix.Mount("none", "/proc", "", unix.MS_REMOUNT, ""); errRemount != nil {
+					die("exec-child: remount /proc: %v / %v", err, errRemount)
+				}
 			}
 		}
 	}
@@ -627,17 +651,23 @@ func runExecChild(cred, workdir, appPath string, args []string, joined bool) {
 // supervisorState is shared between the signal loop and the reverse
 // channel goroutine.
 type supervisorState struct {
-	appPid     int
-	restart    string
-	stopSignal syscall.Signal   // signal forwarded to app on host SIGTERM/SIGINT; 0 → SIGTERM
-	stopGrace  time.Duration    // grace before SIGKILL; 0 → gracefulShutdown default
-	execReg    *execRegistry    // exec-session child reaping + quiesce gating
-	connReg    *connRegistry    // port-forward session tracking + quiesce teardown
-	acceptLn   *acceptListeners // accept-mode (`LOCAL::TARGET`) guest listener cache
+	appPid     atomic.Int64      // current app pid; updated on in-place restart
+	spec       *proto.LaunchSpec // app launch spec (incl. Restart) for re-fork on restart
+	appBackoff backoff           // app restart backoff (shared scheme, supervise.go)
+	shutdown   atomic.Bool       // set on SIGTERM/SIGINT; gates app restart re-fork
+	quiescing  atomic.Bool       // set across a snapshot quiesce; gates app restart re-fork
+	stopSignal syscall.Signal    // signal forwarded to app on host SIGTERM/SIGINT; 0 → SIGTERM
+	stopGrace  time.Duration     // grace before SIGKILL; 0 → gracefulShutdown default
+	execReg    *execRegistry     // exec-session child reaping + quiesce gating
+	connReg    *connRegistry     // port-forward session tracking + quiesce teardown
+	acceptLn   *acceptListeners  // accept-mode (`LOCAL::TARGET`) guest listener cache
+	pluginReg  *pluginRegistry   // companion-process (launch.plugin[]) supervision
 }
 
-// phase3Supervise reaps children. On user-app exit it drains the stdio
-// MUX, notifies the host (best-effort), then reboots.
+// phase3Supervise reaps children. The user app's exit applies launch.restart
+// (restart in place with backoff, or reboot); plugin exits route to the plugin
+// supervisor; exec-session children route to their session; orphans (shared-PID
+// apps' descendants) are reaped silently.
 func phase3Supervise(s *supervisorState, b *consoleBridge) {
 	sigCh := make(chan os.Signal, 16)
 	signal.Notify(sigCh, syscall.SIGCHLD, syscall.SIGTERM, syscall.SIGINT)
@@ -653,16 +683,22 @@ func phase3Supervise(s *supervisorState, b *consoleBridge) {
 					break
 				}
 				logf("reaped pid=%d exit=%d signal=%v", pid, status.ExitStatus(), status.Signal())
-				if pid == s.appPid {
-					handleAppExit(status, s, b)
-					return
+				if int64(pid) == s.appPid.Load() {
+					if handleAppExit(status, s, b) {
+						return // rebooting (doReboot does not return; this is a backstop)
+					}
+					continue // restarting in place — keep reaping
 				}
-				// Non-app child = an exec session's child. Route its
-				// status to the waiting session goroutine (it must not
-				// trigger the app-exit reboot).
+				// A companion plugin? Route to its supervisor (backoff restart).
+				if s.pluginReg.onExit(pid, status) {
+					continue
+				}
+				// Otherwise an exec-session child (deliver to its goroutine) or
+				// a shared-PID app orphan (no session → silently reaped).
 				s.execReg.deliver(pid, status)
 			}
 		case syscall.SIGTERM, syscall.SIGINT:
+			s.shutdown.Store(true) // stop any in-flight app restart from re-forking
 			stopSig := s.stopSignal
 			if stopSig == 0 {
 				stopSig = syscall.SIGTERM
@@ -671,9 +707,10 @@ func phase3Supervise(s *supervisorState, b *consoleBridge) {
 			if grace <= 0 {
 				grace = gracefulShutdown
 			}
-			logf("received %v, sending %v to app pid=%d (grace %s)", sig, stopSig, s.appPid, grace)
-			_ = syscall.Kill(s.appPid, stopSig)
-			waitOrTimeout(s.appPid, grace)
+			appPid := int(s.appPid.Load())
+			logf("received %v, sending %v to app pid=%d (grace %s)", sig, stopSig, appPid, grace)
+			_ = syscall.Kill(appPid, stopSig)
+			waitOrTimeout(appPid, grace)
 			b.appExited()
 			notifyAppExited(0, 0)
 			doReboot()
@@ -682,7 +719,11 @@ func phase3Supervise(s *supervisorState, b *consoleBridge) {
 	}
 }
 
-func handleAppExit(status syscall.WaitStatus, s *supervisorState, b *consoleBridge) {
+// handleAppExit applies the app's restart policy. It returns true if the
+// sandbox is rebooting (so the reaper loop stops), false if the app is being
+// restarted in place (the reaper keeps running). The stdio MUX survives an
+// in-place restart (consoleBridge.rewireApp); only a reboot tears it down.
+func handleAppExit(status syscall.WaitStatus, s *supervisorState, b *consoleBridge) (rebooting bool) {
 	var code, sig int
 	if status.Signaled() {
 		sig = int(status.Signal())
@@ -690,11 +731,58 @@ func handleAppExit(status syscall.WaitStatus, s *supervisorState, b *consoleBrid
 	} else {
 		code = status.ExitStatus()
 	}
-	logf("app exited code=%d signal=%d (restart=%s); draining MUX, notifying host, rebooting", code, sig, s.restart)
+	if !s.shutdown.Load() && wantRestart(s.spec.Restart, status) {
+		delay := s.appBackoff.next(time.Now())
+		logf("app exited code=%d signal=%d (restart=%s) — restarting in %s", code, sig, s.spec.Restart, delay)
+		go restartApp(s, b, delay)
+		return false
+	}
+	logf("app exited code=%d signal=%d (restart=%s) — draining MUX, notifying host, rebooting", code, sig, s.spec.Restart)
 	b.appExited() // close app fds, flush guest→host streams (bounded)
 	notifyAppExited(code, sig)
-	// v1: all restart policies just reboot. Real in-place restart is v2.
-	doReboot()
+	doReboot() // does not return
+	return true
+}
+
+// restartApp re-forks the user app in place after the backoff delay, re-wiring
+// fresh stdio onto the surviving MUX session. Runs on its own goroutine so the
+// reaper keeps collecting plugins/exec children during the backoff. Skips the
+// re-fork if the sandbox is shutting down; waits out a snapshot quiesce window
+// so it never forks an app the freeze missed.
+func restartApp(s *supervisorState, b *consoleBridge, delay time.Duration) {
+	time.Sleep(delay)
+	for {
+		if s.shutdown.Load() {
+			return
+		}
+		if !s.quiescing.Load() {
+			break
+		}
+		time.Sleep(50 * time.Millisecond) // wait out the snapshot window
+	}
+	cs, err := b.rewireApp(s.spec.Stdio)
+	if err != nil {
+		logf("restart: re-wire stdio: %v (rebooting)", err)
+		notifyAppExited(1, 0)
+		doReboot()
+		return
+	}
+	s.appBackoff.onStart(time.Now())
+	pid, err := phase2ForkApp(s.spec, cs)
+	if err != nil {
+		logf("restart: fork app: %v (rebooting)", err)
+		notifyAppExited(1, 0)
+		doReboot()
+		return
+	}
+	s.appPid.Store(int64(pid))
+	if err := cgroupPlaceApp(pid); err != nil {
+		logf("restart: cgroup place pid=%d: %v", pid, err)
+	}
+	logf("app restarted pid=%d", pid)
+	if err := notifyAppStarted(pid); err != nil {
+		logf("restart: app_started notify failed (continuing): %v", err)
+	}
 }
 
 func waitOrTimeout(pid int, timeout time.Duration) {

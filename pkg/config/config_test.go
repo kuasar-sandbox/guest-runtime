@@ -364,6 +364,53 @@ func TestValidateCold_DiskModeMutualExclusion(t *testing.T) {
 	}
 }
 
+func TestValidateCold_LaunchExtras(t *testing.T) {
+	cases := []struct {
+		name      string
+		mutate    func(c *SandboxConfig)
+		wantSubst string // "" → expect success
+	}{
+		{"bad pid_namespace", func(c *SandboxConfig) { c.Launch.PIDNamespace = "weird" }, "pid_namespace"},
+		{"shared pid_namespace ok", func(c *SandboxConfig) { c.Launch.PIDNamespace = "shared" }, ""},
+		{"bad launch.restart", func(c *SandboxConfig) { c.Launch.Restart = "sometimes" }, "launch.restart"},
+		{"launch.restart always ok", func(c *SandboxConfig) { c.Launch.Restart = "always" }, ""},
+		{"plugin needs exec", func(c *SandboxConfig) {
+			c.Launch.Plugin = []PluginConfig{{Restart: "always"}}
+		}, "plugin[0].exec"},
+		{"bad plugin restart", func(c *SandboxConfig) {
+			c.Launch.Plugin = []PluginConfig{{Exec: "/x", Restart: "foo"}}
+		}, "plugin[0].restart"},
+		{"plugin ok", func(c *SandboxConfig) {
+			c.Launch.Plugin = []PluginConfig{{Exec: "/sidecar", Restart: "always"}}
+		}, ""},
+		{"bad init timeout", func(c *SandboxConfig) {
+			c.Init = []InitConfig{{Exec: "/x", Timeout: "nope"}}
+		}, "init[0].timeout"},
+		{"init timeout ok", func(c *SandboxConfig) {
+			c.Init = []InitConfig{{Exec: "/x", Timeout: "30s"}}
+		}, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := Load(writeYAML(t, minimalCold))
+			if err != nil {
+				t.Fatal(err)
+			}
+			tc.mutate(cfg)
+			err = cfg.ValidateCold()
+			if tc.wantSubst == "" {
+				if err != nil {
+					t.Fatalf("expected no error, got %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantSubst) {
+				t.Fatalf("got %v, want substring %q", err, tc.wantSubst)
+			}
+		})
+	}
+}
+
 func TestValidateCold_ResourceControl(t *testing.T) {
 	// Helper: write a minimal config and apply mutator before validating.
 	run := func(t *testing.T, mutate func(c *SandboxConfig), wantErrSubstr string) {

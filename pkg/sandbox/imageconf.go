@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"sort"
+	"time"
 
 	"github.com/kuasar-sandbox/sandbox-builder/pkg/image"
 	"github.com/kuasar-sandbox/sandbox-runtime/pkg/config"
@@ -221,9 +222,48 @@ func toProtoInit(init []config.InitConfig) []proto.InitSpec {
 	}
 	out := make([]proto.InitSpec, len(init))
 	for i, it := range init {
-		out[i] = proto.InitSpec{Exec: it.Exec, Args: it.Args, User: it.User}
+		out[i] = proto.InitSpec{
+			Exec:      it.Exec,
+			Args:      it.Args,
+			Env:       it.Env,
+			Workdir:   it.Workdir,
+			User:      it.User,
+			TimeoutMs: durationMs(it.Timeout),
+		}
 	}
 	return out
+}
+
+// toProtoPlugins converts config plugin slices to proto slices.
+func toProtoPlugins(plugins []config.PluginConfig) []proto.PluginSpec {
+	if len(plugins) == 0 {
+		return nil
+	}
+	out := make([]proto.PluginSpec, len(plugins))
+	for i, p := range plugins {
+		out[i] = proto.PluginSpec{
+			Exec:    p.Exec,
+			Args:    p.Args,
+			Env:     p.Env,
+			Workdir: p.Workdir,
+			User:    p.User,
+			Restart: p.Restart,
+		}
+	}
+	return out
+}
+
+// durationMs parses a Go duration (already config-validated) to milliseconds;
+// "" / parse error → 0 (no timeout).
+func durationMs(s string) int64 {
+	if s == "" {
+		return 0
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil {
+		return 0
+	}
+	return d.Milliseconds()
 }
 
 var errMissingExec = errMessage("merge launch: no executable found — set sandbox.yaml launch.exec, or ensure the rootfs image's config.json has Entrypoint/Cmd")

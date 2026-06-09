@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/kuasar-sandbox/sandbox-runtime/pkg/proto"
 	"github.com/moby/sys/user"
@@ -196,7 +197,10 @@ func runInit(specs []proto.InitSpec) error {
 		cmd.Stdin = nil
 		cmd.Stdout = os.Stderr
 		cmd.Stderr = os.Stderr
-		cmd.Env = envSliceFromMap(nil)
+		cmd.Env = envSliceFromMap(s.Env) // s.Env merged over the default PATH
+		if s.Workdir != "" && s.Workdir != "/" {
+			cmd.Dir = s.Workdir
+		}
 		if s.User != "" {
 			c, err := resolveCred(s.User)
 			if err != nil {
@@ -209,11 +213,34 @@ func runInit(specs []proto.InitSpec) error {
 			}
 		}
 		logf("init[%d]: %s %v", i, s.Exec, s.Args)
-		if err := cmd.Run(); err != nil {
+		if err := runWithTimeout(cmd, s.TimeoutMs); err != nil {
 			return fmt.Errorf("init[%d] %q: %w", i, s.Exec, err)
 		}
 	}
 	return nil
+}
+
+// runWithTimeout runs cmd to completion, or kills it and returns an error if
+// it exceeds timeoutMs (0 → no timeout). Used for one-shot init commands.
+func runWithTimeout(cmd *exec.Cmd, timeoutMs int64) error {
+	if timeoutMs <= 0 {
+		return cmd.Run()
+	}
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	t := time.NewTimer(time.Duration(timeoutMs) * time.Millisecond)
+	defer t.Stop()
+	select {
+	case err := <-done:
+		return err
+	case <-t.C:
+		_ = cmd.Process.Kill()
+		<-done // reap
+		return fmt.Errorf("timed out after %dms", timeoutMs)
+	}
 }
 
 // --- run-as-user resolution (guest-side /etc/passwd + /etc/group) ---------

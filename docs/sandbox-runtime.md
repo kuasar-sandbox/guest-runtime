@@ -195,8 +195,9 @@ switch-root 之后单线程执行。
 3. applyFiles(spec.files)                 ← 暂存 tmpfs(/run/.inject)→ 写内容 + chmod/chown →
                                             bind 到 target →(read_only 时 remount-ro)→ MNT_DETACH 暂存;
                                             内容仅在内存、不落 vdb;失败 fast-fail
-4. runInit(spec.init)                      ← 顺序执行一次性命令;输出走 console;init[].user 可降权;
-                                            任一条非零退出 = die(initContainers 语义)
+4. runInit(spec.init)                      ← 顺序执行一次性命令;输出走 console;init[].{env,
+                                            workdir,user} 可设;init[].timeout 超时则 SIGKILL;
+                                            任一条非零退出/超时 = die(initContainers 语义,早期执行)
 5. 按 spec.stdio 准备应用 stdio fd(§3.5):
      - tty 模式:openpty();记 master/slave fd;初始 winsize 来自 spec
      - pipe 模式:为每个声明通道建 pipe / socketpair;未声明 stdin → fd 0 接 /dev/null
@@ -204,24 +205,35 @@ switch-root 之后单线程执行。
 7. read   ack                            ← host 确认进入 MUX 态
 
 8. 通过 exec.Cmd 拉起子进程:
-     SysProcAttr.Cloneflags = CLONE_NEWPID | CLONE_NEWNS
+     SysProcAttr.Cloneflags = CLONE_NEWNS [ | CLONE_NEWPID 当 pid_namespace=private(默认) ]
+       private:app 是自身 PID ns 的 PID 1。shared(launch.pid_namespace=shared):app 留在
+       sandbox-init 的 PID ns,由 PID1 reaper 收割 app 的孤儿后代(复用 init reaper)。
      tty 模式: Setctty + setsid + slave 作为 fd 0/1/2;关闭 master 副本于子进程
      pipe 模式: 各 pipe/socketpair 的 child 端作为 fd 0/1/2
-     argv: [/proc/self/exe, "exec-child", cred, workdir, exec, args...]
+     argv: [/proc/self/exe, "exec-child", isolated("1"/"0"), cred, workdir, exec, args...]
        cred = "uid:gid:sg1,sg2"(由 spec.user 在 guest 侧 /etc/passwd 解析)或 "-"(不降权)
      env:  spec.Env(默认补 PATH)
 
-9. 子进程在新 ns 内:mount -t proc proc /proc(需 root)→ chdir(workdir) →
-     若 cred≠"-":setgroups → setgid → setuid(降权放在挂载 /proc 之后、execve 之前)→
-     syscall.Exec(exec, args...)
+9. 子进程在新 ns 内:isolated 时 mount -t proc proc /proc(新 PID ns 必需;shared 沿用
+     sandbox-init 的 /proc)→ chdir(workdir) → 若 cred≠"-":setgroups → setgid → setuid
+     (降权放在挂载 /proc 之后、execve 之前)→ syscall.Exec(exec, args...)
 
 10. 父进程(sandbox-init pid=1):
      - 把子进程 pid 写入 /sys/fs/cgroup/app/cgroup.procs(其派生的整棵进程树
        随之归入该 cgroup;sandbox-init 自身留在 root cgroup,冻结时不被停)
-     - 启动 stdio 桥接 goroutine:app 端 fd ↔ MUX 流(§3.5)
+     - 启动 stdio 桥接 goroutine:app 端 fd ↔ MUX 流(§3.5)。桥的 app 侧 fd 按"代"
+       可换(in-place 重启时 rewireApp 换新 fd),MUX 会话不变 → 重启不断 host 链路
      - 短连接 dial host:5000 发 app_started{pid} → 等 ack → close
-     - 进入阶段 3 supervisor
+     - 拉起 launch.plugin[] 伴生进程(见下),再进入阶段 3 supervisor
 ```
+
+**伴生进程(launch.plugin[])**。app 起来并入 cgroup 后,sandbox-init 顺序拉起每个 plugin
+作为**自身的子进程**(故 reaper 直接收割),跑在同一 guest rootfs + app cgroup(随快照一起
+冻结)+ 网络;stdout/stderr 走 console;支持 env/workdir/user。每个 plugin 按自身
+`restart`(never|on-failure|always,默认 always)+ 共享退避(下文)独立监督。**plugin
+退出绝不影响沙箱生命周期**——只有 app(launch.exec)的退出按 launch.restart 决定 reboot
+或原地重启。plugin 与 app 是"对等体":app 隔离(private)时 plugin 仍在 sandbox-init 的
+PID ns(共享 rootfs/网络/cgroup,但不在 app 的 PID ns 内)。
 
 **降权时机**:`spec.user` 解析后的 uid/gid 不在外层 clone 用 `SysProcAttr.Credential`
 ——否则子进程会以非 root 身份执行 `mount /proc`(新 PID ns 必需)而 EPERM 失败。
@@ -251,22 +263,40 @@ loop:
   signal.Notify(sigchld, sigterm, sigint)
   select:
     sigchld:
-      pid, status = waitpid(-1, WNOHANG)
-      if pid == app_pid:
-        switch sandbox.restart:        // v1: 三种策略都 = 通知 + reboot;in-place refork 是 v2
-          *: app_exit_then_reboot(status)
-      else:                            // 孤儿被 reparent 到 PID 1,收割之
-        // do nothing
+      pid, status = waitpid(-1, WNOHANG)            // 单 reaper 收割所有子进程
+      if pid == app_pid(atomic):                     // 用户应用
+        if !shutting_down && wantRestart(launch.restart, status):
+          go restartApp(backoff)                     // 原地重启(异步),reaper 继续收割
+        else:
+          app_exit_then_reboot(status)               // never / on-failure-clean-exit
+      elif pluginReg.onExit(pid, status):            // 伴生 plugin → 自身策略 + 退避重拉
+        // handled
+      else:                                          // exec 子进程 → 投递其会话;
+        execReg.deliver(pid, status)                 //   或 shared-PID app 的孤儿 → 静默收割
     sigterm/sigint:
-      send spec.stop_signal to app_pid          // 默认 SIGTERM;覆盖镜像 StopSignal
-      wait up to spec.stop_grace_period for app to exit (默认 10s);超时 SIGKILL
+      shutting_down = true                           // 阻止在飞的 restart 再 fork
+      send spec.stop_signal to app_pid               // 默认 SIGTERM;覆盖镜像 StopSignal
+      wait up to spec.stop_grace_period (默认 10s);超时 SIGKILL
       app_exit_then_reboot(status)
+
+restartApp(backoff):                                  // app 原地重启,launch.restart=always/on-failure
+  sleep(backoff)                                      // 退避;期间 reaper 继续收 plugin/exec
+  待 shutting_down=false 且 非 quiescing(快照窗口)
+  rewireApp:换一代 app stdio fd 接到**不变的 MUX 会话** → phase2ForkApp →
+    app_pid.store(newpid) → 入 app cgroup → app_started{newpid}
+  // host 的 run 链路不断,持续收到新实例输出
 
 app_exit_then_reboot(status):
   收尾 MUX:应用 fd 已关 → 各 stdout/stderr/pty 流发 EOF → 等 host 排空(有界,带超时)
   short-conn dial host:5000 → write app_exited{code, term_signal} → wait ack(timeout) → close
   reboot(LINUX_REBOOT_CMD_POWER_OFF)   # ack 拿不到也照常 reboot;POWER_OFF → CH 干净退 0
 ```
+
+**退避**(app 与 plugin 共用,supervise.go):退出即重拉,延迟 10ms 起、每次 ×2、封顶 60s;
+进程存活满 60s 再退出则重置回 10ms。**app_pid 原子化**:restart goroutine fork 后即写,reaper
+按其路由,故新实例的退出不会被误判为 plugin/exec。**快照门**:quiesce 置 quiescing(plugin
+随 app cgroup 冻结、supervisor 不再 fork 新进程),restore/attach 解除——restartApp 会等过这个
+窗口再 fork,避免冻结遗漏新进程。`launch.restart=always` 下 app 退出**不 reboot**,沙箱长活。
 
 `reboot(POWER_OFF)`(而非 `RESTART`):一次性沙箱模型下应用退出即沙箱结束,
 CH 应随之干净退出。`RESTART` 会触发 CH 的"原地重启"流程,试图重连 vhost-user-blk
@@ -909,7 +939,8 @@ sandbox.yaml `launch:` 节(yaml override 优先,Env merge),host sandbox-ctl 合�
   "args":    ["arg1", "arg2"],
   "env":     {"PATH": "...", "HOME": "/root"},
   "workdir": "/",
-  "restart": "never",                    // never | on-failure | always
+  "restart": "never",                    // never|on-failure|always(in-place 重启 + 退避)
+  "share_pid": false,                    // true → 应用进 sandbox-init 的 PID ns(pid_namespace=shared)
   "user":    "0:0",                      // uid:gid 或 name:group(guest 侧 /etc/passwd 解析);空 → root
   "stop_signal":   15,                   // 停机信号编号(host 已从名字解析);0 → SIGTERM
   "stop_grace_sec": 10,                  // 停机宽限秒数;0 → 默认 10s
@@ -917,7 +948,8 @@ sandbox.yaml `launch:` 节(yaml override 优先,Env merge),host sandbox-ctl 合�
   "mounts":  [ {"target": "/tmp", "type": "tmpfs", "options": "nosuid,nodev,mode=1777"},
                {"target": "/var/log", "type": "empty"} ],
   "files":   [ {"path": "/etc/resolv.conf", "mode": "0644", "owner": "0:0", "content": "nameserver ..."} ],
-  "init":    [ {"exec": "/bin/sh", "args": ["-c", "..."], "user": "0:0"} ],
+  "init":    [ {"exec": "/bin/sh", "args": ["-c", "..."], "env": {}, "workdir": "/", "user": "0:0", "timeout_ms": 0} ],
+  "plugins": [ {"exec": "/usr/bin/sidecar", "args": [], "env": {}, "workdir": "/", "user": "0:0", "restart": "always"} ],
   "stdio":   {
     "tty":     true,                     // true: 给应用一个伪终端(pty 模式);false: pipe 模式
     "winsize": {"cols": 80, "rows": 24}, // tty 模式的初始窗口大小
@@ -934,9 +966,12 @@ sandbox.yaml `launch:` 节(yaml override 优先,Env merge),host sandbox-ctl 合�
 
 ### 5.2 用户应用看到的环境
 
-- **PID 1**:用户应用本身(CLONE_NEWPID,看自己 PID = 1)
+- **PID 1**:`pid_namespace=private`(默认)时用户应用是自身 PID ns 的 PID 1
+  (CLONE_NEWPID);`shared` 时应用在 sandbox-init 的 PID ns(非 PID 1),由 sandbox-init
+  做 reaper 收割其孤儿后代。伴生 plugin 与应用同 rootfs/cgroup/网络,但始终在
+  sandbox-init 的 PID ns(private 应用看不到它们)。
 - **mount namespace**:私有挂载 ns,起始视图与 sandbox-init 相同(overlayfs 合并的
-  / + 自挂的 /proc)
+  / + isolated 时自挂的 /proc)
 - **网络**:eth0(virtio-net,host TAP 后端),IP 已由 sandbox-init 配好
 - **/dev**:`devtmpfs`(/dev/null、/dev/random、/dev/urandom 等);`/dev/pts`(devpts)
 - **/run**、**/run/shm**:runtime 自动挂载的 tmpfs(无需声明)

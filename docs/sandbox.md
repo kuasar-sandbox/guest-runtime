@@ -478,11 +478,24 @@ launch:
     PATH: /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
     HOME: /root
   workdir: /
-  restart: never              # never | on-failure | always
+  restart: never              # never|on-failure|always。never=应用退出即沙箱 reboot(一次性);
+                              #   always=原地重启;on-failure=非0/信号退出重启、干净退出 reboot。
+                              #   重启用退避 10ms→60s、存活满 60s 重置;stdio MUX 跨重启存活
+  pid_namespace: private      # private(默认)=应用是自身 PID ns 的 PID 1;
+                              #   shared=应用在 sandbox-init 的 PID ns,复用 PID1 reaper 收割孤儿
   user: "0:0"                 # uid:gid 或 name:group(覆盖镜像 User);命名用户由 guest 侧读 /etc/passwd 解析
   stop_signal: SIGTERM        # 停机信号(覆盖镜像 StopSignal);信号名或编号;空 → SIGTERM
   stop_grace_period: 10s      # 发停机信号后等应用退出的宽限,超时则 SIGKILL;默认 10s
   start_timeout: ""           # host 等待 launch_ack(含 init 全程)的超时;空 / 0 = 无限期(见 §阶段 2)
+  # 伴生进程(plugin):与 launch.exec 同 rootfs/cgroup/网络运行的常驻 sidecar,各自独立监督。
+  # plugin 退出不影响沙箱生命周期(只有 launch.exec 退出才按 launch.restart 决定 reboot/重启)。
+  plugin:
+    - exec: /usr/bin/sidecar
+      args: ["--serve"]
+      env: { LOG: info }        # 可选,合并入默认 PATH
+      workdir: /                # 可选
+      user: "0:0"               # 可选
+      restart: always           # never|on-failure|always;省略 → always(伴生进程默认常驻)
 
 # host 侧恢复/生命周期超时;guest/远程耦合项默认 0 = 不强制(host 等待 guest/懒加载所需的
 # 任意时长,dial/connect 探测仍有界),便于慢速/降级环境:慢的远程仓库/缓存、或调试器暂停都不会
@@ -519,11 +532,15 @@ files:
       nameserver 169.254.169.253
       options timeout:2 attempts:2
 
-# 应用拉起前顺序执行的一次性初始化命令(类 initContainers);任一条非零退出 = 沙箱启动失败
+# 应用拉起前顺序执行的一次性初始化命令(类 initContainers);任一条非零退出/超时 = 沙箱启动失败。
+# 一次性、早期执行语义(跑完即走);常驻进程请用 launch.plugin[]。
 init:
   - exec: /bin/sh
     args: ["-c", "echo provisioning"]
+    env: { STAGE: init }      # 可选,合并入默认 PATH
+    workdir: /                # 可选
     user: "0:0"               # 可选,默认 root
+    timeout: 30s              # 可选,Go duration;超时则 SIGKILL 并判失败;空/0 = 不限时
 ```
 
 **`launch` 增强字段的来源与合并**:`user` / `stop_signal` 与 `exec` / `args`

@@ -462,6 +462,17 @@ type LaunchConfig struct {
 	Workdir string            `yaml:"workdir"`
 	Restart string            `yaml:"restart"` // never|on-failure|always
 
+	// PIDNamespace selects the app's PID namespace: "private" (default) ⇒ the
+	// app is PID 1 of its own namespace; "shared" ⇒ the app runs in
+	// sandbox-init's namespace, reusing its PID-1 reaper for the app's
+	// orphaned descendants. Empty → private.
+	PIDNamespace string `yaml:"pid_namespace,omitempty"`
+
+	// Plugin is the companion-process list: long-running sidecars launched
+	// alongside the app in the same rootfs + cgroup, each supervised by its
+	// own restart policy. A plugin exit never reboots the sandbox.
+	Plugin []PluginConfig `yaml:"plugin,omitempty"`
+
 	// User is the run-as identity ("uid:gid" or "name:group"); overrides
 	// image config User. Empty → image User else root.
 	User string `yaml:"user,omitempty"`
@@ -495,11 +506,26 @@ type MountConfig struct {
 	Options string `yaml:"options,omitempty"`
 }
 
-// InitConfig declares a one-shot init command.
+// InitConfig declares a one-shot init command (run to completion before the
+// app, in order; non-zero exit or timeout aborts startup).
 type InitConfig struct {
-	Exec string   `yaml:"exec"`
-	Args []string `yaml:"args,omitempty"`
-	User string   `yaml:"user,omitempty"`
+	Exec    string            `yaml:"exec"`
+	Args    []string          `yaml:"args,omitempty"`
+	Env     map[string]string `yaml:"env,omitempty"`
+	Workdir string            `yaml:"workdir,omitempty"`
+	User    string            `yaml:"user,omitempty"`
+	Timeout string            `yaml:"timeout,omitempty"` // Go duration; empty/"0" → no timeout
+}
+
+// PluginConfig declares a companion ("plugin") process supervised alongside
+// the app. Restart is its policy (never|on-failure|always; empty → always).
+type PluginConfig struct {
+	Exec    string            `yaml:"exec"`
+	Args    []string          `yaml:"args,omitempty"`
+	Env     map[string]string `yaml:"env,omitempty"`
+	Workdir string            `yaml:"workdir,omitempty"`
+	User    string            `yaml:"user,omitempty"`
+	Restart string            `yaml:"restart,omitempty"` // never|on-failure|always; empty → always
 }
 
 // Load reads one sandbox.yaml and applies defaults.
@@ -658,7 +684,7 @@ func (c *SandboxConfig) CHApiDeadline() time.Duration {
 	}
 	return parseTimeout(c.Timeouts.CHApi) // explicit "0"/"off"/invalid → 0 (no forced)
 }
-func (c *SandboxConfig) APIReadyDeadline() time.Duration { return parseTimeout(c.Timeouts.APIReady) }
+func (c *SandboxConfig) APIReadyDeadline() time.Duration  { return parseTimeout(c.Timeouts.APIReady) }
 func (c *SandboxConfig) VAReportDeadline() time.Duration  { return parseTimeout(c.Timeouts.VAReport) }
 func (c *SandboxConfig) PingDeadline() time.Duration      { return parseTimeout(c.Timeouts.Ping) }
 func (c *SandboxConfig) AppNotifyDeadline() time.Duration { return parseTimeout(c.Timeouts.AppNotify) }
@@ -957,10 +983,33 @@ func (c *SandboxConfig) ValidateCold() error {
 			}
 		}
 	}
-	// init: exec required.
+	// init: exec required; timeout parseable.
 	for i, it := range c.Init {
 		if it.Exec == "" {
 			return fmt.Errorf("init[%d].exec is required", i)
+		}
+		if it.Timeout != "" {
+			if _, err := time.ParseDuration(it.Timeout); err != nil {
+				return fmt.Errorf("init[%d].timeout: %w", i, err)
+			}
+		}
+	}
+	// launch.pid_namespace ∈ {private, shared}.
+	switch c.Launch.PIDNamespace {
+	case "", "private", "shared":
+	default:
+		return fmt.Errorf("launch.pid_namespace %q invalid (want private|shared)", c.Launch.PIDNamespace)
+	}
+	// launch.restart + plugin[] restart policies.
+	if !validRestart(c.Launch.Restart) {
+		return fmt.Errorf("launch.restart %q invalid (want never|on-failure|always)", c.Launch.Restart)
+	}
+	for i, p := range c.Launch.Plugin {
+		if p.Exec == "" {
+			return fmt.Errorf("launch.plugin[%d].exec is required", i)
+		}
+		if !validRestart(p.Restart) {
+			return fmt.Errorf("launch.plugin[%d].restart %q invalid (want never|on-failure|always)", i, p.Restart)
 		}
 	}
 	// launch.stop_signal parseable; durations parseable.
@@ -1112,6 +1161,15 @@ func (c *SandboxConfig) validateRoot(cold bool) error {
 		}
 	}
 	return nil
+}
+
+// validRestart reports whether s is a valid restart policy (empty = default).
+func validRestart(s string) bool {
+	switch s {
+	case "", "never", "on-failure", "always":
+		return true
+	}
+	return false
 }
 
 // requireFileAbs enforces that uri starts with file:// and the path is

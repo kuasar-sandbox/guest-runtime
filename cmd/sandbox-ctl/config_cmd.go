@@ -222,17 +222,21 @@ boot:
 launch:
   exec: /usr/bin/app                       # or omit to use the image's Entrypoint/Cmd (overlay mode only)
   args: []
-  restart: never                           # never | on-failure | always
+  restart: never                           # never | on-failure | always (in-place restart + backoff)
+  # pid_namespace: private                 # private (default) | shared (reuse sandbox-init's reaper)
   # user: "0:0"                            # uid:gid or name:group
   # stop_signal: SIGTERM
+  # Companion processes (sidecars), same rootfs/cgroup/network; exit never reboots the sandbox:
+  # plugin:
+  #   - { exec: /usr/bin/sidecar, restart: always }   # never|on-failure|always (default always)
 # Optional guest environment (applied before the app forks):
 # mounts:
 #   - { target: /tmp,     type: tmpfs, options: "nosuid,nodev,mode=1777" }
 #   - { target: /var/log, type: empty }
 # files:
 #   - { path: /etc/resolv.conf, mode: "0644", content: "nameserver 169.254.169.253\n" }
-# init:
-#   - { exec: /bin/sh, args: ["-c", "echo provisioning"] }
+# init:  # one-shot, run-to-completion before the app (use plugin[] for long-running)
+#   - { exec: /bin/sh, args: ["-c", "echo provisioning"], timeout: 30s }
 `
 
 // skeletonRestore is the restore host-yaml template (sandbox-ctl run --restore).

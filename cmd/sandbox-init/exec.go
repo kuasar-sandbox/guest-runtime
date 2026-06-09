@@ -249,7 +249,7 @@ func runExecSession(c *vsockConn, req *proto.Message, sup *supervisorState) {
 		stderrR:   cb.stderrR,
 	}
 
-	pid, err := forkExecChild(spec, cs, sup.appPid)
+	pid, err := forkExecChild(spec, cs, int(sup.appPid.Load()))
 	if err != nil {
 		eb.drain()
 		fail("exec: fork: " + err.Error())
@@ -313,10 +313,10 @@ func forkExecChild(spec *proto.ExecSpec, cs childStdio, appPid int) (int, error)
 	args := append([]string{self, "exec-join", strconv.Itoa(appPid), ttyArg, spec.Cwd, spec.Argv[0]}, spec.Argv[1:]...)
 
 	cmd := exec.Cmd{
-		Path: self,
-		Args: args,
-		Env:  execEnv(spec.Env),
-		Dir:  "/",
+		Path:   self,
+		Args:   args,
+		Env:    execEnv(spec.Env),
+		Dir:    "/",
 		Stdin:  cs.stdin,
 		Stdout: cs.stdout,
 		Stderr: cs.stderr,

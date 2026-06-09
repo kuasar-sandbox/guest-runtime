@@ -33,85 +33,214 @@ type childStdio struct {
 	tty                   bool
 }
 
-// consoleBridge bridges the app's stdio to the current MUX session.
+// appRole identifies which app stdio fd a pump operates on.
+type appRole int
+
+const (
+	rolePTY appRole = iota
+	roleStdin
+	roleStdout
+	roleStderr
+)
+
+// consoleBridge bridges the app's stdio to the current MUX session. The MUX
+// session (host side) is swapped by reattach across restore/attach; the
+// app-side fds are swapped by rewireApp across an in-place app restart. The
+// pumps are persistent (per sandbox) and re-fetch BOTH the session (from
+// holder) and the app fd (from this bridge, guarded by appMu) so the MUX link
+// survives an app restart with no pump churn (docs/sandbox-runtime.md §3.2).
 type consoleBridge struct {
 	tty bool
+	// negotiated channel set (immutable; what start/protoSpec key off).
+	hasStdin, hasStdout, hasStderr bool
 
-	// tty mode: ptyMaster ↔ MUX StreamPTY (both directions).
+	holder *sessionHolder // current MUX session (host side)
+
+	// app-side fds for the CURRENT app generation, guarded by appMu. ptyMaster
+	// in tty mode; stdinW/stdoutR/stderrR in pipe mode (any nil = channel off).
+	// appGen bumps on each rewireApp; appClosed = sandbox shutdown.
+	appMu     sync.Mutex
+	appCond   *sync.Cond
+	appGen    uint64
+	appClosed bool
 	ptyMaster *os.File
+	stdinW    *os.File
+	stdoutR   *os.File
+	stderrR   *os.File
 
-	// pipe mode: the sandbox-init ends of the app pipes. Any may be nil
-	// (channel not negotiated).
-	stdinW  *os.File // sandbox-init writes app input here (child reads its fd 0)
-	stdoutR *os.File // sandbox-init reads app output here (child writes its fd 1)
-	stderrR *os.File // ditto for stderr
-
-	holder  *sessionHolder
 	started bool
-	wg      sync.WaitGroup // guest→host pumps (the ones that CloseWrite on EOF)
+	wg      sync.WaitGroup // guest→host pumps (the ones that CloseWrite on shutdown)
 }
 
-// setupAppStdio creates the app stdio fds per spec and returns the
-// child's 0/1/2 plus a consoleBridge holding the sandbox-init ends. The
+// appEnds is the sandbox-init side of one app generation's stdio fds.
+type appEnds struct {
+	ptyMaster, stdinW, stdoutR, stderrR *os.File
+}
+
+// fdForLocked returns the current fd for role (caller holds appMu).
+func (b *consoleBridge) fdForLocked(role appRole) *os.File {
+	switch role {
+	case rolePTY:
+		return b.ptyMaster
+	case roleStdin:
+		return b.stdinW
+	case roleStdout:
+		return b.stdoutR
+	case roleStderr:
+		return b.stderrR
+	}
+	return nil
+}
+
+// currentFd returns (fd, gen) for role at the current generation.
+func (b *consoleBridge) currentFd(role appRole) (*os.File, uint64) {
+	b.appMu.Lock()
+	defer b.appMu.Unlock()
+	return b.fdForLocked(role), b.appGen
+}
+
+// writeFd returns the current fd for role (host→app pumps re-fetch the dst per
+// write so a restart's new fd is picked up; nil when the app is momentarily
+// down between instances).
+func (b *consoleBridge) writeFd(role appRole) *os.File {
+	b.appMu.Lock()
+	defer b.appMu.Unlock()
+	return b.fdForLocked(role)
+}
+
+// waitNextFd blocks until a generation newer than gen is wired (an app
+// restart) or the bridge is shut down. Returns (fd, newGen, true) on a new
+// generation, (nil, 0, false) on shutdown.
+func (b *consoleBridge) waitNextFd(role appRole, gen uint64) (*os.File, uint64, bool) {
+	b.appMu.Lock()
+	defer b.appMu.Unlock()
+	for b.appGen <= gen && !b.appClosed {
+		b.appCond.Wait()
+	}
+	if b.appClosed {
+		return nil, 0, false
+	}
+	return b.fdForLocked(role), b.appGen, true
+}
+
+// setEndsLocked installs a generation's fds and bumps appGen (caller holds appMu).
+func (b *consoleBridge) setEndsLocked(e appEnds) {
+	b.ptyMaster, b.stdinW, b.stdoutR, b.stderrR = e.ptyMaster, e.stdinW, e.stdoutR, e.stderrR
+	b.appGen++
+	b.appCond.Broadcast()
+}
+
+// closeEndsLocked closes the current generation's sandbox-init fd ends (caller
+// holds appMu).
+func (b *consoleBridge) closeEndsLocked() {
+	for _, f := range []*os.File{b.ptyMaster, b.stdinW, b.stdoutR, b.stderrR} {
+		if f != nil {
+			_ = f.Close()
+		}
+	}
+}
+
+// rewireApp creates a fresh app stdio generation (for an in-place restart),
+// closing the old ends and waking the pumps onto the new ones; the MUX session
+// is untouched. Returns the new childStdio for the re-fork.
+func (b *consoleBridge) rewireApp(spec proto.StdioSpec) (childStdio, error) {
+	cs, ends, err := makeAppFds(spec)
+	if err != nil {
+		return childStdio{}, err
+	}
+	b.appMu.Lock()
+	b.closeEndsLocked()
+	b.setEndsLocked(ends)
+	b.appMu.Unlock()
+	return cs, nil
+}
+
+// setupAppStdio creates the first app stdio generation per spec and returns
+// the child's 0/1/2 plus a consoleBridge holding the sandbox-init ends. The
 // caller wires the child fds onto the user-app exec.Cmd, then (after the
-// launch_ack handshake) calls bridge.attach(sess) and bridge.start().
+// launch_ack handshake) calls bridge.attach(sess) and bridge.start(). An
+// in-place app restart later calls bridge.rewireApp to swap in a fresh
+// generation.
 func setupAppStdio(spec proto.StdioSpec) (childStdio, *consoleBridge, error) {
-	b := &consoleBridge{holder: newSessionHolder()}
+	cs, ends, err := makeAppFds(spec)
+	if err != nil {
+		return childStdio{}, nil, err
+	}
+	b := &consoleBridge{
+		tty:       spec.TTY,
+		hasStdin:  spec.Stdin,
+		hasStdout: spec.Stdout,
+		hasStderr: spec.Stderr,
+		holder:    newSessionHolder(),
+		appGen:    1,
+		ptyMaster: ends.ptyMaster,
+		stdinW:    ends.stdinW,
+		stdoutR:   ends.stdoutR,
+		stderrR:   ends.stderrR,
+	}
+	b.appCond = sync.NewCond(&b.appMu)
+	return cs, b, nil
+}
+
+// makeAppFds creates one generation of app stdio fds per spec: the child's
+// 0/1/2 (childStdio) plus the sandbox-init ends (appEnds). Shared by cold-start
+// setup and in-place restart re-wire.
+func makeAppFds(spec proto.StdioSpec) (childStdio, appEnds, error) {
 	if spec.TTY {
 		master, slave, err := openPTY()
 		if err != nil {
-			return childStdio{}, nil, fmt.Errorf("openpty: %w", err)
+			return childStdio{}, appEnds{}, fmt.Errorf("openpty: %w", err)
 		}
 		if spec.Winsize != nil {
 			_ = setWinsize(int(master.Fd()), spec.Winsize.Cols, spec.Winsize.Rows)
 		}
-		b.tty = true
-		b.ptyMaster = master
-		return childStdio{stdin: slave, stdout: slave, stderr: slave, tty: true}, b, nil
+		return childStdio{stdin: slave, stdout: slave, stderr: slave, tty: true},
+			appEnds{ptyMaster: master}, nil
 	}
 
 	// pipe mode
 	var cs childStdio
+	var e appEnds
 	if spec.Stdin {
 		pr, pw, err := appPipe() // child reads pr (fd 0); sandbox-init writes pw
 		if err != nil {
-			return childStdio{}, nil, fmt.Errorf("pipe stdin: %w", err)
+			return childStdio{}, appEnds{}, fmt.Errorf("pipe stdin: %w", err)
 		}
-		cs.stdin, b.stdinW = pr, pw
+		cs.stdin, e.stdinW = pr, pw
 	} else {
 		devnull, err := os.OpenFile(os.DevNull, os.O_RDONLY, 0)
 		if err != nil {
-			return childStdio{}, nil, fmt.Errorf("open /dev/null: %w", err)
+			return childStdio{}, appEnds{}, fmt.Errorf("open /dev/null: %w", err)
 		}
 		cs.stdin = devnull
 	}
 	if spec.Stdout {
 		pr, pw, err := appPipe() // child writes pw (fd 1); sandbox-init reads pr
 		if err != nil {
-			return childStdio{}, nil, fmt.Errorf("pipe stdout: %w", err)
+			return childStdio{}, appEnds{}, fmt.Errorf("pipe stdout: %w", err)
 		}
-		cs.stdout, b.stdoutR = pw, pr
+		cs.stdout, e.stdoutR = pw, pr
 	} else {
 		devnull, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
 		if err != nil {
-			return childStdio{}, nil, fmt.Errorf("open /dev/null: %w", err)
+			return childStdio{}, appEnds{}, fmt.Errorf("open /dev/null: %w", err)
 		}
 		cs.stdout = devnull
 	}
 	if spec.Stderr {
 		pr, pw, err := appPipe()
 		if err != nil {
-			return childStdio{}, nil, fmt.Errorf("pipe stderr: %w", err)
+			return childStdio{}, appEnds{}, fmt.Errorf("pipe stderr: %w", err)
 		}
-		cs.stderr, b.stderrR = pw, pr
+		cs.stderr, e.stderrR = pw, pr
 	} else {
 		devnull, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
 		if err != nil {
-			return childStdio{}, nil, fmt.Errorf("open /dev/null: %w", err)
+			return childStdio{}, appEnds{}, fmt.Errorf("open /dev/null: %w", err)
 		}
 		cs.stderr = devnull
 	}
-	return cs, b, nil
+	return cs, e, nil
 }
 
 // appPipeSize is the buffer we request for the app's stdin/stdout/stderr
@@ -157,31 +286,31 @@ func (b *consoleBridge) onSetWinsize(cols, rows uint16) {
 // launch conn) and again on each restore / attach.
 func (b *consoleBridge) attach(sess *mux.Session) { b.holder.set(sess) }
 
-// start spawns the pump goroutines. Idempotent.
+// start spawns the persistent pump goroutines (one set for the sandbox's
+// life, re-fetching the app fd across restarts). Idempotent.
 func (b *consoleBridge) start() {
 	if b.started {
 		return
 	}
 	b.started = true
 	if b.tty {
-		// app output → host (CloseWrite on app exit)
+		// app output → host (CloseWrite only on sandbox shutdown)
 		b.wg.Add(1)
-		go func() { defer b.wg.Done(); pumpAppToHost(b.ptyMaster, b.holder, mux.StreamPTY) }()
-		// host keystrokes → app pty (no CloseWrite — pty is full-duplex,
-		// closed by appExited())
-		go pumpHostToApp(b.ptyMaster, b.holder, mux.StreamPTY, false)
+		go func() { defer b.wg.Done(); pumpAppToHost(b, rolePTY, b.holder, mux.StreamPTY) }()
+		// host keystrokes → app pty (no CloseWrite — pty is full-duplex)
+		go pumpHostToApp(b, rolePTY, b.holder, mux.StreamPTY, false)
 		return
 	}
-	if b.stdinW != nil { // host→app stdin
-		go pumpHostToApp(b.stdinW, b.holder, mux.StreamStdin, true)
+	if b.hasStdin { // host→app stdin
+		go pumpHostToApp(b, roleStdin, b.holder, mux.StreamStdin, true)
 	}
-	if b.stdoutR != nil {
+	if b.hasStdout {
 		b.wg.Add(1)
-		go func() { defer b.wg.Done(); pumpAppToHost(b.stdoutR, b.holder, mux.StreamStdout) }()
+		go func() { defer b.wg.Done(); pumpAppToHost(b, roleStdout, b.holder, mux.StreamStdout) }()
 	}
-	if b.stderrR != nil {
+	if b.hasStderr {
 		b.wg.Add(1)
-		go func() { defer b.wg.Done(); pumpAppToHost(b.stderrR, b.holder, mux.StreamStderr) }()
+		go func() { defer b.wg.Done(); pumpAppToHost(b, roleStderr, b.holder, mux.StreamStderr) }()
 	}
 }
 
@@ -194,9 +323,9 @@ func (b *consoleBridge) protoSpec() proto.StdioSpec {
 		return proto.StdioSpec{TTY: true}
 	}
 	return proto.StdioSpec{
-		Stdin:  b.stdinW != nil,
-		Stdout: b.stdoutR != nil,
-		Stderr: b.stderrR != nil,
+		Stdin:  b.hasStdin,
+		Stdout: b.hasStdout,
+		Stderr: b.hasStderr,
 	}
 }
 
@@ -258,26 +387,18 @@ func (b *consoleBridge) closeLiveMUX() {
 	b.holder.invalidate(sess)
 }
 
-// appExited closes the sandbox-init ends of the app stdio fds — which
-// makes pumpAppToHost see EOF and CloseWrite the guest→host streams —
-// then waits (bounded) for those pumps to drain to the host. Called
-// before reboot.
+// appExited marks the bridge shut at sandbox shutdown (reboot): it closes the
+// current app fd ends and wakes the app→host pumps parked for a next generation
+// so they EOF their streams and exit, then waits (bounded) for them to drain.
+// (An in-place restart uses rewireApp instead, which does NOT close the
+// session.) Called before reboot.
 func (b *consoleBridge) appExited() {
-	if b.tty {
-		if b.ptyMaster != nil {
-			_ = b.ptyMaster.Close() // app's pty slave already gone (its 0/1/2 closed)
-		}
-	} else {
-		if b.stdinW != nil {
-			_ = b.stdinW.Close()
-		}
-		if b.stdoutR != nil {
-			_ = b.stdoutR.Close()
-		}
-		if b.stderrR != nil {
-			_ = b.stderrR.Close()
-		}
-	}
+	b.appMu.Lock()
+	b.closeEndsLocked()
+	b.appClosed = true
+	b.appCond.Broadcast() // wake pumps in waitNextFd → CloseWrite + return
+	b.appMu.Unlock()
+
 	done := make(chan struct{})
 	go func() { b.wg.Wait(); close(done) }()
 	select {
@@ -290,14 +411,24 @@ func (b *consoleBridge) appExited() {
 
 // --- pumps ----------------------------------------------------------
 
-// pumpAppToHost copies bytes the app wrote (src = pty master / stdout|
-// stderr pipe read end) onto the current session's stream `id`,
-// re-fetching the session whenever the old one dies (parking the app via
-// backpressure during the gap). On src EOF (app closed its fd) it sends
-// EOF on the stream and returns.
-func pumpAppToHost(src io.Reader, holder *sessionHolder, id uint8) {
+// pumpAppToHost copies bytes the app wrote (its pty master / stdout|stderr
+// pipe read end, fetched from the bridge per app generation) onto the current
+// session's stream `id`, re-fetching the session whenever the old one dies.
+// On the app fd reaching EOF (the app instance exited) it parks for the next
+// app generation (an in-place restart) and resumes on the fresh fd; only on
+// bridge shutdown (reboot) does it EOF the stream and return.
+func pumpAppToHost(b *consoleBridge, role appRole, holder *sessionHolder, id uint8) {
 	buf := make([]byte, mux.DataChunk)
+	src, gen := b.currentFd(role)
 	for {
+		if src == nil {
+			nsrc, ngen, ok := b.waitNextFd(role, gen)
+			if !ok {
+				return
+			}
+			src, gen = nsrc, ngen
+			continue
+		}
 		n, rerr := src.Read(buf)
 		chunk := buf[:n]
 		for len(chunk) > 0 {
@@ -312,48 +443,46 @@ func pumpAppToHost(src io.Reader, holder *sessionHolder, id uint8) {
 			}
 		}
 		if rerr != nil {
-			// app closed its fd / pty slave gone → EOF the stream.
-			for {
-				sess := holder.wait()
-				if sess == nil {
-					return
+			// This app instance's fd is done. Park for the next instance
+			// (restart); on shutdown, EOF the stream and return.
+			nsrc, ngen, ok := b.waitNextFd(role, gen)
+			if !ok {
+				for {
+					sess := holder.wait()
+					if sess == nil {
+						return
+					}
+					if err := sess.Stream(id).CloseWrite(); err == nil {
+						return
+					}
+					holder.invalidate(sess)
 				}
-				if err := sess.Stream(id).CloseWrite(); err == nil {
-					return
-				}
-				holder.invalidate(sess)
 			}
+			src, gen = nsrc, ngen
 		}
 	}
 }
 
-// pumpHostToApp copies bytes the host wrote on stream `id` into dst (the
-// app's stdin pipe write end, or the pty master). On stream EOF (host
-// closed its stdin) it closes dst when closeOnEOF; on session death it
-// waits for a new session and resumes. Up to ~one read buffer may be
-// lost across a session death (mux.Stream.Read never returns partial on
-// error, so in practice nothing is lost — io.Copy's last failing read
-// is n=0).
-func pumpHostToApp(dst io.WriteCloser, holder *sessionHolder, id uint8, closeOnEOF bool) {
+// pumpHostToApp copies bytes the host wrote on stream `id` into the app's
+// current stdin pipe / pty master (re-fetched per chunk so an in-place
+// restart's new fd is picked up; bytes are dropped while the app is momentarily
+// down between instances). On stream EOF (host closed its stdin — permanent for
+// the sandbox) it closes the current app fd when closeOnEOF and returns; on
+// session death it waits for a new session and resumes.
+func pumpHostToApp(b *consoleBridge, role appRole, holder *sessionHolder, id uint8, closeOnEOF bool) {
+	buf := make([]byte, mux.DataChunk)
 	for {
 		sess := holder.wait()
 		if sess == nil {
-			if closeOnEOF {
-				_ = dst.Close()
-			}
-			return
+			return // shutting down
 		}
-		_, err := io.Copy(dst, sess.Stream(id))
+		err := copyStreamToApp(b, role, sess.Stream(id), buf)
 		switch {
-		case err == nil || errors.Is(err, io.EOF):
-			// host closed its stdin → close the app's stdin.
+		case err == nil, errors.Is(err, io.EOF), errors.Is(err, mux.ErrStreamReset):
 			if closeOnEOF {
-				_ = dst.Close()
-			}
-			return
-		case errors.Is(err, mux.ErrStreamReset):
-			if closeOnEOF {
-				_ = dst.Close()
+				if fd := b.writeFd(role); fd != nil {
+					_ = fd.Close()
+				}
 			}
 			return
 		default:
@@ -363,14 +492,31 @@ func pumpHostToApp(dst io.WriteCloser, holder *sessionHolder, id uint8, closeOnE
 	}
 }
 
+// copyStreamToApp drains stream into the app's current fd for role, re-fetching
+// the destination per chunk and dropping bytes while the app is down (fd nil /
+// write error). Returns the stream read error (io.EOF / reset / session death).
+func copyStreamToApp(b *consoleBridge, role appRole, stream *mux.Stream, buf []byte) error {
+	for {
+		n, rerr := stream.Read(buf)
+		if n > 0 {
+			if fd := b.writeFd(role); fd != nil {
+				_, _ = fd.Write(buf[:n])
+			}
+		}
+		if rerr != nil {
+			return rerr
+		}
+	}
+}
+
 // --- sessionHolder --------------------------------------------------
 
 // sessionHolder is a slot for "the current MUX session", with a cond so
 // pumps can block until one is present (or block again after one dies).
 type sessionHolder struct {
-	mu       sync.Mutex
-	cond     *sync.Cond
-	sess     *mux.Session
+	mu     sync.Mutex
+	cond   *sync.Cond
+	sess   *mux.Session
 	closed bool
 }
 

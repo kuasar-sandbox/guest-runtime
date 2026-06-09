@@ -87,9 +87,26 @@ type LaunchSpec struct {
 	Args    []string          `json:"args,omitempty"`
 	Env     map[string]string `json:"env,omitempty"`
 	Workdir string            `json:"workdir,omitempty"`
-	Restart string            `json:"restart,omitempty"` // never|on-failure|always
-	Network *NetworkSpec      `json:"network,omitempty"`
-	Stdio   StdioSpec         `json:"stdio,omitempty"`
+	// Restart is the app's restart policy: never (default) | on-failure |
+	// always. never ⇒ app exit reboots the sandbox (one-shot). on-failure ⇒
+	// restart in place on non-zero/​signal exit, reboot on clean exit. always
+	// ⇒ always restart in place. Restarts use the shared backoff (10ms→60s,
+	// reset after 60s uptime); the stdio MUX survives across restarts.
+	Restart string       `json:"restart,omitempty"`
+	Network *NetworkSpec `json:"network,omitempty"`
+	Stdio   StdioSpec    `json:"stdio,omitempty"`
+
+	// SharePID selects the app's PID namespace: false (default) ⇒ the app is
+	// PID 1 of its own namespace (CLONE_NEWPID); true ⇒ the app runs in
+	// sandbox-init's PID namespace, so sandbox-init (PID 1) reaps the app and
+	// any orphaned descendants (config: launch.pid_namespace=shared).
+	SharePID bool `json:"share_pid,omitempty"`
+
+	// Plugins are companion ("plugin") processes launched alongside the app,
+	// in the same guest rootfs + cgroup, each supervised by its own restart
+	// policy + the shared backoff. A plugin exit never affects the sandbox
+	// lifecycle (only the app's exit does). docs/sandbox-runtime.md §3.2.
+	Plugins []PluginSpec `json:"plugins,omitempty"`
 
 	// User is the run-as identity for the app process: "uid:gid" or
 	// "name:group" (named forms resolved guest-side against the rootfs
@@ -136,12 +153,30 @@ type FileSpec struct {
 }
 
 // InitSpec is one one-shot init command run (in order, to completion)
-// before the app is forked. User is an optional run-as identity (same
-// form as LaunchSpec.User). A non-zero exit aborts sandbox startup.
+// before the app is forked (initContainers semantics: a non-zero exit — or
+// a TimeoutMs overrun — aborts sandbox startup). User is an optional run-as
+// identity (same form as LaunchSpec.User).
 type InitSpec struct {
-	Exec string   `json:"exec"`
-	Args []string `json:"args,omitempty"`
-	User string   `json:"user,omitempty"`
+	Exec      string            `json:"exec"`
+	Args      []string          `json:"args,omitempty"`
+	Env       map[string]string `json:"env,omitempty"`     // merged over the default PATH
+	Workdir   string            `json:"workdir,omitempty"` // cwd; empty → "/"
+	User      string            `json:"user,omitempty"`
+	TimeoutMs int64             `json:"timeout_ms,omitempty"` // 0 → no timeout
+}
+
+// PluginSpec is one companion ("plugin") process run alongside the app and
+// supervised independently (LaunchSpec.Plugins). Restart is its policy
+// (never | on-failure | always; empty → always — plugins are meant to stay
+// up). It runs in the same guest rootfs + cgroup as the app, with stdout/
+// stderr on the guest console. A plugin's exit never reboots the sandbox.
+type PluginSpec struct {
+	Exec    string            `json:"exec"`
+	Args    []string          `json:"args,omitempty"`
+	Env     map[string]string `json:"env,omitempty"`
+	Workdir string            `json:"workdir,omitempty"`
+	User    string            `json:"user,omitempty"`
+	Restart string            `json:"restart,omitempty"`
 }
 
 // NetworkSpec is the resolved guest IP-layer config sandbox-init applies
