@@ -428,7 +428,7 @@ func runHandshake(ch chan<- handshakeResult) {
 		fail(fmt.Errorf("expected launch message, got %q", msg.Type))
 		return
 	}
-	if msg.Launch.Exec == "" {
+	if msg.Launch.Exec == "" && !msg.Launch.Placeholder {
 		fail(errors.New("launch spec missing exec"))
 		return
 	}
