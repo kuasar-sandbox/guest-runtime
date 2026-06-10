@@ -464,16 +464,21 @@ boot:
     # 不写 boot.root.overlay 时,root 盘本身是可写 ext4,直接挂为 disk0(无 overlayfs、无 disk1)。
     # 下面三项是 overlay.{diff,diff_template,diff_size} 的 root 层等价物,给 root 盘写能力;
     # 与 overlay.* 互斥。base 可选(须是 ext4 镜像作 CoW 下层);无 erofs 镜像 ⇒ 无内嵌
-    # config.json ⇒ launch.exec 必填。
+    # config.json ⇒ launch.exec 必填(launch.placeholder 占位模式除外)。
     #   diff:          file:///var/lib/sandbox/<sid>/<sid>.overlay.diff  # 可写盘;空→自动落盘
     #   diff_template: file:///opt/sandbox/root-templates/app-2G.ext4    # 预格式化 ext4,seed 新盘
     #   diff_size:     2GiB                                              # 同 overlay.diff_size
     #   base_from_refs: []                                              # 单盘快照链(snapshot.cfg 自动填)
 
-# 容器应用启动配置(覆盖 boot.root.base 内嵌的 config.json 默认值;单磁盘模式无内嵌配置,exec 必填)
+# 容器应用启动配置(覆盖 boot.root.base 内嵌的 config.json 默认值;单磁盘模式无内嵌配置,exec 必填;
+# 占位模式 placeholder:true 例外——不跑外部程序)
 launch:
   exec: /usr/bin/foo
   args: ["arg1", "arg2"]
+  # placeholder: true         # 占位模式:不 exec 任何外部程序,app 仅做完 ns/cgroup/stdio 准备后
+  #                           #   等待停机信号——"空白锚点"沙箱,完全靠 `exec` 驱动(磁盘规则不变,
+  #                           #   仍需照常配 boot.root)。与 exec 互斥;恒为 restart=always
+  #                           #   (从 exec 会话里 kill 掉占位 ⇒ 原地重拉,而非 reboot 整个沙箱)
   env:
     PATH: /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
     HOME: /root

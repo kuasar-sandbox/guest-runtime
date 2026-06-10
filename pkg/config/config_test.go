@@ -324,6 +324,11 @@ func TestValidateCold_SingleDisk(t *testing.T) {
 		wantSubst string
 	}{
 		{"no exec (no image config)", func(c *SandboxConfig) { c.Launch.Exec = "" }, "launch.exec"},
+		{"placeholder relaxes exec requirement", func(c *SandboxConfig) {
+			c.Launch.Exec = ""
+			c.Launch.Placeholder = true
+		}, ""}, // single-disk + placeholder needs no exec
+
 		{"no ext4 source", func(c *SandboxConfig) { c.Boot.Root.DiffTemplate = "" }, "ext4 source for the root"},
 		{"manifest diff", func(c *SandboxConfig) { c.Boot.Root.Diff = "manifest://abc" }, "must be file"},
 		{"base ok (ext4 cow lower)", func(c *SandboxConfig) {
@@ -389,6 +394,13 @@ func TestValidateCold_LaunchExtras(t *testing.T) {
 		{"init timeout ok", func(c *SandboxConfig) {
 			c.Init = []InitConfig{{Exec: "/x", Timeout: "30s"}}
 		}, ""},
+		{"placeholder ok (no exec)", func(c *SandboxConfig) {
+			c.Launch.Exec = ""
+			c.Launch.Placeholder = true
+		}, ""},
+		{"placeholder + exec mutually exclusive", func(c *SandboxConfig) {
+			c.Launch.Placeholder = true // minimalCold still sets launch.exec
+		}, "mutually exclusive"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

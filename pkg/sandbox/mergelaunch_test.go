@@ -74,6 +74,42 @@ func TestMergeLaunch_ErrorWhenNoExecAnywhere(t *testing.T) {
 	}
 }
 
+func TestMergeLaunch_Placeholder(t *testing.T) {
+	// Placeholder ignores image Entrypoint/Cmd, needs no exec, and forces
+	// restart=always even when the config asks for something else. Env/workdir
+	// still apply to the anchor process.
+	image := &ImageConfig{
+		Entrypoint: []string{"/image/exec"},
+		Cmd:        []string{"ignored"},
+		Env:        []string{"FROM_IMAGE=1"},
+	}
+	override := config.LaunchConfig{
+		Placeholder: true,
+		Restart:     "never", // must be overridden to "always"
+		Workdir:     "/work",
+		Env:         map[string]string{"K": "v"},
+	}
+	got, err := MergeLaunch(image, override)
+	if err != nil {
+		t.Fatalf("placeholder MergeLaunch: %v", err)
+	}
+	if !got.Placeholder {
+		t.Error("Placeholder = false, want true")
+	}
+	if got.Exec != "" || len(got.Args) != 0 {
+		t.Errorf("Exec/Args = %q/%v, want empty (image Entrypoint/Cmd ignored)", got.Exec, got.Args)
+	}
+	if got.Restart != "always" {
+		t.Errorf("Restart = %q, want always (forced)", got.Restart)
+	}
+	if got.Workdir != "/work" {
+		t.Errorf("Workdir = %q, want /work", got.Workdir)
+	}
+	if got.Env["K"] != "v" || got.Env["FROM_IMAGE"] != "1" {
+		t.Errorf("Env = %v, want override+image merged", got.Env)
+	}
+}
+
 func TestMergeLaunch_FallsBackToImageCmdWhenEntrypointEmpty(t *testing.T) {
 	// python:3.12-slim shape: Entrypoint=[], Cmd=["python3"]
 	image := &ImageConfig{

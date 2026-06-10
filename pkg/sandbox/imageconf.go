@@ -109,7 +109,13 @@ func MergeLaunch(image *ImageConfig, override config.LaunchConfig) (*proto.Launc
 		Restart: "never",
 	}
 
+	// Placeholder: no external program. Skip exec resolution (and any image
+	// Entrypoint/Cmd); env/workdir/user still apply to the anchor process,
+	// and Restart is forced to "always" at the end.
 	switch {
+	case override.Placeholder:
+		spec.Placeholder = true
+
 	case override.Exec != "":
 		spec.Exec = override.Exec
 		spec.Args = override.Args
@@ -159,6 +165,12 @@ func MergeLaunch(image *ImageConfig, override config.LaunchConfig) (*proto.Launc
 
 	if override.Restart != "" {
 		spec.Restart = override.Restart
+	}
+	if spec.Placeholder {
+		// Forced regardless of any launch.restart: a placeholder is the
+		// sandbox's anchor — killing it from an `exec` session must restart
+		// it in place, never reboot the sandbox.
+		spec.Restart = "always"
 	}
 
 	// User: override else image (named forms resolved guest-side).

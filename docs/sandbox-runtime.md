@@ -172,7 +172,8 @@ cmdline,不能走 spec。单盘路径:只 wait `/dev/vda`,`mount -t ext4 /dev/vd
 可写根(无 `/overlay/lower`、`/overlay/upper`、无 overlayfs、无 vdb),其余(`/opt/sandbox-runtime`
 bind、switch-root、phase1b 基础挂载)不变。`empty` 卷的 source 改落在写根自身的
 `/sysroot/.sandbox-volumes/<i>`(无独立 ext4 upper),仍 bind 遮蔽 target、随 switch-root 子树搬运。
-单盘根盘恒为可写 ext4,无 erofs 镜像 ⇒ 无内嵌 config.json ⇒ launch.exec 必填(host 侧 validate 强制)。
+单盘根盘恒为可写 ext4,无 erofs 镜像 ⇒ 无内嵌 config.json ⇒ launch.exec 必填(host 侧 validate 强制;
+`launch.placeholder` 占位模式除外——它本就不跑外部程序)。
 
 ### 3.2 阶段 2:spec 应用 + stdio 接线 + 应用拉起
 
@@ -212,11 +213,18 @@ switch-root 之后单线程执行。
      pipe 模式: 各 pipe/socketpair 的 child 端作为 fd 0/1/2
      argv: [/proc/self/exe, "exec-child", isolated("1"/"0"), cred, workdir, exec, args...]
        cred = "uid:gid:sg1,sg2"(由 spec.user 在 guest 侧 /etc/passwd 解析)或 "-"(不降权)
+       placeholder(launch.placeholder)时 argv = [..., "exec-child-placeholder", isolated, cred, workdir]
+       (无 exec/args:占位锚点,不跑任何外部程序)
      env:  spec.Env(默认补 PATH)
 
 9. 子进程在新 ns 内:isolated 时 mount -t proc proc /proc(新 PID ns 必需;shared 沿用
      sandbox-init 的 /proc)→ chdir(workdir) → 若 cred≠"-":setgroups → setgid → setuid
      (降权放在挂载 /proc 之后、execve 之前)→ syscall.Exec(exec, args...)
+     placeholder 时:同样的 ns/cred 准备,但末步不 execve,改
+       signal.Notify(SIGTERM,SIGINT) → <-sig → exit(0)(不可用 select{}:无活 goroutine
+       会触发 Go 死锁检测 panic)。占位仍是被监督的 app:进 app cgroup、随快照冻结、
+       stop 时收信号退出。host 侧强制 restart=always ⇒ 从 exec 会话 kill 占位会原地
+       重拉(非 reboot);仅 host 停机(置 shutdown 后再杀)走 reboot。
 
 10. 父进程(sandbox-init pid=1):
      - 把子进程 pid 写入 /sys/fs/cgroup/app/cgroup.procs(其派生的整棵进程树
@@ -940,6 +948,7 @@ sandbox.yaml `launch:` 节(yaml override 优先,Env merge),host sandbox-ctl 合�
   "env":     {"PATH": "...", "HOME": "/root"},
   "workdir": "/",
   "restart": "never",                    // never|on-failure|always(in-place 重启 + 退避)
+  "placeholder": false,                  // true → 不 exec 外部程序,占位锚点等待停机;exec 互斥;host 强制 restart=always
   "share_pid": false,                    // true → 应用进 sandbox-init 的 PID ns(pid_namespace=shared)
   "user":    "0:0",                      // uid:gid 或 name:group(guest 侧 /etc/passwd 解析);空 → root
   "stop_signal":   15,                   // 停机信号编号(host 已从名字解析);0 → SIGTERM

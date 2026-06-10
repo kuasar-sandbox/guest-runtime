@@ -87,6 +87,13 @@ type LaunchSpec struct {
 	Args    []string          `json:"args,omitempty"`
 	Env     map[string]string `json:"env,omitempty"`
 	Workdir string            `json:"workdir,omitempty"`
+	// Placeholder, when true, runs no external program: the app child does
+	// all its namespace/cgroup/stdio setup but, instead of execve, waits for
+	// SIGTERM/SIGINT and exits — an empty "anchor" app for a sandbox driven
+	// entirely by `exec`. Exec/Args (and any image Entrypoint/Cmd) are ignored.
+	// A placeholder always uses Restart=always (host forces it) so killing it
+	// from an exec session restarts it rather than reboots the sandbox.
+	Placeholder bool `json:"placeholder,omitempty"`
 	// Restart is the app's restart policy: never (default) | on-failure |
 	// always. never ⇒ app exit reboots the sandbox (one-shot). on-failure ⇒
 	// restart in place on non-zero/​signal exit, reboot on clean exit. always

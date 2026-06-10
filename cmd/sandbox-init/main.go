@@ -60,14 +60,21 @@ func main() {
 	// isolated reports whether the app got its own PID ns (→ remount /proc);
 	// cred ("uid:gid:sg,..." or "-") is dropped just before execve.
 	if len(os.Args) >= 6 && os.Args[1] == "exec-child" {
-		runExecChild(os.Args[2] == "1", os.Args[3], os.Args[4], os.Args[5], os.Args[6:], false)
+		runExecChild(os.Args[2] == "1", os.Args[3], os.Args[4], os.Args[5], os.Args[6:], false, false)
+		return
+	}
+	// Placeholder app (launch.placeholder): same ns/cred setup as exec-child
+	// but no program — it waits for SIGTERM/SIGINT instead of execve.
+	// argv: [self, "exec-child-placeholder", isolated("1"/"0"), cred, workdir]
+	if len(os.Args) >= 5 && os.Args[1] == "exec-child-placeholder" {
+		runExecChild(os.Args[2] == "1", os.Args[3], os.Args[4], "", nil, false, true)
 		return
 	}
 	// Joined exec command (sandbox-ctl exec): forked by the exec-join
 	// helper after it has entered the app's mount + pid namespaces. No
 	// run-as drop here (exec sessions keep the app's identity).
 	if len(os.Args) >= 4 && os.Args[1] == "exec-child-joined" {
-		runExecChild(false, "-", os.Args[2], os.Args[3], os.Args[4:], true)
+		runExecChild(false, "-", os.Args[2], os.Args[3], os.Args[4:], true, false)
 		return
 	}
 	// nsenter helper for sandbox-ctl exec.
@@ -537,7 +544,14 @@ func phase2ForkApp(spec *proto.LaunchSpec, cs childStdio) (int, error) {
 	if isolated {
 		isoArg = "1"
 	}
-	args := append([]string{self, "exec-child", isoArg, credStr, spec.Workdir, spec.Exec}, spec.Args...)
+	// Placeholder: no program — the child sets up its ns/cred then waits.
+	// Otherwise pass the resolved exec + args for execve.
+	var args []string
+	if spec.Placeholder {
+		args = []string{self, "exec-child-placeholder", isoArg, credStr, spec.Workdir}
+	} else {
+		args = append([]string{self, "exec-child", isoArg, credStr, spec.Workdir, spec.Exec}, spec.Args...)
+	}
 
 	cloneflags := uintptr(syscall.CLONE_NEWNS)
 	if isolated {
@@ -583,7 +597,7 @@ func phase2ForkApp(spec *proto.LaunchSpec, cs childStdio) (int, error) {
 // If appPath has no '/', resolve via PATH lookup (image config Cmd
 // often holds bare names like "python3" or "node", expecting standard
 // PATH search semantics like sh/cmd would do).
-func runExecChild(isolated bool, cred, workdir, appPath string, args []string, joined bool) {
+func runExecChild(isolated bool, cred, workdir, appPath string, args []string, joined, placeholder bool) {
 	// Independent children (the user app) get a private mount namespace. A
 	// joined exec command already runs in the app's mount + pid namespace, so
 	// it touches neither the rslave nor /proc (would disrupt the shared view).
@@ -614,7 +628,7 @@ func runExecChild(isolated bool, cred, workdir, appPath string, args []string, j
 	}
 
 	resolved := appPath
-	if !strings.Contains(appPath, "/") {
+	if !placeholder && !strings.Contains(appPath, "/") {
 		// PATH lookup uses os.Environ() (set by parent from spec.Env).
 		p, err := exec.LookPath(appPath)
 		if err != nil {
@@ -641,6 +655,17 @@ func runExecChild(isolated bool, cred, workdir, appPath string, args []string, j
 	// lookup, all of which need root — and right before execve.
 	if err := applyCred(cred); err != nil {
 		die("exec-child: drop privileges: %v", err)
+	}
+
+	// Placeholder: run no program. Wait for a stop signal and exit cleanly.
+	// (Cannot block on `select{}` — Go's deadlock detector would panic with
+	// no live goroutines; a signal-fed channel keeps the runtime alive.)
+	if placeholder {
+		logf("exec-child: placeholder app (no exec) — waiting for stop signal")
+		sigCh := make(chan os.Signal, 1)
+		signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
+		<-sigCh
+		os.Exit(0)
 	}
 
 	if err := syscall.Exec(resolved, append([]string{appPath}, args...), os.Environ()); err != nil {

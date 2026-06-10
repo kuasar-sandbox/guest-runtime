@@ -462,6 +462,14 @@ type LaunchConfig struct {
 	Workdir string            `yaml:"workdir"`
 	Restart string            `yaml:"restart"` // never|on-failure|always
 
+	// Placeholder, when true, starts an empty "anchor" app that runs no
+	// external program (no exec): the app child sets up its namespaces/cgroup/
+	// stdio then waits for stop. exec must be empty (mutually exclusive). The
+	// app always restarts (always), so killing it from an `exec` session
+	// restarts the anchor instead of rebooting the sandbox. Disk config is
+	// unchanged — you still configure boot.root as usual.
+	Placeholder bool `yaml:"placeholder,omitempty"`
+
 	// PIDNamespace selects the app's PID namespace: "private" (default) ⇒ the
 	// app is PID 1 of its own namespace; "shared" ⇒ the app runs in
 	// sandbox-init's namespace, reusing its PID-1 reaper for the app's
@@ -1004,6 +1012,10 @@ func (c *SandboxConfig) ValidateCold() error {
 	if !validRestart(c.Launch.Restart) {
 		return fmt.Errorf("launch.restart %q invalid (want never|on-failure|always)", c.Launch.Restart)
 	}
+	// placeholder runs no external program — exec is mutually exclusive.
+	if c.Launch.Placeholder && c.Launch.Exec != "" {
+		return errors.New("launch.placeholder and launch.exec are mutually exclusive")
+	}
 	for i, p := range c.Launch.Plugin {
 		if p.Exec == "" {
 			return fmt.Errorf("launch.plugin[%d].exec is required", i)
@@ -1155,9 +1167,10 @@ func (c *SandboxConfig) validateRoot(cold bool) error {
 		if r.DiffTemplate == "" && r.Base == "" && r.Diff == "" {
 			return errors.New("single-disk cold boot needs an ext4 source for the root: set boot.root.diff_template, boot.root.base, or an explicit boot.root.diff")
 		}
-		// No erofs image ⇒ no appended image config; the launch must be explicit.
-		if c.Launch.Exec == "" {
-			return errors.New("single-disk mode has no image config (boot.root.overlay omitted): set launch.exec")
+		// No erofs image ⇒ no appended image config; the launch must be explicit
+		// (unless it's a no-exec placeholder, which runs no program at all).
+		if c.Launch.Exec == "" && !c.Launch.Placeholder {
+			return errors.New("single-disk mode has no image config (boot.root.overlay omitted): set launch.exec (or launch.placeholder: true)")
 		}
 	}
 	return nil

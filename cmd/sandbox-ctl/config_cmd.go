@@ -223,6 +223,8 @@ launch:
   exec: /usr/bin/app                       # or omit to use the image's Entrypoint/Cmd (overlay mode only)
   args: []
   restart: never                           # never | on-failure | always (in-place restart + backoff)
+  # placeholder: true                      # no exec: empty anchor app (drive the sandbox via exec sessions);
+                                           #   mutually exclusive with exec; always restarts (kill ⇒ restart, not reboot)
   # pid_namespace: private                 # private (default) | shared (reuse sandbox-init's reaper)
   # user: "0:0"                            # uid:gid or name:group
   # stop_signal: SIGTERM
