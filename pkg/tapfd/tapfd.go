@@ -29,7 +29,7 @@ import (
 const DefaultTimeout = 5 * time.Second
 
 // Metadata is the recognized subset of the handoff payload (docs/tapfd.md
-// §4.3) sandbox-ctl acts on. Unknown keys are ignored per the protocol's
+// §2.3) sandbox-ctl acts on. Unknown keys are ignored per the protocol's
 // forward-compat rule (handled by the vswitch parser).
 type Metadata struct {
 	MAC string // provider-assigned MAC the VMM must mirror onto virtio-net
@@ -37,14 +37,14 @@ type Metadata struct {
 	MTU int    // interface MTU (0 = absent)
 }
 
-// Acquire runs the §5 exec-helper handoff: it creates a connected socketpair,
+// Acquire runs the §3 exec-helper handoff: it creates a connected socketpair,
 // execs argv with TAPFD_SOCKET=fd=3 (the helper's inherited end) and
-// TAPFD_WANT_NETNS=1 (§5.3.1 — request the tap's netns fd), receives exactly
+// TAPFD_WANT_NETNS=1 (§3.4 — request the tap's netns fd), receives exactly
 // one tap fd + metadata + an optional netns fd, and requires the helper to exit
 // 0. The whole exchange is bounded by timeout (<=0 → DefaultTimeout). On success
 // the caller owns the returned files: tap (hand to CH via cmd.ExtraFiles) and,
 // when the provider's tap is netns-isolated, netns (nil otherwise — used to
-// launch CH inside the tap's network namespace, §4.6). Close both after the run.
+// launch CH inside the tap's network namespace, §2.5). Close both after the run.
 func Acquire(ctx context.Context, argv []string, timeout time.Duration) (tap *os.File, netns *os.File, meta Metadata, err error) {
 	if len(argv) == 0 {
 		return nil, nil, Metadata{}, errors.New("tapfd: empty exec argv")
@@ -75,8 +75,8 @@ func Acquire(ctx context.Context, argv []string, timeout time.Duration) (tap *os
 
 	cmd := exec.CommandContext(cctx, argv[0], argv[1:]...)
 	// helperFile becomes the child's fd 3 (cmd.ExtraFiles[0]); the helper dials
-	// it because we point TAPFD_SOCKET at it (docs/tapfd.md §5.3).
-	// TAPFD_WANT_NETNS=1 requests the tap's netns fd (§5.3.1) so we can launch
+	// it because we point TAPFD_SOCKET at it (docs/tapfd.md §3.3).
+	// TAPFD_WANT_NETNS=1 requests the tap's netns fd (§3.4) so we can launch
 	// CH inside it; a provider whose tap isn't netns-isolated simply omits it.
 	cmd.Env = append(os.Environ(), "TAPFD_SOCKET=fd=3", "TAPFD_WANT_NETNS=1")
 	cmd.ExtraFiles = []*os.File{helperFile}
@@ -91,7 +91,7 @@ func Acquire(ctx context.Context, argv []string, timeout time.Duration) (tap *os
 
 	_ = uconn.SetDeadline(time.Now().Add(timeout))
 	tapFiles, netnsFile, meta, rerr := RecvFd(uconn)
-	werr := cmd.Wait() // helper sends one message then exits (§5.4)
+	werr := cmd.Wait() // helper sends one message then exits (§3.5)
 
 	if rerr != nil {
 		closeAll(tapFiles)
@@ -99,7 +99,7 @@ func Acquire(ctx context.Context, argv []string, timeout time.Duration) (tap *os
 		return nil, nil, Metadata{}, fmt.Errorf("tapfd: recv from helper %s: %w (helper exit: %v, stderr=%q)",
 			argv[0], rerr, werr, strings.TrimSpace(stderr.String()))
 	}
-	if werr != nil { // §5.1: non-zero exit or timeout ⇒ failure, do not use the nic
+	if werr != nil { // §3.1: non-zero exit or timeout ⇒ failure, do not use the nic
 		closeAll(tapFiles)
 		closeFile(netnsFile)
 		return nil, nil, Metadata{}, fmt.Errorf("tapfd: helper %s exited non-zero: %w (stderr=%q)",
@@ -113,7 +113,7 @@ func Acquire(ctx context.Context, argv []string, timeout time.Duration) (tap *os
 	return tapFiles[0], netnsFile, meta, nil
 }
 
-// RecvFd performs the §4.4 receive by delegating to the canonical
+// RecvFd performs the §2.4 receive by delegating to the canonical
 // sandbox-vswitch tapfd library (recvmsg, SCM_RIGHTS fd collection, payload
 // parse, fd-count cross-check, and the positional tap/netns split), then
 // projects the resulting PortMetadata onto the MAC/IP/MTU subset sandbox-ctl

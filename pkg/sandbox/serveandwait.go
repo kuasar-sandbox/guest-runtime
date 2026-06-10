@@ -128,7 +128,7 @@ type VMParams struct {
 	Cgroup *resctl.CgroupController
 
 	// NetnsFile, when non-nil, is the tap's network-namespace fd from the same
-	// handoff (docs/tapfd.md §4.6). ServeAndWait fork/execs CH on a thread that
+	// handoff (docs/tapfd.md §2.5). ServeAndWait fork/execs CH on a thread that
 	// setns()'d into it, so CH runs inside the tap's netns. CH does NOT inherit
 	// this fd (it's not an ExtraFile); the caller closes it after the run.
 	NetnsFile *os.File
@@ -612,7 +612,7 @@ func ServeAndWait(p VMParams) (int, error) {
 }
 
 // startCH starts cmd. When netnsFile is non-nil the fork/exec runs on a thread
-// moved into that network namespace (docs/tapfd.md §4.6), so CH — and thus the
+// moved into that network namespace (docs/tapfd.md §2.5), so CH — and thus the
 // guest's virtio-net — lives inside the tap's netns; otherwise CH starts in the
 // host netns. cmd.Process is populated by the time this returns.
 func startCH(cmd *exec.Cmd, netnsFile *os.File) error {

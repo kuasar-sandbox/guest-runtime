@@ -285,7 +285,7 @@ func (c *SandboxConfig) SensorRuntime() (mode string, stallUs, windowUs uint64, 
 //
 // Source modes (exactly one, see ValidateCold):
 //   - TAP: a pre-existing host tap; CH opens it by name (dev/e2e, no provider).
-//   - TapFD: tapfd handoff (docs/tapfd.md §5) — sandbox-ctl execs a helper that
+//   - TapFD: tapfd handoff (docs/tapfd.md §3) — sandbox-ctl execs a helper that
 //     hands over a tap queue fd (with virtio-net header) + metadata.
 //
 // In TapFD mode the handoff metadata OVERRIDES the static attributes:
@@ -293,7 +293,7 @@ func (c *SandboxConfig) SensorRuntime() (mode string, stallUs, windowUs uint64, 
 // meta.mtu→MTU. See NetworkConfig.Effective.
 type NetworkConfig struct {
 	TAP   string       `yaml:"tap,omitempty"`   // host tap name; CH opens it (attach, don't create)
-	TapFD *TapFDConfig `yaml:"tapfd,omitempty"` // tapfd handoff helper (docs/tapfd.md §5)
+	TapFD *TapFDConfig `yaml:"tapfd,omitempty"` // tapfd handoff helper (docs/tapfd.md §3)
 
 	MAC       string `yaml:"mac,omitempty"`       // virtio-net MAC (CH --net mac=); empty + TAP mode → CH auto-assigns
 	IP        string `yaml:"ip,omitempty"`        // guest CIDR (IPv4/IPv6), e.g. "169.254.1.1/31". Empty → no IP config.
@@ -303,7 +303,7 @@ type NetworkConfig struct {
 	Interface string `yaml:"interface,omitempty"` // guest iface name; defaults to "eth0"
 }
 
-// TapFDConfig configures tapfd-handoff acquisition (docs/tapfd.md §5).
+// TapFDConfig configures tapfd-handoff acquisition (docs/tapfd.md §3).
 // sandbox-ctl execs Exec with TAPFD_SOCKET pointing at an inherited
 // socketpair end, then receives one tap queue fd + metadata over it.
 type TapFDConfig struct {

@@ -78,7 +78,7 @@ func TestRecvFd_OK(t *testing.T) {
 }
 
 // TestRecvFd_Netns: payload declares netns_fd=1, so the trailing fd is split
-// off as the netns reference (docs/tapfd.md §4.6 / §4.4 step 5). Any two fds
+// off as the netns reference (docs/tapfd.md §2.5 / §2.4 step 5). Any two fds
 // stand in for [tap, netns]; the split is positional, not content-based.
 func TestRecvFd_Netns(t *testing.T) {
 	a, b := socketPair(t)
@@ -140,7 +140,7 @@ func TestAcquire_Errors(t *testing.T) {
 	if _, _, _, err := Acquire(context.Background(), nil, time.Second); err == nil {
 		t.Fatal("empty argv: want error")
 	}
-	// Helper exits non-zero without handing over a fd (§5.1: must fail).
+	// Helper exits non-zero without handing over a fd (§3.1: must fail).
 	if _, _, _, err := Acquire(context.Background(), []string{"sh", "-c", "exit 3"}, 2*time.Second); err == nil {
 		t.Fatal("non-zero helper: want error")
 	}

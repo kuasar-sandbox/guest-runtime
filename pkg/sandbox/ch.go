@@ -112,9 +112,9 @@ func CHCommand(cfg *config.SandboxConfig, disks []DiskArg, chSock, vsockSock, ke
 
 // chNetArg builds CH's --net value. tapfd handoff (tapFDNum>0) drives
 // virtio-net off a pre-opened tap queue fd inherited by CH (vnet_hdr framing,
-// docs/tapfd.md §4.5); otherwise CH opens a named host tap. A non-empty mac is
+// docs/tapfd.md §2.6); otherwise CH opens a named host tap. A non-empty mac is
 // mirrored onto virtio-net so the provider's data plane accepts the guest
-// (docs/tapfd.md §7); empty → CH auto-assigns. id=_net0 names the device so
+// (docs/tapfd.md §5); empty → CH auto-assigns. id=_net0 names the device so
 // restore can re-bind a fresh fd via --restore net_fds (see restore path).
 func chNetArg(tapName string, tapFDNum int, mac string) string {
 	macPart := ""
