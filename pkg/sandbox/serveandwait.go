@@ -33,10 +33,12 @@ import (
 // boot args vs `--restore source_url=`) are the only thing the callers
 // supply, computed against paths ServeAndWait already decided.
 type CmdEnv struct {
-	Memfd     *memory.Memfd
-	CHSock    string
-	Blk0Sock  string
-	Blk1Sock  string
+	Memfd  *memory.Memfd
+	CHSock string
+	// Disks are the CH --disk devices in order (root first, then data disks);
+	// each carries its socket + readonly flag. BuildCmd emits one --disk per
+	// entry in this order, fixing the guest /dev/vd[a,b,c…] assignment.
+	Disks     []DiskArg
 	VsockBase string
 	UffdSock  string
 	RunDir    string
@@ -86,19 +88,15 @@ type VMParams struct {
 	StatsJSONPath      string        // if non-empty, dump the stats JSON on exit
 	StatsInterval      time.Duration // if > 0, periodically log lazy-load stats (uffd + vhost); 0 = off
 
-	CapBytes int64 // RAM capacity (memfd size); also stats UffdRAMSize
-	// SingleDisk selects single-disk mode: blk0 is the writable Cow (mounted
-	// directly as the rw root), there is no blk1, and Blk0Reader is nil. In
-	// two-disk overlay mode (default) blk0 is Blk0Reader (ro erofs) and blk1
-	// is the Cow (ext4 upper).
-	SingleDisk bool
+	CapBytes   int64               // RAM capacity (memfd size); also stats UffdRAMSize
 	UffdSource uffd.SnapshotReader // ZeroSource (cold) | snapshot source (restore)
-	Blk0Reader vhost.BlockReader   // overlay mode only; nil in single-disk
-	Blk0Label  string
-	Blk0Path   string
-	Cow        *vhost.BlockCOW
-	Blk1Label  string
-	Blk1Path   string
+
+	// Disks are the logical disks served to the guest, in order: Disks[0] is
+	// the root, Disks[1:] are the boot.disks[] data disks (boot.disks[] order).
+	// ServeAndWait expands each into its vhost device(s) in CH --disk order
+	// (single → one writable device; overlay → ro base then rw upper). The
+	// guest's /dev/vd[a,b,c…] follow this order.
+	Disks []DiskBackend
 
 	LaunchSpec    *proto.LaunchSpec // cold: real spec; restore: &proto.LaunchSpec{} placeholder
 	WireLaunchMUX bool              // cold: true (launch conn → MUX); restore: false (MUX via PostSpawn)
@@ -137,8 +135,6 @@ type VMParams struct {
 
 	SnapCfg     *config.SandboxConfig // ctl.sock SnapshotHandler.Cfg
 	ManifestCfg *config.ManifestConfig
-	DiffPath    string
-	OwnedDiff   bool // diff is auto-created (ours) → eligible for zero-copy move on destroy-snapshot
 
 	// Forwards are the parsed `--connect` port-forward directives. Each
 	// gets a host-local listener whose accepted connections are spliced to
@@ -148,6 +144,42 @@ type VMParams struct {
 
 	BuildCmd  func(CmdEnv) (cmd *exec.Cmd, cleanup func(), err error)
 	PostSpawn func(PostSpawnCtx) error
+}
+
+// DiskBackend is one logical disk served to the guest (root or a boot.disks[]
+// data disk). Single-disk: Cow only (one writable ext4 device). Overlay:
+// Reader (ro erofs base) THEN Cow (rw ext4 upper) — two devices. ServeAndWait
+// expands each into its vhost device(s) in CH --disk order. DiffPath/OwnedDiff
+// describe the Cow's writable diff for the snapshot path.
+type DiskBackend struct {
+	Overlay   bool
+	Reader    vhost.BlockReader // overlay only (ro base); nil in single-disk
+	Cow       *vhost.BlockCOW   // the writable ext4 (always present)
+	BasePath  string            // overlay: ro base stats path
+	DiffPath  string            // the Cow's diff file (stats path + snapshot capture source)
+	OwnedDiff bool              // diff is auto-created (ours) → eligible for zero-copy move on destroy-snapshot
+}
+
+// servedDevice is one expanded vhost device (a DiskBackend yields 1 or 2),
+// in CH --disk order. ReadOnly marks the CH --disk readonly=on.
+type servedDevice struct {
+	sock     string
+	readonly bool
+}
+
+// DiskArg is one CH --disk in order (socket + readonly), handed to BuildCmd so
+// the cold/restore cmdlines emit the right device set without re-deriving it.
+type DiskArg struct {
+	Sock     string
+	ReadOnly bool
+}
+
+// SnapDiskRef is one logical disk's writable diff for the snapshot path, in
+// logical order (root, then data disks). The snapshot captures each diff and
+// records its base chain in snapshot.cfg.
+type SnapDiskRef struct {
+	DiffPath  string
+	OwnedDiff bool
 }
 
 // ServeAndWait owns the half of the sandbox lifecycle that is identical
@@ -162,8 +194,6 @@ func ServeAndWait(p VMParams) (int, error) {
 	logf := p.Logf
 	runDir := p.RunDir
 	chSock := filepath.Join(runDir, "ch.sock")
-	blk0Sock := filepath.Join(runDir, "blk0.sock")
-	blk1Sock := filepath.Join(runDir, "blk1.sock")
 	vsockBase := filepath.Join(runDir, "vsock.sock")
 	launchSock := fmt.Sprintf("%s_%d", vsockBase, proto.LaunchPort)
 	uffdSockPath := filepath.Join(runDir, "uffd.sock")
@@ -267,28 +297,47 @@ func ServeAndWait(p VMParams) (int, error) {
 	}
 	defer vaReportSrv.Stop()
 
-	// vhost-blk backends. Single-disk: blk0 is the writable Cow (mounted
-	// directly as rw root), no blk1. Overlay: blk0 is the ro erofs base and
-	// blk1 the writable Cow.
-	var srv0, srv1 *vhost.Server
-	if p.SingleDisk {
-		srv0 = vhost.NewServer(blk0Sock, &vhost.CowBackend{C: p.Cow}, logf)
-	} else {
-		srv0 = vhost.NewServer(blk0Sock, &vhost.ReadOnlyBackend{R: p.Blk0Reader}, logf)
+	// vhost-blk backends. Each logical disk (root + data disks) expands to its
+	// vhost device(s) in CH --disk order: overlay → ro erofs base (blkN) then
+	// rw ext4 upper (blkN+1); single → one rw ext4 (blkN). The device sockets
+	// blk0.sock, blk1.sock, … are numbered in this order, fixing the guest's
+	// /dev/vd[a,b,c…]. diskServers groups, per logical disk, the writable Cow's
+	// snapshot diff (DiffPath/OwnedDiff) for the snapshot path.
+	var servers []*vhost.Server // all vhost servers, in device order
+	var devs []servedDevice     // CH --disk args, in device order
+	var snapDisks []SnapDiskRef // per logical disk: writable diff for snapshot
+	addServer := func(sock string, backend vhost.Backend, label, path string, ro bool) error {
+		s := vhost.NewServer(sock, backend, logf)
+		s.EnableStats(label, path)
+		s.SetMemfd(memfd.Inode(), memfd.Bytes())
+		if err := s.Listen(); err != nil {
+			return err
+		}
+		servers = append(servers, s)
+		devs = append(devs, servedDevice{sock: sock, readonly: ro})
+		return nil
 	}
-	srv0.EnableStats(p.Blk0Label, p.Blk0Path)
-	srv0.SetMemfd(memfd.Inode(), memfd.Bytes())
-	if err := srv0.Listen(); err != nil {
-		return -1, err
+	stopServers := func() {
+		for _, s := range servers {
+			s.Stop()
+		}
 	}
-	if !p.SingleDisk {
-		srv1 = vhost.NewServer(blk1Sock, &vhost.CowBackend{C: p.Cow}, logf)
-		srv1.EnableStats(p.Blk1Label, p.Blk1Path)
-		srv1.SetMemfd(memfd.Inode(), memfd.Bytes())
-		if err := srv1.Listen(); err != nil {
-			srv0.Stop()
+	for _, d := range p.Disks {
+		if d.Overlay {
+			i := len(devs)
+			sock := filepath.Join(runDir, fmt.Sprintf("blk%d.sock", i))
+			if err := addServer(sock, &vhost.ReadOnlyBackend{R: d.Reader}, fmt.Sprintf("blk%d", i), d.BasePath, true); err != nil {
+				stopServers()
+				return -1, err
+			}
+		}
+		i := len(devs)
+		sock := filepath.Join(runDir, fmt.Sprintf("blk%d.sock", i))
+		if err := addServer(sock, &vhost.CowBackend{C: d.Cow}, fmt.Sprintf("blk%d", i), d.DiffPath, false); err != nil {
+			stopServers()
 			return -1, err
 		}
+		snapDisks = append(snapDisks, SnapDiskRef{DiffPath: d.DiffPath, OwnedDiff: d.OwnedDiff})
 	}
 
 	// guestlink.LaunchServer: guest→host management short-conns on
@@ -324,10 +373,7 @@ func ServeAndWait(p VMParams) (int, error) {
 		}
 	}
 	if err := launch.Listen(); err != nil {
-		srv0.Stop()
-		if srv1 != nil {
-			srv1.Stop()
-		}
+		stopServers()
 		return -1, err
 	}
 
@@ -358,10 +404,8 @@ func ServeAndWait(p VMParams) (int, error) {
 		ManifestCfg: p.ManifestCfg,
 		SandboxID:   p.SandboxID,
 		Memfd:       memfd,
-		DiffPath:    p.DiffPath,
-		OwnedDiff:   p.OwnedDiff,
-		Srv0:        srv0,
-		Srv1:        srv1,
+		Disks:       snapDisks,
+		Servers:     servers,
 		CHSock:      chSock,
 		RunDir:      runDir,
 		Pinger:      pinger,
@@ -378,10 +422,7 @@ func ServeAndWait(p VMParams) (int, error) {
 		},
 	}
 	if err := ctlSrv.Listen(); err != nil {
-		srv0.Stop()
-		if srv1 != nil {
-			srv1.Stop()
-		}
+		stopServers()
 		return -1, fmt.Errorf("ctl.sock listen: %w", err)
 	}
 	defer ctlSrv.Stop()
@@ -392,11 +433,9 @@ func ServeAndWait(p VMParams) (int, error) {
 	defer muxLink.Teardown()
 
 	var backendWG sync.WaitGroup
-	backendWG.Add(4)
-	go func() { defer backendWG.Done(); _ = srv0.Serve(backendCtx) }()
-	if srv1 != nil { // overlay mode only
-		backendWG.Add(1)
-		go func() { defer backendWG.Done(); _ = srv1.Serve(backendCtx) }()
+	backendWG.Add(len(servers) + 3) // N vhost servers + launch + vaReport + ctl
+	for _, s := range servers {
+		go func() { defer backendWG.Done(); _ = s.Serve(backendCtx) }()
 	}
 	go func() { defer backendWG.Done(); _ = launch.Serve(backendCtx) }()
 	go func() { defer backendWG.Done(); _ = vaReportSrv.Serve(backendCtx) }()
@@ -412,7 +451,7 @@ func ServeAndWait(p VMParams) (int, error) {
 				uffdHandlerMu.Lock()
 				defer uffdHandlerMu.Unlock()
 				return uffdHandler
-			}, srv0, srv1, logf)
+			}, servers, logf)
 		}()
 	}
 
@@ -439,17 +478,16 @@ func ServeAndWait(p VMParams) (int, error) {
 	if p.TapFile != nil {
 		tapFDNum = 4
 	}
-	// Single-disk: no blk1 socket — the BuildCmd closure (CHCommand / restore
-	// config rewrite) emits a single disk when Blk1Sock is empty.
-	cmdBlk1Sock := blk1Sock
-	if p.SingleDisk {
-		cmdBlk1Sock = ""
+	// CH --disk args in device order (root first, then data disks); BuildCmd
+	// (CHCommand / restore config rewrite) emits one --disk per entry.
+	diskArgs := make([]DiskArg, len(devs))
+	for i, d := range devs {
+		diskArgs[i] = DiskArg{Sock: d.sock, ReadOnly: d.readonly}
 	}
 	cmd, chStdioCleanup, err := p.BuildCmd(CmdEnv{
 		Memfd:     memfd,
 		CHSock:    chSock,
-		Blk0Sock:  blk0Sock,
-		Blk1Sock:  cmdBlk1Sock,
+		Disks:     diskArgs,
 		VsockBase: vsockBase,
 		UffdSock:  uffdSockPath,
 		RunDir:    runDir,
@@ -541,9 +579,8 @@ func ServeAndWait(p VMParams) (int, error) {
 	// in tty mode it CRLF-wrapped that writer (paired with makeRaw), so
 	// these multi-line blocks don't stairstep on a still-raw terminal.
 	statsW := log.Default().Writer()
-	_, _ = srv0.WriteStatsTo(statsW)
-	if srv1 != nil {
-		_, _ = srv1.WriteStatsTo(statsW)
+	for _, s := range servers {
+		_, _ = s.WriteStatsTo(statsW)
 	}
 	uffdHandlerMu.Lock()
 	h := uffdHandler
@@ -552,10 +589,6 @@ func ServeAndWait(p VMParams) (int, error) {
 		writeUffdStats(statsW, h.Stats())
 	}
 	if p.StatsJSONPath != "" {
-		servers := []*vhost.Server{srv0}
-		if srv1 != nil {
-			servers = append(servers, srv1)
-		}
 		bundle := statsBundle{
 			Servers:     servers,
 			StartUnixNs: p.StartUnixNs,

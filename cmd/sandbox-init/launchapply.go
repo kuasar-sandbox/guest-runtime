@@ -35,21 +35,85 @@ func applyVolumeMounts(mounts []proto.MountSpec) error {
 	}
 	vi := 0
 	for _, m := range mounts {
-		if m.Type != "empty" {
-			continue
+		switch m.Type {
+		case "empty":
+			src := fmt.Sprintf("%s/%d", srcRoot, vi)
+			vi++
+			if err := os.MkdirAll(src, 0o755); err != nil {
+				return fmt.Errorf("mkdir volume source %s: %w", src, err)
+			}
+			tgt := "/sysroot" + m.Target
+			if err := os.MkdirAll(tgt, 0o755); err != nil {
+				return fmt.Errorf("mkdir volume target %s: %w", tgt, err)
+			}
+			if err := unix.Mount(src, tgt, "", unix.MS_BIND, ""); err != nil {
+				return fmt.Errorf("bind volume -> %s: %w", m.Target, err)
+			}
+		case "disk":
+			if err := assembleDataDisk(m); err != nil {
+				return err
+			}
 		}
-		src := fmt.Sprintf("%s/%d", srcRoot, vi)
-		vi++
-		if err := os.MkdirAll(src, 0o755); err != nil {
-			return fmt.Errorf("mkdir volume source %s: %w", src, err)
+	}
+	return nil
+}
+
+// assembleDataDisk mounts one boot.disks[] data disk and binds it onto its
+// target inside /sysroot (before switch-root, so phase1b's MS_MOVE carries it
+// into the new /). The /sysdisks/disk-<N>{,-lower,-upper} mountpoints are
+// pre-baked into the runtime erofs (config.MaxDataDisks of them); a missing one
+// is fatal (the erofs predates this disk count — rebuild it or reduce
+// boot.disks[]). single mode mounts one ext4; overlay mode layers a ro erofs
+// base + rw ext4 upper into an overlayfs. The /sysdisks subtree is hidden after
+// switch-root but held alive by the bind (and overlayfs refs) — same as the
+// root overlay's /overlay/lower+upper and the /opt/sandbox-runtime bind.
+func assembleDataDisk(m proto.MountSpec) error {
+	asm := fmt.Sprintf("/sysdisks/disk-%d", m.DiskIndex)
+	needed := []string{asm}
+	if m.DiskOverlay {
+		needed = append(needed, asm+"-lower", asm+"-upper")
+	}
+	for _, d := range needed {
+		if fi, err := os.Stat(d); err != nil || !fi.IsDir() {
+			return fmt.Errorf("disk %d: mountpoint %s missing in runtime erofs (rebuild sandbox-runtime.erofs or reduce boot.disks[])", m.DiskIndex, d)
 		}
-		tgt := "/sysroot" + m.Target
-		if err := os.MkdirAll(tgt, 0o755); err != nil {
-			return fmt.Errorf("mkdir volume target %s: %w", tgt, err)
+	}
+	for _, dev := range m.DiskDevs {
+		if err := waitForDevice(dev, devicePollTimeout); err != nil {
+			return fmt.Errorf("disk %d wait %s: %w", m.DiskIndex, dev, err)
 		}
-		if err := unix.Mount(src, tgt, "", unix.MS_BIND, ""); err != nil {
-			return fmt.Errorf("bind volume -> %s: %w", m.Target, err)
+	}
+	if !m.DiskOverlay {
+		// single: the writable ext4 mounted directly at the assembled point.
+		if err := unix.Mount(m.DiskDevs[0], asm, "ext4", 0, ""); err != nil {
+			return fmt.Errorf("disk %d mount ext4 on %s: %w", m.DiskIndex, asm, err)
 		}
+	} else {
+		// overlay: ro erofs base + rw ext4 upper → overlayfs at the assembled point.
+		lower, upper := asm+"-lower", asm+"-upper"
+		if err := unix.Mount(m.DiskDevs[0], lower, "erofs", unix.MS_RDONLY, ""); err != nil {
+			return fmt.Errorf("disk %d mount erofs lower: %w", m.DiskIndex, err)
+		}
+		if err := unix.Mount(m.DiskDevs[1], upper, "ext4", 0, ""); err != nil {
+			return fmt.Errorf("disk %d mount ext4 upper: %w", m.DiskIndex, err)
+		}
+		if err := os.MkdirAll(upper+"/upperdir", 0o755); err != nil {
+			return fmt.Errorf("disk %d mkdir upperdir: %w", m.DiskIndex, err)
+		}
+		if err := os.MkdirAll(upper+"/workdir", 0o755); err != nil {
+			return fmt.Errorf("disk %d mkdir workdir: %w", m.DiskIndex, err)
+		}
+		opts := fmt.Sprintf("lowerdir=%s,upperdir=%s/upperdir,workdir=%s/workdir", lower, upper, upper)
+		if err := unix.Mount("overlay", asm, "overlay", 0, opts); err != nil {
+			return fmt.Errorf("disk %d mount overlay on %s: %w", m.DiskIndex, asm, err)
+		}
+	}
+	tgt := "/sysroot" + m.Target
+	if err := os.MkdirAll(tgt, 0o755); err != nil {
+		return fmt.Errorf("disk %d mkdir target %s: %w", m.DiskIndex, tgt, err)
+	}
+	if err := unix.Mount(asm, tgt, "", unix.MS_BIND, ""); err != nil {
+		return fmt.Errorf("disk %d bind -> %s: %w", m.DiskIndex, m.Target, err)
 	}
 	return nil
 }

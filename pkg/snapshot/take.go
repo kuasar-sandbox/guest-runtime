@@ -44,37 +44,50 @@ type Sources struct {
 	APISock    string // CH api socket
 	MemfdFD    int    // memfd backing the zone (read-only here; CH is paused)
 	MemfdSize  int64  // ramSize
-	DiffPath   string // blk1 diff file (sparse ext4)
-	OwnedDiff  bool   // true iff the diff is the sandbox's own (auto-created) → eligible for zero-copy move
 	StagingDir string // CH /vm.snapshot dest for config.json/state.json (caller creates+removes)
+
+	// Diffs are the logical disks' writable diffs to capture, in order: Diffs[0]
+	// is the root, Diffs[1:] are the boot.disks[] data disks (boot.disks[]
+	// order). Take absorbs each as a separate overlay artifact; SnapshotCfg
+	// receives the resulting refs in the same order.
+	Diffs []DiskDiff
 
 	// CHApiDeadline bounds each CH API call (pause/snapshot/resume); 0 = no
 	// forced. From config.SandboxConfig.CHApiDeadline() (timeouts.ch_api).
 	CHApiDeadline time.Duration
 
-	// MergeBase{Snapshot,Overlay}: parent LOCAL files this run was restored from
-	// (both set, or neither). When set, Take flattens this run's resident delta
-	// ONTO them (top wins) and absorbs the MERGED result as the new top layer —
-	// replacing the next-newest local layer instead of stacking (docs §3.5). The
-	// caller must pair this with a snapshot.cfg whose from_refs/base_from_refs
-	// DROP the parent ref. Incompatible with the zero-copy overlay move (Take
-	// falls back to copy+merge). Empty ⇒ no merge (stack via the parent ref).
-	MergeBaseSnapshot string // parent <sha>.snapshot abs path; memory section = [0,MemfdSize)
-	MergeBaseOverlay  string // parent <sha>.overlay abs path
+	// MergeBaseSnapshot is the parent LOCAL <sha>.snapshot abs path this run was
+	// restored from (memory section = [0,MemfdSize)). When set, Take flattens
+	// this run's resident memory delta ONTO it and absorbs the merged result as
+	// the new top — replacing the next-newest local layer instead of stacking
+	// (docs §3.5). Per-disk overlay flattening is driven by DiskDiff.MergeBase.
+	// Empty ⇒ no merge (stack via the parent refs).
+	MergeBaseSnapshot string
 
-	// SnapshotCfg renders snapshot.cfg given the final overlay.base ref.
-	SnapshotCfg func(overlayRef string) ([]byte, error)
+	// SnapshotCfg renders snapshot.cfg given the final overlay refs (one per
+	// logical disk, in Diffs order).
+	SnapshotCfg func(overlayRefs []string) ([]byte, error)
 
 	Quiescer Quiescer
 	Logf     func(string, ...any)
+}
+
+// DiskDiff is one logical disk's writable diff to capture. Owned marks an
+// auto-created diff eligible for the zero-copy move on destroy-snapshot.
+// MergeBase, when set (local-parent re-export), is the parent's local overlay
+// file path this disk's delta is flattened onto (replace, not stack).
+type DiskDiff struct {
+	Path      string
+	Owned     bool
+	MergeBase string
 }
 
 // Outputs describes what was produced. Refs are scheme-tagged
 // (file://<sha>.ext | manifest://<key>); Path is the local file (file mode
 // only, "" for upload). The handler maps these into the ctl.Response.
 type Outputs struct {
-	OverlayRef   string
-	OverlayPath  string
+	OverlayRefs  []string // one per logical disk, in Diffs order
+	OverlayPaths []string // local file path per disk (file mode; "" for upload)
 	SnapshotRef  string
 	SnapshotPath string
 
@@ -146,56 +159,34 @@ func Take(s Sources, sink SnapshotSink, resumeAfter bool) (*Outputs, error) {
 		return nil, fmt.Errorf("read state.json: %w", err)
 	}
 
-	// T4: overlay → sink. Done first so snapshot.cfg below carries the final
-	// overlay.base ref.
-	//
-	// Fast path: when the diff is the sandbox's own and the sandbox is being
-	// destroyed (no resume), the diff is consumed — hand it to the sink's
-	// OverlayMover to rename (zero-copy) instead of sparse-copying multi-GiB.
-	// Falls back to the streaming copy on cross-fs rename or any other sink.
-	// merging: the sandbox was restored from a LOCAL snapshot; flatten this run's
-	// resident delta onto the parent local layer (replace, not stack — §3.5).
-	merging := s.MergeBaseSnapshot != "" && s.MergeBaseOverlay != ""
-	if mover, ok := sink.(OverlayMover); ok && s.OwnedDiff && !resumeAfter && !merging {
-		ref, path, mErr := mover.MoveOverlay(s.DiffPath)
-		if mErr == nil {
-			out.OverlayRef, out.OverlayPath = ref, path
-		} else {
+	// T4: overlays → sink, one per logical disk (root + data disks), in order.
+	// Done first so snapshot.cfg below carries the final overlay.base refs.
+	// localMerge: the sandbox was restored from a LOCAL snapshot; per disk with
+	// a MergeBase, flatten this run's resident delta onto the parent local layer
+	// (replace, not stack — §3.5). The zero-copy move fast path applies only to
+	// an owned diff being consumed (destroy, no resume, no merge).
+	localMerge := s.MergeBaseSnapshot != ""
+	out.OverlayRefs = make([]string, len(s.Diffs))
+	out.OverlayPaths = make([]string, len(s.Diffs))
+	for i, d := range s.Diffs {
+		merging := localMerge && d.MergeBase != ""
+		if mover, ok := sink.(OverlayMover); ok && d.Owned && !resumeAfter && !merging {
+			ref, path, mErr := mover.MoveOverlay(d.Path)
+			if mErr == nil {
+				out.OverlayRefs[i], out.OverlayPaths[i] = ref, path
+				continue
+			}
 			logf("snapshot: overlay move fell back to copy: %v", mErr)
 		}
-	}
-	if out.OverlayRef == "" { // not moved (no mover, not owned, resume, merging, or move failed)
-		diff, err := os.Open(s.DiffPath)
+		ref, path, err := absorbOverlay(ctx, sink, d, merging)
 		if err != nil {
-			return nil, fmt.Errorf("open blk1.diff: %w", err)
+			return nil, fmt.Errorf("disk %d: %w", i, err)
 		}
-		defer diff.Close()
-		dstat, err := diff.Stat()
-		if err != nil {
-			return nil, fmt.Errorf("stat blk1.diff: %w", err)
-		}
-		overlayHoles, err := walkHolesCodec(int(diff.Fd()), dstat.Size())
-		if err != nil {
-			return nil, fmt.Errorf("overlay holes: %w", err)
-		}
-		var src io.ReadSeeker = diff
-		holes := overlayHoles
-		if merging {
-			base, baseHoles, berr := openMergeBase(s.MergeBaseOverlay, dstat.Size())
-			if berr != nil {
-				return nil, fmt.Errorf("merge overlay base: %w", berr)
-			}
-			defer base.Close()
-			src, holes = mergeSparse(diff, overlayHoles, base, baseHoles, dstat.Size())
-		}
-		out.OverlayRef, out.OverlayPath, err = sink.AbsorbOverlay(ctx, src, holes)
-		if err != nil {
-			return nil, fmt.Errorf("absorb overlay: %w", err)
-		}
+		out.OverlayRefs[i], out.OverlayPaths[i] = ref, path
 	}
 
-	// T5: snapshot.cfg (final overlay ref) → ZIP trailer.
-	snapshotCfg, err := s.SnapshotCfg(out.OverlayRef)
+	// T5: snapshot.cfg (final overlay refs) → ZIP trailer.
+	snapshotCfg, err := s.SnapshotCfg(out.OverlayRefs)
 	if err != nil {
 		return nil, fmt.Errorf("build snapshot.cfg: %w", err)
 	}
@@ -216,7 +207,7 @@ func Take(s Sources, sink SnapshotSink, resumeAfter bool) (*Outputs, error) {
 	}
 	var memSrc io.ReadSeeker = memfdReader(s.MemfdFD, s.MemfdSize)
 	memSrcHoles := memHoles
-	if merging {
+	if localMerge {
 		base, baseHoles, berr := openMergeBase(s.MergeBaseSnapshot, s.MemfdSize)
 		if berr != nil {
 			return nil, fmt.Errorf("merge memory base: %w", berr)
@@ -242,8 +233,37 @@ func Take(s Sources, sink SnapshotSink, resumeAfter bool) (*Outputs, error) {
 
 	out.WallclockPauseMs = pausedAt.Sub(pauseStart).Milliseconds()
 	out.WallclockDumpMs = dumpEnd.Sub(dumpStart).Milliseconds()
-	logf("snapshot: overlay=%s snapshot=%s memory_resident=%d", out.OverlayRef, out.SnapshotRef, out.MemoryResident)
+	logf("snapshot: overlays=%v snapshot=%s memory_resident=%d", out.OverlayRefs, out.SnapshotRef, out.MemoryResident)
 	return out, nil
+}
+
+// absorbOverlay streams one disk's diff to the sink, optionally flattening it
+// onto the parent's local overlay (merge, replacing the parent layer).
+func absorbOverlay(ctx context.Context, sink SnapshotSink, d DiskDiff, merging bool) (string, string, error) {
+	diff, err := os.Open(d.Path)
+	if err != nil {
+		return "", "", fmt.Errorf("open diff %s: %w", d.Path, err)
+	}
+	defer diff.Close()
+	dstat, err := diff.Stat()
+	if err != nil {
+		return "", "", fmt.Errorf("stat diff %s: %w", d.Path, err)
+	}
+	overlayHoles, err := walkHolesCodec(int(diff.Fd()), dstat.Size())
+	if err != nil {
+		return "", "", fmt.Errorf("overlay holes: %w", err)
+	}
+	var src io.ReadSeeker = diff
+	holes := overlayHoles
+	if merging {
+		base, baseHoles, berr := openMergeBase(d.MergeBase, dstat.Size())
+		if berr != nil {
+			return "", "", fmt.Errorf("merge overlay base: %w", berr)
+		}
+		defer base.Close()
+		src, holes = mergeSparse(diff, overlayHoles, base, baseHoles, dstat.Size())
+	}
+	return sink.AbsorbOverlay(ctx, src, holes)
 }
 
 // hashSparseFile computes a content digest over the data extents of path,

@@ -85,6 +85,10 @@ type SandboxConfig struct {
 type SnapshotRefs struct {
 	RuntimeRef string // file://<basename>@sha256:<digest>
 	BaseRef    string // file://<basename>@sha256:<digest> or manifest://<key>
+	// DiskBaseRefs are the per-data-disk erofs base refs (boot.disks[] order),
+	// the data-disk analogue of BaseRef. Empty entry for a single-disk data disk
+	// (no erofs base) or one with no base.
+	DiskBaseRefs []string
 }
 
 // SnapshotProvenance carries the parent (restored-from) snapshot's identity
@@ -104,6 +108,20 @@ type SnapshotProvenance struct {
 	// for manifest:// / cold-start restores (which stack via ParentSnapshotRef).
 	ParentSnapshotPath string
 	ParentOverlayPath  string
+
+	// ParentDisks is the per-data-disk parent state (boot.disks[] order), the
+	// data-disk analogue of ParentOverlayBase/ParentBaseFromRefs/ParentOverlayPath.
+	// Empty on cold start. Populated by restore from the parent snapshot.cfg's
+	// boot.disks[].
+	ParentDisks []DiskProvenance
+}
+
+// DiskProvenance is one data disk's parent (restored-from) chain — the
+// data-disk analogue of the root fields above.
+type DiskProvenance struct {
+	OverlayBase  string   // parent's boot.disks[i] overlay.base (or single base); "" cold
+	BaseFromRefs []string // parent's boot.disks[i] chain below it
+	OverlayPath  string   // local overlay file path (file:// parent only) for flatten-merge
 }
 
 // ResourcesConfig follows Kubernetes-style capacity / allocatable split:
@@ -387,6 +405,30 @@ type BootConfig struct {
 	Cmdline string     `yaml:"cmdline"` // user extras; merged with auto-injected base
 	Runtime string     `yaml:"runtime"` // file:// sandbox-runtime.erofs path
 	Root    RootConfig `yaml:"root"`
+
+	// Disks are additional data disks (beyond the root). Each follows the same
+	// rules as Root (single-disk diff or two-disk overlay) plus a Name, and
+	// MUST be mounted by exactly one mounts[].type=disk entry (validate enforces
+	// 1:1). Device order is root first, then Disks in array order; each disk's
+	// ordinal (its index here) is its identity on the guest (the name is config
+	// convenience only). At most MaxDataDisks (the count baked into the runtime
+	// erofs as /sysdisks/disk-<N>).
+	Disks []DiskConfig `yaml:"disks,omitempty"`
+}
+
+// MaxDataDisks bounds boot.disks[]. It must equal the number of
+// /sysdisks/disk-<N> mountpoint sets baked into sandbox-runtime.erofs (see
+// the repo Makefile). The guest also rejects a disk whose dir is absent, so a
+// mismatched (older) erofs fails closed rather than silently.
+const MaxDataDisks = 8
+
+// DiskConfig is one boot.disks[] entry: a Name plus the same disk fields as
+// RootConfig (single-disk diff / two-disk overlay). The name is used only to
+// wire mounts[].source → this disk at config time; internally the disk is
+// addressed by its ordinal (index in boot.disks[]).
+type DiskConfig struct {
+	Name       string `yaml:"name"`
+	RootConfig `yaml:",inline"`
 }
 
 type RootConfig struct {
@@ -427,10 +469,15 @@ type RootConfig struct {
 	BaseFromRefs []string `yaml:"base_from_refs,omitempty"`
 }
 
-// SingleDisk reports whether the sandbox runs in single-disk mode (no
+// single reports whether this disk runs in single-disk mode (no overlay node):
+// one writable ext4 CoW mounted directly. The negation is two-disk overlay mode
+// (ro base + writable ext4 upper). Shared by the root and boot.disks[] entries.
+func (r *RootConfig) Single() bool { return r.Overlay == nil }
+
+// SingleDisk reports whether the root runs in single-disk mode (no
 // boot.root.overlay): the root disk is a writable ext4 CoW mounted directly,
 // with no overlayfs and no second disk. The negation is two-disk overlay mode.
-func (c *SandboxConfig) SingleDisk() bool { return c.Boot.Root.Overlay == nil }
+func (c *SandboxConfig) SingleDisk() bool { return c.Boot.Root.Single() }
 
 type OverlayConfig struct {
 	// Base is an optional read-only ext4 layer (e.g. a snapshot's prior dirty
@@ -506,7 +553,10 @@ type FileConfig struct {
 	ReadOnly bool   `yaml:"read_only,omitempty"`
 }
 
-// MountConfig declares a guest mount. Type is tmpfs|empty (empty → empty).
+// MountConfig declares a guest mount. Type is tmpfs|empty|disk (empty default
+// → empty). For type=disk, Source names a boot.disks[] entry (the disk is
+// assembled and bound onto Target); each data disk must be mounted exactly once
+// (validate enforces 1:1).
 type MountConfig struct {
 	Target  string `yaml:"target"`
 	Type    string `yaml:"type,omitempty"`
@@ -812,19 +862,26 @@ func (c *SandboxConfig) CPUWeight() uint64 {
 // (no template, no base). It never applies to an existing diff — that keeps
 // its own on-disk size (truncating it would corrupt its filesystem). If
 // unset, defaults to 1 GiB.
-func (c *SandboxConfig) DiffSizeBytes() (int64, error) {
-	raw, field := c.Boot.Root.DiffSize, "boot.root.diff_size"
-	if c.Boot.Root.Overlay != nil {
-		raw, field = c.Boot.Root.Overlay.DiffSize, "boot.root.overlay.diff_size"
+// diffSizeBytes returns the configured diff size for this disk — single-disk
+// diff_size or overlay.diff_size — defaulting to 1 GiB. field is the config
+// path prefix for error messages (e.g. "boot.root", "boot.disks[0]").
+func (r *RootConfig) DiffSizeBytes(field string) (int64, error) {
+	raw, f := r.DiffSize, field+".diff_size"
+	if r.Overlay != nil {
+		raw, f = r.Overlay.DiffSize, field+".overlay.diff_size"
 	}
 	if raw == "" {
 		return 1 << 30, nil
 	}
 	v, err := util.ParseSize(raw)
 	if err != nil {
-		return 0, fmt.Errorf("%s: %w", field, err)
+		return 0, fmt.Errorf("%s: %w", f, err)
 	}
 	return int64(v), nil
+}
+
+func (c *SandboxConfig) DiffSizeBytes() (int64, error) {
+	return c.Boot.Root.DiffSizeBytes("boot.root")
 }
 
 // ValidateCold checks invariants required for the cold-start path.
@@ -959,6 +1016,9 @@ func (c *SandboxConfig) ValidateCold() error {
 	if err := c.validateRoot(true); err != nil {
 		return err
 	}
+	if err := c.validateDisks(true); err != nil {
+		return err
+	}
 
 	if (c.Network.TAP == "") == (c.Network.TapFD == nil) {
 		return errors.New("network: exactly one of `tap` or `tapfd` is required")
@@ -967,17 +1027,18 @@ func (c *SandboxConfig) ValidateCold() error {
 		return errors.New("network.tapfd.exec is required")
 	}
 
-	// mounts: target absolute; type ∈ {tmpfs, empty}; nfs deferred.
+	// mounts: target absolute; type ∈ {tmpfs, empty, disk}; nfs deferred. The
+	// disk↔boot.disks[] 1:1 correspondence is checked in validateDisks.
 	for i, m := range c.Mounts {
 		if !filepath.IsAbs(m.Target) {
 			return fmt.Errorf("mounts[%d].target must be absolute (got %q)", i, m.Target)
 		}
 		switch m.Type {
-		case "tmpfs", "empty":
+		case "tmpfs", "empty", "disk":
 		case "nfs":
 			return fmt.Errorf("mounts[%d].type %q not yet implemented", i, m.Type)
 		default:
-			return fmt.Errorf("mounts[%d].type %q unknown (want tmpfs|empty)", i, m.Type)
+			return fmt.Errorf("mounts[%d].type %q unknown (want tmpfs|empty|disk)", i, m.Type)
 		}
 	}
 	// files: path absolute; mode valid octal if set.
@@ -1084,6 +1145,9 @@ func (c *SandboxConfig) ValidateRestoreHostConfig() error {
 	if err := c.validateRoot(false); err != nil {
 		return err
 	}
+	if err := c.validateDisks(false); err != nil {
+		return err
+	}
 	if err := c.Timeouts.validate(); err != nil {
 		return err
 	}
@@ -1100,77 +1164,143 @@ func (c *SandboxConfig) ValidateRestoreHostConfig() error {
 //   - single-disk mode (Overlay == nil): the root disk is a writable ext4 CoW
 //     of Base (optional) + Diff/DiffTemplate; root.* are mutually exclusive
 //     with overlay.
-func (c *SandboxConfig) validateRoot(cold bool) error {
-	r := &c.Boot.Root
+//
+// validateDiskSource validates one disk's source config — the root or a
+// boot.disks[] entry — sharing all the overlay-vs-single-disk rules. prefix is
+// the config path used in error messages ("boot.root", "boot.disks[0]"). The
+// root-only launch.exec requirement stays in validateRoot.
+func validateDiskSource(r *RootConfig, prefix string, cold bool) error {
 	if r.Overlay != nil {
-		// root.* single-disk fields are mutually exclusive with overlay.
+		// single-disk fields are mutually exclusive with overlay.
 		if r.Diff != "" || r.DiffTemplate != "" || r.DiffSize != "" || len(r.BaseFromRefs) > 0 {
-			return errors.New("boot.root.{diff,diff_template,diff_size,base_from_refs} are single-disk only — remove them, or remove boot.root.overlay to select single-disk mode")
+			return fmt.Errorf("%s.{diff,diff_template,diff_size,base_from_refs} are single-disk only — remove them, or remove %s.overlay to select single-disk mode", prefix, prefix)
 		}
 		if cold && r.Base == "" {
-			return errors.New("boot.root.base is required (overlay mode)")
+			return fmt.Errorf("%s.base is required (overlay mode)", prefix)
 		}
 		if r.Base != "" {
-			if err := requireAbsIfFile("boot.root.base", r.Base); err != nil {
+			if err := requireAbsIfFile(prefix+".base", r.Base); err != nil {
 				return err
 			}
 		}
 		ov := r.Overlay
 		if ov.Base != "" {
-			if err := requireAbsIfFile("boot.root.overlay.base", ov.Base); err != nil {
+			if err := requireAbsIfFile(prefix+".overlay.base", ov.Base); err != nil {
 				return err
 			}
 		}
 		if ov.Diff != "" {
-			if err := requireFileAbs("boot.root.overlay.diff", ov.Diff); err != nil {
+			if err := requireFileAbs(prefix+".overlay.diff", ov.Diff); err != nil {
 				return err
 			}
 		}
 		if ov.DiffTemplate != "" {
-			if err := requireFileAbs("boot.root.overlay.diff_template", ov.DiffTemplate); err != nil {
+			if err := requireFileAbs(prefix+".overlay.diff_template", ov.DiffTemplate); err != nil {
 				return err
 			}
 		}
-		if _, err := c.DiffSizeBytes(); err != nil {
+		if _, err := r.DiffSizeBytes(prefix); err != nil {
 			return err
 		}
 		// Cold boot needs a mountable ext4 source for the upper layer — a
 		// fresh blank diff is not a valid filesystem.
 		if cold && ov.DiffTemplate == "" && ov.Base == "" && ov.Diff == "" {
-			return errors.New("cold boot needs an ext4 source for the overlay upper: set boot.root.overlay.diff_template, boot.root.overlay.base, or an explicit boot.root.overlay.diff")
+			return fmt.Errorf("cold boot needs an ext4 source for the overlay upper: set %s.overlay.diff_template, %s.overlay.base, or an explicit %s.overlay.diff", prefix, prefix, prefix)
 		}
 		return nil
 	}
 
-	// single-disk mode (boot.root.overlay omitted).
+	// single-disk mode (overlay omitted).
 	if r.Diff != "" {
-		if err := requireFileAbs("boot.root.diff", r.Diff); err != nil {
+		if err := requireFileAbs(prefix+".diff", r.Diff); err != nil {
 			return err
 		}
 	}
 	if r.DiffTemplate != "" {
-		if err := requireFileAbs("boot.root.diff_template", r.DiffTemplate); err != nil {
+		if err := requireFileAbs(prefix+".diff_template", r.DiffTemplate); err != nil {
 			return err
 		}
 	}
 	if r.Base != "" {
-		if err := requireAbsIfFile("boot.root.base", r.Base); err != nil {
+		if err := requireAbsIfFile(prefix+".base", r.Base); err != nil {
 			return err
 		}
 	}
-	if _, err := c.DiffSizeBytes(); err != nil {
+	if _, err := r.DiffSizeBytes(prefix); err != nil {
 		return err
 	}
-	if cold {
-		// The single root disk is always writable ext4; with no overlayfs lower
-		// and no guest-side mkfs it needs a mountable ext4 source.
-		if r.DiffTemplate == "" && r.Base == "" && r.Diff == "" {
-			return errors.New("single-disk cold boot needs an ext4 source for the root: set boot.root.diff_template, boot.root.base, or an explicit boot.root.diff")
+	// The single disk is always writable ext4; with no overlayfs lower and no
+	// guest-side mkfs it needs a mountable ext4 source.
+	if cold && r.DiffTemplate == "" && r.Base == "" && r.Diff == "" {
+		return fmt.Errorf("%s single-disk cold boot needs an ext4 source: set %s.diff_template, %s.base, or an explicit %s.diff", prefix, prefix, prefix, prefix)
+	}
+	return nil
+}
+
+func (c *SandboxConfig) validateRoot(cold bool) error {
+	if err := validateDiskSource(&c.Boot.Root, "boot.root", cold); err != nil {
+		return err
+	}
+	// Single-disk root has no erofs image ⇒ no appended image config; the
+	// launch must be explicit (unless a no-exec placeholder). Root-only —
+	// data disks carry no launch.
+	if cold && c.Boot.Root.Single() && c.Launch.Exec == "" && !c.Launch.Placeholder {
+		return errors.New("single-disk mode has no image config (boot.root.overlay omitted): set launch.exec (or launch.placeholder: true)")
+	}
+	return nil
+}
+
+// validateDisks validates boot.disks[] and the 1:1 correspondence with
+// mounts[].type=disk: every data disk is mounted exactly once, and every
+// type=disk mount names an existing disk. cold gates the source checks.
+func (c *SandboxConfig) validateDisks(cold bool) error {
+	if len(c.Boot.Disks) > MaxDataDisks {
+		return fmt.Errorf("boot.disks: at most %d data disks (got %d)", MaxDataDisks, len(c.Boot.Disks))
+	}
+	names := make(map[string]int, len(c.Boot.Disks))
+	for i := range c.Boot.Disks {
+		d := &c.Boot.Disks[i]
+		if d.Name == "" {
+			return fmt.Errorf("boot.disks[%d].name is required", i)
 		}
-		// No erofs image ⇒ no appended image config; the launch must be explicit
-		// (unless it's a no-exec placeholder, which runs no program at all).
-		if c.Launch.Exec == "" && !c.Launch.Placeholder {
-			return errors.New("single-disk mode has no image config (boot.root.overlay omitted): set launch.exec (or launch.placeholder: true)")
+		if _, dup := names[d.Name]; dup {
+			return fmt.Errorf("boot.disks[%d].name %q duplicated", i, d.Name)
+		}
+		names[d.Name] = i
+		if err := validateDiskSource(&d.RootConfig, fmt.Sprintf("boot.disks[%d]", i), cold); err != nil {
+			return err
+		}
+	}
+	// 1:1 with mounts[].type=disk — COLD only. On restore the guest resumes
+	// with the data disks already mounted (in the memory image); the restore
+	// host yaml lists boot.disks[] for device order + erofs bases but does not
+	// re-mount, so it need not carry the mounts[].
+	if !cold {
+		return nil
+	}
+	mounted := make(map[string]bool, len(names))
+	for i := range c.Mounts {
+		m := &c.Mounts[i]
+		if m.Type != "disk" {
+			continue
+		}
+		if m.Target == "" {
+			return fmt.Errorf("mounts[%d] (type=disk): target is required", i)
+		}
+		if m.Source == "" {
+			return fmt.Errorf("mounts[%d] (type=disk): source (a boot.disks[].name) is required", i)
+		}
+		if _, ok := names[m.Source]; !ok {
+			return fmt.Errorf("mounts[%d] (type=disk): source %q names no boot.disks[] entry", i, m.Source)
+		}
+		if mounted[m.Source] {
+			return fmt.Errorf("mounts[%d] (type=disk): disk %q already mounted (each disk mounts once)", i, m.Source)
+		}
+		mounted[m.Source] = true
+	}
+	for name := range names {
+		if !mounted[name] {
+			return fmt.Errorf("boot.disks[%d] (%q) is defined but not mounted — add a mounts[] entry {type: disk, source: %q}", names[name], name, name)
 		}
 	}
 	return nil

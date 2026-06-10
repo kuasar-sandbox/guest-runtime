@@ -469,6 +469,20 @@ boot:
     #   diff_template: file:///opt/sandbox/root-templates/app-2G.ext4    # 预格式化 ext4,seed 新盘
     #   diff_size:     2GiB                                              # 同 overlay.diff_size
     #   base_from_refs: []                                              # 单盘快照链(snapshot.cfg 自动填)
+  # —— 数据盘 boot.disks[](root 之外的附加盘,最多 8 块)——
+  # 每块盘的配置规则与 boot.root 完全相同(单盘 diff / 双盘 overlay,含 base_from_refs);
+  # 多一个 name(仅配置期用,运行期转序号)。每块盘必须被 mounts[].type=disk 挂载恰好一次
+  # (定义却不挂载 = 配置错误)。设备序:root 在前(单盘 1 个 / overlay 2 个),再按本数组序,
+  # 决定 guest /dev/vd[a,b,c…];详见 docs/sandbox-runtime.md §3.6。
+  disks:
+    - name: scratch                            # 单盘:可写 ext4(diff/diff_template/diff_size)
+      diff_template: file:///opt/sandbox/disk-templates/scratch-50G.ext4
+      diff_size: 50GiB
+    - name: dataset                            # 双盘 overlay:ro erofs base + rw ext4 upper
+      base: file:///opt/sandbox/datasets/models.erofs   # 只读共享数据集(跨沙箱去重)
+      overlay:
+        diff_template: file:///opt/sandbox/disk-templates/blank-10G.ext4
+        diff_size: 10GiB
 
 # 容器应用启动配置(覆盖 boot.root.base 内嵌的 config.json 默认值;单磁盘模式无内嵌配置,exec 必填;
 # 占位模式 placeholder:true 例外——不跑外部程序)
@@ -524,7 +538,10 @@ mounts:
   - { target: /tmp,     type: tmpfs, options: "nosuid,nodev,mode=1777" }
   - { target: /var/log, type: empty }      # 空目录卷:遮蔽镜像该路径原内容,落 vdb(磁盘),
                                             # 模拟容器 VOLUME / k8s emptyDir(仅"初始化为空"语义)
-  # type 省略 = empty;tmpfs = 内存盘。/run 与 /run/shm 由 runtime 自动挂载,无需声明。
+  - { target: /scratch, type: disk, source: scratch }  # 挂 boot.disks[].name=scratch 的整块数据盘
+  - { target: /data,    type: disk, source: dataset }  # 每块 boot.disks[] 须恰好挂一次(1:1)
+  # type 省略 = empty;tmpfs = 内存盘;disk = 挂 boot.disks[] 数据盘(source 关联其 name)。
+  # /run 与 /run/shm 由 runtime 自动挂载,无需声明。
   # 镜像 config.json 的 Volumes 自动并入(等价 type: empty);显式声明同 target 时以显式为准。
 
 # 文件注入:内容写入内存盘后 bind 到目标路径——仅在内存、不落 vdb,适合 secret
@@ -711,6 +728,13 @@ boot:
   # root:
   #   base:           file://<sha256>.overlay   # 本快照捕获的 root diff = 链顶(或 manifest://)
   #   base_from_refs: []                         # 单盘磁盘链;冷启动会把 root.base(CoW 下层)入链
+  # 数据盘 boot.disks[]:有序数组(不含 name,按序号 = cold boot.disks[] 序),每项与 root 同结构
+  # (single → base+base_from_refs;overlay → base_ref+overlay{base,base_from_refs})。每块可写
+  # diff 单独捕获为一个 .overlay 工件(本地)/ manifest key(上传)。恢复时与 restore host yaml 的
+  # boot.disks[] 按序号合并(数同序同)。
+  # disks:
+  #   - { base: file://<sha256>.overlay }                                   # 单盘数据盘
+  #   - { base_ref: file://ds.erofs@sha256:<d>, overlay: { base: file://<sha256>.overlay } }  # overlay 数据盘
 ```
 
 **字段说明**:

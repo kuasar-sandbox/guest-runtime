@@ -87,6 +87,12 @@ sandbox-runtime: sandbox-init
 	         $(BUILD_DIR)/sandbox-runtime/sys $(BUILD_DIR)/sandbox-runtime/dev \
 	         $(BUILD_DIR)/sandbox-runtime/overlay/lower $(BUILD_DIR)/sandbox-runtime/overlay/upper \
 	         $(BUILD_DIR)/sandbox-runtime/sysroot $(BUILD_DIR)/sandbox-runtime/opt/sandbox-runtime
+	@# Pre-baked mountpoints for boot.disks[] data disks (max 8, ordinals 0-7):
+	@# disk-N (assembled fs / single ext4), disk-N-lower (overlay erofs base),
+	@# disk-N-upper (overlay ext4 upper). The guest mounts onto these read-only
+	@# dirs (mounting shadows the dir, no write to the erofs). Keep the count (8)
+	@# in sync with config.MaxDataDisks; the guest rejects a disk whose dir is absent.
+	mkdir -p $(BUILD_DIR)/sandbox-runtime/sysdisks/disk-{0..7}{,-lower,-upper}
 	cp $(BINDIR)/sandbox-init $(BUILD_DIR)/sandbox-runtime/sbin/init
 	chmod +x $(BUILD_DIR)/sandbox-runtime/sbin/init
 	rm -f $(BINDIR)/sandbox-runtime.erofs

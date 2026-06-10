@@ -9,8 +9,7 @@ import (
 // captured in the snapshotted config.json.
 type pathRewrite struct {
 	UffdSocket string
-	Blk0Sock   string
-	Blk1Sock   string
+	DiskSocks  []string // vhost sockets in CH --disk (device) order
 	APISock    string
 	VsockSock  string
 }
@@ -39,22 +38,16 @@ func rewriteConfigPaths(in []byte, p pathRewrite) ([]byte, error) {
 		}
 	}
 
-	// disks[*].vhost_socket — first disk in slot 0 → blk0, second → blk1.
+	// disks[*].vhost_socket — slot i → this run's i-th device socket (device
+	// order: root first, then data disks). The snapshot was taken with the same
+	// device count, so len(disks) must match DiskSocks.
 	if disks, ok := cfg["disks"].([]any); ok {
 		for i, d := range disks {
 			if dm, ok := d.(map[string]any); ok {
-				switch i {
-				case 0:
-					if p.Blk0Sock != "" {
-						dm["vhost_socket"] = p.Blk0Sock
-					}
-				case 1:
-					if p.Blk1Sock != "" {
-						dm["vhost_socket"] = p.Blk1Sock
-					}
-				default:
-					return nil, fmt.Errorf("rewriteConfigPaths: unexpected disk slot %d", i)
+				if i >= len(p.DiskSocks) || p.DiskSocks[i] == "" {
+					return nil, fmt.Errorf("rewriteConfigPaths: no socket for disk slot %d (have %d)", i, len(p.DiskSocks))
 				}
+				dm["vhost_socket"] = p.DiskSocks[i]
 			}
 		}
 	}

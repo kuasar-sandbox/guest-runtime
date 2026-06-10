@@ -329,7 +329,7 @@ func TestValidateCold_SingleDisk(t *testing.T) {
 			c.Launch.Placeholder = true
 		}, ""}, // single-disk + placeholder needs no exec
 
-		{"no ext4 source", func(c *SandboxConfig) { c.Boot.Root.DiffTemplate = "" }, "ext4 source for the root"},
+		{"no ext4 source", func(c *SandboxConfig) { c.Boot.Root.DiffTemplate = "" }, "ext4 source"},
 		{"manifest diff", func(c *SandboxConfig) { c.Boot.Root.Diff = "manifest://abc" }, "must be file"},
 		{"base ok (ext4 cow lower)", func(c *SandboxConfig) {
 			c.Boot.Root.DiffTemplate = ""
@@ -366,6 +366,63 @@ func TestValidateCold_DiskModeMutualExclusion(t *testing.T) {
 	cfg.Boot.Root.DiffTemplate = "file:///opt/x.ext4"
 	if err := cfg.ValidateCold(); err == nil || !strings.Contains(err.Error(), "single-disk only") {
 		t.Fatalf("expected mutual-exclusion error, got %v", err)
+	}
+}
+
+func TestValidateCold_Disks(t *testing.T) {
+	// A valid single data disk + its 1:1 mount (atop the overlay-root fixture).
+	valid := func() *SandboxConfig {
+		cfg, err := Load(writeYAML(t, minimalCold))
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg.Boot.Disks = []DiskConfig{{Name: "data", RootConfig: RootConfig{DiffTemplate: "file:///opt/d.ext4"}}}
+		cfg.Mounts = []MountConfig{{Target: "/data", Type: "disk", Source: "data"}}
+		return cfg
+	}
+	if err := valid().ValidateCold(); err != nil {
+		t.Fatalf("valid single data disk: %v", err)
+	}
+	// Overlay-mode data disk is also valid.
+	ov := valid()
+	ov.Boot.Disks[0].RootConfig = RootConfig{Base: "file:///opt/ds.erofs", Overlay: &OverlayConfig{DiffTemplate: "file:///opt/u.ext4"}}
+	if err := ov.ValidateCold(); err != nil {
+		t.Fatalf("valid overlay data disk: %v", err)
+	}
+
+	cases := []struct {
+		name      string
+		mutate    func(*SandboxConfig)
+		wantSubst string
+	}{
+		{"too many disks", func(c *SandboxConfig) {
+			c.Boot.Disks = make([]DiskConfig, MaxDataDisks+1)
+			c.Mounts = nil
+		}, "at most"},
+		{"missing name", func(c *SandboxConfig) { c.Boot.Disks[0].Name = "" }, "name is required"},
+		{"duplicate name", func(c *SandboxConfig) {
+			c.Boot.Disks = append(c.Boot.Disks, c.Boot.Disks[0])
+			c.Mounts = append(c.Mounts, MountConfig{Target: "/d2", Type: "disk", Source: "data"})
+		}, "duplicated"},
+		{"mount names unknown disk", func(c *SandboxConfig) { c.Mounts[0].Source = "nope" }, "names no boot.disks"},
+		{"disk not mounted", func(c *SandboxConfig) { c.Mounts = nil }, "not mounted"},
+		{"disk mounted twice", func(c *SandboxConfig) {
+			c.Mounts = append(c.Mounts, MountConfig{Target: "/d2", Type: "disk", Source: "data"})
+		}, "already mounted"},
+		{"single data disk no ext4 source", func(c *SandboxConfig) { c.Boot.Disks[0].DiffTemplate = "" }, "ext4 source"},
+		{"overlay data disk needs base", func(c *SandboxConfig) {
+			c.Boot.Disks[0].RootConfig = RootConfig{Overlay: &OverlayConfig{DiffTemplate: "file:///opt/u.ext4"}}
+		}, "base is required"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := valid()
+			tc.mutate(cfg)
+			err := cfg.ValidateCold()
+			if err == nil || !strings.Contains(err.Error(), tc.wantSubst) {
+				t.Fatalf("got %v, want substring %q", err, tc.wantSubst)
+			}
+		})
 	}
 }
 

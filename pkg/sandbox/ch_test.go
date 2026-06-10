@@ -39,7 +39,7 @@ func makeMinimalCfg() *config.SandboxConfig {
 func TestCHCommand_HasExpectedFlags(t *testing.T) {
 	cfg := makeMinimalCfg()
 	args, err := CHCommand(cfg,
-		"/run/sb/blk0.sock", "/run/sb/blk1.sock", "/run/sb/ch.sock", "/run/sb/vsock.sock",
+		[]DiskArg{{Sock: "/run/sb/blk0.sock", ReadOnly: true}, {Sock: "/run/sb/blk1.sock"}}, "/run/sb/ch.sock", "/run/sb/vsock.sock",
 		"/vmlinux", "/sandbox-runtime.erofs", "/run/sb/uffd.sock", "tty", 0, "")
 	if err != nil {
 		t.Fatal(err)
@@ -86,7 +86,7 @@ func TestCHCommand_SingleDisk(t *testing.T) {
 		t.Fatal("cfg should be single-disk after removing overlay")
 	}
 	args, err := CHCommand(cfg,
-		"/run/sb/blk0.sock", "" /* no blk1 */, "/run/sb/ch.sock", "/run/sb/vsock.sock",
+		[]DiskArg{{Sock: "/run/sb/blk0.sock"}}, "/run/sb/ch.sock", "/run/sb/vsock.sock",
 		"/vmlinux", "/sandbox-runtime.erofs", "/run/sb/uffd.sock", "tty", 0, "")
 	if err != nil {
 		t.Fatal(err)
@@ -111,7 +111,7 @@ func TestCHCommand_TapFDMode(t *testing.T) {
 	cfg := makeMinimalCfg()
 	cfg.Network = config.NetworkConfig{TapFD: &config.TapFDConfig{Exec: []string{"helper"}}}
 	args, err := CHCommand(cfg,
-		"/run/sb/blk0.sock", "/run/sb/blk1.sock", "/run/sb/ch.sock", "/run/sb/vsock.sock",
+		[]DiskArg{{Sock: "/run/sb/blk0.sock", ReadOnly: true}, {Sock: "/run/sb/blk1.sock"}}, "/run/sb/ch.sock", "/run/sb/vsock.sock",
 		"/vmlinux", "/sandbox-runtime.erofs", "/run/sb/uffd.sock", "tty",
 		4, "02:00:00:00:80:01") // CH fd 4 (memfd=3 + tap), effective mac from handoff
 	if err != nil {
@@ -128,7 +128,7 @@ func TestCHCommand_TapFDMode(t *testing.T) {
 
 func TestCHCommand_TapNameModeMirrorsMAC(t *testing.T) {
 	cfg := makeMinimalCfg() // Network.TAP = "tap0"
-	args, err := CHCommand(cfg, "/0", "/1", "/c", "/v", "/k", "/r", "/u", "tty",
+	args, err := CHCommand(cfg, []DiskArg{{Sock: "/0", ReadOnly: true}, {Sock: "/1"}}, "/c", "/v", "/k", "/r", "/u", "tty",
 		0, "02:00:00:00:80:01") // no fd; effective mac mirrored
 	if err != nil {
 		t.Fatal(err)
@@ -140,7 +140,7 @@ func TestCHCommand_TapNameModeMirrorsMAC(t *testing.T) {
 
 func TestCHCommand_BalloonDeflateOnOOMDefault(t *testing.T) {
 	cfg := makeMinimalCfg()
-	args, err := CHCommand(cfg, "/0", "/1", "/c", "/v", "/k", "/r", "/u", "tty", 0, "")
+	args, err := CHCommand(cfg, []DiskArg{{Sock: "/0", ReadOnly: true}, {Sock: "/1"}}, "/c", "/v", "/k", "/r", "/u", "tty", 0, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -154,7 +154,7 @@ func TestCHCommand_BalloonDeflateOnOOMDisabled(t *testing.T) {
 	cfg := makeMinimalCfg()
 	off := false
 	cfg.Resources.Allocatable.DeflateOnOOM = &off
-	args, err := CHCommand(cfg, "/0", "/1", "/c", "/v", "/k", "/r", "/u", "tty", 0, "")
+	args, err := CHCommand(cfg, []DiskArg{{Sock: "/0", ReadOnly: true}, {Sock: "/1"}}, "/c", "/v", "/k", "/r", "/u", "tty", 0, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -174,7 +174,7 @@ func TestCHCommand_NoBalloonWhenAllocEqualsCapacity(t *testing.T) {
 	cfg := makeMinimalCfg()
 	cfg.Resources.Allocatable.Memory = cfg.Resources.Capacity.Memory
 	args, err := CHCommand(cfg,
-		"/run/sb/blk0.sock", "/run/sb/blk1.sock", "/run/sb/ch.sock", "/run/sb/vsock.sock",
+		[]DiskArg{{Sock: "/run/sb/blk0.sock", ReadOnly: true}, {Sock: "/run/sb/blk1.sock"}}, "/run/sb/ch.sock", "/run/sb/vsock.sock",
 		"/vmlinux", "/sandbox-runtime.erofs", "/run/sb/uffd.sock", "tty", 0, "")
 	if err != nil {
 		t.Fatal(err)
@@ -214,7 +214,7 @@ func TestCHCommand_MemoryStringsHonored(t *testing.T) {
 	cfg := makeMinimalCfg()
 	cfg.Resources.Capacity.Memory = "512MiB"
 	cfg.Resources.Allocatable.Memory = "256MiB"
-	args, err := CHCommand(cfg, "/0", "/1", "/c", "/v", "/k", "/r", "/u", "tty", 0, "")
+	args, err := CHCommand(cfg, []DiskArg{{Sock: "/0", ReadOnly: true}, {Sock: "/1"}}, "/c", "/v", "/k", "/r", "/u", "tty", 0, "")
 	if err != nil {
 		t.Fatal(err)
 	}

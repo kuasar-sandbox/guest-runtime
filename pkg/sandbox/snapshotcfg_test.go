@@ -19,7 +19,7 @@ func TestBuildSnapshotCfg_SingleDisk(t *testing.T) {
 	cfg.Boot.Root.DiffTemplate = "file:///root.ext4"  // Overlay nil ⇒ single-disk
 	cfg.Boot.Root.Base = "manifest://coldbase"        // CoW lower → chained on cold start
 
-	body, err := buildSnapshotCfg(cfg, "manifest://captured")
+	body, err := buildSnapshotCfg(cfg, []string{"manifest://captured"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -46,7 +46,7 @@ func TestBuildSnapshotCfg_Overlay(t *testing.T) {
 	cfg.SnapshotRefs.BaseRef = "file://img@sha256:bb"
 	cfg.Boot.Root.Overlay = &config.OverlayConfig{Diff: "file:///d.ext4"} // overlay mode
 
-	body, err := buildSnapshotCfg(cfg, "manifest://captured")
+	body, err := buildSnapshotCfg(cfg, []string{"manifest://captured"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -54,6 +54,39 @@ func TestBuildSnapshotCfg_Overlay(t *testing.T) {
 	for _, want := range []string{"base_ref: file://img@sha256:bb", "overlay:", "base: manifest://captured"} {
 		if !strings.Contains(s, want) {
 			t.Errorf("overlay snapshot.cfg missing %q\n%s", want, s)
+		}
+	}
+}
+
+// TestBuildSnapshotCfg_DataDisks verifies boot.disks[] is rendered, one node per
+// data disk (single → base; overlay → base_ref + overlay.base), with the
+// captured overlay refs taken from the per-disk overlayRefs (root is [0]).
+func TestBuildSnapshotCfg_DataDisks(t *testing.T) {
+	cfg := &config.SandboxConfig{}
+	cfg.Resources.Capacity.CPU = 2
+	cfg.Resources.Capacity.Memory = "2GiB"
+	cfg.SnapshotRefs.RuntimeRef = "file://rt@sha256:aa"
+	cfg.SnapshotRefs.BaseRef = "file://img@sha256:bb"
+	cfg.Boot.Root.Overlay = &config.OverlayConfig{Diff: "file:///d.ext4"} // overlay root
+	cfg.Boot.Disks = []config.DiskConfig{
+		{Name: "scratch", RootConfig: config.RootConfig{DiffTemplate: "file:///s.ext4"}},
+		{Name: "dataset", RootConfig: config.RootConfig{Base: "file:///ds.erofs", Overlay: &config.OverlayConfig{Diff: "file:///u.ext4"}}},
+	}
+	cfg.SnapshotRefs.DiskBaseRefs = []string{"", "file://ds@sha256:cc"}
+
+	body, err := buildSnapshotCfg(cfg, []string{"manifest://root", "manifest://scratch", "manifest://dataset"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(body)
+	for _, want := range []string{
+		"disks:",
+		"base: manifest://scratch",      // single data disk: captured diff at base
+		"base_ref: file://ds@sha256:cc", // overlay data disk: erofs base ref
+		"base: manifest://dataset",      // overlay data disk: captured upper at overlay.base
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("data-disk snapshot.cfg missing %q\n%s", want, s)
 		}
 	}
 }

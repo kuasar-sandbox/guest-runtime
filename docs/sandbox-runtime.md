@@ -175,6 +175,36 @@ bind、switch-root、phase1b 基础挂载)不变。`empty` 卷的 source 改落�
 单盘根盘恒为可写 ext4,无 erofs 镜像 ⇒ 无内嵌 config.json ⇒ launch.exec 必填(host 侧 validate 强制;
 `launch.placeholder` 占位模式除外——它本就不跑外部程序)。
 
+**数据盘 `boot.disks[]`**(root 之外,最多 `MaxDataDisks=8` 块)。每块盘配置规则与 `boot.root` 相同
+(单盘 diff / 双盘 overlay,含 `base_from_refs`),host 侧用同一套 `PrepareDiff`/CoW/reader 准备。
+
+```
+设备序(= CH --disk 顺序 = guest /dev/vd[a,b,c…]):
+  root(单盘 1 个 / overlay 2 个) → boot.disks[0](1/2) → boot.disks[1](1/2) → …
+  例:overlay root(vda=base, vdb=upper)+ single 数据盘(vdc)+ overlay 数据盘(vdd=base, vde=upper)
+host 把 mounts[].source(name)→序号→具体 /dev/vdX 解析进 MountSpec(DiskIndex/DiskOverlay/DiskDevs);
+name 不过线。盘的设备位由它在 boot.disks[] 的下标决定,与 mounts[] 顺序无关。
+```
+
+挂载在 `applyVolumeMounts` 内、switch-root **之前**完成(与 `empty` 卷统一成「备好 source → bind
+到 `/sysroot<target>` → switch-root 的 MS_MOVE 携带」)。组装挂点 **预先 bake 进 runtime erofs**
+(`/sysdisks/disk-{0..7}{,-lower,-upper}`,24 个空目录;数量须与 `config.MaxDataDisks` 一致),
+缺失即 die(erofs 版本不符,重建或减盘):
+
+```
+单盘数据盘 N:  mount ext4 /dev/vdX → /sysdisks/disk-N
+overlay 数据盘 N: erofs ro → /sysdisks/disk-N-lower;ext4 rw → /sysdisks/disk-N-upper;
+                 overlayfs(lower, upper/upperdir, upper/workdir) → /sysdisks/disk-N
+两者收尾:bind /sysdisks/disk-N → /sysroot<target>
+```
+
+`/sysdisks` 子树 switch-root 后不可见,但被 bind(及 overlayfs 对 lower/upper 的引用)持活——与
+root overlay 的 `/overlay/lower+upper` 隐藏后仍活、`/opt/sandbox-runtime` bind 同一机制。**恢复**时
+guest 从内存快照续跑、盘已挂好(不重挂),host 只需按同序重建并 serve N 个设备(restore host yaml 的
+`boot.disks[]` 须与快照同数同序;mounts[] 在 restore 下不必带)。**快照**逐盘捕获其可写 diff
+(root + 各数据盘),`snapshot.cfg` 的 `boot.disks[]` 按序记录每盘 `base_ref`/`overlay.base`/链
+(与 `boot.root` 同结构);本地链逐盘 flatten-merge(同 root)。
+
 ### 3.2 阶段 2:spec 应用 + stdio 接线 + 应用拉起
 
 阶段 1 的 JOIN 已拿到 LaunchSpec 与那条 vsock 连接(hello/launch 已收发)。阶段 2

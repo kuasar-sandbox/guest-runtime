@@ -37,8 +37,23 @@ type SnapshotCfg struct {
 			Base         string   `yaml:"base,omitempty"`
 			BaseFromRefs []string `yaml:"base_from_refs,omitempty"`
 		} `yaml:"root"`
+		// Disks are the data-disk nodes (boot.disks[] order), each the same shape
+		// as Root. Ordered, no name (ordinal-keyed; the restore host yaml supplies
+		// names + mount targets, merged by index).
+		Disks []SnapDiskNode `yaml:"disks,omitempty"`
 	} `yaml:"boot"`
 }
+
+// SnapDiskNode is one data disk's snapshot.cfg node (same shape as boot.root).
+type SnapDiskNode struct {
+	BaseRef      string          `yaml:"base_ref,omitempty"`
+	Overlay      *SnapOverlayCfg `yaml:"overlay,omitempty"`
+	Base         string          `yaml:"base,omitempty"`
+	BaseFromRefs []string        `yaml:"base_from_refs,omitempty"`
+}
+
+// single reports whether this disk node was captured in single-disk mode.
+func (n *SnapDiskNode) single() bool { return n.Overlay == nil }
 
 // SnapOverlayCfg is the overlay-mode disk sub-node of a snapshot.cfg.
 type SnapOverlayCfg struct {
@@ -200,6 +215,43 @@ func ApplyRules(host *config.SandboxConfig, snap *SnapshotCfg, snapshotPath stri
 		}
 		ov.Base = snap.Boot.Root.Overlay.Base
 		out.Boot.Root.Overlay = &ov
+	}
+
+	// 5. boot.disks[]: merge each host data disk with the snapshot's captured
+	// disk node by ordinal (same rule as root). Count/order must match — the
+	// restore host yaml describes the same disks the snapshot was taken with.
+	if len(host.Boot.Disks) != len(snap.Boot.Disks) {
+		return nil, fmt.Errorf("boot.disks count mismatch with snapshot.cfg: host=%d snap=%d", len(host.Boot.Disks), len(snap.Boot.Disks))
+	}
+	if len(snap.Boot.Disks) > 0 {
+		out.Boot.Disks = make([]config.DiskConfig, len(host.Boot.Disks))
+		for i := range host.Boot.Disks {
+			hd := host.Boot.Disks[i] // copy: keeps Name + host diff/diff_template
+			sd := &snap.Boot.Disks[i]
+			field := fmt.Sprintf("boot.disks[%d]", i)
+			if sd.single() {
+				hd.Overlay = nil
+				hd.Base = sd.Base
+				hd.BaseFromRefs = sd.BaseFromRefs
+			} else {
+				snapBaseRef, err := ParseRef(sd.BaseRef)
+				if err != nil {
+					return nil, fmt.Errorf("snapshot.cfg.%s.base_ref: %w", field, err)
+				}
+				resolvedBase, err := resolveAnyRef(hd.Base, snapBaseRef, snapshotPath, field+".base")
+				if err != nil {
+					return nil, err
+				}
+				hd.Base = resolvedBase
+				ov := config.OverlayConfig{}
+				if hd.Overlay != nil {
+					ov = *hd.Overlay
+				}
+				ov.Base = sd.Overlay.Base
+				hd.Overlay = &ov
+			}
+			out.Boot.Disks[i] = hd
+		}
 	}
 
 	// boot.kernel / boot.cmdline / launch.* silently ignored — fields

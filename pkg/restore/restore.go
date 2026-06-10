@@ -115,8 +115,6 @@ func Run(ctx context.Context, opts Options) (int, error) {
 	defer os.RemoveAll(runDir)
 
 	chSock := filepath.Join(runDir, "ch.sock")
-	blk0Sock := filepath.Join(runDir, "blk0.sock")
-	blk1Sock := filepath.Join(runDir, "blk1.sock")
 	uffdSock := filepath.Join(runDir, "uffd.sock")
 	stateDir := filepath.Join(runDir, "snap-state")
 	if err := os.MkdirAll(stateDir, 0o755); err != nil {
@@ -253,6 +251,47 @@ func Run(ctx context.Context, opts Options) (int, error) {
 			snapCfg.SnapshotProvenance.ParentOverlayPath = val
 		}
 	}
+	// Per-data-disk provenance (boot.disks[] order): the data-disk analogue of
+	// the root fields above, so a snapshot by this restored run extends each
+	// disk's chain.
+	if len(parsedSnap.Boot.Disks) > 0 {
+		pd := make([]config.DiskProvenance, len(parsedSnap.Boot.Disks))
+		for i := range parsedSnap.Boot.Disks {
+			n := &parsedSnap.Boot.Disks[i]
+			top, chain := n.Base, n.BaseFromRefs
+			if !n.single() {
+				top, chain = n.Overlay.Base, n.Overlay.BaseFromRefs
+			}
+			pd[i] = config.DiskProvenance{OverlayBase: top, BaseFromRefs: chain}
+			if opts.SnapshotPath != "" {
+				if sc, val, ok := config.SchemeAndPath(top); ok && sc == "file" {
+					if !filepath.IsAbs(val) {
+						val = filepath.Join(filepath.Dir(opts.SnapshotPath), val)
+					}
+					pd[i].OverlayPath = val
+				}
+			}
+		}
+		snapCfg.SnapshotProvenance.ParentDisks = pd
+	}
+
+	// Device sockets in CH --disk order: root (1 single / 2 overlay) + each data
+	// disk (1 / 2), as blk0.sock, blk1.sock, … — matching ServeAndWait's layout.
+	nDev := 1
+	if !snapCfg.SingleDisk() {
+		nDev = 2
+	}
+	for i := range snapCfg.Boot.Disks {
+		if snapCfg.Boot.Disks[i].Single() {
+			nDev++
+		} else {
+			nDev += 2
+		}
+	}
+	diskSocks := make([]string, nDev)
+	for i := range diskSocks {
+		diskSocks[i] = filepath.Join(runDir, fmt.Sprintf("blk%d.sock", i))
+	}
 
 	// Derive allocatable_at_snapshot from CH state.json's balloon section
 	// (no separate resource-state.json file — see §13). When the bundle
@@ -319,40 +358,17 @@ func Run(ctx context.Context, opts Options) (int, error) {
 		hooks.SetAllocatableNow(initialAlloc)
 	}
 
-	// Resolve disk reference (the snapshot's top disk layer). file:// is opened
-	// directly; manifest:// goes through pkg/sandbox/disks.OpenManifestFetcher
-	// (same path as cold-start manifest:// disks). Single-disk records it at
-	// root.base; overlay at overlay.base.
-	diskRef := snapCfg.Boot.Root.Base
-	if !snapCfg.SingleDisk() {
-		diskRef = snapCfg.Boot.Root.Overlay.Base
-	}
-	scheme, diskValue, ok := config.SchemeAndPath(diskRef)
-	if !ok {
-		return -1, fmt.Errorf("invalid disk base ref in snapshot.cfg: %s", diskRef)
-	}
-	if scheme == "file" && !filepath.IsAbs(diskValue) && opts.SnapshotPath != "" {
-		// Resolve relative to snapshot file (local mode only).
-		diskValue = filepath.Join(filepath.Dir(opts.SnapshotPath), diskValue)
-	}
-	if scheme == "manifest" && opts.Fetcher == nil {
-		return -1, fmt.Errorf("restore: manifest:// disk in sandbox.cfg requires Fetcher")
-	}
-	logf("disk image: %s://%s", scheme, diskValue)
-
 	// state.json restored verbatim (vCPU regs, virtio queue indices —
 	// nothing path-dependent).
 	if err := os.WriteFile(filepath.Join(stateDir, "state.json"), entries["state.json"], 0o644); err != nil {
 		return -1, err
 	}
-	// config.json contains paths captured at snapshot time (uffd_socket,
-	// vhost_socket, ch.sock api). Rewrite them to point at this run's
-	// paths before handing to CH.
+	// config.json captured paths (uffd_socket, per-disk vhost_socket, ch.sock
+	// api, vsock) → this run's sockets (disks in device order).
 	vsockSock := filepath.Join(runDir, "vsock.sock")
 	rewritten, err := rewriteConfigPaths(entries["config.json"], pathRewrite{
 		UffdSocket: uffdSock,
-		Blk0Sock:   blk0Sock,
-		Blk1Sock:   blk1Sock,
+		DiskSocks:  diskSocks,
 		APISock:    chSock,
 		VsockSock:  vsockSock,
 	})
@@ -392,87 +408,51 @@ func Run(ctx context.Context, opts Options) (int, error) {
 	}
 	logf("snapshot source: %d memory layer(s)", len(memLayers))
 
-	// Open disk as base+diff: the read-only base is [top disk layer] ++
-	// base_from_refs (§3.5) layered into one Stream, the new diff CoW'd on top.
-	// baseReader.Close (deferred) closes the layered base and all its layers.
-	// In single-disk mode this layered base IS blk0 (mounted rw directly); in
-	// overlay mode it is blk1's lower (the erofs blk0 is opened separately below).
-	diskLayers := []fetch.Stream{}
-	topDisk, _, err := sandbox.OpenDiskStream(ctx, scheme+"://"+diskValue, opts.Fetcher)
-	if err != nil {
-		return -1, fmt.Errorf("open disk base: %w", err)
-	}
-	diskLayers = append(diskLayers, topDisk)
-	for i, ref := range parentDiskChain {
-		s, err := openRefStream(ctx, ref, opts)
-		if err != nil {
-			return -1, fmt.Errorf("base_from_refs[%d] %q: %w", i, ref, err)
-		}
-		diskLayers = append(diskLayers, s)
-	}
-	baseStream := fetch.NewLayered(diskLayers...)
-	baseReader := vhost.NewStreamReader(ctx, baseStream, int64(baseStream.Size()))
-	defer baseReader.Close()
-	// Restore always builds a FRESH writable diff on top of the snapshot's
-	// overlay (baseReader). Empty diff path → auto-default to the on-disk base
-	// dir; an auto-defaulted diff is removed when this run ends. The base
-	// provides the ext4, so a blank diff sized to it is mountable.
-	diffURI, diffTemplate := snapCfg.Boot.Root.Diff, snapCfg.Boot.Root.DiffTemplate
+	// Reconstruct each logical disk (root + data disks, in order): layer the
+	// captured base ([top] ++ base_from_refs) into a ro base, build a fresh
+	// writable CoW on top, and (overlay mode) open the erofs base as the ro
+	// device. The root's captured top + chain come from parsedSnap.Boot.Root;
+	// data disks from parsedSnap.Boot.Disks[i].
+	rootTop := parsedSnap.Boot.Root.Base
 	if !snapCfg.SingleDisk() {
-		diffURI, diffTemplate = snapCfg.Boot.Root.Overlay.Diff, snapCfg.Boot.Root.Overlay.DiffTemplate
+		rootTop = parsedSnap.Boot.Root.Overlay.Base
 	}
-	ownedDiff := diffURI == ""
-	if ownedDiff {
-		baseDir := sandbox.DefaultBaseDir(opts.BaseRoot, opts.SandboxID)
-		if err := os.MkdirAll(baseDir, 0o755); err != nil {
-			return -1, fmt.Errorf("mkdir base dir %s: %w", baseDir, err)
-		}
-		diffURI = sandbox.DefaultDiffURI(opts.BaseRoot, opts.SandboxID)
-		defer func() {
-			_ = os.Remove(filepath.Join(baseDir, opts.SandboxID+".overlay.diff"))
-			_ = os.Remove(baseDir)
-		}()
+	rootDiffURI, rootDiffTmpl := snapCfg.Boot.Root.Diff, snapCfg.Boot.Root.DiffTemplate
+	if !snapCfg.SingleDisk() {
+		rootDiffURI, rootDiffTmpl = snapCfg.Boot.Root.Overlay.Diff, snapCfg.Boot.Root.Overlay.DiffTemplate
 	}
-	_, diffPath, ok := config.SchemeAndPath(diffURI)
-	if !ok {
-		return -1, fmt.Errorf("bad root diff uri: %s", diffURI)
-	}
-	diffSize, err := snapCfg.DiffSizeBytes()
+	rootDiffSize, err := snapCfg.DiffSizeBytes()
 	if err != nil {
 		return -1, err
 	}
-	createSize, err := sandbox.PrepareDiff(diffPath, diffTemplate, baseReader.Size(), diffSize)
+	rootDB, rootCleanup, err := reconstructDisk(ctx, opts, snapCfg.SingleDisk(), rootTop, parentDiskChain,
+		snapCfg.Boot.Root.Base, rootDiffURI, rootDiffTmpl, rootDiffSize, "overlay", logf)
 	if err != nil {
-		return -1, fmt.Errorf("prepare diff: %w", err)
+		return -1, err
 	}
-	cow, err := vhost.OpenBlockCOW(diffPath, baseReader, createSize)
-	if err != nil {
-		return -1, fmt.Errorf("open BlockCOW: %w", err)
-	}
-	defer cow.Close()
+	defer rootCleanup()
+	disks := []sandbox.DiskBackend{rootDB}
 
-	// blk0. Overlay mode: the ro erofs base (from host yaml or snap.cfg);
-	// file:// → local stream, manifest:// → fetch.Fetcher via cache-ctl.
-	// Single-disk mode: blk0 IS the writable cow above (mounted rw directly),
-	// so there is no separate erofs base — blk0Reader stays nil and blk0Path
-	// labels the diff for stats.
-	var blk0Reader vhost.BlockReader
-	blk0Path := diffPath
-	if !snapCfg.SingleDisk() {
-		blk0Path = snapCfg.Boot.Root.Base
-		if opts.HostCfg.Boot.Root.Base != "" {
-			blk0Path = opts.HostCfg.Boot.Root.Base
+	for i := range snapCfg.Boot.Disks {
+		d := &snapCfg.Boot.Disks[i]
+		sn := &parsedSnap.Boot.Disks[i]
+		single := d.Single()
+		top, chain := sn.Base, sn.BaseFromRefs
+		diffURI, diffTmpl := d.Diff, d.DiffTemplate
+		if !single {
+			top, chain = sn.Overlay.Base, sn.Overlay.BaseFromRefs
+			diffURI, diffTmpl = d.Overlay.Diff, d.Overlay.DiffTemplate
 		}
-		r, _, err := sandbox.OpenBlockReader(ctx, blk0Path, opts.Fetcher)
+		dsz, err := d.RootConfig.DiffSizeBytes(fmt.Sprintf("boot.disks[%d]", i))
 		if err != nil {
-			return -1, fmt.Errorf("open blk0: %w", err)
+			return -1, err
 		}
-		blk0Reader = r
-		defer blk0Reader.Close()
-	}
-	blk1Path := ""
-	if !snapCfg.SingleDisk() {
-		blk1Path = snapCfg.Boot.Root.Overlay.Diff
+		db, dcleanup, derr := reconstructDisk(ctx, opts, single, top, chain, d.Base, diffURI, diffTmpl, dsz, fmt.Sprintf("disk%d", i), logf)
+		if derr != nil {
+			return -1, derr
+		}
+		defer dcleanup()
+		disks = append(disks, db)
 	}
 
 	// Network: re-acquire the host side for this restore. tapfd mode re-runs
@@ -530,13 +510,7 @@ func Run(ctx context.Context, opts Options) (int, error) {
 
 		CapBytes:   int64(capBytes),
 		UffdSource: source,
-		SingleDisk: snapCfg.SingleDisk(),
-		Blk0Reader: blk0Reader, // nil in single-disk (blk0 is the Cow)
-		Blk0Label:  "blk0",
-		Blk0Path:   blk0Path,
-		Cow:        cow,
-		Blk1Label:  "blk1",
-		Blk1Path:   blk1Path,
+		Disks:      disks,
 
 		LaunchSpec:    &proto.LaunchSpec{},
 		WireLaunchMUX: false,
@@ -549,8 +523,6 @@ func Run(ctx context.Context, opts Options) (int, error) {
 
 		SnapCfg:     &snapCfg,
 		ManifestCfg: opts.ManifestCfg,
-		DiffPath:    diffPath,
-		OwnedDiff:   ownedDiff,
 		Forwards:    opts.Forwards,
 		Cgroup:      cg,
 
@@ -636,6 +608,91 @@ func Run(ctx context.Context, opts Options) (int, error) {
 			return nil
 		},
 	})
+}
+
+// reconstructDisk rebuilds one logical disk for restore: the read-only base is
+// [captured top] ++ chain (§3.5) layered into a Stream; a FRESH writable CoW is
+// built on top (single mode: this IS the disk; overlay mode: the ext4 upper).
+// In overlay mode the erofs base (erofsBaseURI) is opened as the ro device.
+// capturedTop/chain come from the snapshot.cfg node; diffURI/diffTemplate from
+// the merged config (host override, else auto-default <sid>.<diskKey>.diff).
+// The returned cleanup closes the readers/CoW and removes an auto-created diff.
+func reconstructDisk(ctx context.Context, opts Options, single bool, capturedTop string, chain []string, erofsBaseURI, diffURI, diffTemplate string, diffSize int64, diskKey string, logf func(string, ...any)) (sandbox.DiskBackend, func(), error) {
+	var db sandbox.DiskBackend
+	var closers []func()
+	cleanup := func() {
+		for i := len(closers) - 1; i >= 0; i-- {
+			closers[i]()
+		}
+	}
+	fail := func(e error) (sandbox.DiskBackend, func(), error) { cleanup(); return sandbox.DiskBackend{}, nil, e }
+	db.Overlay = !single
+
+	// Layered ro base: [captured top] ++ chain.
+	scheme, val, ok := config.SchemeAndPath(capturedTop)
+	if !ok {
+		return fail(fmt.Errorf("%s: invalid captured base ref: %s", diskKey, capturedTop))
+	}
+	if scheme == "file" && !filepath.IsAbs(val) && opts.SnapshotPath != "" {
+		val = filepath.Join(filepath.Dir(opts.SnapshotPath), val)
+	}
+	if scheme == "manifest" && opts.Fetcher == nil {
+		return fail(fmt.Errorf("%s: manifest:// base requires Fetcher", diskKey))
+	}
+	logf("disk %s image: %s://%s", diskKey, scheme, val)
+	top, _, err := sandbox.OpenDiskStream(ctx, scheme+"://"+val, opts.Fetcher)
+	if err != nil {
+		return fail(fmt.Errorf("%s: open base: %w", diskKey, err))
+	}
+	layers := []fetch.Stream{top}
+	for i, ref := range chain {
+		s, serr := openRefStream(ctx, ref, opts)
+		if serr != nil {
+			return fail(fmt.Errorf("%s base_from_refs[%d] %q: %w", diskKey, i, ref, serr))
+		}
+		closers = append(closers, func() { s.Close() })
+		layers = append(layers, s)
+	}
+	baseStream := fetch.NewLayered(layers...)
+	baseReader := vhost.NewStreamReader(ctx, baseStream, int64(baseStream.Size()))
+	closers = append(closers, func() { baseReader.Close() })
+
+	// Fresh writable diff. Empty URI → auto-default (ours to remove).
+	if diffURI == "" {
+		baseDir := sandbox.DefaultBaseDir(opts.BaseRoot, opts.SandboxID)
+		if err := os.MkdirAll(baseDir, 0o755); err != nil {
+			return fail(fmt.Errorf("%s: mkdir base dir: %w", diskKey, err))
+		}
+		p := filepath.Join(baseDir, fmt.Sprintf("%s.%s.diff", opts.SandboxID, diskKey))
+		diffURI = "file://" + p
+		db.OwnedDiff = true
+		closers = append(closers, func() { _ = os.Remove(p) })
+	}
+	_, diffPath, ok := config.SchemeAndPath(diffURI)
+	if !ok {
+		return fail(fmt.Errorf("%s: bad diff uri: %s", diskKey, diffURI))
+	}
+	createSize, err := sandbox.PrepareDiff(diffPath, diffTemplate, baseReader.Size(), diffSize)
+	if err != nil {
+		return fail(fmt.Errorf("%s: prepare diff: %w", diskKey, err))
+	}
+	cow, err := vhost.OpenBlockCOW(diffPath, baseReader, createSize)
+	if err != nil {
+		return fail(fmt.Errorf("%s: open BlockCOW: %w", diskKey, err))
+	}
+	closers = append(closers, func() { cow.Close() })
+	db.Cow, db.DiffPath = cow, diffPath
+
+	// Overlay mode: the ro erofs base device.
+	if !single {
+		r, _, rerr := sandbox.OpenBlockReader(ctx, erofsBaseURI, opts.Fetcher)
+		if rerr != nil {
+			return fail(fmt.Errorf("%s: open erofs base: %w", diskKey, rerr))
+		}
+		db.Reader, db.BasePath = r, erofsBaseURI
+		closers = append(closers, func() { r.Close() })
+	}
+	return db, cleanup, nil
 }
 
 // openRefStream resolves a from_refs / base_from_refs entry (§3.5) into a

@@ -34,7 +34,7 @@ import (
 // off` — no 8250 UART; cmdline pins `console=hvc0`. The application's
 // stdin/stdout/stderr do NOT travel via the console — they go over the
 // vsock stdio MUX (pkg/mux). See docs/sandbox.md §5.2.
-func CHCommand(cfg *config.SandboxConfig, blk0Sock, blk1Sock, chSock, vsockSock, kernelPath, runtimePath, uffdSock, consoleArg string, tapFDNum int, netMAC string) ([]string, error) {
+func CHCommand(cfg *config.SandboxConfig, disks []DiskArg, chSock, vsockSock, kernelPath, runtimePath, uffdSock, consoleArg string, tapFDNum int, netMAC string) ([]string, error) {
 	capBytes, err := cfg.CapacityMemoryBytes()
 	if err != nil {
 		return nil, err
@@ -67,15 +67,19 @@ func CHCommand(cfg *config.SandboxConfig, blk0Sock, blk1Sock, chSock, vsockSock,
 		"--serial", "off",
 	}
 
-	// Disks: single-disk mode is one writable vhost-user-blk (blk0 = the rw
-	// root, mounted directly); overlay mode is the read-only erofs base (blk0)
-	// + the writable ext4 upper (blk1).
-	if cfg.SingleDisk() {
-		args = append(args, "--disk", fmt.Sprintf("vhost_user=on,socket=%s", blk0Sock))
-	} else {
-		args = append(args, "--disk",
-			fmt.Sprintf("vhost_user=on,socket=%s,readonly=on", blk0Sock),
-			fmt.Sprintf("vhost_user=on,socket=%s", blk1Sock))
+	// One --disk flag with all served vhost devices as values, in order (root
+	// first, then each boot.disks[] data disk). readonly=on marks ro erofs bases
+	// (overlay lowers); writable ext4 (single root / overlay uppers / single
+	// data disks) are read-write. This order fixes the guest /dev/vd[a,b,c…].
+	if len(disks) > 0 {
+		args = append(args, "--disk")
+		for _, d := range disks {
+			spec := "vhost_user=on,socket=" + d.Sock
+			if d.ReadOnly {
+				spec += ",readonly=on"
+			}
+			args = append(args, spec)
+		}
 	}
 
 	if allocBytes < capBytes {

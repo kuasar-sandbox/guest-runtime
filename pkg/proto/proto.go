@@ -135,15 +135,26 @@ type LaunchSpec struct {
 	Init   []InitSpec  `json:"init,omitempty"`
 }
 
-// MountSpec is one declarative guest mount. Type is "tmpfs" or "empty"
-// (volume dir masking image content); empty → "empty". Options is a
-// mount option string (e.g. "nosuid,nodev,mode=1777"); Source is reserved
-// for future types (nfs).
+// MountSpec is one declarative guest mount. Type is "tmpfs", "empty"
+// (volume dir masking image content; empty → "empty"), or "disk" (a
+// boot.disks[] data disk, assembled + bound onto Target before switch-root).
+// Options is a mount option string (e.g. "nosuid,nodev,mode=1777").
+//
+// For Type=="disk" the host resolves the config's source disk name to its
+// ordinal + device(s); the name itself is not sent. DiskIndex is the
+// boot.disks[] ordinal (used only for the /sysdisks/disk-<N> staging label).
+// DiskOverlay selects two-disk overlay mode (ro erofs base + rw ext4 upper)
+// vs single-disk (one rw ext4). DiskDevs are the resolved guest block
+// devices in CH --disk order: single = [rw-ext4]; overlay = [ro-erofs, rw-ext4].
 type MountSpec struct {
 	Target  string `json:"target"`
 	Type    string `json:"type,omitempty"`
 	Source  string `json:"source,omitempty"`
 	Options string `json:"options,omitempty"`
+
+	DiskIndex   int      `json:"disk_index,omitempty"`
+	DiskOverlay bool     `json:"disk_overlay,omitempty"`
+	DiskDevs    []string `json:"disk_devs,omitempty"`
 }
 
 // FileSpec is one file injected into the guest rootfs at Path. Content is

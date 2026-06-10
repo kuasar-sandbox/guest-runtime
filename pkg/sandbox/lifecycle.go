@@ -20,6 +20,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/kuasar-sandbox/sandbox-accelerator/pkg/manifest"
+	"github.com/kuasar-sandbox/sandbox-accelerator/pkg/manifest/fetch"
 	"github.com/kuasar-sandbox/sandbox-runtime/pkg/chapi"
 	"github.com/kuasar-sandbox/sandbox-runtime/pkg/ctl"
 	"github.com/kuasar-sandbox/sandbox-runtime/pkg/memory"
@@ -341,14 +342,28 @@ func Run(ctx context.Context, opts RunOptions) (int, error) {
 	}
 	defer cow.Close()
 
-	// Disk labels/paths for stats by mode: single-disk's blk0 IS the writable
-	// diff (no blk1); overlay's blk0 is the erofs base and blk1 the diff.
-	blk0Path, blk1Path := opts.Cfg.Boot.Root.Base, ""
-	if opts.Cfg.SingleDisk() {
-		blk0Path = diffPath
-	} else {
-		blk1Path = opts.Cfg.Boot.Root.Overlay.Diff
+	// Root logical disk (Disks[0]): single → one writable Cow (blk0); overlay →
+	// ro erofs base (blk0) + writable Cow (blk1). Data disks (boot.disks[], in
+	// order) append their device(s) after the root.
+	disks := []DiskBackend{{
+		Overlay:   !opts.Cfg.SingleDisk(),
+		Reader:    blk0Reader, // nil in single-disk
+		Cow:       cow,
+		BasePath:  opts.Cfg.Boot.Root.Base, // overlay ro device stats path
+		DiffPath:  diffPath,
+		OwnedDiff: ownedDiff,
+	}}
+	for i := range opts.Cfg.Boot.Disks {
+		db, dcleanup, derr := prepColdDataDisk(ctx, &opts.Cfg.Boot.Disks[i], i, opts.BaseRoot, opts.SandboxID, fetcher)
+		if derr != nil {
+			return -1, derr
+		}
+		defer dcleanup()
+		disks = append(disks, db)
 	}
+	// Resolve mounts[].type=disk → guest device paths (name→ordinal→/dev/vdX);
+	// clears the name (not sent to the guest).
+	resolveDiskMounts(launchSpec.Mounts, opts.Cfg.Boot.Disks, opts.Cfg.SingleDisk())
 
 	// The shared back-half (memfd, uffd va_report handler, vhost-blk
 	// backends, launch server, pinger, ctl.sock, signal escalation,
@@ -369,13 +384,7 @@ func Run(ctx context.Context, opts RunOptions) (int, error) {
 
 		CapBytes:   int64(capBytes),
 		UffdSource: uffd.ZeroSource{},
-		SingleDisk: opts.Cfg.SingleDisk(),
-		Blk0Reader: blk0Reader, // nil in single-disk (blk0 is the Cow)
-		Blk0Label:  "blk0",
-		Blk0Path:   blk0Path,
-		Cow:        cow,
-		Blk1Label:  "blk1",
-		Blk1Path:   blk1Path,
+		Disks:      disks,
 
 		LaunchSpec:        launchSpec,
 		WireLaunchMUX:     true,
@@ -392,8 +401,6 @@ func Run(ctx context.Context, opts RunOptions) (int, error) {
 
 		SnapCfg:     opts.Cfg,
 		ManifestCfg: opts.ManifestCfg,
-		DiffPath:    diffPath,
-		OwnedDiff:   ownedDiff,
 		Forwards:    opts.Forwards,
 		Cgroup:      cg,
 
@@ -409,7 +416,7 @@ func Run(ctx context.Context, opts RunOptions) (int, error) {
 			if err != nil {
 				return nil, nil, fmt.Errorf("stdio: %w", err)
 			}
-			args, err := CHCommand(opts.Cfg, e.Blk0Sock, e.Blk1Sock, e.CHSock, e.VsockBase, kernelPath, runtimePath, e.UffdSock, consoleArg, e.TapFDNum, e.NetMAC)
+			args, err := CHCommand(opts.Cfg, e.Disks, e.CHSock, e.VsockBase, kernelPath, runtimePath, e.UffdSock, consoleArg, e.TapFDNum, e.NetMAC)
 			if err != nil {
 				cleanup()
 				return nil, nil, fmt.Errorf("CH cmdline: %w", err)
@@ -568,23 +575,142 @@ func writeUffdStats(w io.Writer, s map[string]uint64) {
 	}
 }
 
-// pairQuiescer drives Quiesce/Resume on both vhost backends together. b is
-// nil in single-disk mode (only blk0 = a exists).
-type pairQuiescer struct{ a, b *vhost.Server }
+// guestDevPath maps a 0-based device index to its guest block device. virtio-blk
+// names devices vda, vdb, … in CH --disk order; root takes the first 1-2, data
+// disks the rest. Index stays < 26 (root ≤ 2 + 8 data disks × 2 = 18 max).
+func guestDevPath(i int) string { return "/dev/vd" + string(rune('a'+i)) }
 
-func (p *pairQuiescer) Quiesce() {
-	p.a.Quiesce()
-	if p.b != nil {
-		p.b.Quiesce()
+// resolveDiskMounts fills the type=disk MountSpecs with their resolved guest
+// devices: it maps each mount's source (a boot.disks[] name) to that disk's
+// ordinal and CH-order device path(s), and clears Source (the name is not sent
+// to the guest — only the ordinal + devices). Device order is root first (1 or
+// 2 devices), then each boot.disks[] entry in array order.
+func resolveDiskMounts(mounts []proto.MountSpec, disks []config.DiskConfig, rootSingle bool) {
+	first := make([]int, len(disks))
+	next := 1
+	if !rootSingle {
+		next = 2
+	}
+	ord := make(map[string]int, len(disks))
+	for i := range disks {
+		ord[disks[i].Name] = i
+		first[i] = next
+		if disks[i].RootConfig.Single() {
+			next++
+		} else {
+			next += 2
+		}
+	}
+	for mi := range mounts {
+		m := &mounts[mi]
+		if m.Type != "disk" {
+			continue
+		}
+		i := ord[m.Source] // validated to exist by config.validateDisks
+		d := &disks[i]
+		m.DiskIndex = i
+		m.Source = ""
+		if d.RootConfig.Single() {
+			m.DiskOverlay = false
+			m.DiskDevs = []string{guestDevPath(first[i])}
+		} else {
+			m.DiskOverlay = true
+			m.DiskDevs = []string{guestDevPath(first[i]), guestDevPath(first[i] + 1)}
+		}
 	}
 }
-func (p *pairQuiescer) Resume() {
+
+// prepColdDataDisk resolves one boot.disks[] data disk for cold start: opens its
+// optional ro base(s) and builds its writable CoW diff (same machinery as the
+// root). ordinal is its boot.disks[] index (used for the auto-default diff name).
+// The returned cleanup closes the readers/CoW and removes an auto-created diff.
+func prepColdDataDisk(ctx context.Context, d *config.DiskConfig, ordinal int, baseRoot, sandboxID string, fetcher fetch.Fetcher) (DiskBackend, func(), error) {
+	var db DiskBackend
+	var closers []func()
+	cleanup := func() {
+		for i := len(closers) - 1; i >= 0; i-- {
+			closers[i]()
+		}
+	}
+	fail := func(e error) (DiskBackend, func(), error) { cleanup(); return DiskBackend{}, nil, e }
+
+	single := d.RootConfig.Single()
+	db.Overlay = !single
+	field := fmt.Sprintf("boot.disks[%d]", ordinal)
+
+	var cowBaseURI, diffURI, diffTemplate string
+	if single {
+		cowBaseURI, diffURI, diffTemplate = d.Base, d.Diff, d.DiffTemplate
+	} else {
+		r, _, err := OpenBlockReader(ctx, d.Base, fetcher)
+		if err != nil {
+			return fail(fmt.Errorf("%s erofs base: %w", field, err))
+		}
+		db.Reader, db.BasePath = r, d.Base
+		closers = append(closers, func() { r.Close() })
+		cowBaseURI, diffURI, diffTemplate = d.Overlay.Base, d.Overlay.Diff, d.Overlay.DiffTemplate
+	}
+
+	var cowBase vhost.BlockReader
+	if cowBaseURI != "" {
+		r, _, err := OpenBlockReader(ctx, cowBaseURI, fetcher)
+		if err != nil {
+			return fail(fmt.Errorf("%s cow base: %w", field, err))
+		}
+		cowBase = r
+		closers = append(closers, func() { r.Close() })
+	}
+
+	if diffURI == "" { // auto-default a per-disk diff on the base dir; ours to remove
+		baseDir := DefaultBaseDir(baseRoot, sandboxID)
+		if err := os.MkdirAll(baseDir, 0o755); err != nil {
+			return fail(fmt.Errorf("%s mkdir base dir: %w", field, err))
+		}
+		p := filepath.Join(baseDir, fmt.Sprintf("%s.disk%d.diff", sandboxID, ordinal))
+		diffURI = "file://" + p
+		db.OwnedDiff = true
+		closers = append(closers, func() { _ = os.Remove(p) })
+	}
+	_, diffPath, ok := config.SchemeAndPath(diffURI)
+	if !ok {
+		return fail(fmt.Errorf("%s diff invalid URI: %s", field, diffURI))
+	}
+	var baseSize int64
+	if cowBase != nil {
+		baseSize = cowBase.Size()
+	}
+	diffSize, err := d.RootConfig.DiffSizeBytes(field)
+	if err != nil {
+		return fail(err)
+	}
+	createSize, err := PrepareDiff(diffPath, diffTemplate, baseSize, diffSize)
+	if err != nil {
+		return fail(fmt.Errorf("%s prepare diff: %w", field, err))
+	}
+	cow, err := vhost.OpenBlockCOW(diffPath, cowBase, createSize)
+	if err != nil {
+		return fail(fmt.Errorf("%s COW: %w", field, err))
+	}
+	closers = append(closers, func() { cow.Close() })
+	db.Cow, db.DiffPath = cow, diffPath
+	return db, cleanup, nil
+}
+
+// allQuiescer drives Quiesce/Resume on every vhost backend together (root +
+// data-disk devices, in device order).
+type allQuiescer struct{ servers []*vhost.Server }
+
+func (q *allQuiescer) Quiesce() {
+	for _, s := range q.servers {
+		s.Quiesce()
+	}
+}
+func (q *allQuiescer) Resume() {
 	// LIFO so callers of Quiesce see fully-paused state before any
 	// resume kicks the backends.
-	if p.b != nil {
-		p.b.Resume()
+	for i := len(q.servers) - 1; i >= 0; i-- {
+		q.servers[i].Resume()
 	}
-	p.a.Resume()
 }
 
 // SnapshotHandler bundles the live state needed to service one
@@ -597,10 +723,8 @@ type SnapshotHandler struct {
 	ManifestCfg *config.ManifestConfig // required for --upload; the Ingester is built lazily per snapshot
 	SandboxID   string                 // required: snapshot.Take rejects empty
 	Memfd       *memory.Memfd
-	DiffPath    string
-	OwnedDiff   bool // diff is auto-created (ours) → eligible for zero-copy move on destroy-snapshot
-	Srv0        *vhost.Server
-	Srv1        *vhost.Server
+	Disks       []SnapDiskRef   // writable diffs to capture, logical order (root, then data disks)
+	Servers     []*vhost.Server // all vhost servers (quiesced together around the dump)
 	CHSock      string
 	RunDir      string
 	Pinger      *guestlink.Pinger // optional; if non-nil, paused around quiesce/Take
@@ -612,7 +736,7 @@ type SnapshotHandler struct {
 // Handle dispatches one ctl snapshot_request. Public for restore.Run.
 func (h *SnapshotHandler) Handle(req ctl.Request) (ctl.Response, error) {
 	opts := RunOptions{Cfg: h.Cfg, ManifestCfg: h.ManifestCfg, SandboxID: h.SandboxID}
-	return handleSnapshotRequest(req, opts, h.Memfd, h.DiffPath, h.OwnedDiff, h.Srv0, h.Srv1, h.CHSock, h.RunDir, h.Pinger, h.Forwarder, h.Reattach, h.Logf)
+	return handleSnapshotRequest(req, opts, h.Memfd, h.Disks, h.Servers, h.CHSock, h.RunDir, h.Pinger, h.Forwarder, h.Reattach, h.Logf)
 }
 
 // handleSnapshotRequest executes one snapshot_request received via
@@ -624,9 +748,8 @@ func handleSnapshotRequest(
 	req ctl.Request,
 	opts RunOptions,
 	mfd *memory.Memfd,
-	diffPath string,
-	ownedDiff bool,
-	srv0, srv1 *vhost.Server,
+	disks []SnapDiskRef, // writable diffs, logical order (root, then data disks)
+	servers []*vhost.Server, // all vhost servers (quiesced together)
 	chSock, runDir string,
 	pinger *guestlink.Pinger,
 	forwarder *Forwarder, // gates new forwards + collapses active relays around quiesce; may be nil
@@ -719,8 +842,8 @@ func handleSnapshotRequest(
 	// manifest://<key> in --upload mode) so snapshot.cfg's overlay.base is
 	// final on first write — no post-hoc ZIP rewrite.
 	cfg := opts.Cfg
-	snapCfgBuilder := func(overlayRef string) ([]byte, error) {
-		return buildSnapshotCfg(cfg, overlayRef)
+	snapCfgBuilder := func(overlayRefs []string) ([]byte, error) {
+		return buildSnapshotCfg(cfg, overlayRefs)
 	}
 
 	// opts.SandboxID is always populated by the run path (generated when the
@@ -746,30 +869,41 @@ func handleSnapshotRequest(
 		sink = snapshot.NewFileSink(req.OutDir, sandboxID, logf)
 	}
 
+	// Per-disk diff list (root, then data disks) for Take. Restored from a LOCAL
+	// snapshot ⇒ MERGE this run's resident delta onto the parent local layer
+	// (replace the next-newest layer, not stack) for BOTH --output and --upload;
+	// buildSnapshotCfg drops the parent ref to match. Cold/manifest parents stack.
+	prov := cfg.SnapshotProvenance
+	localParent := strings.HasPrefix(prov.ParentSnapshotRef, "file://")
+	diffs := make([]snapshot.DiskDiff, len(disks))
+	for i, d := range disks {
+		dd := snapshot.DiskDiff{Path: d.DiffPath, Owned: d.OwnedDiff}
+		if localParent {
+			if i == 0 {
+				dd.MergeBase = prov.ParentOverlayPath // root
+			} else if j := i - 1; j < len(prov.ParentDisks) {
+				dd.MergeBase = prov.ParentDisks[j].OverlayPath
+			}
+		}
+		diffs[i] = dd
+	}
 	src := snapshot.Sources{
 		SandboxID:     sandboxID,
 		APISock:       chSock,
 		MemfdFD:       mfd.FD(),
 		MemfdSize:     int64(mfd.Size()),
-		DiffPath:      diffPath,
-		OwnedDiff:     ownedDiff,
+		Diffs:         diffs,
 		StagingDir:    stagingDir,
 		CHApiDeadline: cfg.CHApiDeadline(),
 		SnapshotCfg:   snapCfgBuilder,
-		Quiescer:      &pairQuiescer{a: srv0, b: srv1},
+		Quiescer:      &allQuiescer{servers: servers},
 		Logf:          logf,
 	}
-	// Restored from a LOCAL snapshot ⇒ MERGE this run's resident delta onto the
-	// parent local layer (replace the next-newest layer, not stack) for BOTH
-	// --output (→ new local top) and --upload (→ new manifest:// top, so the
-	// uploaded snapshot has NO buried file:// layer). buildSnapshotCfg drops the
-	// parent ref to match. Cold-start / manifest:// parents stack (no merge).
-	if prov := cfg.SnapshotProvenance; strings.HasPrefix(prov.ParentSnapshotRef, "file://") {
+	if localParent {
 		if prov.ParentSnapshotPath == "" || prov.ParentOverlayPath == "" {
 			return ctl.Response{}, fmt.Errorf("snapshot: local parent %q lacks merge paths", prov.ParentSnapshotRef)
 		}
 		src.MergeBaseSnapshot = prov.ParentSnapshotPath
-		src.MergeBaseOverlay = prov.ParentOverlayPath
 	}
 	out, err := snapshot.Take(src, sink, req.ResumeAfter)
 	if err != nil {
@@ -795,22 +929,25 @@ func handleSnapshotRequest(
 		WallclockPauseMs: out.WallclockPauseMs,
 		WallclockDumpMs:  out.WallclockDumpMs,
 	}
+	// The response reports the ROOT overlay (out.*[0]); data-disk overlays live
+	// in the bundle's snapshot.cfg (boot.disks[]) and, in --output mode, as
+	// sibling files.
 	if !req.Upload {
 		resp.SnapshotPath = out.SnapshotPath
-		resp.OverlayPath = out.OverlayPath
-		resp.OverlayRef = out.OverlayRef
+		resp.OverlayPath = out.OverlayPaths[0]
+		resp.OverlayRef = out.OverlayRefs[0]
 		return resp, nil
 	}
 
-	// Upload mode: the IngestSink already streamed the overlay + bundle to the
+	// Upload mode: the IngestSink already streamed the overlays + bundle to the
 	// store during Take (resident pages only). Report the manifest keys it
 	// produced (out.*Ref are manifest://<key>) plus per-artifact dedup stats.
 	// OverlayRef stays scheme-tagged — it is the snapshot bundle's overlay.base,
 	// used for from_refs chaining.
 	overlayRes, bundleRes := ingestSink.Results()
 	resp.SnapshotManifestKey = strings.TrimPrefix(out.SnapshotRef, "manifest://")
-	resp.OverlayManifestKey = strings.TrimPrefix(out.OverlayRef, "manifest://")
-	resp.OverlayRef = out.OverlayRef
+	resp.OverlayManifestKey = strings.TrimPrefix(out.OverlayRefs[0], "manifest://")
+	resp.OverlayRef = out.OverlayRefs[0]
 	resp.Msg = fmt.Sprintf("upload OK; overlay stored=%d dedup=%d, snapshot stored=%d dedup=%d",
 		overlayRes.StoredChunks, overlayRes.DedupChunks, bundleRes.StoredChunks, bundleRes.DedupChunks)
 	return resp, nil
@@ -841,46 +978,79 @@ func destroyAfterSnapshot(chSock string, respDeadline time.Duration, logf func(s
 // (file SHA256 is hashed once at startup; see config.SnapshotRefs in
 // config.SandboxConfig). overlayRef is filled in by Take() after overlay
 // digest is known, or by Upload() after overlay manifest key is known.
-func buildSnapshotCfg(cfg *config.SandboxConfig, overlayRef string) ([]byte, error) {
+func buildSnapshotCfg(cfg *config.SandboxConfig, overlayRefs []string) ([]byte, error) {
 	doc := snapshotCfgYAML{}
 	doc.Resources.Capacity.CPU = cfg.Resources.Capacity.CPU
 	doc.Resources.Capacity.Memory = cfg.Resources.Capacity.Memory
 	doc.Boot.RuntimeRef = cfg.SnapshotRefs.RuntimeRef
+
 	// Incremental layered chain (docs/sandbox.md §3.5), keyed on the parent's
-	// scheme:
+	// scheme (same rule for memory, root, and each data disk):
 	//   - LOCAL parent (file://): this run's resident delta was MERGED onto the
 	//     parent local layer (snapshot.Take's mergeSparse), so the new top
 	//     REPLACES the parent — inherit the parent's lower chain, drop the parent
-	//     ref. Keeps the local-layer depth at 1 (the local-layer invariant: at
-	//     most one file:// layer, always the top).
-	//   - REMOTE parent (manifest://) / cold start: prepend the parent ref to
-	//     stack a new top over it.
+	//     ref (local-layer depth stays 1).
+	//   - REMOTE (manifest://) / cold start: prepend the parent ref to stack.
 	prov := cfg.SnapshotProvenance
-	var diskChain []string
-	if strings.HasPrefix(prov.ParentSnapshotRef, "file://") {
+	localParent := strings.HasPrefix(prov.ParentSnapshotRef, "file://")
+	coldStart := prov.ParentSnapshotRef == ""
+	if localParent {
 		doc.FromRefs = prov.ParentFromRefs
-		diskChain = prov.ParentBaseFromRefs
 	} else {
 		doc.FromRefs = prependRef(prov.ParentSnapshotRef, prov.ParentFromRefs)
-		diskChain = prependRef(prov.ParentOverlayBase, prov.ParentBaseFromRefs)
 	}
-	if cfg.SingleDisk() {
-		// single-disk: the captured root diff is the child's read-only base;
-		// no erofs base_ref, no overlay node. The diff is sparse (CoW writes
-		// only), so on COLD start the config's root.base (the ext4 CoW lower the
-		// diff sits on) must be chained below it, else restore loses the unwritten
-		// base blocks. A self-contained diff (diff_template) has no base — chain
-		// stays empty. On restore-derived snapshots the chain already carries it.
-		if prov.ParentSnapshotRef == "" && cfg.Boot.Root.Base != "" {
-			diskChain = prependRef(cfg.Boot.Root.Base, diskChain)
+
+	// Root node.
+	doc.Boot.Root = renderDiskNode(overlayRefs[0], cfg.SnapshotRefs.BaseRef,
+		cfg.Boot.Root.Base, cfg.SingleDisk(), localParent, coldStart,
+		prov.ParentOverlayBase, prov.ParentBaseFromRefs)
+
+	// Data-disk nodes (boot.disks[] order), each with its own parent chain.
+	for i := range cfg.Boot.Disks {
+		d := &cfg.Boot.Disks[i]
+		var pTop string
+		var pChain []string
+		if i < len(prov.ParentDisks) {
+			pTop, pChain = prov.ParentDisks[i].OverlayBase, prov.ParentDisks[i].BaseFromRefs
 		}
-		doc.Boot.Root.Base = overlayRef
-		doc.Boot.Root.BaseFromRefs = diskChain
-	} else {
-		doc.Boot.Root.BaseRef = cfg.SnapshotRefs.BaseRef
-		doc.Boot.Root.Overlay = &overlayCfgYAML{Base: overlayRef, BaseFromRefs: diskChain}
+		baseRef := ""
+		if i < len(cfg.SnapshotRefs.DiskBaseRefs) {
+			baseRef = cfg.SnapshotRefs.DiskBaseRefs[i]
+		}
+		doc.Boot.Disks = append(doc.Boot.Disks, renderDiskNode(overlayRefs[1+i],
+			baseRef, d.Base, d.RootConfig.Single(), localParent, coldStart, pTop, pChain))
 	}
 	return yaml.Marshal(&doc)
+}
+
+// renderDiskNode renders one disk's snapshot.cfg node (root or a data disk),
+// computing its incremental chain. overlayRef is the captured top diff ref;
+// baseRef the erofs image ref (overlay mode); coldBase the cold-start CoW base
+// to chain (single mode). parentTop/parentChain are this disk's parent overlay
+// ref + chain — dropped (localParent: merged) or prepended (stacked).
+func renderDiskNode(overlayRef, baseRef, coldBase string, single, localParent, coldStart bool, parentTop string, parentChain []string) diskNodeYAML {
+	var chain []string
+	if localParent {
+		chain = parentChain
+	} else {
+		chain = prependRef(parentTop, parentChain)
+	}
+	node := diskNodeYAML{}
+	if single {
+		// The captured diff is sparse (CoW writes only), so on COLD start the
+		// config base (the ext4 CoW lower the diff sits on) must be chained below
+		// it, else restore loses the unwritten base blocks. A self-contained diff
+		// (diff_template) has no base — chain stays empty.
+		if coldStart && coldBase != "" {
+			chain = prependRef(coldBase, chain)
+		}
+		node.Base = overlayRef
+		node.BaseFromRefs = chain
+	} else {
+		node.BaseRef = baseRef
+		node.Overlay = &overlayCfgYAML{Base: overlayRef, BaseFromRefs: chain}
+	}
+	return node
 }
 
 // prependRef returns [ref] ++ rest when ref is non-empty, else nil. Used to
@@ -895,6 +1065,17 @@ func prependRef(ref string, rest []string) []string {
 	return out
 }
 
+// diskNodeYAML is one disk's snapshot.cfg node (root or a boot.disks[] entry).
+//   - overlay mode: base_ref (erofs image) + overlay{captured upper diff + chain}.
+//   - single-disk mode: the captured diff is the child's read-only base; chain
+//     below it. (base/base_from_refs mutually exclusive with base_ref/overlay.)
+type diskNodeYAML struct {
+	BaseRef      string          `yaml:"base_ref,omitempty"`
+	Overlay      *overlayCfgYAML `yaml:"overlay,omitempty"`
+	Base         string          `yaml:"base,omitempty"`
+	BaseFromRefs []string        `yaml:"base_from_refs,omitempty"`
+}
+
 // snapshotCfgYAML mirrors the on-disk snapshot.cfg schema. Extracted
 // type so buildSnapshotCfg + applyrules.SnapshotCfg share a definition.
 type snapshotCfgYAML struct {
@@ -906,16 +1087,9 @@ type snapshotCfgYAML struct {
 	} `yaml:"resources"`
 	FromRefs []string `yaml:"from_refs,omitempty"`
 	Boot     struct {
-		RuntimeRef string `yaml:"runtime_ref"`
-		Root       struct {
-			// overlay mode: erofs image + the captured upper diff (+ its chain).
-			BaseRef string          `yaml:"base_ref,omitempty"`
-			Overlay *overlayCfgYAML `yaml:"overlay,omitempty"`
-			// single-disk mode: the captured root diff is the child's read-only
-			// base; chain below it. (Mutually exclusive with base_ref/overlay.)
-			Base         string   `yaml:"base,omitempty"`
-			BaseFromRefs []string `yaml:"base_from_refs,omitempty"`
-		} `yaml:"root"`
+		RuntimeRef string         `yaml:"runtime_ref"`
+		Root       diskNodeYAML   `yaml:"root"`
+		Disks      []diskNodeYAML `yaml:"disks,omitempty"`
 	} `yaml:"boot"`
 }
 
@@ -936,6 +1110,23 @@ func populateSnapshotRefs(cfg *config.SandboxConfig) error {
 		return fmt.Errorf("boot.runtime: %w", err)
 	}
 	cfg.SnapshotRefs.RuntimeRef = rRef
+
+	// Per-data-disk erofs base refs (overlay mode). Indexed by boot.disks[]
+	// ordinal; empty entry for single-disk / no-base disks.
+	if len(cfg.Boot.Disks) > 0 {
+		cfg.SnapshotRefs.DiskBaseRefs = make([]string, len(cfg.Boot.Disks))
+		for i := range cfg.Boot.Disks {
+			d := &cfg.Boot.Disks[i]
+			if d.Single() || d.Base == "" {
+				continue
+			}
+			ref, err := buildBootRef(d.Base, true /* allowManifest */)
+			if err != nil {
+				return fmt.Errorf("boot.disks[%d].base: %w", i, err)
+			}
+			cfg.SnapshotRefs.DiskBaseRefs[i] = ref
+		}
+	}
 
 	if cfg.Boot.Root.Base == "" {
 		return nil
