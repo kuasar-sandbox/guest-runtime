@@ -17,8 +17,10 @@ import (
 // Memory sizing: --memory size= is the capacity (what guest sees), with
 // shared=on so vhost-user backends in the same process can mmap the
 // memfd CH creates. Balloon size = capacity - allocatable, releasing the
-// difference back to host at boot; free_page_reporting=on lets the guest
-// continuously report unused pages (drives EVENT_REMOVE on the uffd).
+// difference back to host at boot. free_page_reporting stays OFF (its
+// mmu_notifier traffic starves the guest vsock kthread — see balloon.go);
+// runtime adjustments come from the host resctl.BalloonController via
+// /api/v1/vm.resize on mem_report feedback.
 //
 // uffdSock is the path of the va_report UDS server (cloud-hypervisor.md
 // §3.3). Patched CH connects to it during create_ram_region.
