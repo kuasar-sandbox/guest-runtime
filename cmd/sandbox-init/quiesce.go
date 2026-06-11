@@ -18,7 +18,7 @@ import (
 // not as a halted snapshot.
 //
 // The /tmp tmpfs reset and the application-level signal hook described
-// in §12.1.4 are v2 work — not implemented here.
+// in docs/sandbox-runtime.md §3.4 (quiesce extension items) are not implemented here.
 func runQuiesce() {
 	t0 := time.Now()
 

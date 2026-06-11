@@ -199,7 +199,7 @@ func Run(ctx context.Context, opts RunOptions) (int, error) {
 	}
 
 	// Resolve the root disk(s) and image config by mode (docs/sandbox-runtime
-	// .md §3.x):
+	// .md §3.1):
 	//   - overlay mode: blk0 is the read-only erofs image (boot.root.base);
 	//     the launch defaults (image config) are read from its appended ZIP.
 	//   - single-disk mode: blk0 is the writable ext4 CoW built below; there

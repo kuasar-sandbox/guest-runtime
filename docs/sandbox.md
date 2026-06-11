@@ -68,7 +68,7 @@ sandbox-ctl 是 CH 的父进程。CH 退出 → sandbox-ctl 收 SIGCHLD → 优�
 ### 1.2 设计原则
 
 1. **统一内存所有权**:sandbox-ctl 拥有 memfd inode,CH 通过继承 fd 映射同一
-   inode。冷启动 + 恢复用同一份内存代码路径(详见 §冷启动数据流);snapshot
+   inode。冷启动 + 恢复用同一份内存代码路径(详见 §5);snapshot
    时 sandbox-ctl 直接 SEEK_DATA/HOLE 扫驻留页,不经 CH→file→sandbox-ctl 的
    中转
 2. **单 uffd 模型**:CH 进程内创建 uffd(必须绑到 CH mm),通过 SCM_RIGHTS 把
@@ -80,7 +80,7 @@ sandbox-ctl 是 CH 的父进程。CH 退出 → sandbox-ctl 收 SIGCHLD → 优�
 4. **资源可寻址**:任何运行所需文件(vmlinux 除外)都能选 `file://` 或
    `manifest://`,运行时无差别看待;snapshot 同样可上传至 manifest 存储
 5. **三态资源控制**:是否启用 cgroup 限制、是否启用动态控制由 sandbox.yaml
-   字段是否存在决定,无独立 mode 开关(详见 §资源模型)
+   字段是否存在决定,无独立 mode 开关(详见 §4)
 6. **per-sandbox 一进程**:类 `runc run` 语义,不是 daemon。故障域、资源
    记账、生命周期对齐自然清晰
 
@@ -114,7 +114,8 @@ sandbox-ctl 是 CH 的父进程。CH 退出 → sandbox-ctl 收 SIGCHLD → 优�
 sandbox-ctl run [flags]
 
   # 配置 + 身份
-  --config <path>         sandbox.yaml 路径(SANDBOX_CONFIG env;flag 优先)
+  --config <path[:path2...]>  sandbox.yaml 路径,':' 分隔多份时 front-to-back 深合并
+                          (语义同 config 子命令,§2.5;SANDBOX_CONFIG env;flag 优先)
   --manifest-config <path>  manifest 配置 YAML(MANIFEST_CONFIG env);仅 manifest://
                           资源(blk0 base、--restore manifest://、--upload)需要
   --sandbox-id <sid>      覆盖 yaml 里的 sandbox.id
@@ -247,10 +248,6 @@ sandbox-ctl 控制终端的前台进程组——终端产生的 `^C` / `^\` / `^
   稀疏文件流,manifest 经 cache-ctl + store-ctl 按 chunk 粒度 lazy fetch,再按
   snapshot.cfg 的 `from_refs` 叠成分层流(§3.5)写入 memfd。snapshot.cfg 内
   base_ref / overlay.base(+ base_from_refs)同理
-
-迁移说明:**`sandbox-ctl restore` 子命令已删除**。原 `sandbox-ctl restore --snapshot=<x> --config=y.yaml`
-的语义对应于 `sandbox-ctl run --restore=<x> --config=y.yaml`,行为完全等价
-(stdio / cgroup / network 接线统一)。
 
 **配置交付(文件 vs 内存)与 run-task 启动模型**:上面的 `--config` / `SANDBOX_CONFIG`
 是文件路径形态。除此之外,sandbox-ctl 还能在无 config-socket 的前提下接收**内存内**
@@ -460,7 +457,7 @@ boot:
                                               # 已存在的 diff 忽略此项
       diff_size: 1GiB                         # 可选,默认 1GiB。仅在"创建空白 diff"(无模板、
                                               # 无 base)时用于定尺寸;已有 diff 保持自身大小
-    # —— 单磁盘模式:省略上面的 overlay 即启用(详见 docs/sandbox-runtime.md §3.x)——
+    # —— 单磁盘模式:省略上面的 overlay 即启用(详见 docs/sandbox-runtime.md §3.1)——
     # 不写 boot.root.overlay 时,root 盘本身是可写 ext4,直接挂为 disk0(无 overlayfs、无 disk1)。
     # 下面三项是 overlay.{diff,diff_template,diff_size} 的 root 层等价物,给 root 盘写能力;
     # 与 overlay.* 互斥。base 可选(须是 ext4 镜像作 CoW 下层);无 erofs 镜像 ⇒ 无内嵌
@@ -473,7 +470,7 @@ boot:
   # 每块盘的配置规则与 boot.root 完全相同(单盘 diff / 双盘 overlay,含 base_from_refs);
   # 多一个 name(仅配置期用,运行期转序号)。每块盘必须被 mounts[].type=disk 挂载恰好一次
   # (定义却不挂载 = 配置错误)。设备序:root 在前(单盘 1 个 / overlay 2 个),再按本数组序,
-  # 决定 guest /dev/vd[a,b,c…];详见 docs/sandbox-runtime.md §3.6。
+  # 决定 guest /dev/vd[a,b,c…];详见 docs/sandbox-runtime.md §3.1。
   disks:
     - name: scratch                            # 单盘:可写 ext4(diff/diff_template/diff_size)
       diff_template: file:///opt/sandbox/disk-templates/scratch-50G.ext4
@@ -505,7 +502,8 @@ launch:
   user: "0:0"                 # uid:gid 或 name:group(覆盖镜像 User);命名用户由 guest 侧读 /etc/passwd 解析
   stop_signal: SIGTERM        # 停机信号(覆盖镜像 StopSignal);信号名或编号;空 → SIGTERM
   stop_grace_period: 10s      # 发停机信号后等应用退出的宽限,超时则 SIGKILL;默认 10s
-  start_timeout: ""           # host 等待 launch_ack(含 init 全程)的超时;空 / 0 = 无限期(见 §阶段 2)
+  start_timeout: ""           # host 等待 launch_ack(含 init 全程)的超时;空 / 0 = 无限期
+                              #   (见 sandbox-runtime.md §4.10)
   # 伴生进程(plugin):与 launch.exec 同 rootfs/cgroup/网络运行的常驻 sidecar,各自独立监督。
   # plugin 退出不影响沙箱生命周期(只有 launch.exec 退出才按 launch.restart 决定 reboot/重启)。
   plugin:
@@ -578,8 +576,8 @@ launch 握手,不下发 guest。
 故慢的远程/缓存只会让换入变慢、不会误超时;恶劣环境把这两个值调大或置 0 即可。会
 **非自愿误触发**的是 host 侧写死的管理/恢复面 deadline(restore 握手、CH `/vm.resume`
 响应、CH API socket 就绪、va_report 交接,以及 **host→guest ping** 与 **guest→host
-管理消息(mem_report / app_started / app_exited)** 的读死线——后两者原为 200ms,在 vCPU
-被慢缺页阻塞时会刷 ping 超时、mem_report broken-pipe、CH vsock BrokenPipe)——这些一律由
+管理消息(mem_report / app_started / app_exited)** 的读死线——后两者在 vCPU 被慢缺页
+阻塞时最易误判为 ping 超时 / mem_report broken-pipe)——这些一律由
 `timeouts` 接管,默认 0 = 不强制(host 等待所需任意时长,dial/connect 探测仍有界,可经
 SIGINT / CH 退出取消)。这样默认配置在慢速或降级环境下"开箱即用、不误杀";生产环境按
 [`examples/timeouts-production.yaml`](../examples/timeouts-production.yaml) 设正值,
@@ -587,7 +585,7 @@ SIGINT / CH 退出取消)。这样默认配置在慢速或降级环境下"开箱
 
 所有 CH API 调用(restore 的 /vm.resume、snapshot 的 pause/snapshot/resume、关停的
 vmm.shutdown)统一经**单一 `pkg/chapi` 客户端**(`chapi.Client`,`timeouts.ch_api` 作
-其响应死线),不再有 restore 自带的重复实现。`ch_api` 是唯一**默认有界(60s)**的项:
+其响应死线)。`ch_api` 是唯一**默认有界(60s)**的项:
 CH API 是本地管理调用、快且不受远程/缓存慢影响,60s 是安全网而非热限;置 `"0"` 才不强制。
 
 > **`ping` 与 `--ping-fatal-threshold` 的配合**:`ping` 默认不强制时,卡死但仍连通的
@@ -598,20 +596,20 @@ CH API 是本地管理调用、快且不受远程/缓存慢影响,60s 是安全�
 
 **`mounts` / `files` / `init` 的应用时机**:三者均在 guest 收到 LaunchSpec 后、
 应用进程拉起前生效(`init` 在 `launch_ack` 之前完成,故 host 的 "settled" 信号代表
-"环境与 init 全部就绪",详见 [`sandbox-runtime.md`](sandbox-runtime.md) §阶段 2)。
+"环境与 init 全部就绪",详见 [`sandbox-runtime.md`](sandbox-runtime.md) §3.2)。
 `mounts` 的 `empty` 卷落 vdb(磁盘、不耗内存),`files` 落内存盘(不进磁盘快照层)。
 
 **冷启动(golden) vs restore(per-instance)注入**:`mounts` / `init` / 静态
 `files` 在冷启动期应用,会被黄金快照捕获、由 1:N 克隆共享。需要**逐实例不同且排除出
 黄金快照**的文件(per-instance secret、实例专属 resolv.conf),由 sandbox-ctl 在
 **restore 时**经 restore 通知把该实例的 `files` 推送给 guest,guest 在 thaw 前注入
-(与网络 flush-and-replace 同一窗口,见 §11);此类内容仅落克隆自身内存、不入黄金快照。
+(与网络 flush-and-replace 同一窗口,见 §11.0);此类内容仅落克隆自身内存、不入黄金快照。
 路由由 sandbox-ctl 编排决定(冷启动 → LaunchSpec,restore → restore 通知),与网络
 字段一致,schema 无需 per-instance 标记。
 
 清单配置(manifest/store/crypto/cache 节)单独存在,不放入 sandbox.yaml——它
 是节点级配置,所有 CLI 共享(sandbox-ctl 通过 `--manifest-config` 或
-`MANIFEST_CONFIG` 环境变量引用,详见 [`manifest.md`](manifest.md))。
+`MANIFEST_CONFIG` 环境变量引用,详见 `sandbox-accelerator/docs/manifest.md`)。
 
 **绝对路径要求**:sandbox.yaml 中所有 `file://` URL 必须是绝对路径
 (`file:///abs/path/to/file`)。配置校验阶段拒绝 `file://relative/path`
@@ -638,14 +636,13 @@ init=/sbin/init root=/dev/pmem0 ro rootfstype=erofs dax=always console=hvc0
 **网络配置不进 cmdline**:IP/MTU/Nexthop/Hostname/Interface 通过 vsock launch 协议
 下发给 sandbox-init;phase 2 由 sandbox-init 用 raw netlink 配置(IFF_UP[+IFLA_MTU] +
 RTM_NEWADDR + 可选 RTM_NEWROUTE)。restore 时同一组字段可经 restore 通知重新下发,
-sandbox-init 以 flush-and-replace 重配网卡(克隆取新 L3 身份,见 §恢复)。kernel 已删
-`CONFIG_IP_PNP*`,不再支持
-`ip=...` cmdline 形式。
+sandbox-init 以 flush-and-replace 重配网卡(克隆取新 L3 身份,见 §11.0)。kernel 不含
+`CONFIG_IP_PNP*`,不支持 `ip=...` cmdline 形式。
 
 **`launch.*` / `mounts` / `files` / `init` 不进 cmdline**:容器启动配置
 (exec/args/env/workdir/restart/user/stop_signal/stop_grace_period)及挂载 / 文件 /
 初始化命令均通过 vsock 在运行时下发,见 [`sandbox-runtime.md`](sandbox-runtime.md)
-§阶段 2。`start_timeout` 仅在 host 侧约束 launch 握手等待。
+§3.2。`start_timeout` 仅在 host 侧约束 launch 握手等待。
 
 ### 3.2 file:// vs manifest:// truth table
 
@@ -963,7 +960,7 @@ T20  vCPU 跑过程中:
      · backend 访问 backendVA → kernel 默认 shmem 缺页:folio 已存在(handler 装的)→
        直接装 sandbox-ctl mm PTE,无 uffd 事件
      · sandbox-init 周期(默认 5s)从 /proc/meminfo 读 MemAvailable/MemTotal,
-       走短连接发 mem_report(§sandbox-runtime §4.3)给 host
+       走短连接发 mem_report(sandbox-runtime.md §4.3)给 host
      · host BalloonController 按策略推 desired_balloon target(详见 §9.3),通过
        CH HTTP API PUT /api/v1/vm.resize 落到 guest;guest balloon 驱动 inflate
        → CH 在 memfd 上 fallocate(PUNCH_HOLE) + 在 chVA 上 madvise(DONTNEED)
@@ -1021,7 +1018,7 @@ cloud-hypervisor \
 - `--memory-zone fd=3,uffd_socket=...`:patched CH 跳过 memfd_create,直接用
   sandbox-ctl 传入的 fd 当 backing;在 create_ram_region 内自己创建 uffd,
   通过 uffd_socket 发 va_report + SCM_RIGHTS,等 sandbox-ctl ack 后才允许
-  vCPU 跑(详见 [`cloud-hypervisor.md`](cloud-hypervisor.md))
+  vCPU 跑(详见 `sandbox-deps/docs/cloud-hypervisor.md`)
 - `--pmem discard_writes=on` 让 guest 写 pmem 不影响 host 文件
 - blk0 readonly=on 在 vhost-user 协议层告知 guest 这是只读盘
 - `--vsock cid=3,socket=...`:CH 创建 virtio-vsock 设备,guest CID=3,通过 hybrid
@@ -1074,7 +1071,7 @@ SEEK_DATA/HOLE 提取数据 extent,把每个 extent 的 `(offset, length)` frami
 逻辑偏移 [ramSize, EOF)      标准 ZIP archive
                                 / config.json     CH 设备拓扑 + memory layout
                                 / state.json      vCPU 寄存器、virtio queue、IRQ
-                                / snapshot.cfg    §3.4 schema(替代旧 sandbox.cfg)
+                                / snapshot.cfg    §3.4 schema
 ```
 
 `ramSize` 是 zone 的逻辑大小;ZIP append 在该逻辑偏移之后。依赖 ZIP 中央目录
@@ -1092,7 +1089,7 @@ SEEK_DATA/HOLE 提取数据 extent,把每个 extent 的 `(offset, length)` frami
 sandbox 实际驻留 200 MiB → 文件物理 ~200 MiB。`tar`、`cp --sparse=auto`、
 `manifest.Ingester` 都尊重稀疏(后者把空洞编码进 manifest.HoleExtent)。
 
-**单 zone 假设**:v1 限定单 memory zone。多 zone 扩展时格式扩展见 §14。
+**单 zone 假设**:限定单 memory zone(固定 spec,见 §14.1)。
 
 **`<sha256>.overlay` / `<sha256>.snapshot` 写入路径**(copy-then-hash):
 
@@ -1198,8 +1195,8 @@ T10 sandbox-ctl snapshot(发起方进程)收到 done:
 - patched CH **不写** memory-ranges
 - sandbox-ctl 持有 memfd 自己 sparse 拷贝,**不经 CH→file→sandbox-ctl 的中转**
 - ZIP 内 snapshot.cfg 在 T5 一次写入即终态,**没有"事后回填重写 ZIP"步骤**
-- 8 GiB sandbox / 200 MiB 驻留:物理 I/O ~200 MiB(过去 ~24 GiB),延迟
-  ~1 s 量级
+- 8 GiB sandbox / 200 MiB 驻留:物理 I/O ~200 MiB(CH 通用快照路径 ~24 GiB),
+  延迟 ~1 s 量级
 - overlay 文件名内嵌 SHA256(content-addressable),同沙箱多次 snapshot 内容
   不变时自动同名
 
@@ -1320,7 +1317,8 @@ T14 sandbox-ctl 调 PUT /api/v1/vm.resume → vCPU 从 snapshot 时刻继续
     分层流内部:命中本快照 / 某祖先则取该层数据;合并空洞 → UFFDIO_ZEROPAGE(无取数)
 T15 vsock 连接发 restore{epoch=N, wallclock_ns} 给 sandbox-init(guest:5000 listener
      跨快照保留),等 restore_ack{stdio, app_state} 响应作为 guest agent ready 信号
-     (单次 deadline 5 s)。CH 把快照里的 CLOCK_REALTIME 原样载回,guest 墙钟落后
+     (deadline = `timeouts.restore`,默认不强制,§3.1)。CH 把快照里的
+     CLOCK_REALTIME 原样载回,guest 墙钟落后
      整个静置区间;sandbox-init 收到 restore 后先 clock_settime 把 CLOCK_REALTIME
      跳到 wallclock_ns(host 发送前一刻的墙钟,残留传播偏差亚毫秒),再回 ack——
      应用解除阻塞前墙钟已纠正。单调时钟不受影响(Go 定时器、ping RTT、mem_report
@@ -1455,13 +1453,13 @@ handler 消费完该事件才返回。(1) 的 fallocate 只丢 inode 页,**不**
 handler 收到 `EVENT_REMOVE` 后做 **process-level reclaim**:对 sandbox-ctl
 自己的 backendVA mmap 做 `madvise(MADV_DONTNEED)`,把进程级 PTE/RSS 份额清掉。
 
-**为什么冷启动收敛从数十秒降到近乎瞬时**。`release_memory_range` 在 x86-4K
-下**逐 4K 页**调用(`pbp` 合并被旁路)。改动前,把 balloon 充到 `capacity −
+**空洞跳过为何决定冷启动收敛速度**。`release_memory_range` 在 x86-4K
+下**逐 4K 页**调用(`pbp` 合并被旁路)。若不跳过空洞,把 balloon 充到 `capacity −
 allocatable_now`(1.5 GiB 量级)时**每个 4K 页**都走 (1)(2),而 (2) 的
 `MADV_DONTNEED` 在 uffd VMA 上**同步阻塞**到单 reader handler 消费完该
 `EVENT_REMOVE` 才返回——balloon 线程要做 `≈ 充气字节 / 4K`(1.5 GiB ≈ 40 万)
-次**串行的跨进程同步往返**。这串行握手(而非回收真实内存本身)就是数十秒
-收敛、以及之前偶发 boot 期软死锁的根因。
+次**串行的跨进程同步往返**,收敛达数十秒,且可在 boot 期形成软死锁。瓶颈是
+这串行握手,而非回收真实内存本身。
 
 guest balloon 驱动充气分配的页**从不被 guest 写入**(`balloon_page_alloc` 无
 `__GFP_ZERO`,平台 guest 内核未启用 `init_on_alloc`,fill 路径只动元数据),
@@ -1469,7 +1467,7 @@ guest balloon 驱动充气分配的页**从不被 guest 写入**(`balloon_page_a
 (实测冷启动 ~99%)在 memfd 上是从未触碰的空洞——无 inode 页、无 PTE、无可
 释放物。CH 的 release 用一次 `lseek(SEEK_DATA)` 探测该 run 是否整段空洞,
 空洞则**跳过 (1)(2)**(平台 patch,见
-[`cloud-hypervisor.md`](cloud-hypervisor.md) §3.4):无 madvise → 无同步握手,
+`sandbox-deps/docs/cloud-hypervisor.md` §3.4):无 madvise → 无同步握手,
 balloon 线程以内存速度扫过这 ~99% 的页 → **收敛近乎瞬时**。
 
 剩下少量(实测 ~1%)是 guest 启动期经 vhost-blk 后端 / 内核拉进 page cache
@@ -1582,9 +1580,9 @@ CH 命令行(三种模式都用,跟 cgroup 解耦):
   BalloonController 在 settled 之后(launch 握手完成)接管 target,把 balloon
   推到 `capacity − allocatable_now`。这批让出的页 ~99%(实测)是从未写过的
   空洞(memfd 稀疏未 prefault),CH 的 release 对空洞 run 跳过 PUNCH/madvise
-  →省去同步 `EVENT_REMOVE` 握手,**收敛从数十秒降到近乎瞬时**;少量确驻留的
+  → 省去同步 `EVENT_REMOVE` 握手,充气收敛近乎瞬时;少量确驻留的
   瞬态 page cache 仍合法回收(机制见 §8.5 与
-  [`cloud-hypervisor.md`](cloud-hypervisor.md) §3.4)
+  `sandbox-deps/docs/cloud-hypervisor.md` §3.4)
 - **不**启用 `free_page_reporting`。FPR 让 guest 在每轮 page reclaim 中把空闲
   页号高频推到 host,CH 的 `release_memory_range` 对自身 mmap 做
   `madvise(MADV_DONTNEED)` 广播 mmu_notifier 失效到 KVM EPT,持续的 IPI
@@ -1638,7 +1636,7 @@ deflate_on_oom 触发链路:
 
 ## 10. 与 node-ctl 的资源协议
 
-详细协议规范见 [`node.md`](node.md) §协议;本节描述 sandbox-ctl 侧的执行器
+详细协议规范见 `sandbox-sentinel/docs/node.md` §5;本节描述 sandbox-ctl 侧的执行器
 行为。
 
 ### 10.1 沙箱状态机
@@ -1764,7 +1762,7 @@ allocatable 初值必须够大才能避免 PSI 节流 / sensor 反复 burst。
 |---|---|---|
 | `resources.capacity.{cpu,memory}` | 与 snapshot.cfg 严格相等才允许;不一致拒绝启动(error: "capacity mismatch") | 直接用 snapshot.cfg.resources.capacity |
 | `resources.allocatable.*` | 与冷启动语义相同(host 资源策略) | 沿用冷启动默认(等于 capacity) |
-| `network.{tap\|tapfd}` | 必须(源二选一);tapfd 模式重新交接(§6 幂等)取新 fd,经 `--restore net_fds=[_net0@[4]]` 注入 CH;tap 名模式 CH 按名重开 | error: missing(restore 不能没网络源) |
+| `network.{tap\|tapfd}` | 必须(源二选一);tapfd 模式重新交接(docs/tapfd.md §4,幂等)取新 fd,经 `--restore net_fds=[_net0@[4]]` 注入 CH;tap 名模式 CH 按名重开 | error: missing(restore 不能没网络源) |
 | `network.{ip,mtu,nexthop,hostname,interface}` | 经 restore 通知重新下发,guest flush-and-replace 重配(克隆取新 L3 身份);MAC 不变(沿用快照设备状态,故 provider 须用稳定 per-port MAC) | 保留快照网络不变 |
 | `boot.kernel` | 静默忽略(restore 不 boot) | 同 |
 | `boot.runtime`(仅 file://) | basename + sha256 digest 与 snapshot.cfg.runtime_ref 全部匹配才允许;否则拒绝 | 用 snapshot.cfg.runtime_ref:basename 解析为 `<sid>.snapshot` 同目录文件 |
@@ -2043,8 +2041,6 @@ digest)随后在 `restore.ApplyRules` 拿到 bundle 时进行。额外:
 - **跨节点 live migration**:page server / source-on-demand 协议是另一个产品
   级特性。本系统是单节点 snapshot + restore
 - **多 memory zone**:NUMA / virtio-mem 用例;本设计是固定 spec、单 zone
-- **restore 后再 snapshot**:uffd-backed 内存做 snapshot 的状态收敛复杂度高;
-  本设计 snapshot/restore 是单向的
 - **多 sandbox 共享 sandbox-ctl**:per-sandbox 一进程是有意的架构选择(故障
   域、资源记账)
 
@@ -2059,7 +2055,7 @@ vmlinux 通过 `boot.kernel: file://...` 提供:
 - **in-guest userfaultfd 系统调用**:`CONFIG_USERFAULTFD` 未启用
 - **NR_CPUS 上限 4**
 
-详见 [`sandbox-kernel.md`](sandbox-kernel.md) §平台 ABI 边界。
+详见 `sandbox-deps/docs/sandbox-kernel.md` §3、§5。
 
 ### 14.3 扩展点(用例驱动)
 
@@ -2068,24 +2064,25 @@ vmlinux 通过 `boot.kernel: file://...` 提供:
 | **DISCARD with overlay.base layer** | 引入 manifest:// base + 本地 diff 部署形态 | 三态 stateMap(clean/dirty/discard,2 bits/block) |
 | **memory hotplug / virtio-mem** | 弹性扩缩用例 | uffd 动态 register、状态表扩容 |
 | **incremental snapshot** | 频繁 snapshot 同一 sandbox 的用例 | KVM_GET_DIRTY_LOG 接入 + log-mode CH 协调 |
-| **应用 quiesce hook** | 跨实例去重率超过 PROPOSAL §4 量化的"非确定性 50-70%"上限的用例 | sandbox-runtime quiesce 扩展项表 |
-| **in-place app restart** | `restart: on-failure/always` 真正同进程 refork(不 reboot) | sandbox-runtime §3.3 / §5.3;sandbox-ctl 退出码语义不变 |
+| **应用 quiesce hook** | 跨实例去重率超过 kuasar-sandbox.md §4.6 量化的"非确定性 50-70%"上限的用例 | sandbox-runtime.md §3.4 quiesce 扩展项表 |
 
 ## 15. See Also
 
 - [`sandbox-runtime.md`](sandbox-runtime.md) —— guest 内 sandbox-init 三阶段
   与 vsock 控制面协议
-- [`cloud-hypervisor.md`](cloud-hypervisor.md) —— CH patches、命令行选项、
+- `sandbox-deps/docs/cloud-hypervisor.md` —— CH patches、命令行选项、
   外部托管内存契约
-- [`sandbox-kernel.md`](sandbox-kernel.md) —— guest kernel defconfig、平台
+- `sandbox-deps/docs/sandbox-kernel.md` —— guest kernel defconfig、平台
   ABI 边界
-- [`node.md`](node.md) —— 资源控制协议规范、节点级仲裁、admission、reclaimer
-- [`manifest.md`](manifest.md) —— manifest:// 资源拉取通道(blk0 base、
-  snapshot)
-- [`cache.md`](cache.md) —— sandbox-ctl 通过 cache-ctl 客户端做 chunk-level
-  请求
-- [`flatten.md`](flatten.md) —— 构建 boot.root.base 的 EROFS 镜像
-- [`build.md`](build.md) —— sandbox-ctl + sandbox-init + cloud-hypervisor +
-  vmlinux 的整体构建流程
-- [`perf.md`](perf.md) —— 沙箱性能基线与密度调优
-- `PROPOSAL.md` §4 / §6.9-6.11 / §10.2 —— 沙箱在系统中的位置与目标
+- `sandbox-deps/docs/build.md` —— 原生依赖(mkfs.erofs / vmlinux /
+  cloud-hypervisor / envd)的构建流程
+- `sandbox-sentinel/docs/node.md` —— 资源控制协议规范、节点级仲裁、
+  admission、reclaimer
+- `sandbox-accelerator/docs/manifest.md` —— manifest:// 资源拉取通道
+  (blk0 base、snapshot)
+- `sandbox-accelerator/docs/cache.md` —— sandbox-ctl 通过 cache-ctl 客户端做
+  chunk-level 请求
+- `sandbox-builder/docs/flatten.md` —— 构建 boot.root.base 的 EROFS 镜像
+- `kuasar-sandbox/docs/perf.md` —— 沙箱性能基线与密度调优
+- `kuasar-sandbox/docs/kuasar-sandbox.md` §2.4 / §3.3 / §4.6 —— 沙箱在系统中的
+  位置与目标

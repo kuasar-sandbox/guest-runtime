@@ -135,7 +135,7 @@ func bindVsockListener(port uint32) (int, error) {
 // doesn't close the conn out from under the session.
 //
 // The listener fd lives for the entire sandbox lifetime and is **never
-// closed by quiesce** (§9.1.5) — closing it would cut off the host's
+// closed by quiesce** (docs/sandbox-runtime.md §3.4) — closing it would cut off the host's
 // subsequent restore / attach.
 //
 // sup carries the exec registry (exec sessions register their children
@@ -363,7 +363,7 @@ func notifyAppStarted(pid int) error {
 // notifyMemReport dials the host launch UDS and pushes a /proc/meminfo
 // snapshot. Best-effort: errors logged, the next ticker iteration tries
 // again. Used by the host-side balloon controller (replaces
-// virtio-balloon free-page-reporting, see docs/sandbox.md §known-issues).
+// virtio-balloon free-page-reporting, see docs/sandbox.md §14).
 func notifyMemReport(memAvailable, memTotal uint64) error {
 	conn, err := dialVsock(proto.VsockHostCID, proto.LaunchPort)
 	if err != nil {
@@ -391,7 +391,7 @@ func notifyMemReport(memAvailable, memTotal uint64) error {
 // notifyAppExited dials the host launch UDS and sends a short-conn
 // app_exited notification. sig != 0 means the app was killed by that
 // signal (code is then 128+sig per the shell convention). Best-effort —
-// the guest reboots regardless of outcome (§9.1.6).
+// the guest reboots regardless of outcome (docs/sandbox-runtime.md §3.3).
 func notifyAppExited(code, sig int) {
 	conn, err := dialVsock(proto.VsockHostCID, proto.LaunchPort)
 	if err != nil {

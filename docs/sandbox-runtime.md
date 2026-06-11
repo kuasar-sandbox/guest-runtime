@@ -41,7 +41,7 @@ page cache 的密度收益。
                                        ├──── conn: ping ─────────►│      app sees itself PID 1
                                        │◄─── conn: app_started ───┤
                                        │                          │
-   /run/sandbox/<sid>/vsock.sock  ◄────────────┤◄─── conn: app_exited ────┤    user app exits
+   /run/sandbox/<sid>/vsock.sock  ◄────┤◄─── conn: app_exited ────┤    user app exits
                                        │                          │    reboot()
                                        │◄─── CH exits ────────────┤
 ```
@@ -79,13 +79,14 @@ page cache 的密度收益。
 组件(如 `/opt/sandbox-runtime/bin/envd`)放此处,经 virtio-pmem + DAX 跨 sandbox
 共享一份、与 sandbox-init 原子同版;phase1a 把它 bind 进新 root 同名路径(§3.1),
 应用在自身 rootfs 内以**只读**看到它,且该路径遮蔽 app 镜像在此的任何内容(§5.2)。
-当前为空占位,payload 后续填充。
+当前为空占位。
 
 镜像小(~15 MiB)+ DAX 直接映射 host page cache,N 个 sandbox 共享同一份内存
 工作集(实际 ~10 MiB 驻留)。EROFS 文件格式 endian-neutral,任意 host arch 上
 的 mkfs.erofs 都可生成镜像;镜像内的 `/sbin/init` 是 target arch 二进制。
 
-构建方式见 [`build.md`](build.md) `make sandbox-runtime` target。
+构建经本仓 `make sandbox-runtime`(需 sandbox-deps 的 mkfs.erofs;详见
+`sandbox-deps/docs/build.md` §2.1)。
 
 ## 3. sandbox-init 三阶段
 
@@ -355,7 +356,7 @@ target 锚定在合理水位(详见 [`sandbox.md`](sandbox.md) §9.3);失败仅�
 quiesce 是 host `/vm.pause` 之前的最后一次清理机会,目标两件事:
 
 1. 把跨实例 snapshot 的内存与磁盘状态推向"确定性",让分块去重率从 50-70% 升至
-   >90%(PROPOSAL §4)。
+   >90%(`kuasar-sandbox/docs/kuasar-sandbox.md` §4.6)。
 2. **让 MUX 与端口转发连接在快照前彻底关闭**——快照绝不能捕获一条半开/握手中途的
    MUX 连接,或一条仍在飞的 `connect` 端口转发连接(restore 出来后无对端,成为
    悬挂状态;§4.6 / §3.7)。
@@ -395,10 +396,10 @@ quiesce 是 host `/vm.pause` 之前的最后一次清理机会,目标两件事:
   与 memory dump 看到的是一致状态
 - **drop_caches=3**:page cache 是确定性 snapshot 的核心污染源;同一应用不同启动
   序的 page cache 内容按访问顺序、prefetch 时序差异化堆积,跨实例 ~90% 不同;drop
-  后每实例 restore 后 page cache 初值统一为空,直接对应 PROPOSAL §4 量化的"确定性
+  后每实例 restore 后 page cache 初值统一为空,直接对应 kuasar-sandbox.md §4.6 量化的"确定性
   50→90% dedup"差距来源。sandbox-init 是 PID 1 root,write 无权限障碍
 
-**扩展项(v2,协议预留扩展位)**:
+**扩展项(未实现;协议预留扩展位)**:
 
 | 动作 | 说明 |
 |---|---|
@@ -412,8 +413,8 @@ quiesce 是 host `/vm.pause` 之前的最后一次清理机会,目标两件事:
 - **不**终止 user app、**不**向其发信号——quiesce 不是 sigterm;应用是被 cgroup
   v2 freezer **冻结**(step 0,对应用透明,非信号、非终止),不再依赖"停读输出"
   的自然反压
-- **不**重置 RNG / 熵池——熵池重新播种属 restore 路径职责(本轮未实现,见
-  §4.3 `restore` 行的 deferred 注)
+- **不**重置 RNG / 熵池——熵池重新播种属 restore 路径职责(未实现,见
+  §4.3 `restore` 行)
 - **不**清理 /var/log 等运行时日志——应用职责
 
 **错误处理**:
@@ -640,7 +641,7 @@ vsock 端口固定 `5000`,**两个方向都复用同一端口号**,身份按方�
 | **健康探测** | host→guest | `ping{id, t_send_ns}` → `pong{id, t_send_ns}` | 关 | host 计 RTT / 超时 / 失败数(§4.9) |
 | **mem 报告** | guest→host | `mem_report{mem_avail, mem_total}` → `mem_report_ack` | 关 | guest 周期上报 `/proc/meminfo`,喂 host BalloonController |
 | **快照前** | host→guest | `quiesce` → `quiesced` | 关 | guest 冻结应用进程树 + 跑 prep + 关闭 MUX(§3.4),`quiesced` ⇒ 应用已冻结、可安全 `/vm.pause` |
-| **恢复后** | host→guest | `restore{epoch, wallclock_ns, network?, files?}` → `restore_ack{stdio, app_state}` | **升级 MUX** | 快照恢复 vCPU 起跑后 host 通知 guest;应用此时仍处 freezer 冻结态(冻结态随快照保存,`/vm.resume` 不解冻);`restore` 携带 host 发送前一刻的墙钟 `wallclock_ns`,guest 收到后先 `clock_settime` 把 `CLOCK_REALTIME` 跳到该值(CH 把快照里的旧钟原样载回,不纠正则落后整个静置区间;单调钟不受影响);若带 `network`,以 **flush-and-replace** 重配 L3(克隆取新 IP/MTU/nexthop/hostname;MAC 沿用快照设备状态不变);若带 `files`,把该实例专属文件(per-instance secret / resolv.conf)注入(同冷启动的内存盘 + bind 机制,仅落克隆内存、不入黄金快照)。两者均 best-effort + 记日志、thaw 前完成;回 `restore_ack`(ATTACH_ACK 的超集 + "恢复完成"信号,host 据此判定 restore 完成)、重连 MUX,**最后 thaw 应用**(write `cgroup.freeze=0`)——故应用绝不会观察到旧墙钟、错误网络、缺失的 per-instance 文件或未重连的 MUX。**RNG 重播种仍 deferred(未实现)**;该连接成为新 MUX |
+| **恢复后** | host→guest | `restore{epoch, wallclock_ns, network?, files?}` → `restore_ack{stdio, app_state}` | **升级 MUX** | 快照恢复 vCPU 起跑后 host 通知 guest;应用此时仍处 freezer 冻结态(冻结态随快照保存,`/vm.resume` 不解冻);`restore` 携带 host 发送前一刻的墙钟 `wallclock_ns`,guest 收到后先 `clock_settime` 把 `CLOCK_REALTIME` 跳到该值(CH 把快照里的旧钟原样载回,不纠正则落后整个静置区间;单调钟不受影响);若带 `network`,以 **flush-and-replace** 重配 L3(克隆取新 IP/MTU/nexthop/hostname;MAC 沿用快照设备状态不变);若带 `files`,把该实例专属文件(per-instance secret / resolv.conf)注入(同冷启动的内存盘 + bind 机制,仅落克隆内存、不入黄金快照)。两者均 best-effort + 记日志、thaw 前完成;回 `restore_ack`(ATTACH_ACK 的超集 + "恢复完成"信号,host 据此判定 restore 完成)、重连 MUX,**最后 thaw 应用**(write `cgroup.freeze=0`)——故应用绝不会观察到旧墙钟、错误网络、缺失的 per-instance 文件或未重连的 MUX。**RNG 重播种未实现**;该连接成为新 MUX |
 | **MUX 重连** | host→guest | `attach{epoch}` → `attach_ack{stdio, app_state}` | **升级 MUX** | 纯 stdio-MUX 传输重连:MUX 因 vsock 异常断了,host 拨新连接重建;guest 优雅关旧 MUX(已断则硬丢)、回 ack,该连接成为新 MUX(§4.6)。**attach ≠ 快照后 resume**——活 VM 上从未 quiesce 的断线兜底也走它。thaw 不属 attach 语义,而属 quiesce 生命周期(freeze 的逆),**由 guest 自身冻结状态驱动**:仍冻结才补 thaw(仅 `resume_after=true` 同进程续跑路径——VM 原地 resume,attach 恰为首个 post-resume 接触),活 VM 重连本未冻结即跳过 |
 | **执行命令** | host→guest | `exec{spec}` → `exec_ack{stdio}` | **升级 MUX(独立会话)** | guest 为这条 `exec` 起一个兄弟进程并准备其 stdio,回 `exec_ack`,该连接成为这次 exec 会话**独立**的 MUX;并发多条互不影响;命令结束 guest 在 MUX 上发 EXIT_STATUS 再走 §4.6 关闭。详见 §3.6 |
 | **端口转发** | host→guest | `connect{spec}` → `connect_ack` | **升级转发数据通道** | guest 为这条 `connect` 取得 `ConnectSpec.address` 上的目标连接——dial(默认)或 `Accept`(`spec.accept`,accept 模式可无限期阻塞,host 无 deadline park)——回 `connect_ack`,该连接成为这条转发的 fwd 帧数据通道(§4.7),保留 TCP 半关闭;并发多条互不影响;quiesce 时主动拆除(§3.4)。详见 §3.7 |
@@ -914,12 +915,12 @@ restore 语义干净)。
 | sandbox-ctl 完成 `quiesce` 写入 | stop |
 | CH 进程退出 | stop |
 
-**默认参数**(可由 sandbox.yaml `health.ping:` 覆盖,**仅 interval 与 timeout**):
+**参数**:
 
-| 参数 | 默认 | 含义 |
+| 参数 | 值 | 含义 |
 |---|---|---|
-| `interval` | 1 s | 两次 ping 起始时刻间隔 |
-| `timeout` | 200 ms | 单次 dial+write+read 总预算;到点视为失败 |
+| `interval` | 1 s(固定) | 两次 ping 起始时刻间隔 |
+| `timeout` | sandbox.yaml `timeouts.ping`;默认不强制(生产档 200 ms) | 单次 dial+write+read 总预算;到点视为失败。启用 `--ping-fatal-threshold` 时须设有界值(sandbox.md §2.2 / §3.1) |
 
 **指标**(sandbox-ctl 暴露,统计窗口 = 沙箱生命周期):`ping_attempts_total` /
 `ping_success_total` / `ping_timeout_total` / `ping_dial_error_total` /
@@ -949,17 +950,23 @@ restore 语义干净)。
 - `quiesce` 在 deadline 内未收到 `quiesced` → host 视为协议失败,**放弃此次 snapshot**
   (绝不带半状态/半开 MUX 快照),sandbox 继续运行
 
+host 侧凡由 sandbox.yaml `timeouts.*` 接管的项以配置为准,默认不强制(host 等待
+任意时长,dial 仍有界;详见 [`sandbox.md`](sandbox.md) §3.1);其余为 `pkg/proto`
+协议常量:
+
 | 消息 | 单次 deadline | 备注 |
 |---|---|---|
-| `hello` | guest dial 重试预算 5 s + host 侧短探活 deadline | 冷启动早期 host listener 可能短暂未起,指数退避保留;host 读 hello 用短 deadline 兜底"只连不 hello"的死 guest |
+| `hello` | guest dial 重试预算 5 s;host 读死线 `timeouts.app_notify`(默认不强制) | 冷启动早期 host listener 可能短暂未起,guest 指数退避重试 |
 | `launch_ack`(host 等待) | `launch.start_timeout`,空 / 0 = **无限期** | launch_ack 在 guest 把 spec 全部应用完(含可能很长的 `init`)后才发,故 host 读它的 deadline 由 start_timeout 控制;默认无限期(init 可任意长),生产建议显式设值,否则卡死的 guest 无 host 侧超时。此连接随后转 MUX |
-| `app_started` | 200 ms | 健康路径 µs 级,deadline 仅作 host 协程泄漏兜底 |
-| `app_exited` | 200 ms | ack 拿不到也照常 reboot |
-| `ping` | 200 ms | 1 s interval 下足够裕度;到点计入 `ping_timeout_total` |
+| `app_started` | guest 侧 200 ms(dial+write+读 ack);host 读死线 `timeouts.app_notify`(默认不强制) | 健康路径 µs 级;guest 侧短预算作"host 已死"的快速失败 |
+| `app_exited` | 同 `app_started` | ack 拿不到也照常 reboot |
+| `ping` | `timeouts.ping`(默认不强制;生产档 200 ms) | 到点计入 `ping_timeout_total`;启用 `--ping-fatal-threshold` 须设有界值 |
 | `quiesce` | 8 s | guest 要 drop caches + 停读 app pipe + MUX_CLOSE 一来回;留足头部 |
-| `restore` / `attach` | 5 s | kernel vsock 层在此期间 hold 住连接请求等 vCPU 跑起来 accept;此连接随后转 MUX |
-| `exec` | 10 s | 比 restore/attach 宽:guest 要 fork+exec 子进程并 PATH 解析后才回 `exec_ack`;仅覆盖握手段,连接转 MUX 后 deadline 清除 |
-| `mem_report` | 200 ms | guest 每 5 s 一次,host 失败仅记日志、controller 在下一 tick 用旧 hint |
+| `restore` | `timeouts.restore`(默认不强制) | kernel vsock 层在此期间 hold 住连接请求等 vCPU 跑起来 accept;恢复期大量缺页换入会拉长;此连接随后转 MUX |
+| `attach` | 5 s | 同 `restore` 的 hold 语义;此连接随后转 MUX |
+| `exec` | 10 s | 比 attach 宽:guest 要 fork+exec 子进程并 PATH 解析后才回 `exec_ack`;仅覆盖握手段,连接转 MUX 后 deadline 清除 |
+| `connect` | 10 s | 仅覆盖握手段(内含 guest 侧 dial 目标 ≤ 5 s);连接转 fwd 通道后 deadline 清除 |
+| `mem_report` | 同 `app_started` | guest 每 5 s 一次,host 失败仅记日志、controller 在下一 tick 用旧 hint |
 
 ## 5. 应用契约
 
@@ -1033,11 +1040,13 @@ sandbox.yaml `launch:` 节(yaml override 优先,Env merge),host sandbox-ctl 合�
 - `restart: never`:应用退出 → sandbox-init 收尾 MUX、发 `app_exited{code,term_signal}`
   → reboot → CH 退 → sandbox-ctl 退,sandbox 销毁。退出码(或致死信号)透传到
   sandbox-ctl 的进程退出码
-- `restart: on-failure` / `always`:v1 三种策略行为相同(通知 + reboot);同进程内
-  in-place refork 是 v2
+- `restart: always`:应用退出 → **原地重启**(同进程内 refork + rewireApp,§3.3),
+  沙箱长活、stdio MUX 跨重启存活,host 链路不断
+- `restart: on-failure`:非零退出 / 被信号杀 → 原地重启;干净退出 → 同 `never`
+  (通知 + reboot)
 
-Restart(v2)是同进程内 fork,**不**重新走整个 sandbox 启动序;快照恢复期被
-restore 的 sandbox-init 仍在原 supervisor 循环内。
+原地重启是同进程内 fork,**不**重新走整个 sandbox 启动序(退避 10ms→60s,存活满
+60s 重置;停机信号或 quiesce 窗口期间不重拉,§3.3)。
 
 ### 5.4 信号处理
 
@@ -1049,14 +1058,13 @@ restore 的 sandbox-init 仍在原 supervisor 循环内。
 - tty 模式下,host 终端在 raw 态时键盘 `^C`(0x03)作为字节经 MUX PTY 流送到 guest
   伪终端,由 guest 的行规程转成 SIGINT 发给应用——这是想要的;杀沙箱另走 SIGTERM
   或转义序列(详见 [`sandbox.md`](sandbox.md) §2.2)
-- `quiesce.signal`(v2 扩展)发给 user app 做应用层清理
+- `quiesce.signal`(§3.4 扩展项,未实现)发给 user app 做应用层清理
 
 ## 6. 扩展点
 
 | 扩展 | 引入条件 | 影响章节 |
 |---|---|---|
-| 应用 quiesce hook | 跨实例去重率超过 PROPOSAL §4 量化的"非确定性 50-70%" 上限的用例 | §3.4 quiesce 扩展项表 |
-| in-place app restart | `restart: on-failure/always` 真正同进程 refork(不 reboot) | §3.3 / §5.3 |
+| 应用 quiesce hook | 跨实例去重率超过 kuasar-sandbox.md §4.6 量化的"非确定性 50-70%" 上限的用例 | §3.4 quiesce 扩展项表 |
 | 应用 stderr 旁路 | 需要 host 侧 stdout 与 stderr 分流(终端模式天然无此区分,pipe 模式可加一条 vsock 旁路) | §3.5 / §4.5 |
 | 自带 vmlinux | 用户需要 cgroup 资源控制器(平台 kernel 仅带 v2 freezer)/ nested userfaultfd / 别的 kernel 特性 | sandbox-ctl `boot.kernel: file://...` |
 | 自带 sandbox-runtime | 用户应用对 PID 1 / supervisor 有特殊要求(罕见) | 平台不阻止,但失去 DAX 共享收益 |
@@ -1066,9 +1074,10 @@ restore 的 sandbox-init 仍在原 supervisor 循环内。
 
 - [`sandbox.md`](sandbox.md) §2.2(`run` 的 `--tty` / `--console` / stdio 标志)、
   §5.2(CH 冷启动命令行)、§6.2 / §6.3(snapshot 时序 / ctl.sock 协议)、§7(恢复)
-- [`sandbox-kernel.md`](sandbox-kernel.md) —— guest kernel 启用的 namespace /
+- `sandbox-deps/docs/sandbox-kernel.md` —— guest kernel 启用的 namespace /
   文件系统 / virtio-console / 网络功能为何如此
-- [`cloud-hypervisor.md`](cloud-hypervisor.md) §vsock hybrid 代理 —— vsock 在 host
+- `sandbox-deps/docs/cloud-hypervisor.md` §5.2 —— vsock hybrid 代理:host
   侧映射到 UDS 的 CONNECT 行格式;`--console` / `--serial` 的用法
-- [`build.md`](build.md) —— `make sandbox-runtime` 构建流程
-- `PROPOSAL.md` §4 "确定性 Guest 配置" —— quiesce prep 必做项的目标依据
+- `sandbox-deps/docs/build.md` §2.1 —— mkfs.erofs 构建(本仓 `make sandbox-runtime` 的前置工具)
+- `kuasar-sandbox/docs/kuasar-sandbox.md` §4.6 —— quiesce prep 必做项的目标依据
+  (确定性 guest 配置)

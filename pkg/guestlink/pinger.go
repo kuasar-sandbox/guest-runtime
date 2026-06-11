@@ -42,7 +42,7 @@ func (c *PingerConfig) withDefaults() PingerConfig {
 // reverse-channel listener. It owns a HostClient and a PingStats
 // counter aggregator.
 //
-// Lifecycle (§9.1.4):
+// Lifecycle (docs/sandbox-runtime.md §4.9):
 //
 //   - Created by sandbox.Run / restore.Run with the per-sandbox vsock
 //     base path.
@@ -124,7 +124,7 @@ func (p *Pinger) Stop() {
 
 // Pause halts ping send temporarily without tearing the goroutine down.
 // Used during snapshot quiesce window so the host doesn't dial guest
-// while it's pre-paused (§9.1.4 quiesce → /vm.pause sequence).
+// while it's pre-paused (docs/sandbox.md §6.2 quiesce → /vm.pause sequence).
 func (p *Pinger) Pause()  { p.paused.Store(true) }
 func (p *Pinger) Resume() { p.paused.Store(false) }
 
