@@ -58,6 +58,7 @@ BUILD_DIR      := build/$(TARGET_ARCH)
 TARBALL_DIR    := build/tarball
 
 EROFS_BIN   := $(abspath $(BINDIR)/mkfs.erofs)
+TAR_BIN     := $(abspath $(BINDIR)/tar)
 CH_BIN      := $(abspath $(BINDIR)/cloud-hypervisor)
 VMLINUX_BIN := $(abspath $(BINDIR)/vmlinux)
 ENVD_BIN    := $(abspath $(BINDIR)/envd)
@@ -65,6 +66,8 @@ ENVD_BIN    := $(abspath $(BINDIR)/envd)
 # Upstream tarballs + optional SHA256 (scripts skip verify when empty).
 EROFS_TARBALL                   ?= https://github.com/erofs/erofs-utils/archive/refs/tags/v1.9.1.tar.gz\#erofs-utils-v1.9.1.tar.gz
 EROFS_TARBALL_SHA256            ?=
+TAR_TARBALL                     ?= https://ftp.gnu.org/gnu/tar/tar-1.35.tar.gz\#tar-1.35.tar.gz
+TAR_TARBALL_SHA256              ?=
 LINUX_TARBALL                   ?= https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.1.169.tar.gz
 LINUX_TARBALL_SHA256            ?=
 CLOUD_HYPERVISOR_TARBALL        ?= https://github.com/cloud-hypervisor/cloud-hypervisor/archive/refs/tags/v51.1.tar.gz\#cloud-hypervisor-51.1.tar.gz
@@ -129,7 +132,7 @@ endef
 # ---------------------------------------------------------------------------
 # Targets
 # ---------------------------------------------------------------------------
-.PHONY: all build erofs cloud-hypervisor vmlinux envd \
+.PHONY: all build erofs tar cloud-hypervisor vmlinux envd \
         ch-fetch ch-patches-apply ch-patches ch-patches-format ch-build \
         linux-fetch linux-patches-apply linux-patches linux-patches-format linux-build \
         clean help
@@ -138,7 +141,7 @@ all: build
 
 # All native artifacts. cloud-hypervisor and vmlinux are multi-minute cold
 # builds; erofs + envd are the fastest (subminute on a warm tarball cache).
-build: cloud-hypervisor vmlinux erofs envd
+build: cloud-hypervisor vmlinux erofs tar envd
 
 # --- erofs-utils (mkfs.erofs) ----------------------------------------------
 erofs: $(EROFS_BIN)
@@ -148,6 +151,15 @@ $(EROFS_BIN):
 	EROFS_TARBALL_SHA256="$(EROFS_TARBALL_SHA256)" \
 		bash deps/build-erofs.sh
 	$(call link_bin,mkfs.erofs)
+
+# --- GNU tar (static; flatten-ctl tar/rootfs engine) ------------------------
+tar: $(TAR_BIN)
+$(TAR_BIN):
+	$(DEPS_ENV) \
+	TAR_TARBALL="$(TAR_TARBALL)" \
+	TAR_TARBALL_SHA256="$(TAR_TARBALL_SHA256)" \
+		bash deps/build-tar.sh
+	$(call link_bin,tar)
 
 # --- envd (e2b guest agent; injected into sandbox-runtime-e2b.erofs) -------
 envd: $(ENVD_BIN)
@@ -204,13 +216,14 @@ clean:
 	# Preserve build/tarball/ (re-downloading source is expensive) and the
 	# arch-neutral source trees under build/src/ (may contain WIP patch dev
 	# under build/src/cloud-hypervisor/.git, build/src/linux/.git).
-	rm -rf $(CLOUD_HYPERVISOR_BUILD_OUT) $(LINUX_BUILD_OUT) $(BUILD_DIR)/src/erofs-utils
+	rm -rf $(CLOUD_HYPERVISOR_BUILD_OUT) $(LINUX_BUILD_OUT) $(BUILD_DIR)/src/erofs-utils $(BUILD_DIR)/src/gnu-tar
 	rm -rf bin
 
 help:
 	@echo "sandbox-deps — native dependency builds. Targets:"
-	@echo "  build (=all)          cloud-hypervisor + vmlinux + erofs + envd (multi-min cold)"
+	@echo "  build (=all)          cloud-hypervisor + vmlinux + erofs + tar + envd (multi-min cold)"
 	@echo "  erofs                 build mkfs.erofs (erofs-utils)"
+	@echo "  tar                   build static GNU tar (flatten-ctl tar/rootfs engine)"
 	@echo "  vmlinux               build the guest kernel (~5-10 min cold)"
 	@echo "  cloud-hypervisor      build the patched VMM (~minutes cold)"
 	@echo "  envd                  build the e2b guest agent (e2b-dev/infra; pin via ENVD_TARBALL)"
