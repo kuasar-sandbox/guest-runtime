@@ -1,8 +1,8 @@
 # cloud-hypervisor — VMM 与平台 patches
 
 平台用 cloud-hypervisor(CH)作为 microVM 监视器。绝大多数路径跑 upstream
-行为,只有快照路径与外部托管内存通过我们维护的 3 个 patch 进入 sandbox-ctl
-提供的 memfd + uffd 模型。本文档定义 patch 范围、构建工作流、以及外部托管
+行为,只有快照路径与外部托管内存通过本仓维护的 4 个 patch 进入 sandbox-ctl
+提供的 memfd + uffd 模型。本文档定义 patch 范围、构建方式、以及外部托管
 内存模式的行为契约。
 
 ## 1. 概述
@@ -21,7 +21,8 @@
 
 这两点 upstream CH 都不直接支持。第二条尤其本质——upstream uffd handler 模型
 是 CH 调外部 socket,handler 提供数据,但平台需要 handler 接管 fault 投递
-路由,upstream 的 listener 模型不够。
+路由,upstream 的 listener 模型不够。此外这一模型带来一条派生修复:balloon
+释放路径对从未驻留的空洞 run 不能合成 `EVENT_REMOVE` 风暴(patch 0004,§3.4)。
 
 ### 1.2 patch 范围(总结)
 
@@ -34,12 +35,13 @@
 | `virtio-devices/src/balloon.rs` | ~38 | balloon release 对 user-managed zone 的空洞 run 跳过 `PUNCH_HOLE`/`MADV_DONTNEED`(`SEEK_DATA` 探测)|
 | `virtio-devices/src/seccomp_filters.rs` | ~8 | balloon 线程 seccomp 放行 `SYS_lseek`(skip-hole 探测所需)|
 
-总计 ~429 行 Rust（约数）+ 4 个 cohesive commits。基于 cloud-hypervisor `v51.1`。
+总计 ~429 行 Rust、4 个 commit,基于 cloud-hypervisor `v51.1`。
 
 ### 1.3 维护策略
 
 - patch 文件位置:`deps/ch-patches/000{1,2,3,4}-*.patch`
-- 应用方式:`make ch-patches-apply`(在 `make cloud-hypervisor` 内自动调)
+- 应用方式:`make ch-patches-apply`(在 `make cloud-hypervisor` 内自动调);
+  开发循环与幂等 sanity 语义见 sandbox-deps `docs/build.md` §3
 - 跟 upstream rebase:每个 CH 大版本(~3 月)review 一次,几行 conflict
   人工 fix
 - **不**尝试上游化:patch 设计选择(SCM_RIGHTS in-process + create_ram_region
@@ -74,7 +76,7 @@ cloud-hypervisor \
 # fd=3 ← memfd from sandbox-ctl via cmd.ExtraFiles[0]
 ```
 
-详细命令行(冷启动 / 恢复)见 [`sandbox.md`](sandbox.md) §冷启动 与 §恢复。
+详细命令行(冷启动 / 恢复)见 `sandbox-runtime/docs/sandbox.md` §5.2 与 §7。
 
 ## 3. patch 提交结构
 
@@ -218,87 +220,24 @@ process-level reclaim,而空洞 offset sandbox-ctl 也从未 fault → 那一步
 **同步阻塞**到外部单 reader handler 消费完 `EVENT_REMOVE` 才返回——
 `≈ 充气字节 / 4K` 次串行跨进程往返,正是数十秒收敛(及偶发 boot 软死锁)
 的根因。改动后冷启动充气页**实测 ~99% 是从未触碰的空洞**,`lseek(SEEK_DATA)`
-探测后跳过 (1)(2):无 madvise → 无同步握手 → balloon 线程以内存速度扫过
-→ **收敛近乎瞬时**。剩 ~1% 是 guest 启动期经 vhost-blk / 内核进过 page
+探测后整段跳过 `PUNCH_HOLE` 与 `MADV_DONTNEED`:无 madvise → 无同步握手 →
+balloon 线程以内存速度扫过 → **收敛近乎瞬时**。剩 ~1% 是 guest 启动期经 vhost-blk / 内核进过 page
 cache 又释放、folio 仍驻留 memfd 的页,`lseek` 见数据**不跳过**,照常回收
 ——有界合法,行为同 upstream。guest 退出时整 zone unmap 产生的大
 `EVENT_REMOVE` 与本 patch 无关、不计入充气阶段。x86-4K 下空洞探测退化为每
 页一次 `lseek`——纯 in-kernel xarray 走查,无事件 / 无 handler 握手 / 无
-共享 inode madvise 争用,本地廉价;把连续 PFN 在 inflate 队列合并成 run
-再探测是后续可选优化,不在本 patch 范围。
+共享 inode madvise 争用,本地廉价。
 
 ## 4. 构建工作流
 
-`deps/build-cloud-hypervisor.sh` 是多阶段 dispatcher,STAGE 选择阶段:
+产物由 sandbox-deps 仓构建:`make cloud-hypervisor` = 取 pin 的 v51.1 tarball +
+`git am deps/ch-patches/*.patch` + `cargo build --release --locked`,冷构建
+~5-10 min、热(cargo 缓存)秒级,产物 `bin/<arch>/cloud-hypervisor`。构建以
+`--remap-path-prefix` 把源树与 registry 依赖映射为相对路径 / `/cargo` 前缀,
+panic 消息与 DWARF 不泄漏构建机绝对路径。
 
-| STAGE | 输入 | 输出 | 何时用 |
-|-------|------|------|--------|
-| `fetch` | tarball | 解压 + git init + tag `ch-patches-base` | 一次性,首次构建前 |
-| `patches-apply` | `deps/ch-patches/*.patch` | `git am` 到源树 | `make cloud-hypervisor` 自动调 |
-| `patches-format` | 当前源树 commits | 提取到 `deps/ch-patches/*.patch` | patch 开发后回写 |
-| `build` | 已 patched 源树 | `bin/<arch>/cloud-hypervisor` | `make cloud-hypervisor` 自动调 |
-
-### 4.1 标准 build
-
-```bash
-make cloud-hypervisor
-# = STAGE=fetch + STAGE=patches-apply + STAGE=build
-# 冷构建 ~10 min,热(cargo cache)~秒级
-```
-
-### 4.2 patch 开发流
-
-需要修改 patch 时:
-
-```bash
-# 1. 一次性:拉源码 + git tag base
-make ch-fetch
-
-# 2. 在源树里改代码 + commit
-cd build/src/cloud-hypervisor
-# ... 编辑 vmm/src/memory_manager.rs ...
-git -c user.name=dev -c user.email=dev@local commit -am "...".
-
-# 3. 把 commits 提取回 deps/ch-patches/*.patch
-make ch-patches-format
-
-# 4. 重新应用 + build,验证可重复
-make cloud-hypervisor
-```
-
-`patches-apply` 会做 sanity 检查:
-
-- 目标 git tree 必须有 `ch-patches-base` tag
-- 若 HEAD == base:`git am` 应用所有 patches
-- 若 HEAD 已经 = base + patches.len() 个 commits 且 subject 完全匹配:
-  视为已应用,跳过(幂等)
-- 任何其他状态:报错并指引"先 `make ch-patches-format` 保 WIP,然后
-  `git reset --hard ch-patches-base`,再重跑"——避免静默覆盖未保存的开发中改动
-
-### 4.3 交叉编译
-
-跨架构构建走 `RUST_TARGET` + `${CROSS_PREFIX}gcc` 链:
-
-```bash
-# x86_64 host 上交叉构建 aarch64 cloud-hypervisor
-make TARGET_ARCH=aarch64 cloud-hypervisor
-# script 内:
-#   --target=aarch64-unknown-linux-gnu
-#   CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
-```
-
-需要 `rustup target add <target>` 提前安装目标 std 库。
-
-### 4.4 WSL2 注意
-
-CH 源树 ~50K 文件、cargo target ~2 GiB。WSL2 在 `/mnt/<drive>/` (DrvFs)上每
-小文件 5-10× I/O 开销。建议覆盖 `CH_SRC` + `CH_BUILD_OUT`:
-
-```bash
-CH_SRC=~/ch-build/src CH_BUILD_OUT=~/ch-build/out make cloud-hypervisor
-```
-
-把构建工件放到 Linux-native 文件系统(ext4 over WSL2)。
+patch 开发循环(`ch-fetch` / `ch-patches-format`、`patches-apply` 的幂等
+sanity 检查)、交叉编译与 WSL2 注意统一见 sandbox-deps `docs/build.md` §3-§5。
 
 ## 5. 启动协议(per-arch)
 
@@ -332,8 +271,8 @@ virtio-mem     → host-driven 主动 unplug(扩展点)
 恢复路径设备拓扑通过 `--restore source_url=<state.json dir>` 从 snapshot
 state 还原,不需要重新指定 `--kernel` / `--vsock`。
 
-详细命令行示例与冷启动/恢复差异见 [`sandbox.md`](sandbox.md) §冷启动数据流
-与 §恢复数据流。
+详细命令行示例与冷启动/恢复差异见 `sandbox-runtime/docs/sandbox.md` §5(冷启动
+数据流)与 §7(恢复数据流)。
 
 ### 5.2 vsock hybrid 代理
 
@@ -349,8 +288,8 @@ host → guest 方向需要在第一笔写入发 ASCII `CONNECT <port>\n`,CH 回
 `OK <local_port>\n`(host 须先排空再读后续 payload),之后 CH 把流量代理到 guest
 对应 port 的 listener。两个方向的连接对 CH 而言都是普通字节流——`launch` /
 `restore` / `attach` 这三种连接在应用层握手后由 sandbox-ctl / sandbox-init 自行
-转入帧收发态(stdio MUX),CH 不感知。详细见 [`sandbox.md`](sandbox.md) §5.2 与
-[`sandbox-runtime.md`](sandbox-runtime.md) §4.2。
+转入帧收发态(stdio MUX),CH 不感知。详细见 `sandbox-runtime/docs/sandbox.md` §5.2 与
+`sandbox-runtime/docs/sandbox-runtime.md` §4.2。
 
 ## 6. 行为契约总结
 
@@ -369,33 +308,32 @@ host → guest 方向需要在第一笔写入发 ASCII `CONNECT <port>\n`,CH 回
 | virtio-mem `vm.resize` | ✓ | ✓ |
 
 平台**不**使用 `free_page_reporting`——upstream 支持完好,但在统一 memfd /
-外部 uffd 模型下,CH `release_memory_range` 对自身 mmap 做
-`madvise(MADV_DONTNEED)` 会广播 mmu_notifier 失效到 KVM EPT,持续 IPI
-shootdown 饿死 guest vsock kthread。改由 host 端 BalloonController 通过
-`/vm.resize` 推 inflate target,事件量被反馈环 `MaxStep` 限速。host 推
-inflate 时,release 对 user-managed zone 的空洞 run 由 patch 0004(§3.4)
-跳过,因此冷启动充气(覆盖整个稀疏区间)根本不产生该 `madvise` 广播与
-`EVENT_REMOVE`;`MaxStep` 仅对运行时回收**已驻留**工作集页时仍然有意义。
+外部 uffd 模型下其持续 `madvise(MADV_DONTNEED)` 会广播 mmu_notifier 失效到
+KVM EPT,IPI shootdown 饿死 guest vsock kthread(机理与替代反馈环见
+[`sandbox-kernel.md`](sandbox-kernel.md) §5.5)。改由 host 端 BalloonController
+经 `/vm.resize` 推 inflate target,事件量被反馈环 `MaxStep` 限速;冷启动充气
+覆盖的稀疏区间由 patch 0004(§3.4)跳过,不产生 `madvise` 广播与
+`EVENT_REMOVE`,`MaxStep` 仅对运行时回收**已驻留**工作集页仍有意义。
 `deflate_on_oom` 是 upstream v51.1 原生,无需新 patch。
 
 ## 7. 已知限制
 
-- **patch 不向上游**:风格偏差 + 用例特殊,维护成本由本项目承担
 - **CH v52+ 升级窗口**:每次 CH 大版本会有 `vmm/src/memory_manager.rs` 内部
-  重构,patch 0001/0002 通常需要小幅 rebase。0003 (uffd ioctl) 改动较大,需要
+  重构,patch 0001/0002 通常需要小幅 rebase。0003(uffd ioctl)改动较大,需要
   多花时间 review。0004 仅触 `virtio-devices/src/balloon.rs` 单函数
   (`release_memory_range`),rebase 面最小
-- **多 fd-backed zone**:本设计 v1 限定单 zone(整 8 GiB 一段)。多 zone(NUMA
-  / virtio-mem 横向扩展)是扩展点,需要在 patch 0003 处对每 zone 各自 sendmsg
+- **多 fd-backed zone**:当前限定单 zone(整段 sandbox RAM 一个 memfd)。多
+  zone(NUMA / virtio-mem 横向扩展)需要在 patch 0003 处对每 zone 各自 sendmsg
   一次,sandbox-ctl 端各自维护 addrMap
 
 ## 8. See Also
 
-- [`sandbox.md`](sandbox.md) §冷启动 / §恢复 —— sandbox-ctl 怎么用 patched CH
-  跑沙箱;命令行示例
-- [`sandbox.md`](sandbox.md) §uffd handler —— sandbox-ctl 接收到 uffd_C 之后
-  如何处理 fault 事件
+- `sandbox-runtime/docs/sandbox.md` §5(冷启动数据流,§5.2 CH 命令行)/ §7(恢复
+  数据流)—— sandbox-ctl 怎么用 patched CH 跑沙箱;命令行示例
+- `sandbox-runtime/docs/sandbox.md` §8(uffd handler)—— sandbox-ctl 接收到 uffd_C
+  之后如何处理 fault 事件
 - [`sandbox-kernel.md`](sandbox-kernel.md) —— guest kernel 如何配合 CH 启动
   协议(PVH / EFI stub)
-- [`build.md`](build.md) —— `make cloud-hypervisor` 工作流 + patch 开发循环
-- `PROPOSAL.md` §6.11 / §10.2 —— VMM + Guest 环境在系统中的位置
+- sandbox-deps `docs/build.md` —— `make cloud-hypervisor` 工作流与 patch
+  开发循环
+- `kuasar-sandbox/docs/kuasar-sandbox.md` §2.4 —— VMM 与 Guest 环境在系统中的位置

@@ -59,12 +59,11 @@ build         把 sandbox-common.config + sandbox-<arch>.config 拼接成
 幂等:`bin/<arch>/vmlinux` 存在则跳过(删了重跑或 `make clean && make vmlinux`
 强制重建)。
 
-**Patch 开发流**(与 cloud-hypervisor 的 ch-patches 流对称,见
-[`build.md`](build.md) §4.4):一次性 `make linux-fetch` 拉源码并打
-`linux-patches-base` tag;在 `build/src/linux/` 改代码 + `git commit`;
-`make linux-patches-format` 把 `base..HEAD` 的 commits 导出回
-`deps/linux-patches/*.patch`;`make vmlinux` 自动 apply + 重建。补丁是
-arch-neutral 的,x86_64 / arm64 共用同一组。
+**Patch 开发流**(与 cloud-hypervisor 的 ch-patches 流对称):`make linux-fetch`
+拉源码并打 `linux-patches-base` tag → 在 `build/src/linux/` 改代码 +
+`git commit` → `make linux-patches-format` 导出回 `deps/linux-patches/*.patch`
+→ `make vmlinux` 重新应用 + 构建。幂等与 sanity 语义统一见 sandbox-deps
+`docs/build.md` §3;补丁 arch-neutral,x86_64 / arm64 共用同一组。
 
 ### 2.1 host 构建依赖
 
@@ -182,7 +181,7 @@ CGROUPS=y                       仅为 cgroup v2 freezer:sandbox-init 在 quiesc
                                   地址相关,跨实例 page cache 差异化)
 ```
 
-平台契约边界(关闭 = guest app 看不到这些功能):
+平台 ABI 边界(关闭 = guest app 看不到这些功能):
 
 ```
 # cgroup 资源控制器全 not set       仅 v2 freezer 核心开(§3.1、§5.2);guest
@@ -195,16 +194,28 @@ CGROUPS=y                       仅为 cgroup v2 freezer:sandbox-init 在 quiesc
 NUMA not set                      沙箱永远单 zone 单 node
 ```
 
-调试 / 跟踪(全部关掉,~MiB 级镜像收益):
+调试 / 跟踪(重型设施全关,~MiB 级镜像收益):
 
 ```
-# DEBUG_KERNEL / DEBUG_INFO / FTRACE / KASAN / UBSAN / KMSAN / KFENCE
-# DEBUG_FS / MAGIC_SYSRQ / PROFILING / DEBUG_OBJECTS / DEBUG_KMEMLEAK
-# PROVE_LOCKING / RUNTIME_TESTING_MENU / KGDB
+# DEBUG_INFO / FTRACE / KASAN / UBSAN / KMSAN / KFENCE / DEBUG_FS
+# PROFILING / DEBUG_OBJECTS / DEBUG_KMEMLEAK / PROVE_LOCKING
+# RUNTIME_TESTING_MENU / KGDB
 DEBUG_INFO_NONE=y                 显式无 debug-info(默认即此,固化避免回归)
 LOG_BUF_SHIFT=14                  16 KiB printk ring(默认 17=128 KiB,
                                   默认值 ~50% 的内核启动期 RSS 会变成
                                   跨实例不同的 printk 内容)
+```
+
+例外是一组轻量诊断探测器,当前启用,在 config 中显式标注为临时诊断项
+(全部 print-only,不设任何 `*_PANIC`):
+
+```
+DEBUG_KERNEL=y                    诊断项的 Kconfig 伞(hung-task 等依赖)
+DETECT_HUNG_TASK=y                D 状态卡死打印(timeout 20 s,含锁/IO 等待栈)
+LOCKUP_DETECTOR=y                 CPU 困于内核态探测(+SOFTLOCKUP_DETECTOR)
+WQ_WATCHDOG=y                     workqueue 停转探测
+PSI=y                             内存 / IO 压力量化
+MAGIC_SYSRQ=y                     按需 sysrq-t/-w/-m
 ```
 
 安全 / 强化(单 VM = 单 app 模型不需要 host kernel 级强化):
@@ -216,8 +227,6 @@ LOG_BUF_SHIFT=14                  16 KiB printk ring(默认 17=128 KiB,
 # INTEGRITY not set               IMA / EVM
 # HARDENED_USERCOPY not set       userspace 拷贝边界检查
 # FORTIFY_SOURCE not set          libc 强化(guest userspace 不依赖)
-# LOCKUP_DETECTOR / SOFTLOCKUP    定时探测线程,跨实例 RNG seed 差异化
-# DETECT_HUNG_TASK
 ```
 
 ## 4. 架构差异
@@ -230,6 +239,7 @@ LOG_BUF_SHIFT=14                  16 KiB printk ring(默认 17=128 KiB,
 | 启动入口 | PVH(`PARAVIRT=y` + `XEN_PVH=y` + `PVH=y`)| EFI stub + ACPI(`EFI_STUB=y` + `ACPI=y`)|
 | BIOS / 固件 | 无,CH 直接跳 ELF entry | 无,CH 加载 PE Image,跳 EFI stub entry |
 | 启动结构 | zero-page 由 CH 填(memmap、cmdline) | FDT + ACPI 表由 CH 构造 |
+| SMP 副 CPU 拉起 | APIC INIT-SIPI | PSCI(`ARM_PSCI=y`,无 IPI/SIPI 概念) |
 | 内核镜像 subpath | `vmlinux` | `arch/arm64/boot/Image` |
 | make target | `vmlinux` | `Image` |
 
@@ -248,15 +258,15 @@ boot 时间;arm64 EFI stub 略慢(~80 ms)但仍亚百毫秒。
 
 | 项 | x86_64 | aarch64 |
 |---|---|---|
-| UART 驱动(编入,运行时未必用)| 8250(I/O port 0x3f8) | PL011 AMBA UART(MMIO) |
+| UART 驱动 | 无(8250 不编入) | PL011 AMBA UART(MMIO) |
 | virtio-console(hvc) | `VIRTIO_CONSOLE=y` | `VIRTIO_CONSOLE=y` |
-| Kconfig | (8250 内嵌核心) | `ARM_AMBA=y` + `SERIAL_AMBA_PL011=y` |
+| Kconfig | — | `ARM_AMBA=y` + `SERIAL_AMBA_PL011(_CONSOLE)=y` |
 
 **运行时控制台**:平台启动 CH 时带 `--console tty --serial off`,内核 cmdline 自动
-注入 `console=hvc0`——即内核 dmesg 走 virtio-console(hvc0),没有 8250/PL011 UART
-设备。UART 驱动仍编进内核只是为了用户自带场景与调试灵活性。应用的 stdin/stdout/
-stderr 不走任何 console 设备(走 vsock,见 [`sandbox-runtime.md`](sandbox-runtime.md)
-§3.5 / §4.5)。
+注入 `console=hvc0`——两架构的内核 dmesg 都走 virtio-console(hvc0)。x86_64 内核
+不编任何 UART 驱动;aarch64 编入 PL011(CH 在 arm64 暴露 PL011 设备,留作启动早期
+与调试控制台)。应用的 stdin/stdout/stderr 不走任何 console 设备(走 vsock,见
+`sandbox-runtime/docs/sandbox-runtime.md` §3.5 / §4.5)。
 
 ### 4.4 RTC
 
@@ -301,18 +311,15 @@ x86_64 页大小固定 4 KiB,无此问题。
 `CONFIG_CGROUPS=y` 只为 **cgroup v2 freezer** 一项能力:快照前 sandbox-init 要
 **原子冻结应用进程树**,restore 环境(墙钟等)就绪后再解冻,否则 `/vm.resume`
 先于 guest 处理 `restore` 解冻 vCPU,应用会带着旧墙钟 / 未重连的 MUX 抢跑一段
-(resume-vs-env-init 竞态;机制见 [`sandbox-runtime.md`](sandbox-runtime.md)
+(resume-vs-env-init 竞态;机制见 `sandbox-runtime/docs/sandbox-runtime.md`
 §3.4)。v2 freezer(`cgroup.freeze`,内核 ≥5.2)是 cgroup 核心的一部分,
 `CONFIG_CGROUPS=y` 即得,无独立 Kconfig;`CGROUP_FREEZER` 是 v1 旧冻结器,
 不需要。
 
 **所有资源控制器(`MEMCG` / CPU 带宽 / `BLK_CGROUP` / `CGROUP_PIDS` /
-`CGROUP_DEVICE` / …)仍全关**,因此旧设计担心的两点都不发生:
-
-- 无 memcg/cpuacct 记账层——guest 内不做任何资源记账
-- app cgroup 不设 memory limit → 无 guest 内 cgroup 内存边界,不会早于 host
-  期待的 `deflate_on_oom` 触发;资源边界仍由 host cgroup v2 限 CH + balloon
-  独占,与启用前完全一致
+`CGROUP_DEVICE` / …)仍全关**:guest 内无任何记账层,app cgroup 也没有 memory
+limit,不会早于 host 的 `deflate_on_oom` 触发 guest 内 OOM——资源边界仍由
+host cgroup v2 限 CH + balloon 独占。
 
 sandbox-init 建唯一固定 `/sys/fs/cgroup/app`,路径与结构每实例一致,不引入
 systemd 那种动态 cgroup 树的跨实例路径非确定性。systemd-style 服务管理或
@@ -328,7 +335,8 @@ sandbox-init,sandbox-init 用 raw netlink 配置。`ip_auto_config` initcall
 
 ### 5.4 为什么 NR_CPUS=4
 
-平台 fixed-spec 把 capacity.cpu 限到 1/2/4 三档(详见 sandbox.md §资源模型)。
+平台 fixed-spec 把 capacity.cpu 限到 1/2/4 三档(详见 `sandbox-runtime/docs/sandbox.md`
+§4 资源模型)。
 NR_CPUS=4 让 guest 内核数据结构(per-cpu / cpumask)按 4 核维度分配——
 NR_CPUS=8/16 多余的 per-cpu 字段会让跨实例 RAM 多出一些低利用率脏页。
 
@@ -343,14 +351,14 @@ timeout)。因此平台**关闭 free_page_reporting**——内核侧 `VIRTIO_BAL
 启用模块,但 CH 命令行不开 FPR feature。
 
 替代路径:host 端 BalloonController 周期(默认 5 s)从 guest 拉取 mem_report
-(MemAvailable/MemTotal,详见 sandbox-runtime.md §4.3),按反馈策略推
+(MemAvailable/MemTotal,详见 `sandbox-runtime/docs/sandbox-runtime.md` §4.3),按反馈策略推
 `PUT /api/v1/vm.resize` 改变 balloon target;guest balloon 驱动按 target inflate,
 CH 在 inflate 处理路径里 `fallocate(PUNCH_HOLE) + madvise(DONTNEED)`。事件量
 被反馈环 `MaxStep`(默认 ≤ 256 MiB/tick)限速,不会形成 IPI 风暴。
 
-`VIRTIO_MEM=y` 仍保留作扩展点:virtio-mem 是 host 主动 → guest unplug 路径,
-事件粒度大、批量少,适合 NUMA / 横向扩 zone 等场景。当前 v1 不依赖
-virtio-mem 路径,但保留驱动让未来扩展无需重打 vmlinux。
+`VIRTIO_MEM=y` 保留作扩展点:virtio-mem 是 host 主动 → guest unplug 路径,
+事件粒度大、批量少,适合 NUMA / 横向扩 zone 等场景。平台当前不依赖
+virtio-mem 路径,保留驱动使该扩展无需重打 vmlinux。
 
 ### 5.6 为什么打 virtio_balloon 收敛补丁(`deps/linux-patches/`)
 
@@ -366,7 +374,7 @@ host BalloonController 按反馈推 `vm.resize` target(§5.5),目标值可能一
 反复冲击不可行的 host target。效果:在不可行 target 下 balloon 在数秒内停在
 一个**可持续**的稳态(host 仍可在工作集回落后把 target 调高、driver 再爬升),
 不再活锁。这是纯 guest 侧鲁棒性修复,不改 host↔guest 协议,host 端反馈环
-(§5.5、[`sandbox.md`](sandbox.md) §9.3)语义不变。
+(§5.5、`sandbox-runtime/docs/sandbox.md` §9.3)语义不变。
 
 ## 6. 验证
 
@@ -385,7 +393,7 @@ file bin/aarch64/vmlinux
 # /proc/config.gz 不存在(IKCONFIG 关闭)
 ```
 
-跨实例 RAM 去重率(PROPOSAL §4):同 vmlinux + 同 sandbox-runtime + 同应用,
+跨实例 RAM 去重率(`kuasar-sandbox/docs/kuasar-sandbox.md` §4.6):同 vmlinux + 同 sandbox-runtime + 同应用,
 冷启动到 settled 的 RAM 内容跨实例 hash 相同区段应 > 90%。低于 50% 通常
 是新启用的随机化(KASLR / SLAB 等)漏网,通过比对 `make olddefconfig`
 diff 排查。
@@ -408,9 +416,11 @@ diff 排查。
 
 - [`cloud-hypervisor.md`](cloud-hypervisor.md) —— 平台 VMM 的启动协议、设备
   模型、patch 范围
-- [`sandbox-runtime.md`](sandbox-runtime.md) —— 内核之上 sandbox-init 完成
+- `sandbox-runtime/docs/sandbox-runtime.md` —— 内核之上 sandbox-init 完成
   rootfs 组装与应用拉起
-- [`sandbox.md`](sandbox.md) §boot.kernel —— 沙箱配置如何引用 vmlinux,
-  以及自带 kernel 的接入方式
-- [`build.md`](build.md) —— `make vmlinux` 工作流、交叉编译矩阵
-- `PROPOSAL.md` §4 "确定性 Guest 配置" —— 跨实例 RAM 去重率目标的来源
+- `sandbox-runtime/docs/sandbox.md` §3.1(`boot.kernel`)/ §14.2(平台 ABI 边界)——
+  沙箱配置如何引用 vmlinux,以及自带 kernel 的接入方式
+- sandbox-deps `docs/build.md` —— `make vmlinux` 工作流、patch 开发循环、
+  交叉编译
+- `kuasar-sandbox/docs/kuasar-sandbox.md` §4.6(Guest 确定性配置)—— 跨实例 RAM
+  去重率目标的来源
