@@ -248,10 +248,15 @@ type Winsize struct {
 // Cwd empty / "/" → the guest root. Stdio works exactly like
 // LaunchSpec.Stdio (pty iff TTY, else the requested pipe subset).
 type ExecSpec struct {
-	Argv  []string          `json:"argv"`
-	Env   map[string]string `json:"env,omitempty"`
-	Cwd   string            `json:"cwd,omitempty"`
-	Stdio StdioSpec         `json:"stdio,omitempty"`
+	Argv []string          `json:"argv"`
+	Env  map[string]string `json:"env,omitempty"`
+	Cwd  string            `json:"cwd,omitempty"`
+	// User is an optional run-as identity for the command: "uid[:gid]"
+	// or a user name resolved against the APP rootfs's /etc/passwd
+	// (same forms as LaunchSpec.User). Empty keeps the session's
+	// default (root).
+	User  string    `json:"user,omitempty"`
+	Stdio StdioSpec `json:"stdio,omitempty"`
 }
 
 // --- ConnectSpec ------------------------------------------------------

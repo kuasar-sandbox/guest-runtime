@@ -307,6 +307,7 @@ sandbox-ctl exec --sandbox-id <sid> [flags] -- CMD [ARGS...]
   --run-root <dir>      与 run 一致;SANDBOX_RUN_ROOT env;默认 /run/sandbox。exec 通过
                         <run-root>/<sid>/ctl.sock 联系运行中的 sandbox-ctl run 进程
   --cwd <dir>           命令在 guest 内的工作目录(默认 guest 根)
+  --user <u>            run-as 身份:"uid[:gid]" 或沙箱 /etc/passwd 用户名(默认 root)
   --env KEY=VAL         追加/覆盖一个环境变量,可重复。在一个默认 PATH 基线上叠加
                         (exec 命令不继承应用的 image env,故 PATH 总是注入,裸命令
                         名才能 PATH 查找)
@@ -1248,7 +1249,7 @@ UDS,承载两类宿主侧控制请求:`snapshot`(一问一答)与 `exec`(握手�
 | 字段 | 类型 | 说明 |
 |---|---|---|
 | `type` | string | `"exec_request"` |
-| `exec` | object | `{ argv:[...], env:{K:V}, cwd, stdio }`——要执行的命令与协商的 stdio(对应 §2.4 的 flag) |
+| `exec` | object | `{ argv:[...], env:{K:V}, cwd, user, stdio }`——要执行的命令与协商的 stdio(对应 §2.4 的 flag;user 在 app ns 内按镜像 /etc/passwd 解析) |
 
 run 进程收到后向 guest 反向通道发 `exec` 操作(见
 [`sandbox-runtime.md`](sandbox-runtime.md) §4.3),拿到 guest 实际建立的 stdio

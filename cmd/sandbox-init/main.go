@@ -71,16 +71,16 @@ func main() {
 		return
 	}
 	// Joined exec command (sandbox-ctl exec): forked by the exec-join
-	// helper after it has entered the app's mount + pid namespaces. No
-	// run-as drop here (exec sessions keep the app's identity).
-	if len(os.Args) >= 4 && os.Args[1] == "exec-child-joined" {
-		runExecChild(false, "-", os.Args[2], os.Args[3], os.Args[4:], true, false)
+	// helper after it has entered the app's mount + pid namespaces. cred
+	// was resolved by the helper inside the app ns ("-" = keep root).
+	if len(os.Args) >= 5 && os.Args[1] == "exec-child-joined" {
+		runExecChild(false, os.Args[2], os.Args[3], os.Args[4], os.Args[5:], true, false)
 		return
 	}
 	// nsenter helper for sandbox-ctl exec.
-	// argv: [self, "exec-join", appPid, tty(0|1), cwd, argv0, args...]
-	if len(os.Args) >= 6 && os.Args[1] == "exec-join" {
-		runExecJoin(os.Args[2], os.Args[3], os.Args[4], os.Args[5], os.Args[6:])
+	// argv: [self, "exec-join", appPid, tty(0|1), user|-, cwd, argv0, args...]
+	if len(os.Args) >= 7 && os.Args[1] == "exec-join" {
+		runExecJoin(os.Args[2], os.Args[3], os.Args[4], os.Args[5], os.Args[6], os.Args[7:])
 		return
 	}
 

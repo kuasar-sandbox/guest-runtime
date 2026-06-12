@@ -46,6 +46,7 @@ func execCmd(args []string) int {
 	sandboxID := fs.String("sandbox-id", "", "target sandbox id (required)")
 	runRoot := fs.String("run-root", "", "tmpfs run root (overrides SANDBOX_RUN_ROOT env; default /run/sandbox)")
 	cwd := fs.String("cwd", "", "working directory inside the sandbox (default: guest root)")
+	user := fs.String("user", "", "run-as identity: \"uid[:gid]\" or a user name from the sandbox's /etc/passwd (default: root)")
 	var env envFlag
 	fs.Var(&env, "env", "environment variable KEY=VALUE (repeatable)")
 
@@ -118,6 +119,7 @@ func execCmd(args []string) int {
 		Argv:  command,
 		Env:   envMap,
 		Cwd:   *cwd,
+		User:  *user,
 		Stdio: stdioMode.ProtoSpec(),
 	}
 	if cols, rows, ok := stdioMode.InitialWinsize(); ok {

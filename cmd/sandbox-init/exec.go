@@ -310,7 +310,11 @@ func forkExecChild(spec *proto.ExecSpec, cs childStdio, appPid int) (int, error)
 	if cs.tty {
 		ttyArg = "1"
 	}
-	args := append([]string{self, "exec-join", strconv.Itoa(appPid), ttyArg, spec.Cwd, spec.Argv[0]}, spec.Argv[1:]...)
+	userArg := spec.User
+	if userArg == "" {
+		userArg = "-"
+	}
+	args := append([]string{self, "exec-join", strconv.Itoa(appPid), ttyArg, userArg, spec.Cwd, spec.Argv[0]}, spec.Argv[1:]...)
 
 	cmd := exec.Cmd{
 		Path:   self,
@@ -358,7 +362,7 @@ func forkExecChild(spec *proto.ExecSpec, cs childStdio, appPid int) (int, error)
 // after it is in the new ns avoids that bogus check; the kernel tracks
 // the real parent task regardless of pid-ns visibility, and
 // PR_SET_PDEATHSIG survives a normal (non-setuid) execve.
-func runExecJoin(appPidStr, ttyStr, cwd, argv0 string, args []string) {
+func runExecJoin(appPidStr, ttyStr, userSpec, cwd, argv0 string, args []string) {
 	// setns(CLONE_NEWNS) is per-thread; pin this goroutine so the join
 	// and the subsequent fork happen on the same (joined) thread.
 	runtime.LockOSThread()
@@ -407,8 +411,18 @@ func runExecJoin(appPidStr, ttyStr, cwd, argv0 string, args []string) {
 		sys.Setsid = true
 		sys.Setctty = true // Ctty defaults to 0 = the pty slave
 	}
+	// Resolve the run-as identity AFTER the namespace joins, against the
+	// APP rootfs's /etc/passwd (names like "user" mean the image's user).
+	credStr := "-"
+	if userSpec != "" && userSpec != "-" {
+		c, err := resolveCred(userSpec)
+		if err != nil {
+			die("exec-join: resolve user %q: %v", userSpec, err)
+		}
+		credStr = c.encode()
+	}
 	self := "/proc/self/exe"
-	gargv := append([]string{self, "exec-child-joined", cwd, argv0}, args...)
+	gargv := append([]string{self, "exec-child-joined", credStr, cwd, argv0}, args...)
 	pid, err := syscall.ForkExec(self, gargv, &syscall.ProcAttr{
 		Dir:   "/",
 		Env:   os.Environ(), // = execEnv(spec.Env), inherited via our exec
