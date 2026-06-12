@@ -82,19 +82,26 @@ func OpenManifestStream(ctx context.Context, keyRef string, fetcher fetch.Fetche
 }
 
 // needsManifestFetcher returns true if any disk URI in cfg uses the
-// manifest:// scheme. The result decides whether sandbox-ctl must
-// dial store-ctl / cache-ctl on this run.
+// manifest:// scheme — boot.root and every boot.disks[] node, in both
+// single-disk (base) and overlay (overlay.base) modes. The result decides
+// whether sandbox-ctl must dial store-ctl / cache-ctl on this run.
 func needsManifestFetcher(cfg *config.SandboxConfig) bool {
-	candidates := []string{
-		cfg.Boot.Root.Base,
-		cfg.Boot.Root.Overlay.Base,
+	nodes := []config.RootConfig{cfg.Boot.Root}
+	for _, d := range cfg.Boot.Disks {
+		nodes = append(nodes, d.RootConfig)
 	}
-	for _, uri := range candidates {
-		if uri == "" {
-			continue
+	for _, n := range nodes {
+		candidates := []string{n.Base}
+		if n.Overlay != nil {
+			candidates = append(candidates, n.Overlay.Base)
 		}
-		if scheme, _, ok := config.SchemeAndPath(uri); ok && scheme == "manifest" {
-			return true
+		for _, uri := range candidates {
+			if uri == "" {
+				continue
+			}
+			if scheme, _, ok := config.SchemeAndPath(uri); ok && scheme == "manifest" {
+				return true
+			}
 		}
 	}
 	return false
