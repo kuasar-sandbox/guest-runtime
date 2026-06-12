@@ -142,7 +142,7 @@ func UploadLocal(ctx context.Context, snapshotPath string, mcfg *manifest.Config
 	if err != nil {
 		return "", err
 	}
-	ovHoles, err := snapshot.WalkHolesCodec(int(ovf.Fd()), ovst.Size())
+	ovHoles, err := snapshot.WalkHoles(int(ovf.Fd()), ovst.Size())
 	if err != nil {
 		return "", fmt.Errorf("overlay holes: %w", err)
 	}
@@ -179,7 +179,7 @@ func UploadLocal(ctx context.Context, snapshotPath string, mcfg *manifest.Config
 	if int64(capBytes) > st.Size() {
 		return "", fmt.Errorf("snapshot %s too small (%d) for its memory section (%d)", snapshotPath, st.Size(), capBytes)
 	}
-	memHoles, err := snapshot.WalkHolesCodec(int(f.Fd()), int64(capBytes))
+	memHoles, err := snapshot.WalkHoles(int(f.Fd()), int64(capBytes))
 	if err != nil {
 		return "", fmt.Errorf("memory holes: %w", err)
 	}

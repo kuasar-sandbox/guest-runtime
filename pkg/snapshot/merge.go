@@ -5,7 +5,7 @@ import (
 	"io"
 	"os"
 
-	"github.com/kuasar-sandbox/sandbox-accelerator/pkg/manifest/codec"
+	"github.com/kuasar-sandbox/sandbox-accelerator/pkg/sparse"
 )
 
 // sparseLayer presents [0,size) of a local file as a closable ReadSeeker (an
@@ -22,7 +22,7 @@ func (s *sparseLayer) Close() error { return s.f.Close() }
 // openMergeBase opens a parent local file and returns its [0,size) view plus the
 // holes over [0,size). size must not exceed the file (a snapshot's memory
 // section size = MemfdSize; an overlay's = the diff size).
-func openMergeBase(path string, size int64) (*sparseLayer, []codec.HoleExtent, error) {
+func openMergeBase(path string, size int64) (*sparseLayer, []sparse.Extent, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, nil, err
@@ -36,7 +36,7 @@ func openMergeBase(path string, size int64) (*sparseLayer, []codec.HoleExtent, e
 		f.Close()
 		return nil, nil, fmt.Errorf("merge base %s: file size %d < expected layer size %d", path, st.Size(), size)
 	}
-	holes, err := walkHolesCodec(int(f.Fd()), size)
+	holes, err := WalkHoles(int(f.Fd()), size)
 	if err != nil {
 		f.Close()
 		return nil, nil, err
@@ -62,7 +62,7 @@ func openMergeBase(path string, size int64) (*sparseLayer, []codec.HoleExtent, e
 // Returns a ReadSeeker over [0,size) plus the merged hole map. The result is
 // consumed by the existing sink (AbsorbBundle / AbsorbOverlay), which reads only
 // the non-hole data segments — so the merge stays sparse and the sink is unchanged.
-func mergeSparse(top io.ReadSeeker, topHoles []codec.HoleExtent, base io.ReadSeeker, baseHoles []codec.HoleExtent, size int64) (io.ReadSeeker, []codec.HoleExtent) {
+func mergeSparse(top io.ReadSeeker, topHoles []sparse.Extent, base io.ReadSeeker, baseHoles []sparse.Extent, size int64) (io.ReadSeeker, []sparse.Extent) {
 	m := &mergedReadSeeker{top: top, topHoles: topHoles, base: base, baseHoles: baseHoles, size: size}
 	return m, holeIntersection(topHoles, baseHoles, size)
 }
@@ -80,7 +80,7 @@ const (
 // data segment, then sequential reads).
 type mergedReadSeeker struct {
 	top, base           io.ReadSeeker
-	topHoles, baseHoles []codec.HoleExtent
+	topHoles, baseHoles []sparse.Extent
 	size, pos           int64
 }
 
@@ -158,7 +158,7 @@ func (m *mergedReadSeeker) Seek(off int64, whence int) (int64, error) {
 // holeRun reports whether pos lies in a hole and the end of the current run
 // (hole-end if in a hole, else the start of the next hole, or size). holes must
 // be sorted, non-overlapping, within [0,size) (WalkHoles guarantees this).
-func holeRun(pos int64, holes []codec.HoleExtent, size int64) (bool, int64) {
+func holeRun(pos int64, holes []sparse.Extent, size int64) (bool, int64) {
 	for _, h := range holes {
 		hs, he := int64(h.Offset), int64(h.Offset+h.Size)
 		if pos < hs {
@@ -174,8 +174,8 @@ func holeRun(pos int64, holes []codec.HoleExtent, size int64) (bool, int64) {
 // holeIntersection returns the ranges that are holes in BOTH inputs over
 // [0,size) — positions with no data in either layer, which become merged holes
 // that fall through to the grandparent chain at restore.
-func holeIntersection(a, b []codec.HoleExtent, size int64) []codec.HoleExtent {
-	var out []codec.HoleExtent
+func holeIntersection(a, b []sparse.Extent, size int64) []sparse.Extent {
+	var out []sparse.Extent
 	for pos := int64(0); pos < size; {
 		aHole, aEnd := holeRun(pos, a, size)
 		bHole, bEnd := holeRun(pos, b, size)
@@ -184,7 +184,7 @@ func holeIntersection(a, b []codec.HoleExtent, size int64) []codec.HoleExtent {
 			if n := len(out); n > 0 && int64(out[n-1].Offset+out[n-1].Size) == pos {
 				out[n-1].Size += uint64(end - pos) // coalesce contiguous run
 			} else {
-				out = append(out, codec.HoleExtent{Offset: uint64(pos), Size: uint64(end - pos)})
+				out = append(out, sparse.Extent{Offset: uint64(pos), Size: uint64(end - pos)})
 			}
 		}
 		pos = end

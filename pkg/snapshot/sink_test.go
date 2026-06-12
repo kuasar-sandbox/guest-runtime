@@ -10,7 +10,7 @@ import (
 	"syscall"
 	"testing"
 
-	"github.com/kuasar-sandbox/sandbox-accelerator/pkg/manifest/codec"
+	"github.com/kuasar-sandbox/sandbox-accelerator/pkg/sparse"
 )
 
 // dataSegments must return exactly the resident runs = [0,size) minus holes.
@@ -18,16 +18,16 @@ func TestDataSegments(t *testing.T) {
 	cases := []struct {
 		name  string
 		size  int64
-		holes []codec.HoleExtent
-		want  []codec.HoleExtent
+		holes []sparse.Extent
+		want  []sparse.Extent
 	}{
-		{"no holes", 100, nil, []codec.HoleExtent{{Offset: 0, Size: 100}}},
-		{"leading hole", 100, []codec.HoleExtent{{Offset: 0, Size: 40}}, []codec.HoleExtent{{Offset: 40, Size: 60}}},
-		{"trailing hole", 100, []codec.HoleExtent{{Offset: 60, Size: 40}}, []codec.HoleExtent{{Offset: 0, Size: 60}}},
-		{"middle hole", 100, []codec.HoleExtent{{Offset: 40, Size: 20}}, []codec.HoleExtent{{Offset: 0, Size: 40}, {Offset: 60, Size: 40}}},
-		{"all hole", 100, []codec.HoleExtent{{Offset: 0, Size: 100}}, nil},
-		{"two holes", 100, []codec.HoleExtent{{Offset: 10, Size: 10}, {Offset: 50, Size: 10}},
-			[]codec.HoleExtent{{Offset: 0, Size: 10}, {Offset: 20, Size: 30}, {Offset: 60, Size: 40}}},
+		{"no holes", 100, nil, []sparse.Extent{{Offset: 0, Size: 100}}},
+		{"leading hole", 100, []sparse.Extent{{Offset: 0, Size: 40}}, []sparse.Extent{{Offset: 40, Size: 60}}},
+		{"trailing hole", 100, []sparse.Extent{{Offset: 60, Size: 40}}, []sparse.Extent{{Offset: 0, Size: 60}}},
+		{"middle hole", 100, []sparse.Extent{{Offset: 40, Size: 20}}, []sparse.Extent{{Offset: 0, Size: 40}, {Offset: 60, Size: 40}}},
+		{"all hole", 100, []sparse.Extent{{Offset: 0, Size: 100}}, nil},
+		{"two holes", 100, []sparse.Extent{{Offset: 10, Size: 10}, {Offset: 50, Size: 10}},
+			[]sparse.Extent{{Offset: 0, Size: 10}, {Offset: 20, Size: 30}, {Offset: 60, Size: 40}}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -92,7 +92,7 @@ func TestWriteSparseFileRoundTrip(t *testing.T) {
 	src := make([]byte, size)
 	copy(src[0:4], "HEAD")
 	copy(src[size-4:], "TAIL")
-	holes := []codec.HoleExtent{{Offset: 4, Size: size - 8}} // [4, size-4) is a hole
+	holes := []sparse.Extent{{Offset: 4, Size: size - 8}} // [4, size-4) is a hole
 	tail := []byte("ZIPTRAILER")
 
 	path := filepath.Join(t.TempDir(), "out.bin")

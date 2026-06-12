@@ -201,7 +201,7 @@ func Take(s Sources, sink SnapshotSink, resumeAfter bool) (*Outputs, error) {
 
 	// T6: [memory][ZIP] bundle → sink, streamed from the memfd (CH paused, so
 	// the mapping is stable); only resident pages are read/transferred.
-	memHoles, err := walkHolesCodec(s.MemfdFD, s.MemfdSize)
+	memHoles, err := WalkHoles(s.MemfdFD, s.MemfdSize)
 	if err != nil {
 		return nil, fmt.Errorf("memory holes: %w", err)
 	}
@@ -249,7 +249,7 @@ func absorbOverlay(ctx context.Context, sink SnapshotSink, d DiskDiff, merging b
 	if err != nil {
 		return "", "", fmt.Errorf("stat diff %s: %w", d.Path, err)
 	}
-	overlayHoles, err := walkHolesCodec(int(diff.Fd()), dstat.Size())
+	overlayHoles, err := WalkHoles(int(diff.Fd()), dstat.Size())
 	if err != nil {
 		return "", "", fmt.Errorf("overlay holes: %w", err)
 	}

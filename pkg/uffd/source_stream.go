@@ -7,6 +7,7 @@ import (
 	"io"
 
 	"github.com/kuasar-sandbox/sandbox-accelerator/pkg/manifest/fetch"
+	"github.com/kuasar-sandbox/sandbox-accelerator/pkg/sparse"
 )
 
 // StreamSnapshotSource implements SnapshotReader against a snapshot bundle's
@@ -85,7 +86,7 @@ func (s *StreamSnapshotSource) ReadAt(buf []byte, memfdOffset uint64) (int, bool
 	if rerr != nil { // io.EOF — guarded above (memfdOffset < ramSize ≤ Size)
 		return 0, true, io.EOF
 	}
-	if kind != fetch.Data {
+	if kind != sparse.Data {
 		// Zero region. Serve a zero page only when the whole first page (or
 		// the rest of the image) is zero, so a page straddling zero→data is
 		// never served as zeros.
@@ -108,7 +109,7 @@ func (s *StreamSnapshotSource) ReadAt(buf []byte, memfdOffset uint64) (int, bool
 		// so one fault fetches a whole data span concurrently.
 		for runEnd < end {
 			k2, e2, e2err := s.stream.RunAt(runEnd, end-runEnd)
-			if e2err != nil || k2 != fetch.Data {
+			if e2err != nil || k2 != sparse.Data {
 				break
 			}
 			runEnd = e2

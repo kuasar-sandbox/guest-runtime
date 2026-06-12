@@ -9,8 +9,8 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/kuasar-sandbox/sandbox-accelerator/pkg/manifest/codec"
 	"github.com/kuasar-sandbox/sandbox-accelerator/pkg/manifest/ingest"
+	"github.com/kuasar-sandbox/sandbox-accelerator/pkg/sparse"
 	"github.com/kuasar-sandbox/sandbox-accelerator/pkg/store"
 	"golang.org/x/sys/unix"
 )
@@ -33,8 +33,8 @@ func HexKey(k store.ContentKey) string {
 // resident extents. They return the artifact's ref (file://<sha>.ext |
 // manifest://<key>) and, for file mode, its local path ("" for ingest).
 type SnapshotSink interface {
-	AbsorbOverlay(ctx context.Context, diff io.ReadSeeker, holes []codec.HoleExtent) (ref, path string, err error)
-	AbsorbBundle(ctx context.Context, mem io.ReadSeeker, holes []codec.HoleExtent, zip io.Reader) (ref, path string, err error)
+	AbsorbOverlay(ctx context.Context, diff io.ReadSeeker, holes []sparse.Extent) (ref, path string, err error)
+	AbsorbBundle(ctx context.Context, mem io.ReadSeeker, holes []sparse.Extent, zip io.Reader) (ref, path string, err error)
 }
 
 // OverlayMover is an optional fast path a sink may implement: instead of
@@ -65,7 +65,7 @@ func NewFileSink(outDir, sandboxID string, logf func(string, ...any)) *FileSink 
 	return &FileSink{outDir: outDir, sandboxID: sandboxID, logf: logf}
 }
 
-func (s *FileSink) AbsorbOverlay(_ context.Context, diff io.ReadSeeker, holes []codec.HoleExtent) (string, string, error) {
+func (s *FileSink) AbsorbOverlay(_ context.Context, diff io.ReadSeeker, holes []sparse.Extent) (string, string, error) {
 	digest, final, err := s.writeContentAddressed(diff, holes, nil, "overlay")
 	if err != nil {
 		return "", "", err
@@ -91,7 +91,7 @@ func (s *FileSink) MoveOverlay(diffPath string) (string, string, error) {
 	return "file://" + digest + ".overlay", final, nil
 }
 
-func (s *FileSink) AbsorbBundle(_ context.Context, mem io.ReadSeeker, holes []codec.HoleExtent, zip io.Reader) (string, string, error) {
+func (s *FileSink) AbsorbBundle(_ context.Context, mem io.ReadSeeker, holes []sparse.Extent, zip io.Reader) (string, string, error) {
 	digest, final, err := s.writeContentAddressed(mem, holes, zip, "snapshot")
 	if err != nil {
 		return "", "", err
@@ -111,7 +111,7 @@ func (s *FileSink) AbsorbBundle(_ context.Context, mem io.ReadSeeker, holes []co
 // tail) to a <sid>.<ext>.partial file, hashes it (resident-only via SEEK_DATA),
 // then renames to <sha>.<ext>. The hash pass never re-reads the multi-GiB hole
 // space.
-func (s *FileSink) writeContentAddressed(src io.ReadSeeker, holes []codec.HoleExtent, tail io.Reader, ext string) (string, string, error) {
+func (s *FileSink) writeContentAddressed(src io.ReadSeeker, holes []sparse.Extent, tail io.Reader, ext string) (string, string, error) {
 	size, err := seekerSize(src)
 	if err != nil {
 		return "", "", err
@@ -156,12 +156,12 @@ func (s *IngestSink) Results() (overlay, bundle *ingest.Result) {
 	return s.overlayRes, s.bundleRes
 }
 
-func (s *IngestSink) AbsorbOverlay(ctx context.Context, diff io.ReadSeeker, holes []codec.HoleExtent) (string, string, error) {
+func (s *IngestSink) AbsorbOverlay(ctx context.Context, diff io.ReadSeeker, holes []sparse.Extent) (string, string, error) {
 	size, err := seekerSize(diff)
 	if err != nil {
 		return "", "", err
 	}
-	res, err := s.run(ctx, diff, uint64(size), holes, "overlay")
+	res, err := s.run(ctx, &seekerSource{rs: diff, size: uint64(size), holes: holes}, holes, "overlay")
 	if err != nil {
 		return "", "", err
 	}
@@ -169,7 +169,7 @@ func (s *IngestSink) AbsorbOverlay(ctx context.Context, diff io.ReadSeeker, hole
 	return "manifest://" + HexKey(res.ManifestKey), "", nil
 }
 
-func (s *IngestSink) AbsorbBundle(ctx context.Context, mem io.ReadSeeker, holes []codec.HoleExtent, zip io.Reader) (string, string, error) {
+func (s *IngestSink) AbsorbBundle(ctx context.Context, mem io.ReadSeeker, holes []sparse.Extent, zip io.Reader) (string, string, error) {
 	memSize, err := seekerSize(mem)
 	if err != nil {
 		return "", "", err
@@ -178,11 +178,12 @@ func (s *IngestSink) AbsorbBundle(ctx context.Context, mem io.ReadSeeker, holes 
 	if err != nil {
 		return "", "", fmt.Errorf("read zip: %w", err)
 	}
-	// Ingest requires a ReadSeeker when Holes is set (it seeks per data segment
-	// → reads resident only). Hand it a seekable view of [mem][zip] so the
-	// memory holes are skipped — no tmpfs copy of the bundle.
-	src := &concatReadSeeker{mem: mem, memSize: memSize, tail: tail}
-	res, err := s.run(ctx, src, uint64(memSize)+uint64(len(tail)), holes, "memory section")
+	// Present [mem][zip] as one sparse source so ingest records the
+	// memory holes and reads only resident extents — no tmpfs copy of
+	// the bundle (the ZIP tail is plain data after the memory section).
+	concat := &concatReadSeeker{mem: mem, memSize: memSize, tail: tail}
+	src := &seekerSource{rs: concat, size: uint64(memSize) + uint64(len(tail)), holes: holes}
+	res, err := s.run(ctx, src, holes, "memory section")
 	if err != nil {
 		return "", "", err
 	}
@@ -190,9 +191,10 @@ func (s *IngestSink) AbsorbBundle(ctx context.Context, mem io.ReadSeeker, holes 
 	return "manifest://" + HexKey(res.ManifestKey), "", nil
 }
 
-// run ingests r with a throttled progress log (effective denominator = size
+// run ingests src with a throttled progress log (effective denominator = size
 // minus hole bytes, so % reflects real work).
-func (s *IngestSink) run(ctx context.Context, r io.Reader, size uint64, holes []codec.HoleExtent, label string) (*ingest.Result, error) {
+func (s *IngestSink) run(ctx context.Context, src sparse.Source, holes []sparse.Extent, label string) (*ingest.Result, error) {
+	size := src.Size()
 	var holeBytes uint64
 	for _, h := range holes {
 		holeBytes += h.Size
@@ -218,7 +220,7 @@ func (s *IngestSink) run(ctx context.Context, r io.Reader, size uint64, holes []
 		s.logf("upload: %s %d/%d MiB (%d%%) %.0f MiB/s", label, processed/mib, effective/mib, pct, rate)
 		lastT, lastProcessed = now, processed
 	}
-	res, err := s.ing.Ingest(ctx, r, size, ingest.IngestOption{Holes: holes, OnProgress: onProgress})
+	res, err := s.ing.Ingest(ctx, src, ingest.IngestOption{OnProgress: onProgress})
 	if err != nil {
 		return nil, fmt.Errorf("ingest %s: %w", label, err)
 	}
@@ -247,7 +249,7 @@ func seekerSize(rs io.ReadSeeker) (int64, error) {
 // bytes appended after size), copying only src's resident extents (the
 // complement of holes); hole ranges are left unwritten (sparse). tail (the ZIP
 // trailer, may be nil) is written dense immediately after the size-th byte.
-func writeSparseFile(path string, src io.ReadSeeker, size int64, holes []codec.HoleExtent, tail io.Reader) error {
+func writeSparseFile(path string, src io.ReadSeeker, size int64, holes []sparse.Extent, tail io.Reader) error {
 	dst, err := os.Create(path)
 	if err != nil {
 		return err
@@ -280,42 +282,23 @@ func writeSparseFile(path string, src io.ReadSeeker, size int64, holes []codec.H
 
 // dataSegments returns the resident runs = [0,size) minus holes. holes must be
 // sorted, non-overlapping, within [0,size) (WalkHoles guarantees this).
-func dataSegments(size int64, holes []codec.HoleExtent) []codec.HoleExtent {
-	var segs []codec.HoleExtent
+func dataSegments(size int64, holes []sparse.Extent) []sparse.Extent {
+	var segs []sparse.Extent
 	cursor := uint64(0)
 	for _, h := range holes {
 		if h.Offset > cursor {
-			segs = append(segs, codec.HoleExtent{Offset: cursor, Size: h.Offset - cursor})
+			segs = append(segs, sparse.Extent{Offset: cursor, Size: h.Offset - cursor})
 		}
 		cursor = h.Offset + h.Size
 	}
 	if cursor < uint64(size) {
-		segs = append(segs, codec.HoleExtent{Offset: cursor, Size: uint64(size) - cursor})
+		segs = append(segs, sparse.Extent{Offset: cursor, Size: uint64(size) - cursor})
 	}
 	return segs
 }
 
-// WalkHolesCodec returns fd's holes over [0,size) as codec.HoleExtent (the type
-// the sink + ingest consume). Exported for callers that build a sink source from
-// a static local file (e.g. the offline snapshot upload path).
-func WalkHolesCodec(fd int, size int64) ([]codec.HoleExtent, error) { return walkHolesCodec(fd, size) }
-
-// walkHolesCodec returns fd's holes over [0,size) as codec.HoleExtent (the type
-// the sink + ingest consume). Thin adapter over WalkHoles.
-func walkHolesCodec(fd int, size int64) ([]codec.HoleExtent, error) {
-	hs, err := WalkHoles(fd, size)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]codec.HoleExtent, len(hs))
-	for i, h := range hs {
-		out[i] = codec.HoleExtent{Offset: h.Offset, Size: h.Length}
-	}
-	return out, nil
-}
-
 // residentBytes = size minus the sum of hole sizes.
-func residentBytes(size int64, holes []codec.HoleExtent) uint64 {
+func residentBytes(size int64, holes []sparse.Extent) uint64 {
 	var holeBytes uint64
 	for _, h := range holes {
 		holeBytes += h.Size
@@ -401,4 +384,56 @@ func (c *concatReadSeeker) Read(p []byte) (int, error) {
 	n := copy(p, c.tail[c.pos-c.memSize:])
 	c.pos += int64(n)
 	return n, nil
+}
+
+// seekerSource adapts the sink's wire-in pair (io.ReadSeeker + static
+// hole map) to a sparse.Source for ingest: RunAt classifies from the
+// hole map, ReadAt is Seek+ReadFull — monotone, which is exactly the
+// Source baseline contract and how ingest consumes (data segments in
+// ascending order). Synthetic merge readers (Read+Seek only, no
+// io.ReaderAt) stay usable this way.
+type seekerSource struct {
+	rs    io.ReadSeeker
+	size  uint64
+	holes []sparse.Extent // sorted, disjoint (WalkHoles guarantees)
+}
+
+func (s *seekerSource) Size() uint64 { return s.size }
+
+func (s *seekerSource) RunAt(offset, limit uint64) (sparse.RunKind, uint64, error) {
+	if offset >= s.size {
+		return 0, 0, io.EOF
+	}
+	limEnd := offset + limit
+	if limEnd < offset || limEnd > s.size {
+		limEnd = s.size
+	}
+	isHole, end := holeRun(int64(offset), s.holes, int64(s.size))
+	e := uint64(end)
+	if e > limEnd {
+		e = limEnd
+	}
+	if isHole {
+		return sparse.Hole, e, nil
+	}
+	return sparse.Data, e, nil
+}
+
+func (s *seekerSource) ReadAt(_ context.Context, buf []byte, offset uint64) (int, error) {
+	if offset >= s.size {
+		return 0, io.EOF
+	}
+	n := len(buf)
+	var eof error
+	if offset+uint64(n) > s.size {
+		n = int(s.size - offset)
+		eof = io.EOF
+	}
+	if _, err := s.rs.Seek(int64(offset), io.SeekStart); err != nil {
+		return 0, err
+	}
+	if _, err := io.ReadFull(s.rs, buf[:n]); err != nil {
+		return 0, err
+	}
+	return n, eof
 }

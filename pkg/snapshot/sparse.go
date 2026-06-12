@@ -7,6 +7,7 @@ import (
 	"os"
 	"syscall"
 
+	"github.com/kuasar-sandbox/sandbox-accelerator/pkg/sparse"
 	"golang.org/x/sys/unix"
 )
 
@@ -15,20 +16,15 @@ const (
 	seekHole = 4 // SEEK_HOLE
 )
 
-// HoleExtent is one [Offset, Offset+Length) range that's a hole in
-// the source file.
-type HoleExtent struct {
-	Offset uint64
-	Length uint64
-}
-
-// WalkHoles returns the list of hole extents in [0, size) of fd. The
-// returned ranges are non-overlapping, sorted, and disjoint.
+// WalkHoles returns the hole extents in [0, size) of fd — the raw-fd,
+// size-bounded sibling of sparse.ProbeHoles (memfds and sections have
+// no *os.File to hand over). The returned ranges are non-overlapping,
+// sorted, and disjoint.
 //
 // Implementation walks SEEK_DATA / SEEK_HOLE alternately. A trailing
 // hole (no data after offset) is included.
-func WalkHoles(fd int, size int64) ([]HoleExtent, error) {
-	var holes []HoleExtent
+func WalkHoles(fd int, size int64) ([]sparse.Extent, error) {
+	var holes []sparse.Extent
 	var off int64
 	for off < size {
 		dataOff, err := syscall.Seek(fd, off, seekData)
@@ -36,9 +32,9 @@ func WalkHoles(fd int, size int64) ([]HoleExtent, error) {
 			if errors.Is(err, syscall.ENXIO) {
 				// No more data → rest is hole.
 				if off < size {
-					holes = append(holes, HoleExtent{
+					holes = append(holes, sparse.Extent{
 						Offset: uint64(off),
-						Length: uint64(size - off),
+						Size:   uint64(size - off),
 					})
 				}
 				return holes, nil
@@ -46,9 +42,9 @@ func WalkHoles(fd int, size int64) ([]HoleExtent, error) {
 			return nil, fmt.Errorf("SEEK_DATA at %d: %w", off, err)
 		}
 		if dataOff > off {
-			holes = append(holes, HoleExtent{
+			holes = append(holes, sparse.Extent{
 				Offset: uint64(off),
-				Length: uint64(dataOff - off),
+				Size:   uint64(dataOff - off),
 			})
 		}
 		holeOff, err := syscall.Seek(fd, dataOff, seekHole)

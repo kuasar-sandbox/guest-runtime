@@ -9,6 +9,7 @@ import (
 	"github.com/kuasar-sandbox/sandbox-accelerator/pkg/cache"
 	"github.com/kuasar-sandbox/sandbox-accelerator/pkg/manifest/codec"
 	"github.com/kuasar-sandbox/sandbox-accelerator/pkg/manifest/fetch"
+	"github.com/kuasar-sandbox/sandbox-accelerator/pkg/sparse"
 	"github.com/kuasar-sandbox/sandbox-accelerator/pkg/store"
 )
 
@@ -23,8 +24,8 @@ func (g keyByteGetter) Get(_ context.Context, _ store.Partition, k store.Content
 // passthroughDecryptor returns the ciphertext bytes verbatim.
 type passthroughDecryptor struct{}
 
-func (passthroughDecryptor) Encrypt(_ [32]byte, p []byte) ([]byte, [32]byte)   { return p, [32]byte{} }
-func (passthroughDecryptor) Decrypt(_ [32]byte, c []byte) ([]byte, error)      { return c, nil }
+func (passthroughDecryptor) Encrypt(_ [32]byte, p []byte) ([]byte, [32]byte)     { return p, [32]byte{} }
+func (passthroughDecryptor) Decrypt(_ [32]byte, c []byte) ([]byte, error)        { return c, nil }
 func (passthroughDecryptor) DecryptInPlace(_ [32]byte, b []byte) ([]byte, error) { return b, nil }
 
 // buildPageStream makes a one-page-per-chunk manifest Stream over numPages
@@ -37,7 +38,7 @@ func buildPageStream(t *testing.T, numPages int, fills []byte) fetch.Stream {
 	for i := 0; i < numPages; i++ {
 		off := uint64(i * ps)
 		if fills[i] == 0 {
-			m.Holes = append(m.Holes, codec.HoleExtent{Offset: off, Size: uint64(ps)})
+			m.Holes = append(m.Holes, sparse.Extent{Offset: off, Size: uint64(ps)})
 			continue
 		}
 		m.Entries = append(m.Entries, codec.ChunkEntry{
@@ -102,7 +103,7 @@ func buildExtentStream(t *testing.T, numPages int, exts []extent) fetch.Stream {
 		off := uint64(e.startPage * ps)
 		sz := e.numPages * ps
 		if e.fill == 0 {
-			m.Holes = append(m.Holes, codec.HoleExtent{Offset: off, Size: uint64(sz)})
+			m.Holes = append(m.Holes, sparse.Extent{Offset: off, Size: uint64(sz)})
 			continue
 		}
 		var k store.ContentKey

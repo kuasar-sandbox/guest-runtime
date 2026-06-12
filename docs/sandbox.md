@@ -1087,7 +1087,7 @@ SEEK_DATA/HOLE 提取数据 extent,把每个 extent 的 `(offset, length)` frami
 **关键**:`<sha256>.snapshot` 是**稀疏文件**——`stat.Size() = ramSize + zipSize`,
 但 `st_blocks * 512`(物理占用)= 驻留页数 × 4 KiB + ZIP 字节。一个 8 GiB
 sandbox 实际驻留 200 MiB → 文件物理 ~200 MiB。`tar`、`cp --sparse=auto`、
-`manifest.Ingester` 都尊重稀疏(后者把空洞编码进 manifest.HoleExtent)。
+`manifest.Ingester` 都尊重稀疏(后者把空洞编码进 manifest 的洞表,`sparse.Extent`)。
 
 **单 zone 假设**:限定单 memory zone(固定 spec,见 §14.1)。
 

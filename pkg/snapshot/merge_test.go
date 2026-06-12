@@ -5,13 +5,13 @@ import (
 	"io"
 	"testing"
 
-	"github.com/kuasar-sandbox/sandbox-accelerator/pkg/manifest/codec"
+	"github.com/kuasar-sandbox/sandbox-accelerator/pkg/sparse"
 )
 
 // oracle is the reference layering semantics (must match mergeSparse): top byte
 // where top is resident, else base byte where base is resident, else 0 (merged
 // hole). This is what fetch.Layered would resolve for a [top, base] chain.
-func oracle(top, base []byte, topHoles, baseHoles []codec.HoleExtent, size int64) []byte {
+func oracle(top, base []byte, topHoles, baseHoles []sparse.Extent, size int64) []byte {
 	out := make([]byte, size)
 	for off := int64(0); off < size; off++ {
 		if th, _ := holeRun(off, topHoles, size); !th {
@@ -23,7 +23,7 @@ func oracle(top, base []byte, topHoles, baseHoles []codec.HoleExtent, size int64
 	return out
 }
 
-func readAll(t *testing.T, rs io.ReadSeeker, size int64, holes []codec.HoleExtent) []byte {
+func readAll(t *testing.T, rs io.ReadSeeker, size int64, holes []sparse.Extent) []byte {
 	t.Helper()
 	// Read exactly as the sink does: zero-fill holes, copy data segments.
 	out := make([]byte, size)
@@ -42,25 +42,25 @@ func TestMergeSparse_Equivalence(t *testing.T) {
 	const size = 16
 	cases := []struct {
 		name                string
-		topHoles, baseHoles []codec.HoleExtent
-		wantMergedHoles     []codec.HoleExtent
+		topHoles, baseHoles []sparse.Extent
+		wantMergedHoles     []sparse.Extent
 	}{
 		{
 			name:      "no overlap → no merged hole",
-			topHoles:  []codec.HoleExtent{{Offset: 4, Size: 4}, {Offset: 12, Size: 4}},
-			baseHoles: []codec.HoleExtent{{Offset: 0, Size: 4}},
+			topHoles:  []sparse.Extent{{Offset: 4, Size: 4}, {Offset: 12, Size: 4}},
+			baseHoles: []sparse.Extent{{Offset: 0, Size: 4}},
 		},
 		{
 			name:            "both-hole region → merged hole",
-			topHoles:        []codec.HoleExtent{{Offset: 4, Size: 8}}, // [4,12)
-			baseHoles:       []codec.HoleExtent{{Offset: 8, Size: 8}}, // [8,16)
-			wantMergedHoles: []codec.HoleExtent{{Offset: 8, Size: 4}}, // [8,12)
+			topHoles:        []sparse.Extent{{Offset: 4, Size: 8}}, // [4,12)
+			baseHoles:       []sparse.Extent{{Offset: 8, Size: 8}}, // [8,16)
+			wantMergedHoles: []sparse.Extent{{Offset: 8, Size: 4}}, // [8,12)
 		},
 		{
 			name:            "base fully holed → merged == top holes",
-			topHoles:        []codec.HoleExtent{{Offset: 8, Size: 8}},  // [8,16)
-			baseHoles:       []codec.HoleExtent{{Offset: 0, Size: 16}}, // all
-			wantMergedHoles: []codec.HoleExtent{{Offset: 8, Size: 8}},
+			topHoles:        []sparse.Extent{{Offset: 8, Size: 8}},  // [8,16)
+			baseHoles:       []sparse.Extent{{Offset: 0, Size: 16}}, // all
+			wantMergedHoles: []sparse.Extent{{Offset: 8, Size: 8}},
 		},
 		{
 			name:     "top fully resident → base never shows, no merged hole",
@@ -91,14 +91,14 @@ func TestMergeSparse_Equivalence(t *testing.T) {
 
 func TestHoleIntersection(t *testing.T) {
 	cases := []struct {
-		a, b, want []codec.HoleExtent
+		a, b, want []sparse.Extent
 		size       int64
 	}{
 		{size: 8},
 		{a: hx(0, 8), b: hx(0, 8), want: hx(0, 8), size: 8},
 		{a: hx(0, 4), b: hx(4, 4), want: nil, size: 8}, // disjoint
 		{a: hx(2, 6), b: hx(0, 4), want: hx(2, 2), size: 8},
-		{a: []codec.HoleExtent{{Offset: 0, Size: 2}, {Offset: 6, Size: 2}}, b: hx(0, 8), want: []codec.HoleExtent{{Offset: 0, Size: 2}, {Offset: 6, Size: 2}}, size: 8},
+		{a: []sparse.Extent{{Offset: 0, Size: 2}, {Offset: 6, Size: 2}}, b: hx(0, 8), want: []sparse.Extent{{Offset: 0, Size: 2}, {Offset: 6, Size: 2}}, size: 8},
 	}
 	for i, tc := range cases {
 		got := holeIntersection(tc.a, tc.b, tc.size)
@@ -108,11 +108,11 @@ func TestHoleIntersection(t *testing.T) {
 	}
 }
 
-func hx(offset, size uint64) []codec.HoleExtent {
-	return []codec.HoleExtent{{Offset: offset, Size: size}}
+func hx(offset, size uint64) []sparse.Extent {
+	return []sparse.Extent{{Offset: offset, Size: size}}
 }
 
-func equalHoles(a, b []codec.HoleExtent) bool {
+func equalHoles(a, b []sparse.Extent) bool {
 	if len(a) != len(b) {
 		return false
 	}
