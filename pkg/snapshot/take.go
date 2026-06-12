@@ -1,6 +1,7 @@
 // Package snapshot implements the sandbox-ctl snapshot path: CH
-// /vm.snapshot orchestration, sparse memfd copy, ZIP-at-end bundle
-// composition, and manifest-store upload.
+// /vm.snapshot orchestration, sparse memfd capture, [memory][ZIP]
+// bundle composition into tarstream artifacts, and manifest-store
+// upload.
 //
 // The ctl.sock wire protocol + listener that carries snapshot_request
 // from `sandbox-ctl snapshot` to the run process lives in
@@ -12,15 +13,10 @@ package snapshot
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/binary"
-	"encoding/hex"
-	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
-	"syscall"
 	"time"
 
 	"github.com/kuasar-sandbox/sandbox-runtime/pkg/chapi"
@@ -163,22 +159,14 @@ func Take(s Sources, sink SnapshotSink, resumeAfter bool) (*Outputs, error) {
 	// Done first so snapshot.cfg below carries the final overlay.base refs.
 	// localMerge: the sandbox was restored from a LOCAL snapshot; per disk with
 	// a MergeBase, flatten this run's resident delta onto the parent local layer
-	// (replace, not stack — §3.5). The zero-copy move fast path applies only to
-	// an owned diff being consumed (destroy, no resume, no merge).
+	// (replace, not stack — §3.5). The diff is always repacked into a tar
+	// artifact (the live raw diff and the at-rest artifact are different
+	// containers, so there is no rename fast path).
 	localMerge := s.MergeBaseSnapshot != ""
 	out.OverlayRefs = make([]string, len(s.Diffs))
 	out.OverlayPaths = make([]string, len(s.Diffs))
 	for i, d := range s.Diffs {
-		merging := localMerge && d.MergeBase != ""
-		if mover, ok := sink.(OverlayMover); ok && d.Owned && !resumeAfter && !merging {
-			ref, path, mErr := mover.MoveOverlay(d.Path)
-			if mErr == nil {
-				out.OverlayRefs[i], out.OverlayPaths[i] = ref, path
-				continue
-			}
-			logf("snapshot: overlay move fell back to copy: %v", mErr)
-		}
-		ref, path, err := absorbOverlay(ctx, sink, d, merging)
+		ref, path, err := absorbOverlay(ctx, sink, d, localMerge && d.MergeBase != "")
 		if err != nil {
 			return nil, fmt.Errorf("disk %d: %w", i, err)
 		}
@@ -266,59 +254,3 @@ func absorbOverlay(ctx context.Context, sink SnapshotSink, d DiskDiff, merging b
 	return sink.AbsorbOverlay(ctx, src, holes)
 }
 
-// hashSparseFile computes a content digest over the data extents of path,
-// skipping holes: each data extent's (offset, length) framing plus its bytes
-// are folded into SHA256, and the file's logical size is folded at the end.
-// This is fast (reads only resident data, not the zero pages of a multi-GiB
-// sparse image) and layout-sensitive (different hole distributions → different
-// digest). It is NOT equal to the SHA256 of the full logical (hole=0) byte
-// stream — sparse/dense representation invariance is intentionally traded for
-// speed; the snapshot pipeline only ever emits canonical-sparse files. See
-// docs/sandbox.md §6.1.
-func hashSparseFile(path string) (string, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return "", err
-	}
-	defer f.Close()
-	st, err := f.Stat()
-	if err != nil {
-		return "", err
-	}
-	size := st.Size()
-	fd := int(f.Fd())
-	h := sha256.New()
-	var hdr [16]byte
-	var off int64
-	for off < size {
-		dataOff, err := syscall.Seek(fd, off, seekData)
-		if err != nil {
-			if errors.Is(err, syscall.ENXIO) {
-				break // no more data; remainder is a trailing hole
-			}
-			return "", fmt.Errorf("SEEK_DATA at %d: %w", off, err)
-		}
-		holeOff, err := syscall.Seek(fd, dataOff, seekHole)
-		if err != nil {
-			return "", fmt.Errorf("SEEK_HOLE at %d: %w", dataOff, err)
-		}
-		if holeOff > size {
-			holeOff = size
-		}
-		if holeOff <= dataOff {
-			off = holeOff
-			continue
-		}
-		binary.LittleEndian.PutUint64(hdr[0:8], uint64(dataOff))
-		binary.LittleEndian.PutUint64(hdr[8:16], uint64(holeOff-dataOff))
-		h.Write(hdr[:])
-		if _, err := io.Copy(h, io.NewSectionReader(f, dataOff, holeOff-dataOff)); err != nil {
-			return "", fmt.Errorf("hash data [%d,%d): %w", dataOff, holeOff, err)
-		}
-		off = holeOff
-	}
-	// Fold logical size so the trailing-hole length is part of the identity.
-	binary.LittleEndian.PutUint64(hdr[0:8], uint64(size))
-	h.Write(hdr[:8])
-	return hex.EncodeToString(h.Sum(nil)), nil
-}

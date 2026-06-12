@@ -3,38 +3,94 @@ package snapshot
 import (
 	"archive/zip"
 	"bytes"
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"io"
 	"os"
 	"path/filepath"
-	"reflect"
-	"syscall"
 	"testing"
 
 	"github.com/kuasar-sandbox/sandbox-accelerator/pkg/sparse"
+	"github.com/kuasar-sandbox/sandbox-accelerator/pkg/tarstream"
 )
 
-// dataSegments must return exactly the resident runs = [0,size) minus holes.
-func TestDataSegments(t *testing.T) {
-	cases := []struct {
-		name  string
-		size  int64
-		holes []sparse.Extent
-		want  []sparse.Extent
-	}{
-		{"no holes", 100, nil, []sparse.Extent{{Offset: 0, Size: 100}}},
-		{"leading hole", 100, []sparse.Extent{{Offset: 0, Size: 40}}, []sparse.Extent{{Offset: 40, Size: 60}}},
-		{"trailing hole", 100, []sparse.Extent{{Offset: 60, Size: 40}}, []sparse.Extent{{Offset: 0, Size: 60}}},
-		{"middle hole", 100, []sparse.Extent{{Offset: 40, Size: 20}}, []sparse.Extent{{Offset: 0, Size: 40}, {Offset: 60, Size: 40}}},
-		{"all hole", 100, []sparse.Extent{{Offset: 0, Size: 100}}, nil},
-		{"two holes", 100, []sparse.Extent{{Offset: 10, Size: 10}, {Offset: 50, Size: 10}},
-			[]sparse.Extent{{Offset: 0, Size: 10}, {Offset: 20, Size: 30}, {Offset: 60, Size: 40}}},
+// FileSink must pack content-addressed tarstream artifacts: the envelope
+// carries the hole map (no OS sparseness needed), the name is the SHA256 of
+// the artifact bytes, and the bundle keeps its [memory][ZIP] entry layout.
+func TestFileSinkArtifacts(t *testing.T) {
+	const size = 1 << 20
+	mem := make([]byte, size)
+	copy(mem[0:4], "HEAD")
+	copy(mem[size-4:], "TAIL")
+	holes := []sparse.Extent{{Offset: 4, Size: size - 8}}
+	zipTail := []byte("ZIPTRAILER")
+
+	dir := t.TempDir()
+	sink := NewFileSink(dir, "sid1", nil)
+	ctx := context.Background()
+
+	ref, path, err := sink.AbsorbOverlay(ctx, bytes.NewReader(mem), holes)
+	if err != nil {
+		t.Fatal(err)
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := dataSegments(tc.size, tc.holes); !reflect.DeepEqual(got, tc.want) {
-				t.Errorf("dataSegments(%d, %v) = %v, want %v", tc.size, tc.holes, got, tc.want)
-			}
-		})
+	// Content address = sha256 of the artifact bytes.
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(raw)
+	wantRef := "file://" + hex.EncodeToString(sum[:]) + ".overlay"
+	if ref != wantRef {
+		t.Fatalf("overlay ref = %s, want %s", ref, wantRef)
+	}
+	// The envelope round-trips content + hole map.
+	v, err := tarstream.ReadSeekFrom(bytes.NewReader(raw), "overlay")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v.Size() != size {
+		t.Fatalf("overlay logical size = %d", v.Size())
+	}
+	gotHoles := v.Holes()
+	if len(gotHoles) != 1 || gotHoles[0] != holes[0] {
+		t.Fatalf("overlay holes = %v, want %v", gotHoles, holes)
+	}
+	got, _ := io.ReadAll(v)
+	if !bytes.Equal(got, mem) {
+		t.Fatal("overlay content mismatch")
+	}
+
+	// Bundle: [memory][ZIP] as one entry named "snapshot", + <sid>.snapshot symlink.
+	bref, bpath, err := sink.AbsorbBundle(ctx, bytes.NewReader(mem), holes, bytes.NewReader(zipTail))
+	if err != nil {
+		t.Fatal(err)
+	}
+	braw, err := os.ReadFile(bpath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bsum := sha256.Sum256(braw)
+	if want := "file://" + hex.EncodeToString(bsum[:]) + ".snapshot"; bref != want {
+		t.Fatalf("bundle ref = %s, want %s", bref, want)
+	}
+	bv, err := tarstream.ReadSeekFrom(bytes.NewReader(braw), "snapshot")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bv.Size() != size+int64(len(zipTail)) {
+		t.Fatalf("bundle logical size = %d", bv.Size())
+	}
+	ball, _ := io.ReadAll(bv)
+	if !bytes.Equal(ball[:size], mem) || !bytes.Equal(ball[size:], zipTail) {
+		t.Fatal("bundle [memory][ZIP] layout mismatch")
+	}
+	link, err := os.Readlink(filepath.Join(dir, "sid1.snapshot"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if link != filepath.Base(bpath) {
+		t.Fatalf("symlink → %s, want %s", link, filepath.Base(bpath))
 	}
 }
 
@@ -82,42 +138,6 @@ func TestConcatReadSeeker(t *testing.T) {
 	// (4) SeekEnd reports total length.
 	if end, err := c.Seek(0, io.SeekEnd); err != nil || end != int64(len(full)) {
 		t.Fatalf("SeekEnd = %d, %v; want %d, nil", end, err, len(full))
-	}
-}
-
-// writeSparseFile must reproduce the logical content (holes read back as zeros,
-// tail appended after size) AND leave the hole region unallocated on disk.
-func TestWriteSparseFileRoundTrip(t *testing.T) {
-	const size = 1 << 20 // 1 MiB
-	src := make([]byte, size)
-	copy(src[0:4], "HEAD")
-	copy(src[size-4:], "TAIL")
-	holes := []sparse.Extent{{Offset: 4, Size: size - 8}} // [4, size-4) is a hole
-	tail := []byte("ZIPTRAILER")
-
-	path := filepath.Join(t.TempDir(), "out.bin")
-	if err := writeSparseFile(path, bytes.NewReader(src), size, holes, bytes.NewReader(tail)); err != nil {
-		t.Fatal(err)
-	}
-
-	got, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := append(append([]byte{}, src...), tail...)
-	if !bytes.Equal(got, want) {
-		t.Fatalf("round-trip mismatch: len got=%d want=%d", len(got), len(want))
-	}
-
-	// Sparseness: only ~3 blocks of real data were written into 1 MiB, so the
-	// allocated size must be far below the logical size (a dumb dense copy would
-	// allocate the whole file).
-	fi, err := os.Stat(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if allocated := fi.Sys().(*syscall.Stat_t).Blocks * 512; allocated >= size {
-		t.Errorf("not sparse: allocated=%d bytes, logical=%d", allocated, size)
 	}
 }
 

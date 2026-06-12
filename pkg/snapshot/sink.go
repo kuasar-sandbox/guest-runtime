@@ -2,6 +2,7 @@ package snapshot
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -12,6 +13,7 @@ import (
 	"github.com/kuasar-sandbox/sandbox-accelerator/pkg/manifest/ingest"
 	"github.com/kuasar-sandbox/sandbox-accelerator/pkg/sparse"
 	"github.com/kuasar-sandbox/sandbox-accelerator/pkg/store"
+	"github.com/kuasar-sandbox/sandbox-accelerator/pkg/tarstream"
 	"golang.org/x/sys/unix"
 )
 
@@ -24,28 +26,21 @@ func HexKey(k store.ContentKey) string {
 // the memory+ZIP bundle — straight from their sources to a destination,
 // WITHOUT staging them in /run tmpfs. Two impls share this interface:
 //
-//   - FileSink writes sparse, content-addressed local files (<sha>.overlay /
-//     <sha>.snapshot) under an output dir (--output).
+//   - FileSink packs content-addressed local tarstream artifacts
+//     (<sha>.overlay / <sha>.snapshot, entry "overlay"/"snapshot") under an
+//     output dir (--output); the content address is the SHA256 of the
+//     artifact bytes (deterministic envelope), computed while writing.
 //   - IngestSink streams to a manifest store via ingest.Ingester (--upload).
 //
 // Each method takes the source as an io.ReadSeeker plus its hole map (the
-// caller computes holes via SEEK_HOLE on the source fd); the sink reads only
-// resident extents. They return the artifact's ref (file://<sha>.ext |
-// manifest://<key>) and, for file mode, its local path ("" for ingest).
+// caller computes holes via SEEK_HOLE on the LIVE source fd — the one place
+// filesystem metadata is the hole authority; from the artifact on, the tar
+// envelope is). The sink reads only resident extents. They return the
+// artifact's ref (file://<sha>.ext | manifest://<key>) and, for file mode,
+// its local path ("" for ingest).
 type SnapshotSink interface {
 	AbsorbOverlay(ctx context.Context, diff io.ReadSeeker, holes []sparse.Extent) (ref, path string, err error)
 	AbsorbBundle(ctx context.Context, mem io.ReadSeeker, holes []sparse.Extent, zip io.Reader) (ref, path string, err error)
-}
-
-// OverlayMover is an optional fast path a sink may implement: instead of
-// sparse-COPYING the diff into the content-addressed overlay file, hash the
-// diff in place and RENAME it (zero-copy on the same filesystem). Take uses it
-// only when the diff is the sandbox's own (auto-created) AND the sandbox is
-// being destroyed (no resume) — i.e. the diff is consumed, not a user file.
-// On cross-filesystem rename (or any error) Take falls back to AbsorbOverlay.
-// FileSink implements it; IngestSink does not (it must stream to the store).
-type OverlayMover interface {
-	MoveOverlay(diffPath string) (ref, path string, err error)
 }
 
 // ---------------------------------------------------------------------------
@@ -65,8 +60,13 @@ func NewFileSink(outDir, sandboxID string, logf func(string, ...any)) *FileSink 
 	return &FileSink{outDir: outDir, sandboxID: sandboxID, logf: logf}
 }
 
-func (s *FileSink) AbsorbOverlay(_ context.Context, diff io.ReadSeeker, holes []sparse.Extent) (string, string, error) {
-	digest, final, err := s.writeContentAddressed(diff, holes, nil, "overlay")
+func (s *FileSink) AbsorbOverlay(ctx context.Context, diff io.ReadSeeker, holes []sparse.Extent) (string, string, error) {
+	size, err := seekerSize(diff)
+	if err != nil {
+		return "", "", err
+	}
+	digest, final, err := s.writeArtifact(ctx, "overlay",
+		&seekerSource{rs: diff, size: uint64(size), holes: holes})
 	if err != nil {
 		return "", "", err
 	}
@@ -74,25 +74,18 @@ func (s *FileSink) AbsorbOverlay(_ context.Context, diff io.ReadSeeker, holes []
 	return "file://" + digest + ".overlay", final, nil
 }
 
-// MoveOverlay hashes the diff in place (resident-only) and renames it to the
-// content-addressed <sha>.overlay — no copy. The digest is identical to what
-// AbsorbOverlay would produce, so the overlay ref is the same. Returns the
-// rename error (e.g. EXDEV across filesystems) so Take can fall back to a copy.
-func (s *FileSink) MoveOverlay(diffPath string) (string, string, error) {
-	digest, err := hashSparseFile(diffPath)
+func (s *FileSink) AbsorbBundle(ctx context.Context, mem io.ReadSeeker, holes []sparse.Extent, zip io.Reader) (string, string, error) {
+	memSize, err := seekerSize(mem)
 	if err != nil {
-		return "", "", fmt.Errorf("hash overlay: %w", err)
+		return "", "", err
 	}
-	final := filepath.Join(s.outDir, digest+".overlay")
-	if err := os.Rename(diffPath, final); err != nil {
-		return "", "", err // cross-fs / other → caller falls back to copy
+	tail, err := io.ReadAll(zip) // ZIP trailer is small (KB)
+	if err != nil {
+		return "", "", fmt.Errorf("read zip: %w", err)
 	}
-	s.logf("snapshot: %s.overlay moved (zero-copy)", digest[:12])
-	return "file://" + digest + ".overlay", final, nil
-}
-
-func (s *FileSink) AbsorbBundle(_ context.Context, mem io.ReadSeeker, holes []sparse.Extent, zip io.Reader) (string, string, error) {
-	digest, final, err := s.writeContentAddressed(mem, holes, zip, "snapshot")
+	concat := &concatReadSeeker{mem: mem, memSize: memSize, tail: tail}
+	digest, final, err := s.writeArtifact(ctx, "snapshot",
+		&seekerSource{rs: concat, size: uint64(memSize) + uint64(len(tail)), holes: holes})
 	if err != nil {
 		return "", "", err
 	}
@@ -107,26 +100,34 @@ func (s *FileSink) AbsorbBundle(_ context.Context, mem io.ReadSeeker, holes []sp
 	return "file://" + digest + ".snapshot", final, nil
 }
 
-// writeContentAddressed sparse-copies src's resident extents (+ optional dense
-// tail) to a <sid>.<ext>.partial file, hashes it (resident-only via SEEK_DATA),
-// then renames to <sha>.<ext>. The hash pass never re-reads the multi-GiB hole
-// space.
-func (s *FileSink) writeContentAddressed(src io.ReadSeeker, holes []sparse.Extent, tail io.Reader, ext string) (string, string, error) {
-	size, err := seekerSize(src)
+// writeArtifact packs src as a tarstream artifact (single entry named kind)
+// at <sid>.<kind>.partial, hashing the artifact bytes while writing, then
+// renames to <sha>.<kind>. Only data extents flow (holes ride the envelope
+// map); the artifact file itself is dense and survives non-sparse-aware
+// copies and filesystems.
+func (s *FileSink) writeArtifact(ctx context.Context, kind string, src sparse.Source) (string, string, error) {
+	tmp := filepath.Join(s.outDir, s.sandboxID+"."+kind+".partial")
+	f, err := os.Create(tmp)
 	if err != nil {
 		return "", "", err
 	}
-	tmp := filepath.Join(s.outDir, s.sandboxID+"."+ext+".partial")
-	if err := writeSparseFile(tmp, src, size, holes, tail); err != nil {
-		return "", "", fmt.Errorf("write %s: %w", ext, err)
+	h := sha256.New()
+	if err := tarstream.WriteTo(ctx, io.MultiWriter(f, h), kind, src); err != nil {
+		f.Close()
+		_ = os.Remove(tmp)
+		return "", "", fmt.Errorf("pack %s: %w", kind, err)
 	}
-	digest, err := hashSparseFile(tmp)
-	if err != nil {
-		return "", "", fmt.Errorf("hash %s: %w", ext, err)
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return "", "", err
 	}
-	final := filepath.Join(s.outDir, digest+"."+ext)
+	if err := f.Close(); err != nil {
+		return "", "", err
+	}
+	digest := hex.EncodeToString(h.Sum(nil))
+	final := filepath.Join(s.outDir, digest+"."+kind)
 	if err := os.Rename(tmp, final); err != nil {
-		return "", "", fmt.Errorf("rename %s: %w", ext, err)
+		return "", "", fmt.Errorf("rename %s: %w", kind, err)
 	}
 	return digest, final, nil
 }
@@ -243,58 +244,6 @@ func seekerSize(rs io.ReadSeeker) (int64, error) {
 		return 0, err
 	}
 	return n, nil
-}
-
-// writeSparseFile creates a sparse file at path of logical size = size (+ tail
-// bytes appended after size), copying only src's resident extents (the
-// complement of holes); hole ranges are left unwritten (sparse). tail (the ZIP
-// trailer, may be nil) is written dense immediately after the size-th byte.
-func writeSparseFile(path string, src io.ReadSeeker, size int64, holes []sparse.Extent, tail io.Reader) error {
-	dst, err := os.Create(path)
-	if err != nil {
-		return err
-	}
-	defer dst.Close()
-	if err := dst.Truncate(size); err != nil {
-		return err
-	}
-	for _, seg := range dataSegments(size, holes) {
-		if _, err := src.Seek(int64(seg.Offset), io.SeekStart); err != nil {
-			return err
-		}
-		if _, err := dst.Seek(int64(seg.Offset), io.SeekStart); err != nil {
-			return err
-		}
-		if _, err := io.CopyN(dst, src, int64(seg.Size)); err != nil {
-			return err
-		}
-	}
-	if tail != nil {
-		if _, err := dst.Seek(size, io.SeekStart); err != nil {
-			return err
-		}
-		if _, err := io.Copy(dst, tail); err != nil {
-			return err
-		}
-	}
-	return dst.Sync()
-}
-
-// dataSegments returns the resident runs = [0,size) minus holes. holes must be
-// sorted, non-overlapping, within [0,size) (WalkHoles guarantees this).
-func dataSegments(size int64, holes []sparse.Extent) []sparse.Extent {
-	var segs []sparse.Extent
-	cursor := uint64(0)
-	for _, h := range holes {
-		if h.Offset > cursor {
-			segs = append(segs, sparse.Extent{Offset: cursor, Size: h.Offset - cursor})
-		}
-		cursor = h.Offset + h.Size
-	}
-	if cursor < uint64(size) {
-		segs = append(segs, sparse.Extent{Offset: cursor, Size: uint64(size) - cursor})
-	}
-	return segs
 }
 
 // residentBytes = size minus the sum of hole sizes.

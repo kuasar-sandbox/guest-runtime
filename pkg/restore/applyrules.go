@@ -24,7 +24,11 @@ type SnapshotCfg struct {
 			Memory string `yaml:"memory"`
 		} `yaml:"capacity"`
 	} `yaml:"resources"`
-	FromRefs []string `yaml:"from_refs"` // memory chain below this bundle (§3.5)
+	// Metadata is the opaque platform passthrough (config.SandboxConfig
+	// .Metadata): never interpreted by the runtime, carried verbatim
+	// through snapshot/upload re-rendering, surfaced by info --json.
+	Metadata map[string]string `yaml:"metadata,omitempty"`
+	FromRefs []string          `yaml:"from_refs"` // memory chain below this bundle (§3.5)
 	Boot     struct {
 		RuntimeRef string `yaml:"runtime_ref"`
 		Root       struct {

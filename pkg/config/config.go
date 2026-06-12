@@ -67,6 +67,14 @@ type SandboxConfig struct {
 	Files  []FileConfig  `yaml:"files,omitempty"`
 	Init   []InitConfig  `yaml:"init,omitempty"`
 
+	// Metadata is an opaque key/value passthrough for the platform above:
+	// the runtime never interprets it. It is copied verbatim into a
+	// snapshot's snapshot.cfg (and inherited across restore unless the
+	// host yaml overrides it), making snapshot bundles self-describing
+	// for orchestrator-level concerns (e.g. e2b start/ready commands).
+	// Use namespaced keys ("e2b.start_cmd").
+	Metadata map[string]string `yaml:"metadata,omitempty"`
+
 	// SnapshotRefs is computed at sandbox boot (lifecycle.go fills it
 	// before snapshot is possible) and not part of the YAML schema.
 	// Exposed publicly so snapshot.cfg builder + applyrules can read.

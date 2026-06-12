@@ -62,7 +62,7 @@ func infoCmd(args []string) int {
 		defer fc.Close()
 		stream, totalSize = fc, sz
 	} else {
-		fsr, err := fetch.OpenFileStream(input)
+		fsr, err := fetch.OpenTarStream(input)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			return 1

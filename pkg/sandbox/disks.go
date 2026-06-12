@@ -14,7 +14,7 @@ import (
 
 // OpenBlockReader resolves a file:// or manifest:// disk URI into a
 // vhost.BlockReader plus the total disk size, via a fetch.Stream. file://
-// opens a sparse-aware local stream; manifest:// (one key, or ':'-joined keys
+// opens a local tarstream artifact; manifest:// (one key, or ':'-joined keys
 // that overlay as layers) resolves through the fetcher. Both wrap in a
 // StreamReader whose Close releases the stream (the file's fd; a manifest
 // stream's cache/store client is owned by the Fetcher and closed separately).
@@ -45,7 +45,9 @@ func OpenDiskStream(ctx context.Context, uri string, fetcher fetch.Fetcher) (fet
 	}
 	switch scheme {
 	case "file":
-		s, err := fetch.OpenFileStream(value)
+		// Local disk artifacts are tarstream envelopes (image/overlay);
+		// the hole map comes from the envelope, never the filesystem.
+		s, err := fetch.OpenTarStream(value)
 		if err != nil {
 			return nil, 0, err
 		}

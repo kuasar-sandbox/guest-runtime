@@ -25,16 +25,26 @@ func oracle(top, base []byte, topHoles, baseHoles []sparse.Extent, size int64) [
 
 func readAll(t *testing.T, rs io.ReadSeeker, size int64, holes []sparse.Extent) []byte {
 	t.Helper()
-	// Read exactly as the sink does: zero-fill holes, copy data segments.
+	// Read exactly as the artifact packer does: zero-fill holes, copy the
+	// data segments (= [0,size) minus holes, walked in order).
 	out := make([]byte, size)
-	for _, seg := range dataSegments(size, holes) {
-		if _, err := rs.Seek(int64(seg.Offset), io.SeekStart); err != nil {
-			t.Fatalf("seek %d: %v", seg.Offset, err)
+	cursor := uint64(0)
+	read := func(from, to uint64) {
+		if to <= from {
+			return
 		}
-		if _, err := io.ReadFull(rs, out[seg.Offset:seg.Offset+seg.Size]); err != nil {
-			t.Fatalf("read seg [%d,%d): %v", seg.Offset, seg.Offset+seg.Size, err)
+		if _, err := rs.Seek(int64(from), io.SeekStart); err != nil {
+			t.Fatalf("seek %d: %v", from, err)
+		}
+		if _, err := io.ReadFull(rs, out[from:to]); err != nil {
+			t.Fatalf("read seg [%d,%d): %v", from, to, err)
 		}
 	}
+	for _, h := range holes {
+		read(cursor, h.Offset)
+		cursor = h.Offset + h.Size
+	}
+	read(cursor, uint64(size))
 	return out
 }
 

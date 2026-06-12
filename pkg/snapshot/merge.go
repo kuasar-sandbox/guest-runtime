@@ -6,42 +6,55 @@ import (
 	"os"
 
 	"github.com/kuasar-sandbox/sandbox-accelerator/pkg/sparse"
+	"github.com/kuasar-sandbox/sandbox-accelerator/pkg/tarstream"
 )
 
-// sparseLayer presents [0,size) of a local file as a closable ReadSeeker (an
-// io.SectionReader, so a read never spills past size — e.g. into a .snapshot's
-// ZIP trailer). Used as the merge BASE: the parent local bundle's memory
-// section, or the parent local overlay.
-type sparseLayer struct {
+// tarLayer is a parent local artifact (tarstream envelope) opened as a
+// closable ReadSeeker over its logical view. Used as the merge BASE: the
+// parent local bundle's memory section, or the parent local overlay. Reads
+// past the layer size (e.g. into a .snapshot's ZIP trailer) never happen —
+// mergedReadSeeker bounds every read by its size.
+type tarLayer struct {
 	f *os.File
-	*io.SectionReader
+	tarstream.ReadSeeker
 }
 
-func (s *sparseLayer) Close() error { return s.f.Close() }
+func (l *tarLayer) Close() error { return l.f.Close() }
 
-// openMergeBase opens a parent local file and returns its [0,size) view plus the
-// holes over [0,size). size must not exceed the file (a snapshot's memory
-// section size = MemfdSize; an overlay's = the diff size).
-func openMergeBase(path string, size int64) (*sparseLayer, []sparse.Extent, error) {
+// openMergeBase opens a parent local artifact and returns its logical view
+// plus the holes over [0,size) — from the tar envelope's map, clipped to the
+// layer size (a snapshot's memory section = MemfdSize; an overlay's = the
+// diff size). size must not exceed the entry's logical size.
+func openMergeBase(path string, size int64) (*tarLayer, []sparse.Extent, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, nil, err
 	}
-	st, err := f.Stat()
+	v, err := tarstream.ReadSeekFrom(f, "")
 	if err != nil {
 		f.Close()
-		return nil, nil, err
+		return nil, nil, fmt.Errorf("merge base %s: not a tarstream artifact: %w", path, err)
 	}
-	if st.Size() < size {
+	if v.Size() < size {
 		f.Close()
-		return nil, nil, fmt.Errorf("merge base %s: file size %d < expected layer size %d", path, st.Size(), size)
+		return nil, nil, fmt.Errorf("merge base %s: entry size %d < expected layer size %d", path, v.Size(), size)
 	}
-	holes, err := WalkHoles(int(f.Fd()), size)
-	if err != nil {
-		f.Close()
-		return nil, nil, err
+	return &tarLayer{f: f, ReadSeeker: v}, clipExtents(v.Holes(), uint64(size)), nil
+}
+
+// clipExtents intersects sorted, disjoint extents with [0, size).
+func clipExtents(hs []sparse.Extent, size uint64) []sparse.Extent {
+	var out []sparse.Extent
+	for _, h := range hs {
+		if h.Offset >= size {
+			break
+		}
+		if h.Offset+h.Size > size {
+			h.Size = size - h.Offset
+		}
+		out = append(out, h)
 	}
-	return &sparseLayer{f: f, SectionReader: io.NewSectionReader(f, 0, size)}, holes, nil
+	return out
 }
 
 // mergeSparse flattens two adjacent sparse layers — top (this run's resident
@@ -76,7 +89,7 @@ const (
 )
 
 // mergedReadSeeker presents (top over base) as a single io.ReadSeeker. pos
-// advances monotonically when driven by the sink's writeSparseFile (Seek to a
+// advances monotonically when driven by the sink's artifact packer (Seek to a
 // data segment, then sequential reads).
 type mergedReadSeeker struct {
 	top, base           io.ReadSeeker

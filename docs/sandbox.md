@@ -372,22 +372,28 @@ sandbox-ctl info <manifest://hex | snapshot-path> [flags]
 
 ### 2.7 `sandbox-ctl upload-snapshot`
 
-把一个**本地** snapshot(`<sid>.snapshot` bundle + 同目录 `<sha>.overlay`,带 `snapshot.cfg`
-分层链)**离线提升**为远程 `manifest://` snapshot——**不启动沙箱、不需 /dev/kvm**。把本地
-顶层 overlay + 内存 ingest 进 store,远程下层链按引用带过,产出 0 本地层的全远程快照,
-在 stdout 打印其 `manifest://<key>`(可直接 `run --restore=manifest://<key>`)。
+把一个**本地** snapshot(`<sid>.snapshot` bundle 及其 `snapshot.cfg` 引用的全部本地
+工件)**离线提升**为远程 `manifest://` snapshot——**不启动沙箱、不需 /dev/kvm**。
+**自动上传** cfg 里每个 `file://` 工件槽位并改写为 `manifest://`:根/数据盘的
+base 镜像(`base_ref`,按 `@sha256` 摘要先校验文件)、各盘捕获的顶层
+overlay;远程下层链按引用带过;`runtime_ref` 刻意不动(节点级启动工件,按摘要
+钉住、随平台分发,不属于租户工件域)。内容寻址 ⇒ 共享 base 重复上传自动去重、
+失败重试安全。产出 0 本地层的全远程快照,stdout 打印其 `manifest://<key>`
+(可直接 `run --restore=manifest://<key>`)。
 
 ```
-sandbox-ctl upload-snapshot <snapshot-path> [flags]
+sandbox-ctl upload-snapshot [flags] <snapshot-path>
 
   <snapshot-path>         本地 <sid>.snapshot(或其指向的 <sha>.snapshot)
   --manifest-config <p>   manifest 配置 YAML(MANIFEST_CONFIG env);$MANIFEST_KEY 提供客户密钥
   --quiet                 抑制 stderr 进度日志
 ```
 
-校验(§3.5):每个**下层** `manifest://` 层必须存在且在当前 `MANIFEST_KEY` 下可解封
-(**仅取 manifest blob、不下载 chunk**);若下层含 `file://` 本地层(违反本地层不变量),
-拒绝并提示先 `snapshot --output` 本地导出把它折叠进顶层。
+本地工件按 bundle **同目录**解析(cfg 的 file:// 引用是 basename);base 镜像须与
+bundle 同目录放置。校验(§3.5):每个**下层** `manifest://` 层必须存在且在当前
+`MANIFEST_KEY` 下可解封(**仅取 manifest blob、不下载 chunk**);若**下层**含
+`file://` 本地层(违反本地层不变量),拒绝并提示先 `snapshot --output` 本地导出把
+它折叠进顶层(顶层与 base 镜像不受此限——它们正是被自动上传的对象)。
 
 ## 3. 配置
 
@@ -698,6 +704,13 @@ resources:
   capacity:
     cpu: 2
     memory: 8GiB
+
+# 平台透传元数据(可选):runtime 永不解释,sandbox.yaml 的 metadata 原样带入,
+# 跨 restore 继承(host yaml 显式给 metadata 则整体覆盖),upload 重渲染时保留,
+# info --json 可读。键名建议带命名空间(编排层自用,如 e2b.start_cmd)。
+metadata:
+  e2b.start_cmd: "npm run start"
+  e2b.ready_cmd: "curl -sf localhost:3000/health"
 
 # 内存快照链(增量分层):本快照的内存段是链顶,from_refs 是其下各层
 # (自顶向下,不含自身)。冷启动产生的首个快照 = [];从 s1 恢复再存的 s2 =
@@ -1045,9 +1058,9 @@ cloud-hypervisor \
 
 ```
 <out_dir>/
-├── <sha256>.snapshot                     # 内存稀疏拷贝 + 末尾 ZIP;按内容摘要命名
+├── <sha256>.snapshot                     # tarstream 工件(条目 "snapshot" = [内存][ZIP])
 ├── <sid>.snapshot → <sha256>.snapshot    # 符号链接:按 sid 寻址的"最新"指针
-└── <sha256>.overlay                      # ext4 sparse 文件;按内容摘要命名
+└── <sha256>.overlay                      # tarstream 工件(条目 "overlay" = ext4 diff)
 ```
 
 snapshot 与 overlay 都**按内容摘要命名**(content-addressed),彼此不覆盖,故可作为
@@ -1056,19 +1069,20 @@ snapshot 与 overlay 都**按内容摘要命名**(content-addressed),彼此不�
 `<sha256>.snapshot`,给人和工具一个按 sid 寻址的"最新"入口
 (`<sid>` = `sandbox-ctl run --sandbox-id` 设的或 yaml 里的)。
 
-**内容摘要 `<sha256>`(跳空洞)**:对文件**数据区**算 SHA256,**跳过空洞**——按
-SEEK_DATA/HOLE 提取数据 extent,把每个 extent 的 `(offset, length)` framing 连同其
-字节一起喂入哈希(空洞只贡献 framing,不读 0 字节)。既快(只读驻留数据,不读
-8 GiB 里的零页)又正确(布局敏感:空洞分布不同 → 摘要不同)。代价:摘要不等于
-"整逻辑字节流的 SHA256",失去稀疏/稠密表示无关性;因本管线始终产出规范稀疏形式,
-此性质无损。snapshot 摘要覆盖整个文件(稀疏内存段跳空洞 + ZIP 段全哈希)。
+**工件容器 = tarstream**(`sandbox-accelerator/pkg/tarstream`,GNU PAX sparse
+1.0 单条目 tar):逻辑视图的洞进信封洞图,线上只有数据字节。工件文件本身**致密**
+——`cp`/`rsync`/非稀疏文件系统都不再能破坏语义,洞的权威从此是信封而非 OS。
 
-**`<sha256>.snapshot` 字节布局**(物理稀疏 + 末尾 ZIP):
+**内容摘要 `<sha256>`** = 工件字节(整个 tar 文件)的 SHA256,打包时同步计算
+(信封确定性编码 ⇒ 同内容同摘要)。只读驻留数据 + ZIP 段,8 GiB 镜像里的零页
+不读不写。
+
+**`snapshot` 条目逻辑布局**(信封内的逻辑视图;洞在信封图里):
 
 ```
-逻辑偏移 [0, ramSize)        memfd 内容(SEEK_DATA/HOLE 稀疏化:零页是文件空洞,
-                              非零页占物理 4 KiB)
-逻辑偏移 [ramSize, EOF)      标准 ZIP archive
+逻辑偏移 [0, ramSize)        memfd 内容(SEEK_DATA/HOLE 捕获:零页是洞,
+                              进信封洞图,不占线上字节)
+逻辑偏移 [ramSize, 条目末)   标准 ZIP archive
                                 / config.json     CH 设备拓扑 + memory layout
                                 / state.json      vCPU 寄存器、virtio queue、IRQ
                                 / snapshot.cfg    §3.4 schema
@@ -1082,32 +1096,31 @@ SEEK_DATA/HOLE 提取数据 extent,把每个 extent 的 `(offset, length)` frami
 - ZIP 内部 offset 都相对 ZIP 起点,NewReader 不需要知道 ZIP 起点——从末尾
   倒推
 - 因此 prefix 长度(`ramSize`)不影响 ZIP 解析;memory 区域 + ZIP 共存于一个
-  文件
+  逻辑条目(读取经 `fetch.OpenTarStream` 的 Stream + `NewReaderAt`)
 
-**关键**:`<sha256>.snapshot` 是**稀疏文件**——`stat.Size() = ramSize + zipSize`,
-但 `st_blocks * 512`(物理占用)= 驻留页数 × 4 KiB + ZIP 字节。一个 8 GiB
-sandbox 实际驻留 200 MiB → 文件物理 ~200 MiB。`tar`、`cp --sparse=auto`、
-`manifest.Ingester` 都尊重稀疏(后者把空洞编码进 manifest 的洞表,`sparse.Extent`)。
+**关键**:工件文件物理大小 ≈ 驻留页数 × 4 KiB + ZIP 字节 + 信封开销。一个
+8 GiB sandbox 实际驻留 200 MiB → 文件 ~200 MiB,且这一性质**不依赖文件系统稀疏
+支持**。`manifest.Ingester` 摄取时洞图来自信封(进 manifest 洞表,`sparse.Extent`),
+manifest key 与容器无关(= f(逻辑内容, 洞图))。
 
 **单 zone 假设**:限定单 memory zone(固定 spec,见 §14.1)。
 
-**`<sha256>.overlay` / `<sha256>.snapshot` 写入路径**(copy-then-hash):
+**`<sha256>.overlay` / `<sha256>.snapshot` 写入路径**(pack-while-hash):
 
 file 模式下 overlay 与 snapshot bundle 走同一条落盘路径:
 
-1. quiesce 完成后源内容稳定(overlay 源 = blk1.diff,snapshot 源 = memfd)
-2. 把源的**数据 extent** sparse copy 到同目录的 `<sid>.<ext>.partial`
-   (SEEK_DATA/HOLE 驱动,空洞保留为文件空洞);snapshot 在 `ramSize` 逻辑偏移后
-   追加 ZIP 段
-3. 对 `.partial` **跳空洞算摘要**(见上"内容摘要";只读驻留数据 + ZIP 段)→ `<digest>`
-4. `rename` `.partial` → `<out_dir>/<digest>.<ext>`(原子落定);snapshot 另建/更新
+1. quiesce 完成后源内容稳定(overlay 源 = blk1.diff,snapshot 源 = memfd);
+   洞图经 SEEK_DATA/HOLE 取自**活体**源文件(这是文件系统作为洞权威的唯一一处,
+   工件落定后权威归信封)
+2. `tarstream.WriteTo` 把源打包到同目录 `<sid>.<ext>.partial`,**边写边算**
+   工件字节的 SHA256(一遍);只有数据 extent 上线,洞进信封图;snapshot 的
+   ZIP 段拼接在 `ramSize` 逻辑偏移后
+3. `rename` `.partial` → `<out_dir>/<digest>.<ext>`(原子落定);snapshot 另建/更新
    `<sid>.snapshot` 符号链接指向它
 
 `.partial` 是同目录瞬态名,落定后输出目录只见内容寻址的终态文件。同一沙箱多次
 snapshot 内容不变时摘要相同 → rename 到**同名文件**(覆盖,等价无 op,天然内容寻址)。
-
-整条路径只读源的数据 extent(跳空洞)+ snapshot 的 ZIP 段;`.partial` 刚写完即驻
-page cache,摘要那道 ≈ 内存读。8 GiB / 200 MiB 驻留的沙箱只触约 200 MiB。
+整条路径只读源的数据 extent + ZIP 段,8 GiB / 200 MiB 驻留的沙箱只触约 200 MiB。
 
 ### 6.2 snapshot 时序
 
@@ -1120,7 +1133,7 @@ page cache,摘要那道 ≈ 内存读。8 GiB / 200 MiB 驻留的沙箱只触约
   config.json/state.json(KB 级);GiB 级 memory 段与 overlay 不经此目录——
   --output 直接落 `<out_dir>`(写 `.partial` 再 rename),--upload 流式喂 ingest
 - pause 窗口 = quiesce + CH dump + overlay export + memory dump + zip append。
-  overlay + memory 写都是 SEEK_DATA/HOLE 驱动的 sparse copy,稀疏 sandbox
+  overlay + memory 写都是 SEEK_DATA/HOLE 驱动的数据 extent 打包,稀疏 sandbox
   8 GiB → 驻留 200 MiB → ~100 ms
 
 ```
@@ -1149,7 +1162,7 @@ T4  overlay → sink(在 memory 前处理,snapshot.cfg 才能拿到终态 overla
     若 --output 且 diff 是自动创建(沙箱独占)且本次不 resume(沙箱将销毁):
         **零拷贝**——就地跳空洞算摘要(§6.1)后直接 rename diff → <out_dir>/<digest>.overlay
         (同文件系统;跨文件系统则回退到下面的复制);overlay_ref = file://<digest>.overlay
-    否则若 --output:blk1.diff 数据 extent sparse copy → <sid>.overlay.partial →
+    否则若 --output:blk1.diff 数据 extent 打包 tarstream → <sid>.overlay.partial →
         跳空洞算摘要(§6.1)→ rename <out_dir>/<digest>.overlay;
         overlay_ref = file://<digest>.overlay
     若 --upload:blk1.diff 数据 extent 流式喂 manifest.Ingester(空洞编码进

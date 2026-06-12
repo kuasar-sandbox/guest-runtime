@@ -982,6 +982,7 @@ func buildSnapshotCfg(cfg *config.SandboxConfig, overlayRefs []string) ([]byte, 
 	doc := snapshotCfgYAML{}
 	doc.Resources.Capacity.CPU = cfg.Resources.Capacity.CPU
 	doc.Resources.Capacity.Memory = cfg.Resources.Capacity.Memory
+	doc.Metadata = cfg.Metadata
 	doc.Boot.RuntimeRef = cfg.SnapshotRefs.RuntimeRef
 
 	// Incremental layered chain (docs/sandbox.md §3.5), keyed on the parent's
@@ -1085,7 +1086,8 @@ type snapshotCfgYAML struct {
 			Memory string `yaml:"memory"`
 		} `yaml:"capacity"`
 	} `yaml:"resources"`
-	FromRefs []string `yaml:"from_refs,omitempty"`
+	Metadata map[string]string `yaml:"metadata,omitempty"` // opaque platform passthrough
+	FromRefs []string          `yaml:"from_refs,omitempty"`
 	Boot     struct {
 		RuntimeRef string         `yaml:"runtime_ref"`
 		Root       diskNodeYAML   `yaml:"root"`

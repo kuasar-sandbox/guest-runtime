@@ -138,8 +138,9 @@ func Run(ctx context.Context, opts Options) (int, error) {
 	}
 	defer hooks.Release("normal")
 
-	// Open the snapshot bundle as a single fetch.Stream — file:// is a
-	// sparse-aware local stream, manifest:// is chunk-granular via cache-ctl.
+	// Open the snapshot bundle as a single fetch.Stream — file:// is a local
+	// tarstream artifact (hole map from the envelope), manifest:// is
+	// chunk-granular via cache-ctl.
 	// The same Stream feeds the ZIP reader (via NewReaderAt) and, layered with
 	// from_refs (§3.5), the uffd SnapshotReader. selfRef is this bundle's
 	// content-addressed identity, recorded into a child snapshot's from_refs.
@@ -150,7 +151,7 @@ func Run(ctx context.Context, opts Options) (int, error) {
 		selfRef      string
 	)
 	if opts.SnapshotPath != "" {
-		fs, err := fetch.OpenFileStream(opts.SnapshotPath)
+		fs, err := fetch.OpenTarStream(opts.SnapshotPath)
 		if err != nil {
 			return -1, fmt.Errorf("open snapshot: %w", err)
 		}
@@ -208,6 +209,12 @@ func Run(ctx context.Context, opts Options) (int, error) {
 		return -1, err
 	}
 	snapCfg := *merged
+	// Metadata passthrough: inherit the parent snapshot's metadata so a
+	// snapshot taken by this restored run carries it forward; an explicit
+	// host-yaml metadata map overrides wholesale.
+	if len(snapCfg.Metadata) == 0 {
+		snapCfg.Metadata = parsedSnap.Metadata
+	}
 
 	// Carry the runtime/base refs forward so a snapshot taken by this restored
 	// run records them (the cold path hashes them via populateSnapshotRefs;
