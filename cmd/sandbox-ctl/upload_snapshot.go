@@ -17,7 +17,7 @@ import (
 // each lower layer is present and sealed under the current MANIFEST_KEY (manifest
 // blob only — no chunk download). Prints the uploaded snapshot's manifest:// key.
 //
-//	sandbox-ctl upload-snapshot <snapshot-path> [--manifest-config <file>] [--quiet]
+//	sandbox-ctl upload-snapshot [--manifest-config <file>] [--quiet] <snapshot-path>
 //
 // Needs --manifest-config (or MANIFEST_CONFIG) + $MANIFEST_KEY; no /dev/kvm, no
 // running sandbox. A lower local file:// layer is rejected — re-export it
@@ -31,7 +31,7 @@ func uploadSnapshotCmd(args []string) int {
 	}
 	path := fs.Arg(0)
 	if path == "" {
-		fmt.Fprintln(os.Stderr, "usage: sandbox-ctl upload-snapshot <snapshot-path> [--manifest-config <file>] [--quiet]")
+		fmt.Fprintln(os.Stderr, "usage: sandbox-ctl upload-snapshot [--manifest-config <file>] [--quiet] <snapshot-path>")
 		return 2
 	}
 

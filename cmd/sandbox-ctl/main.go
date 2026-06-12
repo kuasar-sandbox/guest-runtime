@@ -85,9 +85,9 @@ Usage:
   sandbox-ctl config    [--config a.yaml[:b.yaml...] | --template]
                         [--mode default|restore] [--check skip|strict] [-o <file>]
                         produce/merge/validate a sandbox.yaml on stdout
-  sandbox-ctl info      <manifest://hex|snapshot-path> [--json] [--manifest-config <p>]
+  sandbox-ctl info      [--json] [--manifest-config <p>] <manifest://hex|snapshot-path>
                         print a snapshot's embedded snapshot.cfg
-  sandbox-ctl upload-snapshot <snapshot-path> [--manifest-config <p>] [--quiet]
+  sandbox-ctl upload-snapshot [--manifest-config <p>] [--quiet] <snapshot-path>
                         promote a LOCAL snapshot to a remote manifest:// snapshot (no boot)
 
 --manifest-config (or MANIFEST_CONFIG env) is required for any

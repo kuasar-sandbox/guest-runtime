@@ -20,7 +20,7 @@ import (
 // snapshot.cfg (the post-quiesce platform contract: capacity, runtime_ref,
 // base_ref, overlay.base; docs/sandbox.md §3.4). Mirrors `flatten-ctl info`.
 //
-//	sandbox-ctl info <manifest://hex | snapshot-path> [--json] [--manifest-config <file>]
+//	sandbox-ctl info [--json] [--manifest-config <file>] <manifest://hex | snapshot-path>
 //
 // Default output is the raw snapshot.cfg YAML; --json re-emits the parsed struct.
 func infoCmd(args []string) int {
@@ -32,7 +32,7 @@ func infoCmd(args []string) int {
 	}
 	input := fs.Arg(0)
 	if input == "" {
-		fmt.Fprintln(os.Stderr, "usage: sandbox-ctl info <manifest://hex|snapshot-path> [--json] [--manifest-config <file>]")
+		fmt.Fprintln(os.Stderr, "usage: sandbox-ctl info [--json] [--manifest-config <file>] <manifest://hex|snapshot-path>")
 		return 2
 	}
 
