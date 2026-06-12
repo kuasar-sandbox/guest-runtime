@@ -9,6 +9,11 @@
 # Both are TARGET-ARCH binaries (not host tools): they ship in the release tarball
 # for the target they run on. Cross-compilation uses CROSS_PREFIX for the C toolchain.
 #
+# STATIC linking is required, not cosmetic: mkfs.erofs rides the builder guest
+# runtime (/opt/sandbox-runtime/bin, projected into ANY app rootfs — empty ones
+# included), where no dynamic loader exists. Needs libuuid.a (Debian/Ubuntu:
+# uuid-dev). mkfs/fsck do no NSS lookups, so a glibc-static binary is safe.
+#
 # Inputs (env):
 #   EROFS_TARBALL         URL or local path; supports "url#filename" form.
 #                         Default: erofs/erofs-utils v1.9.1 github archive.
@@ -128,9 +133,14 @@ log "make mkfs.erofs + fsck.erofs (mkfs + fsck subdirs; skips mount/dump/fuse)"
 # Build lib first (mkfs/fsck depend on liberofs.a), then the two subdirs we ship.
 # Avoids mount.erofs (pthread link bug in v1.9.1 when multithreading is disabled)
 # and other subdirs we don't need.
+#
+# LDFLAGS=-all-static at make time (not configure: gcc rejects it in configure
+# tests): the libtool link-mode flag for a fully static EXECUTABLE — plain
+# -static is consumed by libtool itself (= "prefer .a of libtool libs") and
+# never reaches the compiler driver.
 make -C "$src_dir/lib"  -j"$(nproc)"
-make -C "$src_dir/mkfs" -j"$(nproc)"
-make -C "$src_dir/fsck" -j"$(nproc)"
+make -C "$src_dir/mkfs" -j"$(nproc)" LDFLAGS="-all-static"
+make -C "$src_dir/fsck" -j"$(nproc)" LDFLAGS="-all-static"
 
 mkdir -p "$BINDIR"
 cp "$src_dir/mkfs/mkfs.erofs" "$out_mkfs"
