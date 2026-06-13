@@ -57,10 +57,11 @@ BINDIR         := bin/$(TARGET_ARCH)
 BUILD_DIR      := build/$(TARGET_ARCH)
 TARBALL_DIR    := build/tarball
 
-EROFS_BIN   := $(abspath $(BINDIR)/mkfs.erofs)
-CH_BIN      := $(abspath $(BINDIR)/cloud-hypervisor)
-VMLINUX_BIN := $(abspath $(BINDIR)/vmlinux)
-ENVD_BIN    := $(abspath $(BINDIR)/envd)
+EROFS_BIN     := $(abspath $(BINDIR)/mkfs.erofs)
+CH_BIN        := $(abspath $(BINDIR)/cloud-hypervisor)
+VMLINUX_BIN   := $(abspath $(BINDIR)/vmlinux)
+ENVD_BIN      := $(abspath $(BINDIR)/envd)
+VERSITYGW_BIN := $(abspath $(BINDIR)/versitygw)
 
 # Upstream tarballs + optional SHA256 (scripts skip verify when empty).
 EROFS_TARBALL                   ?= https://github.com/erofs/erofs-utils/archive/refs/tags/v1.9.1.tar.gz\#erofs-utils-v1.9.1.tar.gz
@@ -71,6 +72,8 @@ CLOUD_HYPERVISOR_TARBALL        ?= https://github.com/cloud-hypervisor/cloud-hyp
 CLOUD_HYPERVISOR_TARBALL_SHA256 ?=
 ENVD_TARBALL                    ?= https://github.com/e2b-dev/infra/archive/refs/tags/2026.22.tar.gz\#e2b-infra-2026.22.tar.gz
 ENVD_TARBALL_SHA256             ?=
+VERSITYGW_TARBALL               ?= https://github.com/versity/versitygw/archive/refs/tags/v1.5.0.tar.gz\#versitygw-1.5.0.tar.gz
+VERSITYGW_TARBALL_SHA256        ?=
 
 # WSL2 + /mnt/<drive>/ detection: kernel tags itself "microsoft" and cwd is on
 # a 9p/drvfs mount. WSL2 users pay a 5-10x per-file I/O penalty for the ~85k
@@ -101,6 +104,9 @@ CH_PATCHES_DIR             := $(abspath deps/ch-patches)
 # the target at build), like cloud-hypervisor / linux.
 ENVD_SRC ?= $(abspath build/src/e2b-infra)
 
+# versitygw: versity/versitygw source tree — arch-neutral and shared (Go).
+VERSITYGW_SRC ?= $(abspath build/src/versitygw)
+
 # Cross toolchain env for the C/C++ steps (CGO/cargo/kbuild). Empty for native.
 ifneq ($(CROSS_PREFIX),)
   CROSS_ENV := CC=$(CROSS_PREFIX)gcc CXX=$(CROSS_PREFIX)g++ AR=$(CROSS_PREFIX)ar STRIP=$(CROSS_PREFIX)strip
@@ -129,7 +135,7 @@ endef
 # ---------------------------------------------------------------------------
 # Targets
 # ---------------------------------------------------------------------------
-.PHONY: all build erofs cloud-hypervisor vmlinux envd \
+.PHONY: all build erofs cloud-hypervisor vmlinux envd versitygw \
         ch-fetch ch-patches-apply ch-patches ch-patches-format ch-build \
         linux-fetch linux-patches-apply linux-patches linux-patches-format linux-build \
         clean help
@@ -159,6 +165,19 @@ $(ENVD_BIN):
 	GO_ARCH="$(GO_ARCH)" \
 		bash deps/build-envd.sh
 	$(call link_bin,envd)
+
+# --- versitygw (S3 gateway for local/single-node COPY file storage) --------
+# Opt-in (NOT in `build`): only deployments using builder.files_storage
+# without a cloud object store need it. Multi-second Go build.
+versitygw: $(VERSITYGW_BIN)
+$(VERSITYGW_BIN):
+	$(DEPS_ENV) \
+	VERSITYGW_TARBALL="$(VERSITYGW_TARBALL)" \
+	VERSITYGW_TARBALL_SHA256="$(VERSITYGW_TARBALL_SHA256)" \
+	VERSITYGW_SRC="$(VERSITYGW_SRC)" \
+	GO_ARCH="$(GO_ARCH)" \
+		bash deps/build-versitygw.sh
+	$(call link_bin,versitygw)
 
 # --- cloud-hypervisor (patched Rust VMM) -----------------------------------
 CH_INVOKE = $(DEPS_ENV) \
@@ -214,6 +233,7 @@ help:
 	@echo "  vmlinux               build the guest kernel (~5-10 min cold)"
 	@echo "  cloud-hypervisor      build the patched VMM (~minutes cold)"
 	@echo "  envd                  build the e2b guest agent (e2b-dev/infra; pin via ENVD_TARBALL)"
+	@echo "  versitygw             build the S3 gateway (opt-in; for builder.files_storage on single-node/local)"
 	@echo "  ch-patches-format     extract HEAD CH commits back to deps/ch-patches/"
 	@echo "  linux-patches-format  extract HEAD linux commits back to deps/linux-patches/"
 	@echo "  clean                 wipe build artifacts (preserves tarball cache + source trees)"
