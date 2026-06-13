@@ -187,7 +187,10 @@ func UploadLocal(ctx context.Context, snapshotPath string, mcfg *manifest.Config
 		return "", fmt.Errorf("ingest bundle: %w", err)
 	}
 	logf("upload-snapshot: memory stored=%d dedup=%d zero=%d", res.StoredChunks, res.DedupChunks, res.ZeroChunks)
-	return snapshot.HexKey(res.ManifestKey), nil
+	// The documented identity is the full ref — callers (orchestrator
+	// promote, scripts) branch on the manifest:// scheme to tell remote
+	// from local, so a bare key here reads as a local path downstream.
+	return "manifest://" + snapshot.HexKey(res.ManifestKey), nil
 }
 
 // artifactUploader ingests local file:// artifacts referenced by a
