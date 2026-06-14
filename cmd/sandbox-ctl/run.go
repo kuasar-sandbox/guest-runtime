@@ -58,10 +58,10 @@ func runCmd(args []string) int {
 	stdoutFlag := fs.Bool("stdout", true, "pipe mode: app stdout → sandbox-ctl stdout (default on; --stdout=false discards)")
 	stderrFlag := fs.Bool("stderr", true, "pipe mode: app stderr → sandbox-ctl stderr (default on; --stderr=false discards)")
 	stdinFrom := fs.String("stdin-from", "", "pipe mode: app stdin reads from FILE (implies --stdin)")
-	stdoutTo := fs.String("stdout-to", "", "pipe mode: app stdout → FILE (implies --stdout)")
-	stderrTo := fs.String("stderr-to", "", "pipe mode: app stderr → FILE (implies --stderr)")
+	stdoutTo := fs.String("stdout-to", "", "pipe mode: app stdout → FILE or journald=TAG (implies --stdout)")
+	stderrTo := fs.String("stderr-to", "", "pipe mode: app stderr → FILE or journald=TAG (implies --stderr)")
 	ttyFlag := fs.Bool("tty", false, "give the app a pty + put our terminal in raw mode (default: auto = on iff stdin&stdout are terminals; mutually exclusive with --stdin/--stdout/--stderr/--*-from/--*-to)")
-	console := fs.String("console", "default", "guest kernel dmesg sink: off | default (our stderr) | file=PATH")
+	console := fs.String("console", "default", "guest kernel dmesg sink: off | default (our stderr) | file=PATH | journald=TAG")
 
 	// Reliability backstop: after N consecutive failed pings, sandbox-ctl
 	// SIGTERMs CH so cmd.Wait returns rather than hanging on a wedged-

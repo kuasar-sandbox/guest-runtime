@@ -143,7 +143,7 @@ sandbox-ctl run [flags]
                           置 control.adopt(YAML `adopt: true`)。注意:adopt 模式
                           让 sandbox-ctl 与 CH 同处一个 cgroup,重新暴露了常规解耦
                           路径所规避的 memory.high 节流死锁(见 pkg/resctl/cgroup.go
-                          头注)——面向 run-task 启动器路径
+                          头注)——面向 run-sandbox 启动器路径
 
   # 诊断
   --stats-json <path>     退出时把各 backend + uffd 统计以 JSON 写到该路径
@@ -187,13 +187,16 @@ sandbox-ctl run [flags]
   --stderr                pipe 模式:默认开启,应用 stderr → sandbox-ctl stderr。
                           --stderr=false 关闭
   --stdin-from <file>     pipe 模式:应用 stdin 读自 <file>(隐含 --stdin=true)
-  --stdout-to <file>      pipe 模式:应用 stdout 写到 <file>(隐含 --stdout=true)
-  --stderr-to <file>      pipe 模式:应用 stderr 写到 <file>(隐含 --stderr=true)
+  --stdout-to <T>         pipe 模式:应用 stdout 写到 T(隐含 --stdout=true)。
+                          T = <file> 或 journald=<tag>(逐行写 journald、
+                          SYSLOG_IDENTIFIER=<tag>、PRIORITY=info)
+  --stderr-to <T>         pipe 模式:应用 stderr 写到 T(同 --stdout-to 的 T 语法)
 
   # guest 内核 dmesg(与应用 stdio 完全独立的一条道)
   --console <mode>        guest 内核控制台(hvc0)的去向。off:给 CH --console off,
                           丢弃;default(默认):写 sandbox-ctl 的 stderr(--tty raw
-                          模式下做 \n→\r\n 转换);file=<path>:写 <path>
+                          模式下做 \n→\r\n 转换);file=<path>:写 <path>;
+                          journald=<tag>:逐行写 journald(SYSLOG_IDENTIFIER=<tag>)
 
   # 端口转发(冷启动 + 恢复模式都生效;详见 docs/sandbox-runtime.md §3.7)
   --connect <L:TARGET>    dial 模式:host 本地端点 L 转发到沙箱内 TARGET,可重复。
@@ -225,7 +228,7 @@ sandbox-ctl 控制终端的前台进程组——终端产生的 `^C` / `^\` / `^
 | pipe 默认(stdin 关) | 0=/dev/null,1→sandbox-ctl stdout,2→sandbox-ctl stderr | STDOUT + STDERR + control 流 |
 | pipe + `--stdin` / `--stdin-from` | 0 = sandbox-ctl stdin / open(F, O_RDONLY) | + STDIN 流 |
 | pipe + `--stdout=false` / `--stderr=false` | 该流不开,应用对应 fd 由 guest 接 /dev/null | 去掉对应流 |
-| pipe + `--stdout-to` / `--stderr-to` = F | sandbox-ctl 把该流写 open(F, O_WRONLY\|O_CREATE\|O_APPEND, 0644) | 不变 |
+| pipe + `--stdout-to` / `--stderr-to` = F | sandbox-ctl 把该流写 open(F, O_WRONLY\|O_CREATE\|O_APPEND, 0644);F=`journald=<tag>` 时逐行写 journald(SYSLOG_IDENTIFIER=<tag>,journald 不可用则回退带 `[tag]` 前缀的 stderr) | 不变 |
 
 互斥规则:
 
@@ -249,11 +252,11 @@ sandbox-ctl 控制终端的前台进程组——终端产生的 `^C` / `^\` / `^
   snapshot.cfg 的 `from_refs` 叠成分层流(§3.5)写入 memfd。snapshot.cfg 内
   base_ref / overlay.base(+ base_from_refs)同理
 
-**配置交付(文件 vs 内存)与 run-task 启动模型**:上面的 `--config` / `SANDBOX_CONFIG`
+**配置交付(文件 vs 内存)与 run-sandbox 启动模型**:上面的 `--config` / `SANDBOX_CONFIG`
 是文件路径形态。除此之外,sandbox-ctl 还能在无 config-socket 的前提下接收**内存内**
 交付的单份 sandbox.yaml:`pkg/config.LoadConfigBytes` 解析一份在内存中持有的
 `SANDBOX_CONFIG` YAML 文档(不从磁盘读),敏感的 manifest 根密钥经 `MANIFEST_KEY`
-env 传入(由 `pkg/manifest` 解析)。编排侧的 `orchestrator-ctl run-task` 启动器即按此
+env 传入(由 `pkg/manifest` 解析)。编排侧的 `orchestrator-ctl run-sandbox` 启动器即按此
 模型工作:它在 `execve` 成 sandbox-ctl 之前,先把非密的 per-sandbox 配置(文件或内存)
 与 `MANIFEST_KEY` env 备好。
 
@@ -1577,7 +1580,7 @@ memory/cpu 上限写到目标 cgroup,区别在于谁进这个 cgroup:
   systemd 单元的)cgroup——上限写到该 cgroup,CH 作为 fork 出的子进程已是成员,
   故 `AddPID` 成为 no-op。代价是 sandbox-ctl 与 CH 同处一个 cgroup,**重新暴露了
   上面解耦路径所规避的 `memory.high` 节流死锁**(见 pkg/resctl/cgroup.go 头注)。
-  面向 run-task 启动器路径(单元自身即沙箱 cgroup,无需预建)。
+  面向 run-sandbox 启动器路径(单元自身即沙箱 cgroup,无需预建)。
 
 ### 9.3 balloon 配置与 BalloonController
 
