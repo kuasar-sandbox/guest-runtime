@@ -1001,9 +1001,15 @@ func buildSnapshotCfg(cfg *config.SandboxConfig, overlayRefs []string) ([]byte, 
 		doc.FromRefs = prependRef(prov.ParentSnapshotRef, prov.ParentFromRefs)
 	}
 
-	// Root node.
+	// Root node. coldLower is the read-only lower the writable diff sits on: the
+	// single-disk CoW base, or the overlay's lower (overlay.base) in two-disk
+	// mode — both must be chained on cold start (see renderDiskNode).
+	rootColdLower := cfg.Boot.Root.Base
+	if cfg.Boot.Root.Overlay != nil {
+		rootColdLower = cfg.Boot.Root.Overlay.Base
+	}
 	doc.Boot.Root = renderDiskNode(overlayRefs[0], cfg.SnapshotRefs.BaseRef,
-		cfg.Boot.Root.Base, cfg.SingleDisk(), localParent, coldStart,
+		rootColdLower, cfg.SingleDisk(), localParent, coldStart,
 		prov.ParentOverlayBase, prov.ParentBaseFromRefs)
 
 	// Data-disk nodes (boot.disks[] order), each with its own parent chain.
@@ -1018,33 +1024,41 @@ func buildSnapshotCfg(cfg *config.SandboxConfig, overlayRefs []string) ([]byte, 
 		if i < len(cfg.SnapshotRefs.DiskBaseRefs) {
 			baseRef = cfg.SnapshotRefs.DiskBaseRefs[i]
 		}
+		diskColdLower := d.Base
+		if d.Overlay != nil {
+			diskColdLower = d.Overlay.Base
+		}
 		doc.Boot.Disks = append(doc.Boot.Disks, renderDiskNode(overlayRefs[1+i],
-			baseRef, d.Base, d.RootConfig.Single(), localParent, coldStart, pTop, pChain))
+			baseRef, diskColdLower, d.RootConfig.Single(), localParent, coldStart, pTop, pChain))
 	}
 	return yaml.Marshal(&doc)
 }
 
 // renderDiskNode renders one disk's snapshot.cfg node (root or a data disk),
 // computing its incremental chain. overlayRef is the captured top diff ref;
-// baseRef the erofs image ref (overlay mode); coldBase the cold-start CoW base
-// to chain (single mode). parentTop/parentChain are this disk's parent overlay
-// ref + chain — dropped (localParent: merged) or prepended (stacked).
-func renderDiskNode(overlayRef, baseRef, coldBase string, single, localParent, coldStart bool, parentTop string, parentChain []string) diskNodeYAML {
+// baseRef the erofs image ref (overlay mode); coldLower the cold-start read-only
+// lower the writable diff sits on — the single-disk CoW base, or the overlay's
+// lower (overlay.base) in two-disk mode — to chain. parentTop/parentChain are
+// this disk's parent overlay ref + chain — dropped (localParent: merged) or
+// prepended (stacked).
+func renderDiskNode(overlayRef, baseRef, coldLower string, single, localParent, coldStart bool, parentTop string, parentChain []string) diskNodeYAML {
 	var chain []string
 	if localParent {
 		chain = parentChain
 	} else {
 		chain = prependRef(parentTop, parentChain)
 	}
+	// The captured diff is sparse (CoW writes only), so on COLD start the
+	// read-only lower the writable diff sits on is not itself captured and must
+	// be chained below the diff, else restore loses those base blocks. This is
+	// the single-disk CoW base AND — symmetrically — the overlay's lower
+	// (overlay.base), e.g. a fromTemplate build's inherited template overlay. A
+	// self-contained diff (diff_template, no lower) has coldLower == "".
+	if coldStart && coldLower != "" {
+		chain = prependRef(coldLower, chain)
+	}
 	node := diskNodeYAML{}
 	if single {
-		// The captured diff is sparse (CoW writes only), so on COLD start the
-		// config base (the ext4 CoW lower the diff sits on) must be chained below
-		// it, else restore loses the unwritten base blocks. A self-contained diff
-		// (diff_template) has no base — chain stays empty.
-		if coldStart && coldBase != "" {
-			chain = prependRef(coldBase, chain)
-		}
 		node.Base = overlayRef
 		node.BaseFromRefs = chain
 	} else {

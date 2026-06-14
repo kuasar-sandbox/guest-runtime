@@ -58,6 +58,38 @@ func TestBuildSnapshotCfg_Overlay(t *testing.T) {
 	}
 }
 
+// TestBuildSnapshotCfg_OverlayColdBase verifies that an overlay-mode COLD start
+// with an inherited overlay.base (e.g. a fromTemplate build) chains that
+// read-only lower into the snapshot's overlay.base_from_refs — else a restore of
+// the new snapshot would lose the inherited layer's filesystem.
+func TestBuildSnapshotCfg_OverlayColdBase(t *testing.T) {
+	cfg := &config.SandboxConfig{}
+	cfg.Resources.Capacity.CPU = 2
+	cfg.Resources.Capacity.Memory = "2GiB"
+	cfg.SnapshotRefs.RuntimeRef = "file://rt@sha256:aa"
+	cfg.SnapshotRefs.BaseRef = "file://img@sha256:bb"
+	cfg.Boot.Root.Overlay = &config.OverlayConfig{
+		Base: "manifest://templatelower", // inherited ro lower (fromTemplate)
+		Diff: "file:///d.ext4",
+	}
+
+	body, err := buildSnapshotCfg(cfg, []string{"manifest://captured"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(body)
+	for _, want := range []string{
+		"base_ref: file://img@sha256:bb",
+		"base: manifest://captured", // captured top diff at overlay.base
+		"base_from_refs:",           // inherited lower chained below it
+		"manifest://templatelower",  // ... the inherited template overlay
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("overlay cold-base snapshot.cfg missing %q\n%s", want, s)
+		}
+	}
+}
+
 // TestBuildSnapshotCfg_DataDisks verifies boot.disks[] is rendered, one node per
 // data disk (single → base; overlay → base_ref + overlay.base), with the
 // captured overlay refs taken from the per-disk overlayRefs (root is [0]).
