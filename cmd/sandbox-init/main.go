@@ -10,7 +10,7 @@
 //     the mount chain and the later chroot. After the join: set up volume
 //     (empty) mounts on the raw ext4 pre-switch, then MS_MOVE + chroot into
 //     the overlay and mount the post-switch base filesystems (devpts, cgroup
-//     freezer, /run, /run/shm).
+//     v2, /run, /run/shm).
 //  2. Apply the launch spec on the post-switch rootfs: network, tmpfs mounts,
 //     file injection, one-shot init — then set up the app's stdio and send
 //     launch_ack{stdio} (its connection becomes the stdio MUX). Fork the user
@@ -317,7 +317,7 @@ func phase1aAssembleRoot() error {
 
 // phase1bSwitchRoot MS_MOVEs /proc /sys /dev (and any volume binds already
 // placed under /sysroot) into the overlay, switches root into it, then
-// mounts the post-switch base filesystems (devpts, cgroup v2 freezer,
+// mounts the post-switch base filesystems (devpts, cgroup v2,
 // /run, /run/shm). Runs after the join, single-threaded — the chroot is a
 // process-global path switch so nothing else may touch a path concurrently.
 func phase1bSwitchRoot() error {
@@ -357,9 +357,10 @@ func phase1bSwitchRoot() error {
 		return fmt.Errorf("mount devpts on /dev/pts: %w", err)
 	}
 
-	// cgroup v2 freezer: the freeze domain for the user-app process
-	// tree (snapshot freeze/thaw, §3.4). Mounted post-chroot so the
-	// path is stable; no controllers enabled.
+	// cgroup v2: the freeze domain for the user-app process tree
+	// (snapshot freeze/thaw, §3.4) + resource-controller delegation so
+	// envd's in-guest cgroups get cpu/memory/io/pids (cgroup.go).
+	// Mounted post-chroot so the path is stable.
 	if err := cgroupMount(); err != nil {
 		return fmt.Errorf("cgroup setup: %w", err)
 	}

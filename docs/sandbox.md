@@ -2066,7 +2066,6 @@ digest)随后在 `restore.ApplyRules` 拿到 bundle 时进行。额外:
 guest kernel 是平台提供的最小镜像,以下功能默认不开。需要的用户 app 自带
 vmlinux 通过 `boot.kernel: file://...` 提供:
 
-- **in-guest cgroups**:host 通过 cgroup v2 限制 CH 进程;guest 不能再切子层
 - **in-guest USER / NET / UTS / IPC / TIME 命名空间**:相关 `CONFIG_*_NS`
   未启用,`unshare(CLONE_NEW*)` 返回 EINVAL
 - **in-guest userfaultfd 系统调用**:`CONFIG_USERFAULTFD` 未启用

@@ -130,7 +130,7 @@ E. switch-root:
                                                     B6 的 /opt 与 D 的 volume binds 一并进入新 /
 
 F. switch-root 之后的基础挂载:
-   mount -t cgroup2 cgroup2 /sys/fs/cgroup;mkdir /sys/fs/cgroup/app   ← v2 freezer 冻结域(§3.4)
+   mount -t cgroup2 cgroup2 /sys/fs/cgroup;mkdir /sys/fs/cgroup/app   ← freezer 冻结域 + 下放 cpu/memory/io/pids 控制器(§3.4)
    mount -t devpts devpts /dev/pts (newinstance,ptmxmode=0666)        ← tty 模式 openpty 需要
    mount -t tmpfs  tmpfs  /run     (nosuid,nodev)                     ← 自动挂载(类 /proc)
    mount -t tmpfs  tmpfs  /run/shm (nosuid,nodev,mode=1777)           ← 自动挂载
@@ -1066,7 +1066,7 @@ sandbox.yaml `launch:` 节(yaml override 优先,Env merge),host sandbox-ctl 合�
 |---|---|---|
 | 应用 quiesce hook | 跨实例去重率超过 kuasar-sandbox.md §4.6 量化的"非确定性 50-70%" 上限的用例 | §3.4 quiesce 扩展项表 |
 | 应用 stderr 旁路 | 需要 host 侧 stdout 与 stderr 分流(终端模式天然无此区分,pipe 模式可加一条 vsock 旁路) | §3.5 / §4.5 |
-| 自带 vmlinux | 用户需要 cgroup 资源控制器(平台 kernel 仅带 v2 freezer)/ nested userfaultfd / 别的 kernel 特性 | sandbox-ctl `boot.kernel: file://...` |
+| 自带 vmlinux | 用户需要平台 kernel 未带的特性(nested userfaultfd / user·net 命名空间 / 别的 kernel 特性);平台 kernel 已含 cgroup cpu/memory/io/pids 控制器 + NFS(v3/v4) + FUSE | sandbox-ctl `boot.kernel: file://...` |
 | 自带 sandbox-runtime | 用户应用对 PID 1 / supervisor 有特殊要求(罕见) | 平台不阻止,但失去 DAX 共享收益 |
 | 独立发布件设备 | Guest 侧 payload(envd 等)需独立于 runtime 镜像迭代 / 热补丁 | §2 / §3.1:bind 源改为独立只读 EROFS 设备(多一 virtio 盘 + vhost 后端) |
 
