@@ -16,9 +16,10 @@ vmlinux 是平台资产,**不**对外暴露内核版本/配置接口给租户。
 |---|---|
 | 镜像小、启动快 | allnoconfig 起步;仅启用沙箱必需的子系统;HZ=100;TTY 单端口 |
 | 跨实例可去重 | 关闭所有运行时随机化(KASLR、SLAB freelist、页面 shuffle);固定 LOCALVERSION |
-| 单 VM = 单 app 模型 | 关闭 user/net/uts/ipc/time namespace、in-guest userfaultfd;cgroup 仅留 v2 freezer 核心(快照 freeze/thaw),不开任何资源控制器 |
+| 单 VM = 单 app 模型 | 关闭 user/net/uts/ipc/time namespace、in-guest userfaultfd(完整 nested 容器运行时非目标,§3.2) |
 | host 控制 guest 内存 | 启用 virtio-balloon(host-driven inflate via vm.resize)+ virtio-mem |
 | 单一 rootfs 路径 | virtio-pmem + DAX + EROFS(只读) + ext4(可写) + overlayfs |
+| 沙箱内资源隔离 + 存储挂载 | cgroup v2 freezer + cpu/memory/io/pids 控制器(envd 经 subtree_control 做 per-进程隔离,§5.2);NFS 客户端 v3/v4 + FUSE(s3fs)挂载(§3.1) |
 
 ### 1.2 内核版本
 
@@ -107,6 +108,12 @@ EROFS_FS=y                      只读根文件系统
 EXT4_FS=y                       overlayfs 写层
 OVERLAY_FS=y                    EROFS lower + ext4 upper 合并出 / 视图
 TMPFS=y                         /tmp 等运行时挂载点
+NETWORK_FILESYSTEMS=y           NFS 伞门(缺失时 NFS_FS 静默 drop,同 NET/PCI)
+NFS_FS=y + NFS_V3 + NFS_V4(.1/.2) 沙箱挂载 NFS(SUNRPC/LOCKD 自动选入;KEYS=y
+                                供 v4 idmap,DNS_RESOLVER=y 供 v4 referral)
+FUSE_FS=y                       沙箱经 s3fs 挂载 S3(用户态 FUSE;/dev/fuse 由
+                                devtmpfs 自动创建)。mount.nfs / s3fs 等用户态
+                                工具在沙箱镜像内,内核只提供能力
 ```
 
 启动 / 时间 / 调度:
@@ -132,19 +139,26 @@ NAMESPACES=y, PID_NS=y          sandbox-init clone(NEWPID|NEWNS) 使用户 app
 # USER_NS, NET_NS not set
 ```
 
-cgroup(仅 v2 freezer 核心,服务快照 freeze/thaw):
+cgroup(v2 freezer 核心 + cpu/memory/io/pids 控制器):
 
 ```
-CGROUPS=y                       仅为 cgroup v2 freezer:sandbox-init 在 quiesce
-                                前原子冻结应用进程树、restore 环境就绪后解冻,
-                                消除 resume-vs-env-init 竞态(机制见
-                                sandbox-runtime.md §3.4;为何只开核心见 §5.2)
-# MEMCG / CPUSETS / CGROUP_SCHED 所有资源控制器全关——guest 内不做资源记账或
-# CFS_BANDWIDTH / BLK_CGROUP /   限制,资源边界仍由 host cgroup v2 限 CH +
-# CGROUP_PIDS / CGROUP_DEVICE /  balloon 独占;CGROUP_FREEZER 是 v1 旧冻结器,
-# CGROUP_PERF / CGROUP_BPF /     用 v2 故不需要
-# CGROUP_HUGETLB / CGROUP_MISC /
-# NET_CLS_CGROUP / NET_PRIO not set
+CGROUPS=y                       cgroup v2 层级。v2 freezer 属核心(无独立
+                                Kconfig):sandbox-init 在 quiesce 前原子冻结
+                                应用进程树、restore 环境就绪后解冻,消除
+                                resume-vs-env-init 竞态(机制见
+                                sandbox-runtime.md §3.4;详见 §5.2)
+MEMCG=y                         memory.{high,max,min,low}
+CGROUP_SCHED + FAIR_GROUP_SCHED cpu.weight(+ CFS_BANDWIDTH 给 cpu.max)
+BLK_CGROUP + BLK_CGROUP_IOCOST  io.weight(io.cost 模型;+ BLK_DEV_THROTTLING
+                                给 io.max)
+CGROUP_PIDS=y                   pids.max
+                                envd 在 guest 内为每类进程(ptys/socats/user)
+                                建子 cgroup 并设上述项;sandbox-init 经 root
+                                cgroup.subtree_control 下放控制器(§5.2)。host
+                                cgroup v2 限 CH + balloon 仍框定整台 VM
+# CGROUP_FREEZER(v1 旧冻结器)/ RT_GROUP_SCHED / CPUSETS / CGROUP_DEVICE /
+# CGROUP_PERF / CGROUP_BPF / CGROUP_HUGETLB / CGROUP_MISC / NET_CLS /
+# NET_PRIO not set —— 未用
 ```
 
 ### 3.2 关键禁用项(收敛闭口)
@@ -169,8 +183,8 @@ CGROUPS=y                       仅为 cgroup v2 freezer:sandbox-init 在 quiesc
 # WATCHDOG / THERMAL / CPU_FREQ   host 管;guest 看到 fixed-spec
 # SCSI / ATA / NVME / LOOP        块设备只走 virtio-blk
 # MD / BCACHE                     软 RAID / 缓存层
-# BTRFS / F2FS / XFS / NFS / FUSE 只用 EROFS + ext4 + tmpfs + overlayfs
-# CIFS / VFAT / NTFS / AUTOFS4
+# BTRFS / F2FS / XFS / CIFS /    本地只用 EROFS + ext4 + tmpfs + overlayfs;
+# VFAT / NTFS / AUTOFS4          网络/对象挂载用 NFS + FUSE(已开,见 §3.1)
 # HUGETLBFS                       与 4 KiB-uffd 模型不兼容
 # BRIDGE / VLAN / BONDING / TUN   guest 内不需要二层桥接
 # VETH / VXLAN / GENEVE / WLAN
@@ -184,9 +198,6 @@ CGROUPS=y                       仅为 cgroup v2 freezer:sandbox-init 在 quiesc
 平台 ABI 边界(关闭 = guest app 看不到这些功能):
 
 ```
-# cgroup 资源控制器全 not set       仅 v2 freezer 核心开(§3.1、§5.2);guest
-                                  app 看不到资源 cgroup,systemd-style 资源
-                                  管理 / nested 容器运行时不支持
 # USERFAULTFD not set             userfaultfd() 是 host 能力(sandbox-ctl
                                   在 memfd 上注册);guest 调用返回 ENOSYS
 # UTS_NS / TIME_NS / IPC_NS /     1-VM = 1-app 模型不需要 nested 隔离
@@ -306,25 +317,36 @@ x86_64 页大小固定 4 KiB,无此问题。
 需要在 guest 内做用户态 uffd 的应用(罕见——多是数据库自己管 page cache 的
 场景)走"自带 vmlinux"路径。
 
-### 5.2 为什么只启用 cgroup v2 freezer 核心
+### 5.2 cgroup v2:freezer + cpu/memory/io/pids 控制器
 
-`CONFIG_CGROUPS=y` 只为 **cgroup v2 freezer** 一项能力:快照前 sandbox-init 要
-**原子冻结应用进程树**,restore 环境(墙钟等)就绪后再解冻,否则 `/vm.resume`
-先于 guest 处理 `restore` 解冻 vCPU,应用会带着旧墙钟 / 未重连的 MUX 抢跑一段
-(resume-vs-env-init 竞态;机制见 `sandbox-runtime/docs/sandbox-runtime.md`
-§3.4)。v2 freezer(`cgroup.freeze`,内核 ≥5.2)是 cgroup 核心的一部分,
-`CONFIG_CGROUPS=y` 即得,无独立 Kconfig;`CGROUP_FREEZER` 是 v1 旧冻结器,
-不需要。
+`CONFIG_CGROUPS=y` 提供 cgroup v2 层级,平台用其两类能力。
 
-**所有资源控制器(`MEMCG` / CPU 带宽 / `BLK_CGROUP` / `CGROUP_PIDS` /
-`CGROUP_DEVICE` / …)仍全关**:guest 内无任何记账层,app cgroup 也没有 memory
-limit,不会早于 host 的 `deflate_on_oom` 触发 guest 内 OOM——资源边界仍由
-host cgroup v2 限 CH + balloon 独占。
+**freezer(核心,无独立 Kconfig)**:快照前 sandbox-init 要**原子冻结应用进程
+树**,restore 环境(墙钟等)就绪后再解冻,否则 `/vm.resume` 先于 guest 处理
+`restore` 解冻 vCPU,应用会带着旧墙钟 / 未重连的 MUX 抢跑一段(resume-vs-env-init
+竞态;机制见 `sandbox-runtime/docs/sandbox-runtime.md` §3.4)。v2 freezer
+(`cgroup.freeze`,内核 ≥5.2)即 `CONFIG_CGROUPS=y` 自带;`CGROUP_FREEZER` 是
+v1 旧冻结器,不需要。
 
-sandbox-init 建唯一固定 `/sys/fs/cgroup/app`,路径与结构每实例一致,不引入
-systemd 那种动态 cgroup 树的跨实例路径非确定性。systemd-style 服务管理或
-nested 容器(podman / docker-in-docker)在沙箱模型下仍不是支持目标——无任何
-控制器,且其工作流跟"短生命周期 + 快照恢复"模式正交。
+**资源控制器(`MEMCG` / `CGROUP_SCHED`+`FAIR_GROUP_SCHED`+`CFS_BANDWIDTH` /
+`BLK_CGROUP`+`BLK_CGROUP_IOCOST`+`BLK_DEV_THROTTLING` / `CGROUP_PIDS`)**:e2b
+模型要在 guest 内对每类进程做资源隔离——envd 为 pty / socat / user 进程各建
+子 cgroup 并设 `cpu.weight` / `memory.{high,max,min,low}` / `io.weight` /
+`pids.max`。控制器不编入则这些接口文件根本不存在(envd 跳过并告警);编入后还须
+**经 `cgroup.subtree_control` 下放**才在子 cgroup 出现,而 envd 自身不写
+subtree_control——故 **sandbox-init 挂载 cgroup2 后,把 root `cgroup.controllers`
+里的控制器写入 root `cgroup.subtree_control`**
+(`sandbox-runtime/cmd/sandbox-init/cgroup.go`;root cgroup 豁免
+no-internal-process 规则,故 PID 1 留在 root 仍可下放)。
+
+这是**在 VM 预算内再细分**,不替代 host 权威:host cgroup v2 限 CH 进程 + balloon
+仍框定整台 VM 的资源上限;guest 内子 cgroup 默认 `memory.max=max`(不设即无限),
+仅 envd 显式设限才生效,故默认不会早于 host `deflate_on_oom` 触发 guest 内 OOM。
+
+sandbox-init 另建唯一固定 `/sys/fs/cgroup/app` 作冻结域(envd 的 ptys/socats/user
+是其 root 同级 cgroup)。完整的 nested 容器运行时(podman / docker-in-docker)仍非
+支持目标——它们还需 `user_ns` / `net_ns`(平台关闭,§3.2),且其工作流跟"短生命
+周期 + 快照恢复"模式正交。
 
 ### 5.3 为什么 IP_PNP 关闭
 
@@ -409,8 +431,8 @@ diff 排查。
 - 升级架构 fragment:review CH 对该 arch 的设备模型是否有新依赖(例如
   GICv4 / 新 RTC 驱动)
 - 不上游化 defconfig:本配置选择跟通用 server distro 取向偏离明显
-  (cgroup 裁剪至仅 v2 freezer / 关闭 userfaultfd / namespace 等),不寻求
-  合并到 upstream
+  (关闭 userfaultfd、裁剪 namespace、cgroup 只留 freezer + sandbox 必需的
+  cpu/memory/io/pids 控制器等),不寻求合并到 upstream
 
 ## 8. See Also
 
