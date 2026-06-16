@@ -39,8 +39,7 @@ make vet test
 
 | 依赖 | 用途 | 解析 |
 |---|---|---|
-| `sandbox-accelerator/pkg/manifest`（+ `cache`/`store` client） | 快照 ingest/fetch、vhost 块读 | `replace => ../sandbox-accelerator` |
-| `sandbox-builder/pkg/image` | 读取展平镜像内嵌的 RuntimeConfig | `replace => ../sandbox-builder` |
+| `sandbox-accelerator/pkg/manifest`（+ `pkg/image`、`cache`/`store` client） | 快照 ingest/fetch、vhost 块读、读展平镜像内嵌的 RuntimeConfig | `replace => ../sandbox-accelerator` |
 | `sandbox-vswitch/pkg/tapfd` | tapfd 交接消费侧（`RecvFdsWithNetns`） | `replace => ../sandbox-vswitch` |
 
 均为纯 Go、无 CGO 的导入面——整仓 `CGO_ENABLED=0` 构建，不引入 rocksdb / eBPF

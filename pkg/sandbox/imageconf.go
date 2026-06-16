@@ -9,7 +9,7 @@ import (
 	"sort"
 	"time"
 
-	"github.com/kuasar-sandbox/sandbox-builder/pkg/image"
+	"github.com/kuasar-sandbox/sandbox-accelerator/pkg/image"
 	"github.com/kuasar-sandbox/sandbox-runtime/pkg/config"
 	"github.com/kuasar-sandbox/sandbox-runtime/pkg/proto"
 )

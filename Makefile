@@ -75,7 +75,7 @@ sandbox-init:
 
 # Pack sandbox-init into the guest "/" image (virtio-pmem, DAX, read-only,
 # shared across sandboxes via host page cache). Needs mkfs.erofs; EROFS is
-# endian-neutral / cross-mountable. mkfs flags mirror sandbox-builder's
+# endian-neutral / cross-mountable. mkfs flags mirror sandbox-accelerator's
 # flatten.go buildEROFS for deterministic, dedup-friendly output. stderr
 # discarded because mkfs.erofs 1.9 emits a false-positive
 # "<E> Compression is not enabled" on -Ededupe even when --chunksize already
