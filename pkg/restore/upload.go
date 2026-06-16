@@ -17,7 +17,7 @@ import (
 	"github.com/kuasar-sandbox/sandbox-accelerator/pkg/manifest/ingest"
 	"github.com/kuasar-sandbox/sandbox-accelerator/pkg/sparse"
 	"github.com/kuasar-sandbox/sandbox-accelerator/pkg/store"
-	"github.com/kuasar-sandbox/sandbox-runtime/internal/util"
+	"github.com/kuasar-sandbox/sandbox-runtime/pkg/util"
 	"github.com/kuasar-sandbox/sandbox-runtime/pkg/config"
 	"github.com/kuasar-sandbox/sandbox-runtime/pkg/snapshot"
 	"gopkg.in/yaml.v3"

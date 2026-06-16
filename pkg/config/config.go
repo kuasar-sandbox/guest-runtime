@@ -14,7 +14,7 @@ import (
 	"time"
 
 	"github.com/kuasar-sandbox/sandbox-accelerator/pkg/manifest"
-	"github.com/kuasar-sandbox/sandbox-runtime/internal/util"
+	"github.com/kuasar-sandbox/sandbox-runtime/pkg/util"
 	"github.com/kuasar-sandbox/sandbox-runtime/pkg/proto"
 	"golang.org/x/sys/unix"
 	"gopkg.in/yaml.v3"

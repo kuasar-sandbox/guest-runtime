@@ -13,7 +13,7 @@ import (
 	"time"
 
 	"github.com/kuasar-sandbox/sandbox-accelerator/pkg/manifest"
-	"github.com/kuasar-sandbox/sandbox-runtime/internal/util"
+	"github.com/kuasar-sandbox/sandbox-runtime/pkg/util"
 	"github.com/kuasar-sandbox/sandbox-runtime/pkg/restore"
 	"github.com/kuasar-sandbox/sandbox-runtime/pkg/sandbox"
 	"github.com/kuasar-sandbox/sandbox-runtime/pkg/stdio"
