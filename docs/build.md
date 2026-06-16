@@ -20,7 +20,7 @@ cargo/Go)与 Go 仓不同、冷构建以分钟计、上游发布节奏独立,故
 
 | 产物 | 上游(pin) | 本仓输入 | 消费方 |
 |---|---|---|---|
-| `mkfs.erofs` `fsck.erofs` | erofs-utils v1.9.1 | — | `sandbox-builder`(展平)、`sandbox-runtime`(打 guest erofs)、`sandbox-orchestrator`(`fsck.erofs --extract`) |
+| `mkfs.erofs` `fsck.erofs` | erofs-utils v1.9.1 | — | `sandbox-accelerator`(展平)、`sandbox-runtime`(打 guest erofs)、`sandbox-orchestrator`(`fsck.erofs --extract`) |
 | `vmlinux` | linux 6.1.169(LTS,cdn.kernel.org) | `deps/linux-patches/`(1 个)+ `deps/vmlinux/*.config` | `sandbox-runtime`(guest 内核) |
 | `cloud-hypervisor` | cloud-hypervisor v51.1 | `deps/ch-patches/`(4 个) | `sandbox-runtime`(VMM) |
 | `envd` | e2b-dev/infra 2026.22(发布 tarball) | — | `sandbox-orchestrator`(注入 `sandbox-runtime-e2b.erofs`) |

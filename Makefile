@@ -1,7 +1,7 @@
 # sandbox-deps — native dependency builds for the kuasar-sandbox platform.
 #
 # Produces the runtime artifacts the Go repos consume but don't link:
-#   mkfs.erofs        (erofs-utils)        — used by sandbox-builder, sandbox-runtime
+#   mkfs.erofs        (erofs-utils)        — used by sandbox-accelerator, sandbox-runtime
 #   vmlinux           (guest kernel)       — used by sandbox-runtime
 #   cloud-hypervisor  (patched Rust VMM)   — used by sandbox-runtime
 #   envd              (e2b guest agent)    — injected into sandbox-runtime-e2b.erofs

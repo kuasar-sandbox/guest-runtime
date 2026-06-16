@@ -9,7 +9,7 @@
 
 | 产物 | 来源 | 消费方 |
 |---|---|---|
-| `mkfs.erofs` | erofs-utils v1.9.1 | `sandbox-builder`(展平)、`sandbox-runtime`(打 guest 镜像) |
+| `mkfs.erofs` | erofs-utils v1.9.1 | `sandbox-accelerator`(展平)、`sandbox-runtime`(打 guest 镜像) |
 | `fsck.erofs` | erofs-utils v1.9.1 | `sandbox-orchestrator`(`fsck.erofs --extract` 解包 base runtime 注入 envd) |
 | `vmlinux` | Linux 6.1.169 + `deps/linux-patches` + `deps/vmlinux/*.config` | `sandbox-runtime`(guest 内核) |
 | `cloud-hypervisor` | CH v51.1 + `deps/ch-patches`(memfd 注入 / snapshot skip / 外部 uffd / balloon 跳洞) | `sandbox-runtime`(VMM) |
