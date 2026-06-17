@@ -384,8 +384,8 @@ index bb40b99..186baa3 100644
          and![Cond::new(1, ArgLen::Dword, Eq, BLKIOOPT as _)?],
          and![Cond::new(1, ArgLen::Dword, Eq, BLKDISCARD as _)?],
          and![Cond::new(1, ArgLen::Dword, Eq, BLKZEROOUT as _)?],
-+        // internal: allow UFFDIO_API + UFFDIO_REGISTER for the uffd-backed
-+        // memory-zone path (commit internal: CH creates its own uffd in
++        // allow UFFDIO_API + UFFDIO_REGISTER for the uffd-backed
++        // memory-zone path (CH creates its own uffd in
 +        // create_ram_region, configures features, and registers the
 +        // chVA range MISSING).
 +        and![Cond::new(1, ArgLen::Dword, Eq, UFFDIO_API as _)?],
@@ -397,7 +397,7 @@ index bb40b99..186baa3 100644
          (libc::SYS_mbind, vec![]),
          (libc::SYS_memfd_create, vec![]),
          (libc::SYS_mmap, vec![]),
-+        // internal: allow userfaultfd() — patched create_ram_region creates
++        // allow userfaultfd() — patched create_ram_region creates
 +        // its own uffd in CH's mm so faults route correctly.
 +        (libc::SYS_userfaultfd, vec![]),
          (libc::SYS_mprotect, vec![]),
