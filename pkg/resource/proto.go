@@ -34,9 +34,6 @@ const (
 	TypeHeartbeat      = "heartbeat"
 	TypeRelease        = "release"
 	TypeAck            = "ack"
-	TypeReclaimRequest = "reclaim_request"
-	TypeReclaimDone    = "reclaim_done"
-	TypeUpdateConfig   = "update_config"
 	TypeReattach       = "reattach"
 	TypeError          = "error"
 
@@ -122,9 +119,8 @@ type Message struct {
 	KilledPID int    `json:"killed_pid,omitempty"`
 	KilledRSS uint64 `json:"killed_rss,omitempty"`
 
-	// ReclaimRequest (controller → sandbox-ctl).
+	// AdminReclaim target (node-ctl reclaim CLI → controller).
 	TargetAllocatable uint64 `json:"target_allocatable,omitempty"`
-	DeadlineMs        int64  `json:"deadline_ms,omitempty"`
 
 	// AdminDrain.
 	Drain bool `json:"drain,omitempty"`

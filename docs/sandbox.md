@@ -1748,8 +1748,8 @@ guest 内进程级压力(跨 host/guest 边界,接口复杂)。
 
 **长连维持**:
 
-- 沙箱进入 startup 后,连接保持活跃;sandbox-ctl 在此连接上发后续 RPC、收
-  ReclaimRequest/UpdateConfig 推送
+- 沙箱进入 startup 后,连接保持活跃;sandbox-ctl 在此连接上发后续 RPC,并经
+  Heartbeat ack 的 `new_allocatable` 接收 reclaim/admin 的 allocatable 调整
 - 30s 周期 Heartbeat;控制器 90s(3 个周期)未收到 → 视为掉线
 
 **断连降级**:

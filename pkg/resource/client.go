@@ -11,20 +11,15 @@ import (
 // Client is sandbox-ctl's RPC interface to the controller. Designed for
 // a single long-lived connection per sandbox. Concurrent calls are
 // serialized by an internal mutex — sandbox-ctl issues at most one
-// outstanding request at a time, with a goroutine to receive pushes
-// (ReclaimRequest / UpdateConfig).
+// outstanding request at a time. Controller-driven allocatable changes
+// (active reclaim / admin grant / admin reclaim) are delivered on the
+// Heartbeat response (NewAllocatable), not via an unsolicited push.
 type Client struct {
 	SocketPath string
 
 	mu    sync.Mutex
 	conn  net.Conn
 	token string
-
-	// Push handlers (controller → sandbox-ctl).
-	OnReclaim func(target uint64, deadlineMs int64)
-	OnUpdate  func(*Message)
-
-	stopRecv chan struct{}
 }
 
 // Connect dials the controller socket. Idempotent: re-dialing closes
@@ -47,10 +42,6 @@ func (c *Client) Connect() error {
 func (c *Client) Close() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.stopRecv != nil {
-		close(c.stopRecv)
-		c.stopRecv = nil
-	}
 	if c.conn != nil {
 		err := c.conn.Close()
 		c.conn = nil
