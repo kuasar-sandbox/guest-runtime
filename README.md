@@ -8,7 +8,7 @@ microVM 沙箱生命周期引擎:冷启动、快照、恢复,以及块设备(vho
 
 对外导出 `pkg/resource`(节点资源控制协议:wire + `Client`;由 `sandbox-orchestrator`
 的 **node-ctl** 作控制器侧 import);协议规范见
-[`sandbox-orchestrator/docs/node.md`](https://github.com/kuasar-sandbox/sandbox-orchestrator/blob/main/docs/node.md) §5。
+[`sandbox-orchestrator/docs/node-resource.md`](https://github.com/kuasar-sandbox/sandbox-orchestrator/blob/main/docs/node-resource.md) §5。
 
 ## 组成
 

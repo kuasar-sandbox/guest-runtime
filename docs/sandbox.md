@@ -256,7 +256,7 @@ sandbox-ctl 控制终端的前台进程组——终端产生的 `^C` / `^\` / `^
 是文件路径形态。除此之外,sandbox-ctl 还能在无 config-socket 的前提下接收**内存内**
 交付的单份 sandbox.yaml:`pkg/config.LoadConfigBytes` 解析一份在内存中持有的
 `SANDBOX_CONFIG` YAML 文档(不从磁盘读),敏感的 manifest 根密钥经 `MANIFEST_KEY`
-env 传入(由 `pkg/manifest` 解析)。编排侧的 `orchestrator-ctl run-sandbox` 启动器即按此
+env 传入(由 `pkg/manifest` 解析)。编排侧的 `node-ctl run-sandbox` 启动器即按此
 模型工作:它在 `execve` 成 sandbox-ctl 之前,先把非密的 per-sandbox 配置(文件或内存)
 与 `MANIFEST_KEY` env 备好。
 
@@ -1653,7 +1653,7 @@ deflate_on_oom 触发链路:
 
 ## 10. 与 node-ctl 的资源协议
 
-详细协议规范见 `sandbox-sentinel/docs/node.md` §5;本节描述 sandbox-ctl 侧的执行器
+详细协议规范见 `sandbox-orchestrator/docs/node-resource.md` §5;本节描述 sandbox-ctl 侧的执行器
 行为。
 
 ### 10.1 沙箱状态机
@@ -2092,7 +2092,7 @@ vmlinux 通过 `boot.kernel: file://...` 提供:
   ABI 边界
 - `sandbox-deps/docs/build.md` —— 原生依赖(mkfs.erofs / vmlinux /
   cloud-hypervisor / envd)的构建流程
-- `sandbox-sentinel/docs/node.md` —— 资源控制协议规范、节点级仲裁、
+- `sandbox-orchestrator/docs/node-resource.md` —— 资源控制协议规范、节点级仲裁、
   admission、reclaimer
 - `sandbox-accelerator/docs/manifest.md` —— manifest:// 资源拉取通道
   (blk0 base、snapshot)
