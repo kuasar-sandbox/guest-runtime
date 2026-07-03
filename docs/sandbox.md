@@ -435,7 +435,7 @@ network:
   # 源(二选一):
   tap: tap0                    # 预创建的 host TAP 名;CH 按名打开(dev/e2e,无 provider)
   tapfd:                       # tapfd 交接(docs/tapfd.md §3):exec provider helper 取 tap 队列 fd
-    exec: ["vswitch-ctl", "open-port", "sw0", "--port=3"]
+    exec: ["connector-ctl", "vswitch", "open-port", "sw0", "--port=3"]
     # timeout: 5s            # 交接超时(Go duration);默认 5s
 
   # 属性:tap 模式按下值生效;tapfd 模式下被交接元数据覆盖——
