@@ -23,7 +23,7 @@ cargo/Go)与 Go 仓不同、冷构建以分钟计、上游发布节奏独立,故
 | `mkfs.erofs` `fsck.erofs` | erofs-utils v1.9.1 | — | `accelerator`(展平)、`sandbox-runtime`(打 guest erofs)、`orchestrator`(`fsck.erofs --extract`) |
 | `vmlinux` | linux 6.1.169(LTS,cdn.kernel.org) | `deps/linux-patches/`(1 个)+ `deps/vmlinux/*.config` | `sandbox-runtime`(guest 内核) |
 | `cloud-hypervisor` | cloud-hypervisor v51.1 | `deps/ch-patches/`(4 个) | `sandbox-runtime`(VMM) |
-| `envd` | e2b-dev/infra 2026.22(发布 tarball) | — | `orchestrator`(注入 `sandbox-runtime-e2b.erofs`) |
+| `envd` | e2b-dev/infra 2026.22(发布 tarball) | — | `guest-runtime`(注入 `sandbox-runtime.erofs`) |
 
 pin 全部落在 Makefile 变量(`EROFS_TARBALL` / `LINUX_TARBALL` / `CLOUD_HYPERVISOR_TARBALL` /
 `ENVD_TARBALL`,支持 `url#filename` 与本地路径两种形式),配套的 `*_TARBALL_SHA256`
@@ -132,8 +132,8 @@ make help                # 列举目标
 CGO_ENABLED=0 -trimpath -ldflags "-s -w"`)→ `bin/<arch>/envd`。GOARCH 即选目标
 架构,交叉无需 C 工具链。
 
-- 产物由 `orchestrator` 的 `make sandbox-runtime-e2b` 注入
-  `sandbox-runtime-e2b.erofs` 的 `/opt/sandbox-runtime/bin/envd`,作为 e2b profile
+- 产物由 `guest-runtime` 的 `make sandbox-runtime` 注入
+  `sandbox-runtime.erofs` 的 `/opt/sandbox-runtime/bin/envd`,作为 e2b profile
   guest 内的数据面 agent(端口 49983)。
 - 工具链注意:envd 的 `go.mod` pin 较新的 Go(如 `go 1.26.3`),`GOTOOLCHAIN=auto`
   按需下载;该下载要求 GOSUMDB 开启——Go 拒绝在 `GOSUMDB=off` 下下载并运行工具链。

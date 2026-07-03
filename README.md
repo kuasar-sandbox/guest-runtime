@@ -1,56 +1,45 @@
-# sandbox-runtime
+# guest-runtime
 
-microVM 沙箱生命周期引擎:冷启动、快照、恢复,以及块设备(vhost-user-blk)与
-按需内存(uffd 懒加载)的 host 侧编排;guest 侧由打进 `sandbox-runtime.erofs`
-的 PID 1(`sandbox-init`)承接。是
-[kuasar-sandbox](https://github.com/kuasar-sandbox/kuasar-sandbox) 平台的运行时
-核心,独立演进。
+Guest runtime image and native dependency build repo for kuasar-sandbox.
 
-对外导出 `pkg/resource`(节点资源控制协议:wire + `Client`;由 `orchestrator`
-的 **node-ctl** 作控制器侧 import);协议规范见
-[`orchestrator/docs/node-resource.md`](https://github.com/kuasar-sandbox/orchestrator/blob/main/docs/node-resource.md) §5。
+This repo owns artifacts that are consumed by the sandbox engine at runtime but
+are not themselves the host-side sandbox lifecycle implementation:
 
-## 组成
-
-| 路径 | 角色 |
+| Path | Role |
 |---|---|
-| `cmd/sandbox-ctl` | host 控制平面:`run`(恢复 = `run --restore`)/ `snapshot` / `exec` / `config` / `info` / `upload-snapshot` |
-| `cmd/sandbox-init` | guest PID 1(打进 `sandbox-runtime.erofs`):三阶段 init + vsock 控制面 + 应用监督 |
-| `pkg/sandbox` `pkg/restore` `pkg/snapshot` | 生命周期编排:冷启动 / 恢复 / 快照(含增量分层链) |
-| `pkg/uffd` `pkg/memory` | uffd handler 与 memfd 统一内存所有权(懒加载) |
-| `pkg/vhost` | vhost-user-blk 后端(file / manifest 块源 + CoW diff) |
-| `pkg/{guestlink,mux,proto,fwd,stdio,ctl}` | host↔guest vsock 控制面、stdio MUX、端口转发、ctl.sock |
-| `pkg/{config,resctl,chapi,tapfd}` | sandbox.yaml、cgroup+balloon 联动、CH API 客户端、tapfd 消费 |
-| `pkg/util` | 内联工具(`ParseSize` / `LocateBinary` 等,跨模块导出) |
-| `pkg/resource` | **导出面**:节点资源控制协议(`orchestrator` 的 node-ctl import) |
+| `Makefile` | Builds one `sandbox-runtime.erofs` from `../sandboxer/bin/<arch>/sandbox-init` plus guest payload. |
+| `docs/sandbox-runtime.md` | Guest runtime image and `sandbox-init` ABI/design. |
+| `native-deps/` | Builds `vmlinux`, `cloud-hypervisor`, `mkfs.erofs`, `fsck.erofs`, and `envd`. |
+| `scripts/guest-inspect.py` | Helper for inspecting guest/runtime images. |
 
-## 构建
+`sandbox-init` source and host lifecycle code live in
+[`sandboxer`](https://github.com/kuasar-sandbox/sandboxer). `guest-runtime`
+packages the built `sandbox-init` into the DAX-shared EROFS image and injects
+the guest payload used by e2b/build flows under `/opt/sandbox-runtime/bin/`:
+`envd`, `flatten-ctl`, and `mkfs.erofs`.
+
+## Build
 
 ```bash
-make build                      # sandbox-ctl + sandbox-init + sandbox-runtime.erofs
-make sandbox-ctl sandbox-init   # 两个纯 Go 二进制(CGO_ENABLED=0)
-make sandbox-runtime            # 把 sandbox-init 打成 sandbox-runtime.erofs(需 mkfs.erofs)
-make build TARGET_ARCH=aarch64  # 交叉编译(别名 amd64 / arm64)
-make vet test
+make native-deps                 # vmlinux / cloud-hypervisor / erofs tools / envd
+make build                       # sandbox-runtime.erofs with envd/flatten-ctl/mkfs.erofs
+make sandbox-runtime             # same image target, builds ../sandboxer sandbox-init if needed
+make build TARGET_ARCH=aarch64
 ```
 
-构建需要 Go 1.24+;运行还需 **native-deps** 产出的原生件:`vmlinux`(guest
-内核)、`cloud-hypervisor`(VMM,平台 patch)、`mkfs.erofs`。
+`make sandbox-runtime` needs `mkfs.erofs`, found from `PATH`, `bin/<arch>/`,
+or `native-deps/bin/<arch>/`; it also consumes `native-deps/bin/<arch>/envd`
+and `../accelerator/bin/<arch>/flatten-ctl`, building those targets on demand
+when their sibling repos are available.
 
-## 跨仓依赖(薄)
+## Artifacts
 
-| 依赖 | 用途 | 解析 |
-|---|---|---|
-| `accelerator/pkg/manifest`(+ `pkg/image`、`cache`/`store` client) | 快照 ingest/fetch、vhost 块读、读展平镜像内嵌的 RuntimeConfig | `replace => ../accelerator` |
-| `connector/pkg/tapfd` | tapfd 交接消费侧(`RecvFdsWithNetns`) | `replace => ../connector` |
+| Artifact | Producer |
+|---|---|
+| `bin/<arch>/sandbox-runtime.erofs` | `make sandbox-runtime` |
+| `native-deps/bin/<arch>/vmlinux` | `make native-deps` |
+| `native-deps/bin/<arch>/cloud-hypervisor` | `make native-deps` |
+| `native-deps/bin/<arch>/mkfs.erofs` / `fsck.erofs` | `make native-deps` |
+| `native-deps/bin/<arch>/envd` | `make native-deps` |
 
-均为纯 Go、无 CGO 的导入面——整仓 `CGO_ENABLED=0` 构建,不引入 rocksdb / eBPF
-等重依赖。`replace` 指向兄弟仓相对路径:clone 全组织为兄弟目录即可离线构建;
-组织级 `go.work` 见 [kuasar-sandbox](https://github.com/kuasar-sandbox/kuasar-sandbox)。
-
-## 文档
-
-- [docs/sandbox.md](docs/sandbox.md) — host 控制平面:`sandbox-ctl` 命令行、
-  sandbox.yaml、冷启动/快照/恢复数据流、uffd handler、资源模型。
-- [docs/sandbox-runtime.md](docs/sandbox-runtime.md) — guest 运行时:
-  `sandbox-init` 三阶段、vsock 控制面 + stdio MUX 协议、应用契约。
+The cross-repo release build is driven from `orchestrator/release-builder`.

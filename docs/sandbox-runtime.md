@@ -1,8 +1,9 @@
 # sandbox-runtime — guest 运行时
 
 guest 内 PID 1 二进制 `sandbox-init` 与承载它的根文件系统镜像
-`sandbox-runtime.erofs`。负责沙箱启动期 rootfs 组装、应用拉起、生命周期监督、
-应用 stdio/console 转发、以及与 host sandbox-ctl 之间的控制面通信。
+`sandbox-runtime.erofs`。`sandbox-init` 源码和 host 侧生命周期实现属于
+`sandboxer`;本仓负责把已构建的 `sandbox-init` 打包成节点级共享的 guest
+runtime 镜像,并维护其依赖的 native 产物。
 
 `sandbox-runtime` 是节点级共享资产——所有 sandbox 通过 virtio-pmem + DAX
 直接映射 host 上同一份 erofs 文件,获得无运行时拷贝、跨 sandbox 共享 host
@@ -75,18 +76,21 @@ page cache 的密度收益。
 **除挂载点与 `/opt/sandbox-runtime/` 外无其他文件**——无 /etc、/usr、/var、
 /lib、共享库等,所有额外功能由 sandbox-init 通过 Go syscall 实现。
 
-`/opt/sandbox-runtime/` 是预留的 **Guest 侧发布件根**:随本镜像出厂的平台运行时
-组件(如 `/opt/sandbox-runtime/bin/envd`)放此处,经 virtio-pmem + DAX 跨 sandbox
-共享一份、与 sandbox-init 原子同版;phase1a 把它 bind 进新 root 同名路径(§3.1),
-应用在自身 rootfs 内以**只读**看到它,且该路径遮蔽 app 镜像在此的任何内容(§5.2)。
-当前为空占位。
+`/opt/sandbox-runtime/` 是 **Guest 侧发布件根**:随本镜像出厂的平台运行时组件
+放此处,经 virtio-pmem + DAX 跨 sandbox 共享一份、与 sandbox-init 原子同版;
+phase1a 把它 bind 进新 root 同名路径(§3.1),应用在自身 rootfs 内以**只读**看到它,
+且该路径遮蔽 app 镜像在此的任何内容(§5.2)。首版单一 runtime 内置
+`/opt/sandbox-runtime/bin/{envd,flatten-ctl,mkfs.erofs}`;e2b 数据面和构建沙箱
+复用同一份镜像。
 
 镜像小(~15 MiB)+ DAX 直接映射 host page cache,N 个 sandbox 共享同一份内存
 工作集(实际 ~10 MiB 驻留)。EROFS 文件格式 endian-neutral,任意 host arch 上
 的 mkfs.erofs 都可生成镜像;镜像内的 `/sbin/init` 是 target arch 二进制。
 
-构建经本仓 `make sandbox-runtime`(需 native-deps 的 mkfs.erofs;详见
-`native-deps/docs/build.md` §2.1)。
+构建经本仓 `make sandbox-runtime`:先消费 `../sandboxer/bin/<arch>/sandbox-init`
+(缺失时自动触发 `make -C ../sandboxer sandbox-init`),再用 native-deps 的
+`mkfs.erofs` 生成 `sandbox-runtime.erofs`。mkfs.erofs 构建详见
+`native-deps/docs/build.md` §2.1。
 
 ## 3. sandbox-init 三阶段
 
@@ -459,7 +463,7 @@ host 侧由 CH 把它写到 sandbox-ctl 给 CH 的 stdout(一根匿名管道),sa
 
 ### 3.6 exec 会话(`sandbox-ctl exec`)
 
-`sandbox-ctl exec`(host 侧 CLI + ctl.sock 见 [`sandbox.md`](sandbox.md) §2.4 /
+`sandbox-ctl exec`(host 侧 CLI + ctl.sock 见 `sandboxer/docs/sandbox.md` §2.4 /
 §6.3)在一个**已运行**的沙箱内拉起一条临时命令,它是用户应用的**兄弟进程**,
 既不替换应用、也不重启沙箱。host 经反向通道发 `exec{spec}`(§4.3);sandbox-init
 为这次会话准备 stdio、起进程、回 `exec_ack`,该连接随即成为这条会话**独立**的
@@ -1079,5 +1083,6 @@ sandbox.yaml `launch:` 节(yaml override 优先,Env merge),host sandbox-ctl 合�
 - `native-deps/docs/cloud-hypervisor.md` §5.2 —— vsock hybrid 代理:host
   侧映射到 UDS 的 CONNECT 行格式;`--console` / `--serial` 的用法
 - `native-deps/docs/build.md` §2.1 —— mkfs.erofs 构建(本仓 `make sandbox-runtime` 的前置工具)
+- `sandboxer/docs/sandbox.md` —— host 侧 `sandbox-ctl` 生命周期、快照/恢复与数据面。
 - `kuasar-sandbox/docs/kuasar-sandbox.md` §4.6 —— quiesce prep 必做项的目标依据
   (确定性 guest 配置)

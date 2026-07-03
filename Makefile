@@ -1,16 +1,16 @@
-# guest-runtime — guest runtime image builder.
+# guest-runtime — guest runtime image and native dependency builder.
 #
-#   sandbox-ctl     host control plane (run / snapshot / exec / config / info)
-#   sandbox-init    guest PID 1 (packed into sandbox-runtime.erofs)
-#   sandbox-runtime sandbox-init packed into a virtio-pmem-mountable EROFS
+# This repo owns guest runtime artifacts:
+#   sandbox-runtime.erofs     virtio-pmem/DAX guest runtime image
+#   native-deps/bin/*         vmlinux, cloud-hypervisor, mkfs.erofs, envd
 #
-# `make build` produces sandbox-ctl, sandbox-init, and sandbox-runtime.erofs.
-# The runtime image target needs mkfs.erofs from native-deps; the finder below
-# probes PATH, this repo's bin/, and native-deps/bin/.
+# The sandbox-init binary is produced by the sibling sandboxer repo. This
+# Makefile consumes ../sandboxer/bin/$(TARGET_ARCH)/sandbox-init and injects the
+# guest payload needed by e2b/build flows into one runtime image.
 
 SHELL := /bin/bash
 
-.PHONY: all build sandbox-ctl sandbox-init sandbox-runtime test vet bench clean help
+.PHONY: all build sandbox-init sandbox-runtime native-deps test clean help
 
 # ---------------------------------------------------------------------------
 # Architecture selection (identical block across all kuasar-sandbox repos)
@@ -30,14 +30,19 @@ else ifeq ($(TARGET_ARCH),aarch64)
 else
   $(error unsupported TARGET_ARCH=$(TARGET_ARCH); supported: x86_64, aarch64)
 endif
+export TARGET_ARCH
 
 # ---------------------------------------------------------------------------
 # Build settings
 # ---------------------------------------------------------------------------
-GO             := go
-GO_BUILD_FLAGS := -trimpath
-BINDIR         := bin/$(TARGET_ARCH)
-BUILD_DIR      := build/$(TARGET_ARCH)
+BINDIR    := bin/$(TARGET_ARCH)
+BUILD_DIR := build/$(TARGET_ARCH)
+
+SANDBOXER_DIR ?= ../sandboxer
+ACCELERATOR_DIR ?= ../accelerator
+SANDBOX_INIT  ?= $(SANDBOXER_DIR)/$(BINDIR)/sandbox-init
+ENVD          ?= native-deps/$(BINDIR)/envd
+FLATTEN_CTL   ?= $(ACCELERATOR_DIR)/$(BINDIR)/flatten-ctl
 
 # mkfs.erofs lookup chain (in priority order):
 #   PATH → this repo's $(BINDIR)/ → this repo's bin/ symlink →
@@ -48,6 +53,7 @@ MKFS_EROFS ?= $(shell \
     || ( [ -x bin/mkfs.erofs ] && echo bin/mkfs.erofs ) \
     || ( [ -x native-deps/$(BINDIR)/mkfs.erofs ] && echo native-deps/$(BINDIR)/mkfs.erofs ) \
     || ( [ -x native-deps/bin/mkfs.erofs ] && echo native-deps/bin/mkfs.erofs ))
+MKFS_GUEST ?= $(MKFS_EROFS)
 
 define link_bin
 @if [ "$(HOST_ARCH)" = "$(TARGET_ARCH)" ]; then \
@@ -60,41 +66,45 @@ endef
 # ---------------------------------------------------------------------------
 all: build
 
-build: sandbox-ctl sandbox-init sandbox-runtime
+build: sandbox-runtime
 
-sandbox-ctl:
-	@mkdir -p $(BINDIR)
-	GOOS=linux GOARCH=$(GO_ARCH) CGO_ENABLED=0 $(GO) build $(GO_BUILD_FLAGS) -o $(BINDIR)/sandbox-ctl ./cmd/sandbox-ctl
-	$(call link_bin,sandbox-ctl)
+native-deps:
+	$(MAKE) -C native-deps build
 
-# guest PID 1: stripped (no libc inside the guest rootfs).
 sandbox-init:
-	@mkdir -p $(BINDIR)
-	GOOS=linux GOARCH=$(GO_ARCH) CGO_ENABLED=0 $(GO) build $(GO_BUILD_FLAGS) -ldflags '-s -w' -o $(BINDIR)/sandbox-init ./cmd/sandbox-init
-	$(call link_bin,sandbox-init)
+	$(MAKE) -C $(SANDBOXER_DIR) sandbox-init
+
+envd:
+	$(MAKE) -C native-deps envd
+
+flatten-ctl:
+	$(MAKE) -C $(ACCELERATOR_DIR) flatten-ctl
 
 # Pack sandbox-init into the guest "/" image (virtio-pmem, DAX, read-only,
-# shared across sandboxes via host page cache). Needs mkfs.erofs; EROFS is
-# endian-neutral / cross-mountable. mkfs flags mirror accelerator's
-# flatten.go buildEROFS for deterministic, dedup-friendly output. stderr
-# discarded because mkfs.erofs 1.9 emits a false-positive
-# "<E> Compression is not enabled" on -Ededupe even when --chunksize already
-# triggers chunk-based dedup (matches flatten.go Stderr=io.Discard).
-sandbox-runtime: sandbox-init
-	@[ -n "$(MKFS_EROFS)" ] || { echo "mkfs.erofs not found — build it in native-deps (\`make -C native-deps erofs\`) or set MKFS_EROFS=<path>" >&2; exit 1; }
+# shared across sandboxes via host page cache). envd, flatten-ctl, and mkfs.erofs
+# are projected into application roots by sandbox-init through
+# /opt/sandbox-runtime/bin.
+sandbox-runtime:
+	@[ -n "$(MKFS_EROFS)" ] || { echo "mkfs.erofs not found — build it with \`make native-deps\` or set MKFS_EROFS=<path>" >&2; exit 1; }
+	@[ -x "$(SANDBOX_INIT)" ] || $(MAKE) sandbox-init
+	@[ -x "$(ENVD)" ] || $(MAKE) envd
+	@[ -x "$(FLATTEN_CTL)" ] || $(MAKE) flatten-ctl
+	@[ -x "$(MKFS_GUEST)" ] || { echo "guest mkfs.erofs not found — set MKFS_GUEST=<path>" >&2; exit 1; }
 	rm -rf $(BUILD_DIR)/sandbox-runtime
 	mkdir -p $(BUILD_DIR)/sandbox-runtime/sbin $(BUILD_DIR)/sandbox-runtime/proc \
 	         $(BUILD_DIR)/sandbox-runtime/sys $(BUILD_DIR)/sandbox-runtime/dev \
 	         $(BUILD_DIR)/sandbox-runtime/overlay/lower $(BUILD_DIR)/sandbox-runtime/overlay/upper \
-	         $(BUILD_DIR)/sandbox-runtime/sysroot $(BUILD_DIR)/sandbox-runtime/opt/sandbox-runtime
-	@# Pre-baked mountpoints for boot.disks[] data disks (max 8, ordinals 0-7):
-	@# disk-N (assembled fs / single ext4), disk-N-lower (overlay erofs base),
-	@# disk-N-upper (overlay ext4 upper). The guest mounts onto these read-only
-	@# dirs (mounting shadows the dir, no write to the erofs). Keep the count (8)
-	@# in sync with config.MaxDataDisks; the guest rejects a disk whose dir is absent.
+	         $(BUILD_DIR)/sandbox-runtime/sysroot $(BUILD_DIR)/sandbox-runtime/opt/sandbox-runtime/bin
+	@# Pre-baked mountpoints for boot.disks[] data disks (max 8, ordinals 0-7).
 	mkdir -p $(BUILD_DIR)/sandbox-runtime/sysdisks/disk-{0..7}{,-lower,-upper}
-	cp $(BINDIR)/sandbox-init $(BUILD_DIR)/sandbox-runtime/sbin/init
+	cp "$(SANDBOX_INIT)" $(BUILD_DIR)/sandbox-runtime/sbin/init
 	chmod +x $(BUILD_DIR)/sandbox-runtime/sbin/init
+	cp "$(ENVD)" $(BUILD_DIR)/sandbox-runtime/opt/sandbox-runtime/bin/envd
+	cp "$(FLATTEN_CTL)" $(BUILD_DIR)/sandbox-runtime/opt/sandbox-runtime/bin/flatten-ctl
+	cp "$(MKFS_GUEST)" $(BUILD_DIR)/sandbox-runtime/opt/sandbox-runtime/bin/mkfs.erofs
+	chmod 0755 $(BUILD_DIR)/sandbox-runtime/opt/sandbox-runtime/bin/envd \
+	           $(BUILD_DIR)/sandbox-runtime/opt/sandbox-runtime/bin/flatten-ctl \
+	           $(BUILD_DIR)/sandbox-runtime/opt/sandbox-runtime/bin/mkfs.erofs
 	rm -f $(BINDIR)/sandbox-runtime.erofs
 	"$(MKFS_EROFS)" \
 	    -Ededupe \
@@ -105,34 +115,28 @@ sandbox-runtime: sandbox-init
 	    -x-1 \
 	    -U 00000000-0000-0000-0000-000000000000 \
 	    $(BINDIR)/sandbox-runtime.erofs $(BUILD_DIR)/sandbox-runtime 2>/dev/null
-	@# virtio-pmem requires 2 MiB-aligned backing; EROFS self-describes its
+	@# virtio-pmem requires 2 MiB-aligned backing. EROFS self-describes its
 	@# extent in the superblock so sparse padding is invisible to mount.
 	@actual=$$(stat -c %s $(BINDIR)/sandbox-runtime.erofs); \
 	 aligned=$$(( ($$actual + 2097151) / 2097152 * 2097152 )); \
 	 [ "$$aligned" = "$$actual" ] || truncate -s $$aligned $(BINDIR)/sandbox-runtime.erofs
+	$(call link_bin,sandbox-runtime.erofs)
 	@echo "==> built $(BINDIR)/sandbox-runtime.erofs"
 
 test:
-	CGO_ENABLED=0 $(GO) test ./...
-
-vet:
-	CGO_ENABLED=0 $(GO) vet ./...
+	$(MAKE) -C native-deps test
 
 clean:
 	rm -rf bin build
-
-# Go micro-benchmarks. Sandbox-level e2e (cold/snapshot/restore/...) lives in
-# release-builder/test/e2e — they need vmlinux + cloud-hypervisor + mkfs.erofs
-# (from native-deps) plus accelerator binaries, so they're cross-repo and
-# their natural home is the umbrella.
-bench:
-	CGO_ENABLED=0 $(GO) test -bench=. -benchmem -run=^$$ ./...
+	$(MAKE) -C native-deps clean
 
 help:
 	@echo "guest-runtime. Targets:"
-	@echo "  build              sandbox-ctl + sandbox-init + sandbox-runtime.erofs"
-	@echo "  sandbox-ctl        host control plane"
-	@echo "  sandbox-init       guest PID 1 (stripped)"
-	@echo "  sandbox-runtime    pack sandbox-init into the guest erofs (needs mkfs.erofs)"
-	@echo "  test / vet / clean"
+	@echo "  build              build sandbox-runtime.erofs"
+	@echo "  sandbox-runtime    pack sandboxer sandbox-init into guest erofs"
+	@echo "  sandbox-init       delegate to ../sandboxer sandbox-init"
+	@echo "  envd               build e2b guest agent"
+	@echo "  flatten-ctl        delegate to ../accelerator flatten-ctl"
+	@echo "  native-deps        build vmlinux / cloud-hypervisor / mkfs.erofs / envd"
+	@echo "  test / clean"
 	@echo "  TARGET_ARCH        x86_64 (default) | aarch64"

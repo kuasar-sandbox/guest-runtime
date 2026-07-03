@@ -13,7 +13,7 @@
 | `fsck.erofs` | erofs-utils v1.9.1 | `orchestrator`(`fsck.erofs --extract` 解包 base runtime 注入 envd) |
 | `vmlinux` | Linux 6.1.169 + `deps/linux-patches` + `deps/vmlinux/*.config` | `sandbox-runtime`(guest 内核) |
 | `cloud-hypervisor` | CH v51.1 + `deps/ch-patches`(memfd 注入 / snapshot skip / 外部 uffd / balloon 跳洞) | `sandbox-runtime`(VMM) |
-| `envd` | e2b-dev/infra 发布 tarball(tag `2026.22`) | `orchestrator`(注入 `sandbox-runtime-e2b.erofs` 的 guest agent) |
+| `envd` | e2b-dev/infra 发布 tarball(tag `2026.22`) | `guest-runtime`(注入 `sandbox-runtime.erofs` 的 guest agent) |
 
 `librocksdb`(`accelerator` 的 CGO 链接依赖)在该仓内构建,不在此处。
 

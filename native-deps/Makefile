@@ -4,7 +4,7 @@
 #   mkfs.erofs        (erofs-utils)        — used by accelerator, sandbox-runtime
 #   vmlinux           (guest kernel)       — used by sandbox-runtime
 #   cloud-hypervisor  (patched Rust VMM)   — used by sandbox-runtime
-#   envd              (e2b guest agent)    — injected into sandbox-runtime-e2b.erofs
+#   envd              (e2b guest agent)    — injected into sandbox-runtime.erofs
 #
 # (librocksdb, accelerator's CGO link dep, is built in that repo.)
 #
@@ -155,7 +155,7 @@ $(EROFS_BIN):
 		bash deps/build-erofs.sh
 	$(call link_bin,mkfs.erofs)
 
-# --- envd (e2b guest agent; injected into sandbox-runtime-e2b.erofs) -------
+# --- envd (e2b guest agent; injected into sandbox-runtime.erofs) -----------
 envd: $(ENVD_BIN)
 $(ENVD_BIN):
 	$(DEPS_ENV) \
