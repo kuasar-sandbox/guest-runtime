@@ -7,7 +7,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/kuasar-sandbox/sandbox-runtime/pkg/proto"
+	"github.com/kuasar-sandbox/guest-runtime/pkg/proto"
 )
 
 // HostClient sends host→guest messages on the launch channel. It dials

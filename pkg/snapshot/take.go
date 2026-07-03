@@ -19,7 +19,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/kuasar-sandbox/sandbox-runtime/pkg/chapi"
+	"github.com/kuasar-sandbox/guest-runtime/pkg/chapi"
 )
 
 // Quiescer abstracts the vhost backend's pause/resume hooks. A typical

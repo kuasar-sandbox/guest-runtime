@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/kuasar-sandbox/sandbox-runtime/pkg/mux"
+	"github.com/kuasar-sandbox/guest-runtime/pkg/mux"
 )
 
 func ptr(b bool) *bool { return &b }

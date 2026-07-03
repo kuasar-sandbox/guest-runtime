@@ -8,7 +8,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/kuasar-sandbox/sandbox-runtime/pkg/proto"
+	"github.com/kuasar-sandbox/guest-runtime/pkg/proto"
 )
 
 // PingerConfig tunes the host→guest ping ticker. Defaults match

@@ -6,8 +6,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/kuasar-sandbox/sandbox-runtime/pkg/uffd"
-	"github.com/kuasar-sandbox/sandbox-runtime/pkg/vhost"
+	"github.com/kuasar-sandbox/guest-runtime/pkg/uffd"
+	"github.com/kuasar-sandbox/guest-runtime/pkg/vhost"
 )
 
 // lazyStatsTicker periodically logs lazy-load progress so a slow remote store

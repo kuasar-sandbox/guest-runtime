@@ -26,7 +26,7 @@ import (
 	"syscall"
 	"unsafe"
 
-	"github.com/kuasar-sandbox/sandbox-runtime/pkg/proto"
+	"github.com/kuasar-sandbox/guest-runtime/pkg/proto"
 	"golang.org/x/sys/unix"
 )
 

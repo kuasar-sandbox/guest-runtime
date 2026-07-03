@@ -8,8 +8,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/kuasar-sandbox/sandbox-runtime/pkg/fwd"
-	"github.com/kuasar-sandbox/sandbox-runtime/pkg/proto"
+	"github.com/kuasar-sandbox/guest-runtime/pkg/fwd"
+	"github.com/kuasar-sandbox/guest-runtime/pkg/proto"
 )
 
 // The guest side of `sandbox-ctl run --connect` port forwarding: for each

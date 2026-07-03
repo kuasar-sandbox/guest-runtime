@@ -41,7 +41,7 @@
 
 - patch 文件位置:`deps/ch-patches/000{1,2,3,4}-*.patch`
 - 应用方式:`make ch-patches-apply`(在 `make cloud-hypervisor` 内自动调);
-  开发循环与幂等 sanity 语义见 sandbox-deps `docs/build.md` §3
+  开发循环与幂等 sanity 语义见 native-deps `docs/build.md` §3
 - 跟 upstream rebase:每个 CH 大版本(~3 月)review 一次,几行 conflict
   人工 fix
 - **不**尝试上游化:patch 设计选择(SCM_RIGHTS in-process + create_ram_region
@@ -76,7 +76,7 @@ cloud-hypervisor \
 # fd=3 ← memfd from sandbox-ctl via cmd.ExtraFiles[0]
 ```
 
-详细命令行(冷启动 / 恢复)见 `sandbox-runtime/docs/sandbox.md` §5.2 与 §7。
+详细命令行(冷启动 / 恢复)见 `guest-runtime/docs/sandbox.md` §5.2 与 §7。
 
 ## 3. patch 提交结构
 
@@ -230,14 +230,14 @@ cache 又释放、folio 仍驻留 memfd 的页,`lseek` 见数据**不跳过**,�
 
 ## 4. 构建工作流
 
-产物由 sandbox-deps 仓构建:`make cloud-hypervisor` = 取 pin 的 v51.1 tarball +
+产物由 native-deps 仓构建:`make cloud-hypervisor` = 取 pin 的 v51.1 tarball +
 `git am deps/ch-patches/*.patch` + `cargo build --release --locked`,冷构建
 ~5-10 min、热(cargo 缓存)秒级,产物 `bin/<arch>/cloud-hypervisor`。构建以
 `--remap-path-prefix` 把源树与 registry 依赖映射为相对路径 / `/cargo` 前缀,
 panic 消息与 DWARF 不泄漏构建机绝对路径。
 
 patch 开发循环(`ch-fetch` / `ch-patches-format`、`patches-apply` 的幂等
-sanity 检查)、交叉编译与 WSL2 注意统一见 sandbox-deps `docs/build.md` §3-§5。
+sanity 检查)、交叉编译与 WSL2 注意统一见 native-deps `docs/build.md` §3-§5。
 
 ## 5. 启动协议(per-arch)
 
@@ -271,7 +271,7 @@ virtio-mem     → host-driven 主动 unplug(扩展点)
 恢复路径设备拓扑通过 `--restore source_url=<state.json dir>` 从 snapshot
 state 还原,不需要重新指定 `--kernel` / `--vsock`。
 
-详细命令行示例与冷启动/恢复差异见 `sandbox-runtime/docs/sandbox.md` §5(冷启动
+详细命令行示例与冷启动/恢复差异见 `guest-runtime/docs/sandbox.md` §5(冷启动
 数据流)与 §7(恢复数据流)。
 
 ### 5.2 vsock hybrid 代理
@@ -288,8 +288,8 @@ host → guest 方向需要在第一笔写入发 ASCII `CONNECT <port>\n`,CH 回
 `OK <local_port>\n`(host 须先排空再读后续 payload),之后 CH 把流量代理到 guest
 对应 port 的 listener。两个方向的连接对 CH 而言都是普通字节流——`launch` /
 `restore` / `attach` 这三种连接在应用层握手后由 sandbox-ctl / sandbox-init 自行
-转入帧收发态(stdio MUX),CH 不感知。详细见 `sandbox-runtime/docs/sandbox.md` §5.2 与
-`sandbox-runtime/docs/sandbox-runtime.md` §4.2。
+转入帧收发态(stdio MUX),CH 不感知。详细见 `guest-runtime/docs/sandbox.md` §5.2 与
+`guest-runtime/docs/sandbox-runtime.md` §4.2。
 
 ## 6. 行为契约总结
 
@@ -328,12 +328,12 @@ KVM EPT,IPI shootdown 饿死 guest vsock kthread(机理与替代反馈环见
 
 ## 8. See Also
 
-- `sandbox-runtime/docs/sandbox.md` §5(冷启动数据流,§5.2 CH 命令行)/ §7(恢复
+- `guest-runtime/docs/sandbox.md` §5(冷启动数据流,§5.2 CH 命令行)/ §7(恢复
   数据流)—— sandbox-ctl 怎么用 patched CH 跑沙箱;命令行示例
-- `sandbox-runtime/docs/sandbox.md` §8(uffd handler)—— sandbox-ctl 接收到 uffd_C
+- `guest-runtime/docs/sandbox.md` §8(uffd handler)—— sandbox-ctl 接收到 uffd_C
   之后如何处理 fault 事件
 - [`sandbox-kernel.md`](sandbox-kernel.md) —— guest kernel 如何配合 CH 启动
   协议(PVH / EFI stub)
-- sandbox-deps `docs/build.md` —— `make cloud-hypervisor` 工作流与 patch
+- native-deps `docs/build.md` —— `make cloud-hypervisor` 工作流与 patch
   开发循环
 - `kuasar-sandbox/docs/kuasar-sandbox.md` §2.4 —— VMM 与 Guest 环境在系统中的位置

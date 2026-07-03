@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/kuasar-sandbox/sandbox-runtime/pkg/resource"
+	"github.com/kuasar-sandbox/guest-runtime/pkg/resource"
 	"golang.org/x/sys/unix"
 )
 

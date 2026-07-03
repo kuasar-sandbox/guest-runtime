@@ -5,8 +5,8 @@ import (
 	"io"
 	"net"
 
-	"github.com/kuasar-sandbox/sandbox-runtime/pkg/ctl"
-	"github.com/kuasar-sandbox/sandbox-runtime/pkg/proto"
+	"github.com/kuasar-sandbox/guest-runtime/pkg/ctl"
+	"github.com/kuasar-sandbox/guest-runtime/pkg/proto"
 )
 
 // ServeExecRequest is the run-process side of `sandbox-ctl exec`. It

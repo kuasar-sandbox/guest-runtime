@@ -63,7 +63,7 @@ build         把 sandbox-common.config + sandbox-<arch>.config 拼接成
 **Patch 开发流**(与 cloud-hypervisor 的 ch-patches 流对称):`make linux-fetch`
 拉源码并打 `linux-patches-base` tag → 在 `build/src/linux/` 改代码 +
 `git commit` → `make linux-patches-format` 导出回 `deps/linux-patches/*.patch`
-→ `make vmlinux` 重新应用 + 构建。幂等与 sanity 语义统一见 sandbox-deps
+→ `make vmlinux` 重新应用 + 构建。幂等与 sanity 语义统一见 native-deps
 `docs/build.md` §3;补丁 arch-neutral,x86_64 / arm64 共用同一组。
 
 ### 2.1 host 构建依赖
@@ -277,7 +277,7 @@ boot 时间;arm64 EFI stub 略慢(~80 ms)但仍亚百毫秒。
 注入 `console=hvc0`——两架构的内核 dmesg 都走 virtio-console(hvc0)。x86_64 内核
 不编任何 UART 驱动;aarch64 编入 PL011(CH 在 arm64 暴露 PL011 设备,留作启动早期
 与调试控制台)。应用的 stdin/stdout/stderr 不走任何 console 设备(走 vsock,见
-`sandbox-runtime/docs/sandbox-runtime.md` §3.5 / §4.5)。
+`guest-runtime/docs/sandbox-runtime.md` §3.5 / §4.5)。
 
 ### 4.4 RTC
 
@@ -324,7 +324,7 @@ x86_64 页大小固定 4 KiB,无此问题。
 **freezer(核心,无独立 Kconfig)**:快照前 sandbox-init 要**原子冻结应用进程
 树**,restore 环境(墙钟等)就绪后再解冻,否则 `/vm.resume` 先于 guest 处理
 `restore` 解冻 vCPU,应用会带着旧墙钟 / 未重连的 MUX 抢跑一段(resume-vs-env-init
-竞态;机制见 `sandbox-runtime/docs/sandbox-runtime.md` §3.4)。v2 freezer
+竞态;机制见 `guest-runtime/docs/sandbox-runtime.md` §3.4)。v2 freezer
 (`cgroup.freeze`,内核 ≥5.2)即 `CONFIG_CGROUPS=y` 自带;`CGROUP_FREEZER` 是
 v1 旧冻结器,不需要。
 
@@ -357,7 +357,7 @@ sandbox-init,sandbox-init 用 raw netlink 配置。`ip_auto_config` initcall
 
 ### 5.4 为什么 NR_CPUS=4
 
-平台 fixed-spec 把 capacity.cpu 限到 1/2/4 三档(详见 `sandbox-runtime/docs/sandbox.md`
+平台 fixed-spec 把 capacity.cpu 限到 1/2/4 三档(详见 `guest-runtime/docs/sandbox.md`
 §4 资源模型)。
 NR_CPUS=4 让 guest 内核数据结构(per-cpu / cpumask)按 4 核维度分配——
 NR_CPUS=8/16 多余的 per-cpu 字段会让跨实例 RAM 多出一些低利用率脏页。
@@ -373,7 +373,7 @@ timeout)。因此平台**关闭 free_page_reporting**——内核侧 `VIRTIO_BAL
 启用模块,但 CH 命令行不开 FPR feature。
 
 替代路径:host 端 BalloonController 周期(默认 5 s)从 guest 拉取 mem_report
-(MemAvailable/MemTotal,详见 `sandbox-runtime/docs/sandbox-runtime.md` §4.3),按反馈策略推
+(MemAvailable/MemTotal,详见 `guest-runtime/docs/sandbox-runtime.md` §4.3),按反馈策略推
 `PUT /api/v1/vm.resize` 改变 balloon target;guest balloon 驱动按 target inflate,
 CH 在 inflate 处理路径里 `fallocate(PUNCH_HOLE) + madvise(DONTNEED)`。事件量
 被反馈环 `MaxStep`(默认 ≤ 256 MiB/tick)限速,不会形成 IPI 风暴。
@@ -396,7 +396,7 @@ host BalloonController 按反馈推 `vm.resize` target(§5.5),目标值可能一
 反复冲击不可行的 host target。效果:在不可行 target 下 balloon 在数秒内停在
 一个**可持续**的稳态(host 仍可在工作集回落后把 target 调高、driver 再爬升),
 不再活锁。这是纯 guest 侧鲁棒性修复,不改 host↔guest 协议,host 端反馈环
-(§5.5、`sandbox-runtime/docs/sandbox.md` §9.3)语义不变。
+(§5.5、`guest-runtime/docs/sandbox.md` §9.3)语义不变。
 
 ## 6. 验证
 
@@ -438,11 +438,11 @@ diff 排查。
 
 - [`cloud-hypervisor.md`](cloud-hypervisor.md) —— 平台 VMM 的启动协议、设备
   模型、patch 范围
-- `sandbox-runtime/docs/sandbox-runtime.md` —— 内核之上 sandbox-init 完成
+- `guest-runtime/docs/sandbox-runtime.md` —— 内核之上 sandbox-init 完成
   rootfs 组装与应用拉起
-- `sandbox-runtime/docs/sandbox.md` §3.1(`boot.kernel`)/ §14.2(平台 ABI 边界)——
+- `guest-runtime/docs/sandbox.md` §3.1(`boot.kernel`)/ §14.2(平台 ABI 边界)——
   沙箱配置如何引用 vmlinux,以及自带 kernel 的接入方式
-- sandbox-deps `docs/build.md` —— `make vmlinux` 工作流、patch 开发循环、
+- native-deps `docs/build.md` —— `make vmlinux` 工作流、patch 开发循环、
   交叉编译
 - `kuasar-sandbox/docs/kuasar-sandbox.md` §4.6(Guest 确定性配置)—— 跨实例 RAM
   去重率目标的来源

@@ -1,6 +1,6 @@
 # build — 原生依赖构建工作流
 
-sandbox-deps 仓的构建工作流:从上游源码构建 kuasar-sandbox 平台运行期消费、但各 Go 仓
+native-deps 仓的构建工作流:从上游源码构建 kuasar-sandbox 平台运行期消费、但各 Go 仓
 不链接的四件原生产物——`mkfs.erofs`/`fsck.erofs`(erofs-utils)、`vmlinux`(guest 内核)、
 `cloud-hypervisor`(patched VMM)、`envd`(e2b guest agent)。工具链(autotools/kbuild/
 cargo/Go)与 Go 仓不同、冷构建以分钟计、上游发布节奏独立,故单独成仓。
@@ -20,16 +20,16 @@ cargo/Go)与 Go 仓不同、冷构建以分钟计、上游发布节奏独立,故
 
 | 产物 | 上游(pin) | 本仓输入 | 消费方 |
 |---|---|---|---|
-| `mkfs.erofs` `fsck.erofs` | erofs-utils v1.9.1 | — | `sandbox-accelerator`(展平)、`sandbox-runtime`(打 guest erofs)、`sandbox-orchestrator`(`fsck.erofs --extract`) |
+| `mkfs.erofs` `fsck.erofs` | erofs-utils v1.9.1 | — | `accelerator`(展平)、`sandbox-runtime`(打 guest erofs)、`orchestrator`(`fsck.erofs --extract`) |
 | `vmlinux` | linux 6.1.169(LTS,cdn.kernel.org) | `deps/linux-patches/`(1 个)+ `deps/vmlinux/*.config` | `sandbox-runtime`(guest 内核) |
 | `cloud-hypervisor` | cloud-hypervisor v51.1 | `deps/ch-patches/`(4 个) | `sandbox-runtime`(VMM) |
-| `envd` | e2b-dev/infra 2026.22(发布 tarball) | — | `sandbox-orchestrator`(注入 `sandbox-runtime-e2b.erofs`) |
+| `envd` | e2b-dev/infra 2026.22(发布 tarball) | — | `orchestrator`(注入 `sandbox-runtime-e2b.erofs`) |
 
 pin 全部落在 Makefile 变量(`EROFS_TARBALL` / `LINUX_TARBALL` / `CLOUD_HYPERVISOR_TARBALL` /
 `ENVD_TARBALL`,支持 `url#filename` 与本地路径两种形式),配套的 `*_TARBALL_SHA256`
 为空时跳过校验。升级版本 = 改变量 + 重验 patch 应用。
 
-`librocksdb`(`sandbox-accelerator` 的 CGO 链接依赖)在该仓内构建,不在此处。
+`librocksdb`(`accelerator` 的 CGO 链接依赖)在该仓内构建,不在此处。
 
 ### 1.2 目录布局
 
@@ -132,7 +132,7 @@ make help                # 列举目标
 CGO_ENABLED=0 -trimpath -ldflags "-s -w"`)→ `bin/<arch>/envd`。GOARCH 即选目标
 架构,交叉无需 C 工具链。
 
-- 产物由 `sandbox-orchestrator` 的 `make sandbox-runtime-e2b` 注入
+- 产物由 `orchestrator` 的 `make sandbox-runtime-e2b` 注入
   `sandbox-runtime-e2b.erofs` 的 `/opt/sandbox-runtime/bin/envd`,作为 e2b profile
   guest 内的数据面 agent(端口 49983)。
 - 工具链注意:envd 的 `go.mod` pin 较新的 Go(如 `go 1.26.3`),`GOTOOLCHAIN=auto`

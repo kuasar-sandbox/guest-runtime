@@ -1,4 +1,4 @@
-# sandbox-deps
+# native-deps
 
 [kuasar-sandbox](https://github.com/kuasar-sandbox/kuasar-sandbox) 平台的原生依赖
 构建:从上游源码(含本地 patch)构建 Go 仓不链接、但运行期消费的原生件。工具链
@@ -9,13 +9,13 @@
 
 | 产物 | 来源 | 消费方 |
 |---|---|---|
-| `mkfs.erofs` | erofs-utils v1.9.1 | `sandbox-accelerator`(展平)、`sandbox-runtime`(打 guest 镜像) |
-| `fsck.erofs` | erofs-utils v1.9.1 | `sandbox-orchestrator`(`fsck.erofs --extract` 解包 base runtime 注入 envd) |
+| `mkfs.erofs` | erofs-utils v1.9.1 | `accelerator`(展平)、`sandbox-runtime`(打 guest 镜像) |
+| `fsck.erofs` | erofs-utils v1.9.1 | `orchestrator`(`fsck.erofs --extract` 解包 base runtime 注入 envd) |
 | `vmlinux` | Linux 6.1.169 + `deps/linux-patches` + `deps/vmlinux/*.config` | `sandbox-runtime`(guest 内核) |
 | `cloud-hypervisor` | CH v51.1 + `deps/ch-patches`(memfd 注入 / snapshot skip / 外部 uffd / balloon 跳洞) | `sandbox-runtime`(VMM) |
-| `envd` | e2b-dev/infra 发布 tarball(tag `2026.22`) | `sandbox-orchestrator`(注入 `sandbox-runtime-e2b.erofs` 的 guest agent) |
+| `envd` | e2b-dev/infra 发布 tarball(tag `2026.22`) | `orchestrator`(注入 `sandbox-runtime-e2b.erofs` 的 guest agent) |
 
-`librocksdb`(`sandbox-accelerator` 的 CGO 链接依赖)在该仓内构建,不在此处。
+`librocksdb`(`accelerator` 的 CGO 链接依赖)在该仓内构建,不在此处。
 
 ## 组成
 

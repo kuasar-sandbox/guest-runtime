@@ -9,9 +9,9 @@ import (
 	"sort"
 	"time"
 
-	"github.com/kuasar-sandbox/sandbox-accelerator/pkg/image"
-	"github.com/kuasar-sandbox/sandbox-runtime/pkg/config"
-	"github.com/kuasar-sandbox/sandbox-runtime/pkg/proto"
+	"github.com/kuasar-sandbox/accelerator/pkg/image"
+	"github.com/kuasar-sandbox/guest-runtime/pkg/config"
+	"github.com/kuasar-sandbox/guest-runtime/pkg/proto"
 )
 
 // ImageConfig captures the container default launch settings the

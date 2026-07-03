@@ -3,7 +3,7 @@ package sandbox
 import (
 	"context"
 	"fmt"
-	"github.com/kuasar-sandbox/sandbox-runtime/pkg/guestlink"
+	"github.com/kuasar-sandbox/guest-runtime/pkg/guestlink"
 	"net"
 	"os"
 	"strconv"
@@ -11,8 +11,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/kuasar-sandbox/sandbox-runtime/pkg/fwd"
-	"github.com/kuasar-sandbox/sandbox-runtime/pkg/proto"
+	"github.com/kuasar-sandbox/guest-runtime/pkg/fwd"
+	"github.com/kuasar-sandbox/guest-runtime/pkg/proto"
 )
 
 // ForwardSpec is one parsed `--connect` directive: accept connections on

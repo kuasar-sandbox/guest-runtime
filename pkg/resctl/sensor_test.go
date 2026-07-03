@@ -2,7 +2,7 @@ package resctl
 
 import (
 	"context"
-	"github.com/kuasar-sandbox/sandbox-runtime/pkg/config"
+	"github.com/kuasar-sandbox/guest-runtime/pkg/config"
 	"os"
 	"path/filepath"
 	"strings"

@@ -1,7 +1,7 @@
 package sandbox
 
 import (
-	"github.com/kuasar-sandbox/sandbox-runtime/pkg/config"
+	"github.com/kuasar-sandbox/guest-runtime/pkg/config"
 	"testing"
 
 	"golang.org/x/sys/unix"

@@ -3,7 +3,7 @@ package restore
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"github.com/kuasar-sandbox/sandbox-runtime/pkg/config"
+	"github.com/kuasar-sandbox/guest-runtime/pkg/config"
 	"os"
 	"path/filepath"
 	"strings"

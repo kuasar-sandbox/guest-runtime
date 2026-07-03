@@ -5,18 +5,18 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"github.com/kuasar-sandbox/sandbox-runtime/pkg/config"
-	"github.com/kuasar-sandbox/sandbox-runtime/pkg/resctl"
+	"github.com/kuasar-sandbox/guest-runtime/pkg/config"
+	"github.com/kuasar-sandbox/guest-runtime/pkg/resctl"
 	"os"
 	"strconv"
 	"strings"
 	"time"
 
-	"github.com/kuasar-sandbox/sandbox-accelerator/pkg/manifest"
-	"github.com/kuasar-sandbox/sandbox-runtime/pkg/util"
-	"github.com/kuasar-sandbox/sandbox-runtime/pkg/restore"
-	"github.com/kuasar-sandbox/sandbox-runtime/pkg/sandbox"
-	"github.com/kuasar-sandbox/sandbox-runtime/pkg/stdio"
+	"github.com/kuasar-sandbox/accelerator/pkg/manifest"
+	"github.com/kuasar-sandbox/guest-runtime/pkg/util"
+	"github.com/kuasar-sandbox/guest-runtime/pkg/restore"
+	"github.com/kuasar-sandbox/guest-runtime/pkg/sandbox"
+	"github.com/kuasar-sandbox/guest-runtime/pkg/stdio"
 )
 
 // runCmd implements `sandbox-ctl run`. With --restore=<ref> it switches
