@@ -357,7 +357,7 @@ sandbox-init,sandbox-init 用 raw netlink 配置。`ip_auto_config` initcall
 
 ### 5.4 为什么 NR_CPUS=4
 
-平台 fixed-spec 把 capacity.cpu 限到 1/2/4 三档(详见 `guest-runtime/docs/sandbox.md`
+平台 fixed-spec 把 capacity.cpu 限到 1/2/4 三档(详见 `sandboxer/docs/sandbox.md`
 §4 资源模型)。
 NR_CPUS=4 让 guest 内核数据结构(per-cpu / cpumask)按 4 核维度分配——
 NR_CPUS=8/16 多余的 per-cpu 字段会让跨实例 RAM 多出一些低利用率脏页。
@@ -396,7 +396,7 @@ host BalloonController 按反馈推 `vm.resize` target(§5.5),目标值可能一
 反复冲击不可行的 host target。效果:在不可行 target 下 balloon 在数秒内停在
 一个**可持续**的稳态(host 仍可在工作集回落后把 target 调高、driver 再爬升),
 不再活锁。这是纯 guest 侧鲁棒性修复,不改 host↔guest 协议,host 端反馈环
-(§5.5、`guest-runtime/docs/sandbox.md` §9.3)语义不变。
+(§5.5、`sandboxer/docs/sandbox.md` §9.3)语义不变。
 
 ## 6. 验证
 
@@ -440,7 +440,7 @@ diff 排查。
   模型、patch 范围
 - `guest-runtime/docs/sandbox-runtime.md` —— 内核之上 sandbox-init 完成
   rootfs 组装与应用拉起
-- `guest-runtime/docs/sandbox.md` §3.1(`boot.kernel`)/ §14.2(平台 ABI 边界)——
+- `sandboxer/docs/sandbox.md` §3.1(`boot.kernel`)/ §14.2(平台 ABI 边界)——
   沙箱配置如何引用 vmlinux,以及自带 kernel 的接入方式
 - native-deps `docs/build.md` —— `make vmlinux` 工作流、patch 开发循环、
   交叉编译

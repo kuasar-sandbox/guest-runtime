@@ -138,7 +138,7 @@ endef
 .PHONY: all build erofs cloud-hypervisor vmlinux envd versitygw \
         ch-fetch ch-patches-apply ch-patches ch-patches-format ch-build \
         linux-fetch linux-patches-apply linux-patches linux-patches-format linux-build \
-        clean help
+        test clean help
 
 all: build
 
@@ -219,6 +219,9 @@ linux-build:
 vmlinux: linux-patches-apply linux-build
 	$(call link_bin,vmlinux)
 
+test:
+	bash -n deps/*.sh
+
 clean:
 	# Preserve build/tarball/ (re-downloading source is expensive) and the
 	# arch-neutral source trees under build/src/ (may contain WIP patch dev
@@ -236,5 +239,6 @@ help:
 	@echo "  versitygw             build the S3 gateway (opt-in; for builder.files_storage on single-node/local)"
 	@echo "  ch-patches-format     extract HEAD CH commits back to deps/ch-patches/"
 	@echo "  linux-patches-format  extract HEAD linux commits back to deps/linux-patches/"
+	@echo "  test                  syntax-check native dependency build scripts"
 	@echo "  clean                 wipe build artifacts (preserves tarball cache + source trees)"
 	@echo "  TARGET_ARCH           x86_64 (default) | aarch64; CROSS_PREFIX auto-derives"

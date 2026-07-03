@@ -10,7 +10,7 @@
 
 SHELL := /bin/bash
 
-.PHONY: all build sandbox-init sandbox-runtime native-deps test clean help
+.PHONY: all build sandbox-init sandbox-runtime native-deps erofs envd flatten-ctl test clean help
 
 # ---------------------------------------------------------------------------
 # Architecture selection (identical block across all kuasar-sandbox repos)
@@ -44,16 +44,14 @@ SANDBOX_INIT  ?= $(SANDBOXER_DIR)/$(BINDIR)/sandbox-init
 ENVD          ?= native-deps/$(BINDIR)/envd
 FLATTEN_CTL   ?= $(ACCELERATOR_DIR)/$(BINDIR)/flatten-ctl
 
-# mkfs.erofs lookup chain (in priority order):
-#   PATH → this repo's $(BINDIR)/ → this repo's bin/ symlink →
-#   native-deps/bin/$(TARGET_ARCH)/ → native-deps/bin/ symlink
-MKFS_EROFS ?= $(shell \
+# BUILD_MKFS_EROFS is the host executable that packs sandbox-runtime.erofs.
+# GUEST_MKFS_EROFS is the target-arch static binary shipped inside the guest
+# runtime image. Cross builds must keep them separate.
+BUILD_MKFS_EROFS ?= $(shell \
     command -v mkfs.erofs 2>/dev/null \
-    || ( [ -x $(BINDIR)/mkfs.erofs ] && echo $(BINDIR)/mkfs.erofs ) \
-    || ( [ -x bin/mkfs.erofs ] && echo bin/mkfs.erofs ) \
-    || ( [ -x native-deps/$(BINDIR)/mkfs.erofs ] && echo native-deps/$(BINDIR)/mkfs.erofs ) \
+    || ( [ "$(HOST_ARCH)" = "$(TARGET_ARCH)" ] && [ -x native-deps/$(BINDIR)/mkfs.erofs ] && echo native-deps/$(BINDIR)/mkfs.erofs ) \
     || ( [ -x native-deps/bin/mkfs.erofs ] && echo native-deps/bin/mkfs.erofs ))
-MKFS_GUEST ?= $(MKFS_EROFS)
+GUEST_MKFS_EROFS ?= native-deps/$(BINDIR)/mkfs.erofs
 
 define link_bin
 @if [ "$(HOST_ARCH)" = "$(TARGET_ARCH)" ]; then \
@@ -71,6 +69,9 @@ build: sandbox-runtime
 native-deps:
 	$(MAKE) -C native-deps build
 
+erofs:
+	$(MAKE) -C native-deps erofs
+
 sandbox-init:
 	$(MAKE) -C $(SANDBOXER_DIR) sandbox-init
 
@@ -85,11 +86,11 @@ flatten-ctl:
 # are projected into application roots by sandbox-init through
 # /opt/sandbox-runtime/bin.
 sandbox-runtime:
-	@[ -n "$(MKFS_EROFS)" ] || { echo "mkfs.erofs not found — build it with \`make native-deps\` or set MKFS_EROFS=<path>" >&2; exit 1; }
+	@[ -n "$(BUILD_MKFS_EROFS)" ] || { echo "host mkfs.erofs not found; install erofs-utils or set BUILD_MKFS_EROFS=<host-executable>" >&2; exit 1; }
 	@[ -x "$(SANDBOX_INIT)" ] || $(MAKE) sandbox-init
 	@[ -x "$(ENVD)" ] || $(MAKE) envd
 	@[ -x "$(FLATTEN_CTL)" ] || $(MAKE) flatten-ctl
-	@[ -x "$(MKFS_GUEST)" ] || { echo "guest mkfs.erofs not found — set MKFS_GUEST=<path>" >&2; exit 1; }
+	@[ -x "$(GUEST_MKFS_EROFS)" ] || $(MAKE) erofs
 	rm -rf $(BUILD_DIR)/sandbox-runtime
 	mkdir -p $(BUILD_DIR)/sandbox-runtime/sbin $(BUILD_DIR)/sandbox-runtime/proc \
 	         $(BUILD_DIR)/sandbox-runtime/sys $(BUILD_DIR)/sandbox-runtime/dev \
@@ -101,12 +102,13 @@ sandbox-runtime:
 	chmod +x $(BUILD_DIR)/sandbox-runtime/sbin/init
 	cp "$(ENVD)" $(BUILD_DIR)/sandbox-runtime/opt/sandbox-runtime/bin/envd
 	cp "$(FLATTEN_CTL)" $(BUILD_DIR)/sandbox-runtime/opt/sandbox-runtime/bin/flatten-ctl
-	cp "$(MKFS_GUEST)" $(BUILD_DIR)/sandbox-runtime/opt/sandbox-runtime/bin/mkfs.erofs
+	cp "$(GUEST_MKFS_EROFS)" $(BUILD_DIR)/sandbox-runtime/opt/sandbox-runtime/bin/mkfs.erofs
 	chmod 0755 $(BUILD_DIR)/sandbox-runtime/opt/sandbox-runtime/bin/envd \
 	           $(BUILD_DIR)/sandbox-runtime/opt/sandbox-runtime/bin/flatten-ctl \
 	           $(BUILD_DIR)/sandbox-runtime/opt/sandbox-runtime/bin/mkfs.erofs
+	mkdir -p $(BINDIR)
 	rm -f $(BINDIR)/sandbox-runtime.erofs
-	"$(MKFS_EROFS)" \
+	"$(BUILD_MKFS_EROFS)" \
 	    -Ededupe \
 	    --chunksize=4096 \
 	    --all-root \
@@ -125,6 +127,7 @@ sandbox-runtime:
 
 test:
 	$(MAKE) -C native-deps test
+	python3 -m py_compile scripts/guest-inspect.py
 
 clean:
 	rm -rf bin build
@@ -135,6 +138,7 @@ help:
 	@echo "  build              build sandbox-runtime.erofs"
 	@echo "  sandbox-runtime    pack sandboxer sandbox-init into guest erofs"
 	@echo "  sandbox-init       delegate to ../sandboxer sandbox-init"
+	@echo "  erofs              build target-arch guest mkfs.erofs"
 	@echo "  envd               build e2b guest agent"
 	@echo "  flatten-ctl        delegate to ../accelerator flatten-ctl"
 	@echo "  native-deps        build vmlinux / cloud-hypervisor / mkfs.erofs / envd"

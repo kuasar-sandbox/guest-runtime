@@ -2,9 +2,8 @@
 #
 # Build mkfs.erofs + fsck.erofs (no compression, no fuse) into $BINDIR.
 # mkfs.erofs sits alongside flatten-ctl (it locates mkfs.erofs via its own binary
-# directory when MKFS_EROFS_PATH is unset); fsck.erofs is used by
-# orchestrator-ctl build-runtime (`fsck.erofs --extract`) to unpack the base
-# sandbox-runtime.erofs before injecting envd.
+# directory when MKFS_EROFS_PATH is unset); fsck.erofs ships with the native
+# dependency set for diagnostics and release artifact inspection.
 #
 # Both are TARGET-ARCH binaries (not host tools): they ship in the release tarball
 # for the target they run on. Cross-compilation uses CROSS_PREFIX for the C toolchain.
