@@ -3,14 +3,13 @@
 # Produces the runtime artifacts the Go repos consume but don't link:
 #   mkfs.erofs        (erofs-utils)        — used by accelerator, guest-runtime
 #   vmlinux           (guest kernel)       — used by sandboxer / sandbox-ctl
-#   cloud-hypervisor  (patched Rust VMM)   — used by sandboxer / sandbox-ctl
 #   envd              (e2b guest agent)    — injected into sandbox-runtime.erofs
 #
 # (librocksdb, accelerator's CGO link dep, is built in that repo.)
 #
-# `make build` builds all four (cloud-hypervisor + vmlinux + erofs + envd). Each
+# `make build` builds vmlinux + erofs + envd. Each
 # artifact has fetch / (patch) / build sub-stages; idempotency lives inside the
-# scripts. cloud-hypervisor and vmlinux are multi-minute cold builds.
+# scripts. vmlinux is the multi-minute cold build.
 # Cross-compile by setting TARGET_ARCH; CROSS_PREFIX auto-derives when
 # HOST_ARCH != TARGET_ARCH (distros ship cross packages under the GNU triple).
 
@@ -30,11 +29,9 @@ endif
 ifeq ($(TARGET_ARCH),x86_64)
   GO_ARCH     := amd64
   KERNEL_ARCH := x86_64
-  RUST_TARGET := x86_64-unknown-linux-gnu
 else ifeq ($(TARGET_ARCH),aarch64)
   GO_ARCH     := arm64
   KERNEL_ARCH := arm64
-  RUST_TARGET := aarch64-unknown-linux-gnu
 else
   $(error unsupported TARGET_ARCH=$(TARGET_ARCH); supported: x86_64, aarch64)
 endif
@@ -58,7 +55,6 @@ BUILD_DIR      := build/$(TARGET_ARCH)
 TARBALL_DIR    := build/tarball
 
 EROFS_BIN     := $(abspath $(BINDIR)/mkfs.erofs)
-CH_BIN        := $(abspath $(BINDIR)/cloud-hypervisor)
 VMLINUX_BIN   := $(abspath $(BINDIR)/vmlinux)
 ENVD_BIN      := $(abspath $(BINDIR)/envd)
 VERSITYGW_BIN := $(abspath $(BINDIR)/versitygw)
@@ -68,8 +64,6 @@ EROFS_TARBALL                   ?= https://github.com/erofs/erofs-utils/archive/
 EROFS_TARBALL_SHA256            ?=
 LINUX_TARBALL                   ?= https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.1.169.tar.gz
 LINUX_TARBALL_SHA256            ?=
-CLOUD_HYPERVISOR_TARBALL        ?= https://github.com/cloud-hypervisor/cloud-hypervisor/archive/refs/tags/v51.1.tar.gz\#cloud-hypervisor-51.1.tar.gz
-CLOUD_HYPERVISOR_TARBALL_SHA256 ?=
 ENVD_TARBALL                    ?= https://github.com/e2b-dev/infra/archive/refs/tags/2026.22.tar.gz\#e2b-infra-2026.22.tar.gz
 ENVD_TARBALL_SHA256             ?=
 VERSITYGW_TARBALL               ?= https://github.com/versity/versitygw/archive/refs/tags/v1.5.0.tar.gz\#versitygw-1.5.0.tar.gz
@@ -94,14 +88,8 @@ LINUX_BUILD_SRC   ?= $(abspath build/src/linux)
 LINUX_BUILD_OUT   ?= $(abspath $(BUILD_DIR)/linux)
 LINUX_PATCHES_DIR := $(abspath deps/linux-patches)
 
-# cloud-hypervisor: source tree (kept under git, holds patch dev WIP) is
-# arch-neutral and shared; cargo target dir is per-arch.
-CLOUD_HYPERVISOR_SRC       ?= $(abspath build/src/cloud-hypervisor)
-CLOUD_HYPERVISOR_BUILD_OUT ?= $(abspath $(BUILD_DIR)/cloud-hypervisor)
-CH_PATCHES_DIR             := $(abspath deps/ch-patches)
-
 # envd: e2b-dev/infra source tree — arch-neutral and shared (Go: GOARCH picks
-# the target at build), like cloud-hypervisor / linux.
+# the target at build), like linux.
 ENVD_SRC ?= $(abspath build/src/e2b-infra)
 
 # versitygw: versity/versitygw source tree — arch-neutral and shared (Go).
@@ -118,7 +106,6 @@ endif
 DEPS_ENV = \
     TARGET_ARCH="$(TARGET_ARCH)" \
     KERNEL_ARCH="$(KERNEL_ARCH)" \
-    RUST_TARGET="$(RUST_TARGET)" \
     CROSS_PREFIX="$(CROSS_PREFIX)" \
     BUILD_DIR="$(abspath $(BUILD_DIR))" \
     BINDIR="$(abspath $(BINDIR))" \
@@ -135,16 +122,15 @@ endef
 # ---------------------------------------------------------------------------
 # Targets
 # ---------------------------------------------------------------------------
-.PHONY: all build erofs cloud-hypervisor vmlinux envd versitygw \
-        ch-fetch ch-patches-apply ch-patches ch-patches-format ch-build \
+.PHONY: all build erofs vmlinux envd versitygw \
         linux-fetch linux-patches-apply linux-patches linux-patches-format linux-build \
         test clean help
 
 all: build
 
-# All native artifacts. cloud-hypervisor and vmlinux are multi-minute cold
-# builds; erofs + envd are the fastest (subminute on a warm tarball cache).
-build: cloud-hypervisor vmlinux erofs envd
+# All native artifacts. vmlinux is the multi-minute cold build; erofs + envd are
+# the fastest (subminute on a warm tarball cache).
+build: vmlinux erofs envd
 
 # --- erofs-utils (mkfs.erofs) ----------------------------------------------
 erofs: $(EROFS_BIN)
@@ -179,26 +165,6 @@ $(VERSITYGW_BIN):
 		bash deps/build-versitygw.sh
 	$(call link_bin,versitygw)
 
-# --- cloud-hypervisor (patched Rust VMM) -----------------------------------
-CH_INVOKE = $(DEPS_ENV) \
-    CLOUD_HYPERVISOR_TARBALL="$(CLOUD_HYPERVISOR_TARBALL)" \
-    CLOUD_HYPERVISOR_TARBALL_SHA256="$(CLOUD_HYPERVISOR_TARBALL_SHA256)" \
-    CH_SRC="$(CLOUD_HYPERVISOR_SRC)" \
-    CH_BUILD_OUT="$(CLOUD_HYPERVISOR_BUILD_OUT)" \
-    PATCHES_DIR="$(CH_PATCHES_DIR)"
-
-ch-fetch:
-	STAGE=fetch $(CH_INVOKE) bash deps/build-cloud-hypervisor.sh
-ch-patches-apply: ch-fetch
-	STAGE=patches-apply $(CH_INVOKE) bash deps/build-cloud-hypervisor.sh
-ch-patches: ch-patches-apply
-ch-patches-format:
-	STAGE=patches-format $(CH_INVOKE) bash deps/build-cloud-hypervisor.sh
-ch-build:
-	STAGE=build $(CH_INVOKE) bash deps/build-cloud-hypervisor.sh
-cloud-hypervisor: ch-patches-apply ch-build
-	$(call link_bin,cloud-hypervisor)
-
 # --- vmlinux (guest kernel) ------------------------------------------------
 LINUX_INVOKE = $(DEPS_ENV) \
     LINUX_TARBALL="$(LINUX_TARBALL)" \
@@ -225,19 +191,17 @@ test:
 clean:
 	# Preserve build/tarball/ (re-downloading source is expensive) and the
 	# arch-neutral source trees under build/src/ (may contain WIP patch dev
-	# under build/src/cloud-hypervisor/.git, build/src/linux/.git).
-	rm -rf $(CLOUD_HYPERVISOR_BUILD_OUT) $(LINUX_BUILD_OUT) $(BUILD_DIR)/src/erofs-utils
+	# under build/src/linux/.git).
+	rm -rf $(LINUX_BUILD_OUT) $(BUILD_DIR)/src/erofs-utils
 	rm -rf bin
 
 help:
 	@echo "native-deps — native dependency builds. Targets:"
-	@echo "  build (=all)          cloud-hypervisor + vmlinux + erofs + envd (multi-min cold)"
+	@echo "  build (=all)          vmlinux + erofs + envd (multi-min cold)"
 	@echo "  erofs                 build mkfs.erofs (erofs-utils)"
 	@echo "  vmlinux               build the guest kernel (~5-10 min cold)"
-	@echo "  cloud-hypervisor      build the patched VMM (~minutes cold)"
 	@echo "  envd                  build the e2b guest agent (e2b-dev/infra; pin via ENVD_TARBALL)"
 	@echo "  versitygw             build the S3 gateway (opt-in; for builder.files_storage on single-node/local)"
-	@echo "  ch-patches-format     extract HEAD CH commits back to deps/ch-patches/"
 	@echo "  linux-patches-format  extract HEAD linux commits back to deps/linux-patches/"
 	@echo "  test                  syntax-check native dependency build scripts"
 	@echo "  clean                 wipe build artifacts (preserves tarball cache + source trees)"

@@ -1,16 +1,18 @@
 # guest-runtime — guest runtime image and native dependency builder.
 #
-# This repo owns guest runtime artifacts:
+# This repo builds guest runtime artifacts:
+#   flatten-ctl               OCI/dir -> deterministic EROFS builder
 #   sandbox-runtime.erofs     virtio-pmem/DAX guest runtime image
-#   native-deps/bin/*         vmlinux, cloud-hypervisor, mkfs.erofs, envd
+#   native-deps/bin/*         vmlinux, mkfs.erofs, fsck.erofs, envd
 #
 # The sandbox-init binary is produced by the sibling sandboxer repo. This
 # Makefile consumes ../sandboxer/bin/$(TARGET_ARCH)/sandbox-init and injects the
-# guest payload needed by e2b/build flows into one runtime image.
+# guest payload needed by e2b/build flows into one runtime image. flatten-ctl is
+# a CLI in this repo; its reusable implementation packages live in accelerator.
 
 SHELL := /bin/bash
 
-.PHONY: all build sandbox-init sandbox-runtime native-deps erofs envd flatten-ctl test clean help
+.PHONY: all build flatten-ctl sandbox-init sandbox-runtime native-deps erofs envd test clean help
 
 # ---------------------------------------------------------------------------
 # Architecture selection (identical block across all kuasar-sandbox repos)
@@ -37,12 +39,13 @@ export TARGET_ARCH
 # ---------------------------------------------------------------------------
 BINDIR    := bin/$(TARGET_ARCH)
 BUILD_DIR := build/$(TARGET_ARCH)
+GO        := go
+GO_BUILD_FLAGS := -trimpath
 
 SANDBOXER_DIR ?= ../sandboxer
-ACCELERATOR_DIR ?= ../accelerator
 SANDBOX_INIT  ?= $(SANDBOXER_DIR)/$(BINDIR)/sandbox-init
 ENVD          ?= native-deps/$(BINDIR)/envd
-FLATTEN_CTL   ?= $(ACCELERATOR_DIR)/$(BINDIR)/flatten-ctl
+FLATTEN_CTL   ?= $(BINDIR)/flatten-ctl
 
 # BUILD_MKFS_EROFS is the host executable that packs sandbox-runtime.erofs.
 # GUEST_MKFS_EROFS is the target-arch static binary shipped inside the guest
@@ -64,7 +67,12 @@ endef
 # ---------------------------------------------------------------------------
 all: build
 
-build: sandbox-runtime
+build: flatten-ctl sandbox-runtime
+
+flatten-ctl:
+	@mkdir -p $(BINDIR)
+	GOOS=linux GOARCH=$(GO_ARCH) CGO_ENABLED=0 $(GO) build $(GO_BUILD_FLAGS) -o $(BINDIR)/flatten-ctl ./cmd/flatten-ctl
+	$(call link_bin,flatten-ctl)
 
 native-deps:
 	$(MAKE) -C native-deps build
@@ -77,9 +85,6 @@ sandbox-init:
 
 envd:
 	$(MAKE) -C native-deps envd
-
-flatten-ctl:
-	$(MAKE) -C $(ACCELERATOR_DIR) flatten-ctl
 
 # Pack sandbox-init into the guest "/" image (virtio-pmem, DAX, read-only,
 # shared across sandboxes via host page cache). envd, flatten-ctl, and mkfs.erofs
@@ -128,6 +133,7 @@ sandbox-runtime:
 test:
 	$(MAKE) -C native-deps test
 	python3 -m py_compile scripts/guest-inspect.py
+	CGO_ENABLED=0 $(GO) test ./...
 
 clean:
 	rm -rf bin build
@@ -135,12 +141,12 @@ clean:
 
 help:
 	@echo "guest-runtime. Targets:"
-	@echo "  build              build sandbox-runtime.erofs"
+	@echo "  build              build flatten-ctl + sandbox-runtime.erofs"
+	@echo "  flatten-ctl        OCI/dir -> deterministic EROFS builder"
 	@echo "  sandbox-runtime    pack sandboxer sandbox-init into guest erofs"
 	@echo "  sandbox-init       delegate to ../sandboxer sandbox-init"
 	@echo "  erofs              build target-arch guest mkfs.erofs"
 	@echo "  envd               build e2b guest agent"
-	@echo "  flatten-ctl        delegate to ../accelerator flatten-ctl"
-	@echo "  native-deps        build vmlinux / cloud-hypervisor / mkfs.erofs / envd"
+	@echo "  native-deps        build vmlinux / mkfs.erofs / fsck.erofs / envd"
 	@echo "  test / clean"
 	@echo "  TARGET_ARCH        x86_64 (default) | aarch64"

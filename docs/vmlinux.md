@@ -1,4 +1,4 @@
-# sandbox-kernel — guest 内核定制
+# vmlinux — guest 内核镜像
 
 平台为每个 sandbox 提供一份**最小化、确定性、跨实例一致**的 Linux 内核镜像
 (`bin/<arch>/vmlinux`)。本文档定义这份镜像的构建方式、启用/禁用的功能集合,
@@ -60,7 +60,7 @@ build         把 sandbox-common.config + sandbox-<arch>.config 拼接成
 幂等:`bin/<arch>/vmlinux` 存在则跳过(删了重跑或 `make clean && make vmlinux`
 强制重建)。
 
-**Patch 开发流**(与 cloud-hypervisor 的 ch-patches 流对称):`make linux-fetch`
+**Patch 开发流**:`make linux-fetch`
 拉源码并打 `linux-patches-base` tag → 在 `build/src/linux/` 改代码 +
 `git commit` → `make linux-patches-format` 导出回 `deps/linux-patches/*.patch`
 → `make vmlinux` 重新应用 + 构建。幂等与 sanity 语义统一见 native-deps

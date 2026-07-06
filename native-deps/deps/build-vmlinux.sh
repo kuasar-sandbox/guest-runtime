@@ -2,7 +2,7 @@
 #
 # Multi-stage dispatcher for the sandbox guest kernel: upstream Linux
 # source built with the patches under deps/linux-patches/.  Structure
-# mirrors deps/build-cloud-hypervisor.sh exactly (same patch dev loop).
+# uses the same staged patch development pattern as sandboxer/native-deps.
 #
 # Stages are selected via the STAGE env var (default: build):
 #

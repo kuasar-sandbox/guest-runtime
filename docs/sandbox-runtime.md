@@ -1,9 +1,9 @@
 # sandbox-runtime — guest 运行时
 
 guest 内 PID 1 二进制 `sandbox-init` 与承载它的根文件系统镜像
-`sandbox-runtime.erofs`。`sandbox-init` 源码和 host 侧生命周期实现属于
+`sandbox-runtime.erofs`。`sandbox-init` 源码和 host 侧生命周期实现在
 `sandboxer`;本仓负责把已构建的 `sandbox-init` 打包成节点级共享的 guest
-runtime 镜像,并维护其依赖的 native 产物。
+runtime 镜像,并维护镜像构建所需的 native 产物。
 
 `sandbox-runtime` 是节点级共享资产——所有 sandbox 通过 virtio-pmem + DAX
 直接映射 host 上同一份 erofs 文件,获得无运行时拷贝、跨 sandbox 共享 host
@@ -1078,9 +1078,9 @@ sandbox.yaml `launch:` 节(yaml override 优先,Env merge),host sandbox-ctl 合�
 
 - `sandboxer/docs/sandbox.md` §2.2(`run` 的 `--tty` / `--console` / stdio 标志)、
   §5.2(CH 冷启动命令行)、§6.2 / §6.3(snapshot 时序 / ctl.sock 协议)、§7(恢复)
-- `native-deps/docs/sandbox-kernel.md` —— guest kernel 启用的 namespace /
+- `docs/vmlinux.md` —— guest kernel 启用的 namespace /
   文件系统 / virtio-console / 网络功能为何如此
-- `native-deps/docs/cloud-hypervisor.md` §5.2 —— vsock hybrid 代理:host
+- `sandboxer/docs/cloud-hypervisor.md` §5.2 —— vsock hybrid 代理:host
   侧映射到 UDS 的 CONNECT 行格式;`--console` / `--serial` 的用法
 - `native-deps/docs/build.md` §2.1 —— mkfs.erofs 构建(本仓 `make sandbox-runtime` 的前置工具)
 - `sandboxer/docs/sandbox.md` —— host 侧 `sandbox-ctl` 生命周期、快照/恢复与数据面。
