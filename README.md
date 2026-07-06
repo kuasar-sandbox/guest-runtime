@@ -1,28 +1,26 @@
 # guest-runtime
 
-Guest runtime image and native dependency build repo for kuasar-sandbox.
+Guest 运行时镜像与构建工具仓:负责构建 `sandbox-runtime.erofs`、`flatten-ctl`
+以及 guest 侧 native 产物。host 生命周期、快照、恢复和 `sandbox-init` 源码属于
+`sandboxer`;内容寻址、manifest/cache/store 与展平公共库属于 `accelerator`。
 
-This repo builds the guest-side artifacts consumed by the sandbox engine at
-runtime. Host lifecycle code remains in `sandboxer`; reusable content/image
-libraries remain in `accelerator`.
+## 组成
 
-| Path | Role |
+| 路径 | 角色 |
 |---|---|
-| `Makefile` | Builds one `sandbox-runtime.erofs` from `../sandboxer/bin/<arch>/sandbox-init` plus guest payload. |
-| `cmd/flatten-ctl` | OCI/目录 → EROFS deterministic image builder; the CLI imports `accelerator/pkg/{flatten,image,remote,tar}`. |
-| `docs/sandbox-runtime.md` | Guest runtime image layout, payload projection, and packaging contract. |
-| `docs/vmlinux.md` | Guest kernel image contract and config rationale. |
-| `docs/flatten.md` | `flatten-ctl` CLI, remote pull cache, and OCI Referrers behavior. |
-| `native-deps/` | Builds `vmlinux`, `mkfs.erofs`, `fsck.erofs`, and `envd`. |
-| `scripts/guest-inspect.py` | Helper for inspecting guest/runtime images. |
+| `cmd/flatten-ctl` | OCI/目录 → EROFS deterministic image builder;复用 `accelerator/pkg/{flatten,image,remote,tar}` |
+| `docs/sandbox-runtime.md` | runtime 镜像布局、guest payload、构建和发布契约 |
+| `docs/vmlinux.md` | guest kernel 镜像契约和配置理由 |
+| `docs/flatten.md` | `flatten-ctl` CLI、远程拉取缓存、OCI Referrers 行为 |
+| `native-deps/` | 构建 `vmlinux`、`mkfs.erofs`、`fsck.erofs`、`envd` |
+| `scripts/guest-inspect.py` | 检查 guest/runtime 镜像的辅助脚本 |
 
-`sandbox-init` source and host lifecycle code live in
-[`sandboxer`](https://github.com/kuasar-sandbox/sandboxer). `guest-runtime`
-packages the built `sandbox-init` into the DAX-shared EROFS image and injects
-the guest payload used by e2b/build flows under `/opt/sandbox-runtime/bin/`:
-`envd`, `flatten-ctl`, and `mkfs.erofs`.
+`guest-runtime` 把 `../sandboxer/bin/<arch>/sandbox-init` 和 guest payload 打进
+同一份 DAX-shared EROFS 镜像。镜像内 `/opt/sandbox-runtime/bin/` 首版包含
+`envd`、`flatten-ctl`、`mkfs.erofs`;`vmlinux` 和 `cloud-hypervisor` 不进入
+runtime 镜像,分别由 `guest-runtime` 专用包和 `sandboxer` 发布。
 
-## Build
+## 构建
 
 ```bash
 make native-deps                 # vmlinux / erofs tools / envd
@@ -32,13 +30,13 @@ make sandbox-runtime             # same image target, builds ../sandboxer sandbo
 make build TARGET_ARCH=aarch64
 ```
 
-`make sandbox-runtime` needs `mkfs.erofs`, found from `PATH`, `bin/<arch>/`,
-or `native-deps/bin/<arch>/`; it also consumes `native-deps/bin/<arch>/envd`
-and this repo's `bin/<arch>/flatten-ctl`, building those targets on demand.
+`make sandbox-runtime` 需要 `mkfs.erofs`;查找顺序为 `PATH`、`bin/<arch>/`、
+`native-deps/bin/<arch>/`。它还会消费 `native-deps/bin/<arch>/envd` 和本仓
+`bin/<arch>/flatten-ctl`;缺失时按需触发对应构建目标。
 
-## Artifacts
+## 产物
 
-| Artifact | Producer |
+| 产物 | 生成入口 |
 |---|---|
 | `bin/<arch>/flatten-ctl` | `make flatten-ctl` |
 | `bin/<arch>/sandbox-runtime.erofs` | `make sandbox-runtime` |
@@ -46,4 +44,18 @@ and this repo's `bin/<arch>/flatten-ctl`, building those targets on demand.
 | `native-deps/bin/<arch>/mkfs.erofs` / `fsck.erofs` | `make native-deps` |
 | `native-deps/bin/<arch>/envd` | `make native-deps` |
 
-The cross-repo release build is driven from `orchestrator/release-builder`.
+跨仓发布由 `orchestrator/release-builder` 编排:
+
+- `guest-runtime-<version>-linux-<arch>.tar.gz`:包含 `flatten-ctl`、erofs tools、
+  `envd`、本仓文档和 flatten e2e。
+- `sandbox-runtime-<arch>-<version>.tar.gz`:runtime 镜像专用包,包含版本化
+  `.bundle` 文件和 `bin/sandbox-runtime.erofs` 兼容别名。
+- `vmlinux-<arch>-<version>.tar.gz`:guest kernel 专用包,包含版本化 kernel 文件
+  和 `bin/vmlinux` 兼容别名。
+
+## 文档
+
+- [docs/sandbox-runtime.md](docs/sandbox-runtime.md) — runtime 镜像打包、发布和消费契约。
+- [docs/vmlinux.md](docs/vmlinux.md) — guest kernel 配置、构建和平台 ABI。
+- [docs/flatten.md](docs/flatten.md) — `flatten-ctl` 命令和确定性展平。
+- [native-deps/docs/build.md](native-deps/docs/build.md) — native-deps 构建工作流。

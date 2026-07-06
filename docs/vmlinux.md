@@ -63,8 +63,9 @@ build         把 sandbox-common.config + sandbox-<arch>.config 拼接成
 **Patch 开发流**:`make linux-fetch`
 拉源码并打 `linux-patches-base` tag → 在 `build/src/linux/` 改代码 +
 `git commit` → `make linux-patches-format` 导出回 `deps/linux-patches/*.patch`
-→ `make vmlinux` 重新应用 + 构建。幂等与 sanity 语义统一见 native-deps
-`docs/build.md` §3;补丁 arch-neutral,x86_64 / arm64 共用同一组。
+→ `make vmlinux` 重新应用 + 构建。幂等与 sanity 语义统一见
+`guest-runtime/native-deps/docs/build.md` §3;补丁 arch-neutral,x86_64 /
+arm64 共用同一组。
 
 ### 2.1 host 构建依赖
 
@@ -436,13 +437,13 @@ diff 排查。
 
 ## 8. See Also
 
-- [`cloud-hypervisor.md`](cloud-hypervisor.md) —— 平台 VMM 的启动协议、设备
+- `sandboxer/docs/cloud-hypervisor.md` —— 平台 VMM 的启动协议、设备
   模型、patch 范围
 - `guest-runtime/docs/sandbox-runtime.md` —— 内核之上 sandbox-init 完成
   rootfs 组装与应用拉起
 - `sandboxer/docs/sandbox.md` §3.1(`boot.kernel`)/ §14.2(平台 ABI 边界)——
   沙箱配置如何引用 vmlinux,以及自带 kernel 的接入方式
-- native-deps `docs/build.md` —— `make vmlinux` 工作流、patch 开发循环、
+- `guest-runtime/native-deps/docs/build.md` —— `make vmlinux` 工作流、patch 开发循环、
   交叉编译
 - `orchestrator/release-builder/docs/kuasar-sandbox.md` §4.6(Guest 确定性配置)—— 跨实例 RAM
   去重率目标的来源

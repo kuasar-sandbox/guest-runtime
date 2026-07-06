@@ -503,7 +503,8 @@ sha256 相等。
 `sandbox-ctl run` 在启动前从 boot.root.base 文件末尾解 ZIP,拿到运行时投影作为
 LaunchSpec 的 fallback:`sandbox.yaml` `launch.*` 字段优先,`Env` 取镜像在下、
 override 在上的合并,`Volumes` 并入 `mounts`。因此 image config 有 Entrypoint/Cmd
-时 `launch.exec` 即可省略。合并规则的权威定义见 [`sandbox.md`](sandbox.md) §3.3。
+时 `launch.exec` 即可省略。合并规则的权威定义见
+`sandboxer/docs/sandbox.md` §3.3。
 
 ## 4. 算法
 
@@ -639,12 +640,13 @@ OCI image config 字段繁多,大量与启动无关:`created` / `author` / `hist
 
 ## 7. See Also
 
-- [`manifest.md`](manifest.md) —— 展平后的镜像经 manifest-ctl 入内容
+- `accelerator/docs/manifest.md` —— 展平后的镜像经 manifest-ctl 入内容
   寻址存储;chunk dedup 跨镜像共享 layer-level 重复内容
-- [`sandbox.md`](sandbox.md) §3.3 flattened image 内嵌 config.json ——
-  沙箱 启动时如何使用 ZIP trailer 中的 OCI runtime config
-- [`sandbox.md`](sandbox.md) §boot.root.base —— 用展平镜像作为 sandbox
+- `sandboxer/docs/sandbox.md` §3.3 flattened image 内嵌 config.json ——
+  沙箱启动时如何使用 ZIP trailer 中的 OCI runtime config
+- `sandboxer/docs/sandbox.md` §boot.root.base —— 用展平镜像作为 sandbox
   的只读根
-- [`build.md`](build.md) —— `guest-runtime/native-deps` 构建 mkfs.erofs(`make -C ../guest-runtime/native-deps
-  erofs`);本仓 `make build` 只构建 flatten-ctl,运行期经同目录 / `PATH` 定位 mkfs.erofs
+- `guest-runtime/native-deps/docs/build.md` —— 构建 mkfs.erofs(`make -C
+  guest-runtime/native-deps erofs`);本仓 `make build` 只构建 flatten-ctl,运行期
+  经同目录 / `PATH` 定位 mkfs.erofs
 - `orchestrator/release-builder/docs/kuasar-sandbox.md` §2.2 / §3.1 —— 展平在系统中的位置与目标
