@@ -336,7 +336,7 @@ v1 旧冻结器,不需要。
 **经 `cgroup.subtree_control` 下放**才在子 cgroup 出现,而 envd 自身不写
 subtree_control——故 **sandbox-init 挂载 cgroup2 后,把 root `cgroup.controllers`
 里的控制器写入 root `cgroup.subtree_control`**
-(`sandbox-runtime/cmd/sandbox-init/cgroup.go`;root cgroup 豁免
+(`sandboxer/cmd/sandbox-init/cgroup.go`;root cgroup 豁免
 no-internal-process 规则,故 PID 1 留在 root 仍可下放)。
 
 这是**在 VM 预算内再细分**,不替代 host 权威:host cgroup v2 限 CH 进程 + balloon
@@ -415,7 +415,7 @@ file bin/aarch64/vmlinux
 # /proc/config.gz 不存在(IKCONFIG 关闭)
 ```
 
-跨实例 RAM 去重率(`kuasar-sandbox/docs/kuasar-sandbox.md` §4.6):同 vmlinux + 同 sandbox-runtime + 同应用,
+跨实例 RAM 去重率(`orchestrator/release-builder/docs/kuasar-sandbox.md` §4.6):同 vmlinux + 同 sandbox-runtime + 同应用,
 冷启动到 settled 的 RAM 内容跨实例 hash 相同区段应 > 90%。低于 50% 通常
 是新启用的随机化(KASLR / SLAB 等)漏网,通过比对 `make olddefconfig`
 diff 排查。
@@ -444,5 +444,5 @@ diff 排查。
   沙箱配置如何引用 vmlinux,以及自带 kernel 的接入方式
 - native-deps `docs/build.md` —— `make vmlinux` 工作流、patch 开发循环、
   交叉编译
-- `kuasar-sandbox/docs/kuasar-sandbox.md` §4.6(Guest 确定性配置)—— 跨实例 RAM
+- `orchestrator/release-builder/docs/kuasar-sandbox.md` §4.6(Guest 确定性配置)—— 跨实例 RAM
   去重率目标的来源

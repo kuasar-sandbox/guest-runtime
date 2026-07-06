@@ -1,9 +1,10 @@
 # build — 原生依赖构建工作流
 
-native-deps 仓的构建工作流:从上游源码构建 kuasar-sandbox 平台运行期消费、但各 Go 仓
+native-deps 目录的构建工作流:从上游源码构建 kuasar-sandbox 平台运行期消费、但各 Go 仓
 不链接的四件原生产物——`mkfs.erofs`/`fsck.erofs`(erofs-utils)、`vmlinux`(guest 内核)、
 `cloud-hypervisor`(patched VMM)、`envd`(e2b guest agent)。工具链(autotools/kbuild/
-cargo/Go)与 Go 仓不同、冷构建以分钟计、上游发布节奏独立,故单独成仓。
+cargo/Go)与 Go 仓不同、冷构建以分钟计、上游发布节奏独立,因此内聚在
+`guest-runtime/native-deps` 目录下独立构建。
 
 所有产物走同一条流水线:按 URL pin 的上游 tarball(可选 SHA256 校验)→ 共享缓存与
 解压 → 本地补丁(仅 vmlinux 与 cloud-hypervisor,`git am`)→ 构建 → `bin/<arch>/`。
@@ -11,8 +12,9 @@ cargo/Go)与 Go 仓不同、冷构建以分钟计、上游发布节奏独立,故
 本文:CH patch 语义与行为契约见 [`cloud-hypervisor.md`](cloud-hypervisor.md),内核
 配置体系见 [`sandbox-kernel.md`](sandbox-kernel.md)。
 
-平台级聚合由主仓编排:`make -C kuasar-sandbox build` 首先驱动本仓 `make build`,再把
-产物按 `scripts/artifacts.list` 收集进发布包。
+平台级聚合由 `orchestrator/release-builder` 编排:
+`make -C orchestrator/release-builder build` 首先驱动本目录 `make build`,再把
+产物按 `orchestrator/release-builder/scripts/artifacts.list` 收集进发布包。
 
 ## 1. 概述
 
@@ -20,9 +22,9 @@ cargo/Go)与 Go 仓不同、冷构建以分钟计、上游发布节奏独立,故
 
 | 产物 | 上游(pin) | 本仓输入 | 消费方 |
 |---|---|---|---|
-| `mkfs.erofs` `fsck.erofs` | erofs-utils v1.9.1 | — | `accelerator`(展平)、`sandbox-runtime`(打 guest erofs)、`orchestrator`(`fsck.erofs --extract`) |
-| `vmlinux` | linux 6.1.169(LTS,cdn.kernel.org) | `deps/linux-patches/`(1 个)+ `deps/vmlinux/*.config` | `sandbox-runtime`(guest 内核) |
-| `cloud-hypervisor` | cloud-hypervisor v51.1 | `deps/ch-patches/`(4 个) | `sandbox-runtime`(VMM) |
+| `mkfs.erofs` `fsck.erofs` | erofs-utils v1.9.1 | — | `accelerator`(展平)、`guest-runtime`(打 guest erofs)、发布包诊断 / accelerator 测试 |
+| `vmlinux` | linux 6.1.169(LTS,cdn.kernel.org) | `deps/linux-patches/`(1 个)+ `deps/vmlinux/*.config` | `sandboxer`/`sandbox-ctl`(guest 内核) |
+| `cloud-hypervisor` | cloud-hypervisor v51.1 | `deps/ch-patches/`(4 个) | `sandboxer`/`sandbox-ctl`(VMM) |
 | `envd` | e2b-dev/infra 2026.22(发布 tarball) | — | `guest-runtime`(注入 `sandbox-runtime.erofs`) |
 
 pin 全部落在 Makefile 变量(`EROFS_TARBALL` / `LINUX_TARBALL` / `CLOUD_HYPERVISOR_TARBALL` /
@@ -233,5 +235,6 @@ WSL2 的 `/mnt/<drive>/`(DrvFs)上每个小文件有 5-10 倍 I/O 开销,而内�
   契约、启动协议与设备模型(随发布包)。
 - [`sandbox-kernel.md`](sandbox-kernel.md) —— guest 内核配置体系、架构差异与关键
   决策(随发布包)。
-- `kuasar-sandbox/Makefile` + `kuasar-sandbox/scripts/release.sh` —— 平台级聚合
-  构建与发布打包;本仓产物经 `scripts/artifacts.list` 收集进发布包 `bin/`。
+- `orchestrator/release-builder/Makefile` + `orchestrator/release-builder/scripts/release.sh`
+  —— 平台级聚合构建与发布打包;本目录产物经
+  `orchestrator/release-builder/scripts/artifacts.list` 收集进发布包 `bin/`。

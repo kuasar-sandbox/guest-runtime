@@ -3,16 +3,16 @@
 [kuasar-sandbox](https://github.com/kuasar-sandbox/kuasar-sandbox) 平台的原生依赖
 构建:从上游源码(含本地 patch)构建 Go 仓不链接、但运行期消费的原生件。工具链
 (autotools/kbuild/cargo/Go)与 Go 仓不同、冷构建以分钟计、上游发布节奏独立,
-故单独成仓。
+因此内聚在 `guest-runtime/native-deps` 目录下独立构建。
 
 ## 产物与消费方
 
 | 产物 | 来源 | 消费方 |
 |---|---|---|
-| `mkfs.erofs` | erofs-utils v1.9.1 | `accelerator`(展平)、`sandbox-runtime`(打 guest 镜像) |
-| `fsck.erofs` | erofs-utils v1.9.1 | `orchestrator`(`fsck.erofs --extract` 解包 base runtime 注入 envd) |
-| `vmlinux` | Linux 6.1.169 + `deps/linux-patches` + `deps/vmlinux/*.config` | `sandbox-runtime`(guest 内核) |
-| `cloud-hypervisor` | CH v51.1 + `deps/ch-patches`(memfd 注入 / snapshot skip / 外部 uffd / balloon 跳洞) | `sandbox-runtime`(VMM) |
+| `mkfs.erofs` | erofs-utils v1.9.1 | `accelerator`(展平)、`guest-runtime`(打 guest runtime 镜像) |
+| `fsck.erofs` | erofs-utils v1.9.1 | 发布包诊断与 accelerator EROFS 内容断言测试 |
+| `vmlinux` | Linux 6.1.169 + `deps/linux-patches` + `deps/vmlinux/*.config` | `sandboxer`/`sandbox-ctl`(guest 内核) |
+| `cloud-hypervisor` | CH v51.1 + `deps/ch-patches`(memfd 注入 / snapshot skip / 外部 uffd / balloon 跳洞) | `sandboxer`/`sandbox-ctl`(VMM) |
 | `envd` | e2b-dev/infra 发布 tarball(tag `2026.22`) | `guest-runtime`(注入 `sandbox-runtime.erofs` 的 guest agent) |
 
 `librocksdb`(`accelerator` 的 CGO 链接依赖)在该仓内构建,不在此处。

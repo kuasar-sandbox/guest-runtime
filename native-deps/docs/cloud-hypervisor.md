@@ -230,7 +230,7 @@ cache 又释放、folio 仍驻留 memfd 的页,`lseek` 见数据**不跳过**,�
 
 ## 4. 构建工作流
 
-产物由 native-deps 仓构建:`make cloud-hypervisor` = 取 pin 的 v51.1 tarball +
+产物由 `guest-runtime/native-deps` 构建:`make cloud-hypervisor` = 取 pin 的 v51.1 tarball +
 `git am deps/ch-patches/*.patch` + `cargo build --release --locked`,冷构建
 ~5-10 min、热(cargo 缓存)秒级,产物 `bin/<arch>/cloud-hypervisor`。构建以
 `--remap-path-prefix` 把源树与 registry 依赖映射为相对路径 / `/cargo` 前缀,
@@ -336,4 +336,4 @@ KVM EPT,IPI shootdown 饿死 guest vsock kthread(机理与替代反馈环见
   协议(PVH / EFI stub)
 - native-deps `docs/build.md` —— `make cloud-hypervisor` 工作流与 patch
   开发循环
-- `kuasar-sandbox/docs/kuasar-sandbox.md` §2.4 —— VMM 与 Guest 环境在系统中的位置
+- `orchestrator/release-builder/docs/kuasar-sandbox.md` §2.4 —— VMM 与 Guest 环境在系统中的位置
