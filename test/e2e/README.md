@@ -13,7 +13,9 @@ in-memory ggcr registry that only does the tag-schema referrers fallback.)
 
 This builds `flatten-ctl` + the sibling `store-ctl`, prefers a `zot` already on
 `PATH` (fetching one into `bin/` only as a fallback), and runs
-`test/e2e/e2e_flatten.sh`. Any missing requirement yields a clean `[SKIP]`.
+`test/e2e/e2e_flatten.sh`. Under `make test-e2e`, missing requirements fail the
+run via `REQUIRE_GUEST_RUNTIME=1`; direct ad-hoc runs may still skip soft
+prerequisites for local convenience.
 
 ## What it checks
 
@@ -30,13 +32,11 @@ This builds `flatten-ctl` + the sibling `store-ctl`, prefers a `zot` already on
 
 ## Requirements
 
-Any missing requirement yields a clean `[SKIP]` (exit 0), not a failure.
-
 - `docker`, with the seed image cached (default `python:3.12-alpine`),
 - `mkfs.erofs` on `PATH` or via `MKFS_EROFS_PATH`,
 - `curl`, and network access to download zot (honours the ambient proxy env),
 - the sibling `../accelerator` checkout (builds `store-ctl`),
-- `htpasswd` for the basic-auth sub-test (that sub-test is skipped if absent).
+- `htpasswd` for the basic-auth sub-test.
 
 ## Knobs
 

@@ -12,7 +12,7 @@
 
 SHELL := /bin/bash
 
-.PHONY: all build flatten-ctl sandbox-init sandbox-runtime native-deps erofs envd test clean help
+.PHONY: all build flatten-ctl sandbox-init sandbox-runtime native-deps erofs envd test test-e2e clean help
 
 # ---------------------------------------------------------------------------
 # Architecture selection (identical block across all kuasar-sandbox repos)
@@ -46,6 +46,8 @@ SANDBOXER_DIR ?= ../sandboxer
 SANDBOX_INIT  ?= $(SANDBOXER_DIR)/$(BINDIR)/sandbox-init
 ENVD          ?= native-deps/$(BINDIR)/envd
 FLATTEN_CTL   ?= $(BINDIR)/flatten-ctl
+STORE_CTL     ?= ../accelerator/$(BINDIR)/store-ctl
+ZOT_BIN       ?= zot
 
 # BUILD_MKFS_EROFS is the host executable that packs sandbox-runtime.erofs.
 # GUEST_MKFS_EROFS is the target-arch static binary shipped inside the guest
@@ -135,6 +137,9 @@ test:
 	python3 -m py_compile scripts/guest-inspect.py
 	CGO_ENABLED=0 $(GO) test ./...
 
+test-e2e: flatten-ctl
+	REQUIRE_GUEST_RUNTIME=1 FLATTEN_CTL="$(FLATTEN_CTL)" STORE_CTL="$(STORE_CTL)" ZOT_BIN="$(ZOT_BIN)" bash test/e2e/e2e_flatten.sh
+
 clean:
 	rm -rf bin build
 	$(MAKE) -C native-deps clean
@@ -148,5 +153,7 @@ help:
 	@echo "  erofs              build target-arch guest mkfs.erofs"
 	@echo "  envd               build e2b guest agent"
 	@echo "  native-deps        build vmlinux / mkfs.erofs / fsck.erofs / envd"
-	@echo "  test / clean"
+	@echo "  test               unit/static checks"
+	@echo "  test-e2e           full flatten-ctl registry/store e2e"
+	@echo "  clean"
 	@echo "  TARGET_ARCH        x86_64 (default) | aarch64"

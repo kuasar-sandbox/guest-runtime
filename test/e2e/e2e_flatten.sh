@@ -11,10 +11,9 @@
 # with E2E_IMAGE) into zot via `docker push`, so no synthetic image tooling is
 # needed and the layers have real, readable file modes.
 #
-# Requirements (missing ones -> SKIP, not fail): docker (with the seed image
-# cached), mkfs.erofs, curl, plus the flatten-ctl / store-ctl / zot binaries
-# (the Makefile `e2e` target builds/downloads them and points the env vars
-# below at them). Auth sub-test additionally needs `htpasswd`.
+# Requirements: docker, mkfs.erofs, curl, flatten-ctl, store-ctl, zot, and
+# htpasswd for the auth sub-test. When REQUIRE_GUEST_RUNTIME=1, missing
+# prerequisites fail the e2e instead of skipping.
 #
 # Env knobs:
 #   FLATTEN_CTL, STORE_CTL, ZOT_BIN   binary paths (default: look up on PATH)
@@ -51,7 +50,14 @@ AUTH_LOGGED_IN=""
 log()  { printf '\n=== %s ===\n' "$*"; }
 ok()   { printf '  [ ok ] %s\n' "$*"; }
 bad()  { printf '  [FAIL] %s\n' "$*"; FAILS=$((FAILS + 1)); }
-skip() { printf '[SKIP] %s\n' "$*"; exit 0; }
+skip() {
+	if [ "${REQUIRE_GUEST_RUNTIME:-0}" = "1" ]; then
+		printf '[FAIL] %s\n' "$*" >&2
+		exit 1
+	fi
+	printf '[SKIP] %s\n' "$*"
+	exit 0
+}
 have() { command -v "$1" >/dev/null 2>&1; }
 
 # port_free PORT -> 0 if nothing is listening on 127.0.0.1:PORT
@@ -127,13 +133,13 @@ is_hex64() { [[ "$1" =~ ^[0-9a-f]{64}$ ]]; }
 # --------------------------------------------------------------------------
 # preflight
 # --------------------------------------------------------------------------
-log "preflight"
 # flatten-ctl preserves the image's real uid/gid (chown), which needs root —
 # re-exec under sudo so the flattened rootfs keeps ownership (e.g. /home/<user>).
 if [ "$(id -u)" -ne 0 ]; then
 	command -v sudo >/dev/null 2>&1 || skip "not root and sudo unavailable (flatten preserves ownership; needs root)"
 	exec sudo -nE "$0" "$@"
 fi
+log "preflight"
 have curl || skip "curl not found"
 have docker || skip "docker not found"
 docker info >/dev/null 2>&1 || skip "docker not usable (daemon down or no permission)"
@@ -296,7 +302,11 @@ grep -qi "referrer written" "$WORK/t3.err" && ok "different owner did not match 
 # ==========================================================================
 log "TEST 4: basic-auth registry"
 if ! have htpasswd; then
-	echo "  [SKIP] htpasswd not found — skipping auth sub-test"
+	if [ "${REQUIRE_GUEST_RUNTIME:-0}" = "1" ]; then
+		bad "htpasswd not found"
+	else
+		echo "  [SKIP] htpasswd not found — skipping auth sub-test"
+	fi
 else
 	AUTH_PORT="$(free_port)"
 	mkdir -p "$WORK/zot-auth"

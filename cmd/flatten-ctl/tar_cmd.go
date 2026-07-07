@@ -49,6 +49,7 @@ func cmdTarExtract(args []string) {
 	fs.StringVar(&file, "f", "-", "shorthand for --file")
 	chown := fs.String("chown", "", "uid:gid applied to every entry (numeric, or names resolved against the target's /etc/passwd|group)")
 	chmod := fs.String("chmod", "", "octal permission bits applied to every entry")
+	noChown := fs.Bool("no-chown", false, "skip ownership restoration")
 	dense := fs.Bool("dense", false, "disable sparse handling: extract logical bytes via the stdlib reader (declared holes become allocated zeros)")
 	fs.Usage = tarUsage
 	fs.Parse(args)
@@ -58,7 +59,8 @@ func cmdTarExtract(args []string) {
 		fatal("tar: %v", err)
 	}
 	opts := btar.Options{
-		Dense: *dense,
+		Dense:   *dense,
+		NoChown: *noChown,
 		Warnf: func(format string, a ...any) {
 			fmt.Fprintf(os.Stderr, format+"\n", a...)
 		},
@@ -275,7 +277,7 @@ func parseStreamRule(arg string) (name, src string, err error) {
 
 func tarUsage() {
 	fmt.Fprintf(os.Stderr, `Usage:
-  flatten-ctl tar extract [-f tarfile] [--chown u:g] [--chmod 755] [rule...]
+  flatten-ctl tar extract [-f tarfile] [--chown u:g] [--no-chown] [--chmod 755] [rule...]
   flatten-ctl tar stream  [-f tarfile] [--size N] [in-tar[:source]]
 
 Both directions are pure Go; no tar binary is involved.
@@ -296,7 +298,8 @@ members dense. Rules are "in-tar-path[:outside-path]":
   :dir/             the whole archive root mapped to dir/
 
 No rules takes everything. --chown/--chmod override ownership and
-permissions on every extracted entry.
+permissions on every extracted entry. --no-chown skips ownership
+restoration when uid/gid metadata is irrelevant to the extraction.
 
 stream packages exactly one file as a tarstream (a single-file sparse
 tar; see accelerator/pkg/tarstream). A file source's holes
