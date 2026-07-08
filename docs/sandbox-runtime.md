@@ -147,7 +147,7 @@ cloud-hypervisor。guest kernel 挂载该 pmem 后执行 `/sbin/init`,即
 
 | 包 | 内容 | Release |
 |---|---|---|
-| `guest-runtime-<version>-linux-<arch>.tar.gz` | `flatten-ctl`、`mkfs.erofs`、`fsck.erofs`、`envd`、本仓文档和 flatten e2e | `guest-runtime` 仓 `v<version>` |
+| `guest-runtime-<version>-linux-<arch>.tar.gz` | `flatten-ctl`、`mkfs.erofs`、本仓文档和 flatten e2e | `guest-runtime` 仓 `v<version>` |
 | `sandbox-runtime-<arch>-<version>.tar.gz` | runtime 镜像本体和 `docs/sandbox-runtime.md` | `guest-runtime` 仓 `runtime-v<version>` |
 
 runtime 专用包内同时放置:
@@ -165,6 +165,9 @@ release/sandbox-runtime.json
 聚合发布 `orchestrator` 仓的 `release-v<version>` 不重新打包,只上传各仓原始
 组件包和 `SHA256SUMS`。用户把需要的组件包解到同一目录即可得到共享的
 `bin/`、`docs/`、`test/`、`deploy/`、`release/` 布局。
+
+`envd` 已内置在 `sandbox-runtime` 镜像中,不作为独立 `bin/envd` 发布;
+`fsck.erofs` 是源码树诊断/测试辅助工具,不进入通用组件包。
 
 ## 6. 可靠性与升级
 

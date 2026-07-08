@@ -9,12 +9,14 @@ in-memory ggcr registry that only does the tag-schema referrers fallback.)
 
 ## Run
 
-    make test-e2e-flatten      # also runs as part of `make test-e2e` + the umbrella gate
+    make test-e2e              # also runs as part of the release-builder umbrella gate
 
-This builds `flatten-ctl` + the sibling `store-ctl`, prefers a `zot` already on
-`PATH` (fetching one into `bin/` only as a fallback), and runs
-`test/e2e/e2e_flatten.sh`. Under `make test-e2e`, missing requirements fail the
-run via `REQUIRE_GUEST_RUNTIME=1`; direct ad-hoc runs may still skip soft
+This builds `flatten-ctl` + the sibling `store-ctl` and runs
+`test/e2e/e2e_flatten.sh` against `ZOT_BIN` or a `zot` already on `PATH`.
+When run from the source-tree release-builder umbrella, `make e2e-tools`
+downloads zot into `build/e2e-tools/` and passes `ZOT_BIN`; release packages do
+not ship zot. Under `make test-e2e`, missing requirements fail via
+`REQUIRE_GUEST_RUNTIME=1`; direct ad-hoc script runs may still skip soft
 prerequisites for local convenience.
 
 ## What it checks
@@ -34,12 +36,12 @@ prerequisites for local convenience.
 
 - `docker`, with the seed image cached (default `python:3.12-alpine`),
 - `mkfs.erofs` on `PATH` or via `MKFS_EROFS_PATH`,
-- `curl`, and network access to download zot (honours the ambient proxy env),
-- the sibling `../accelerator` checkout (builds `store-ctl`),
-- `htpasswd` for the basic-auth sub-test.
+- `curl`,
+- `zot` on `PATH` or via `ZOT_BIN`,
+- the sibling `../accelerator` checkout (builds `store-ctl`).
 
 ## Knobs
 
 - `E2E_IMAGE=<repo:tag>` — cached image to seed (default `python:3.12-alpine`).
-- `ZOT_VERSION=<tag>` — zot release to download (Makefile; default pinned).
+- `ZOT_BIN=<path>` — override the zot executable.
 - `E2E_KEEP=1` — leave the work dir and processes up for debugging.

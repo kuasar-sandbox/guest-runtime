@@ -11,9 +11,9 @@
 # with E2E_IMAGE) into zot via `docker push`, so no synthetic image tooling is
 # needed and the layers have real, readable file modes.
 #
-# Requirements: docker, mkfs.erofs, curl, flatten-ctl, store-ctl, zot, and
-# htpasswd for the auth sub-test. When REQUIRE_GUEST_RUNTIME=1, missing
-# prerequisites fail the e2e instead of skipping.
+# Requirements: docker, mkfs.erofs, curl, flatten-ctl, store-ctl, and zot. When
+# REQUIRE_GUEST_RUNTIME=1, missing prerequisites fail the e2e instead of
+# skipping.
 #
 # Env knobs:
 #   FLATTEN_CTL, STORE_CTL, ZOT_BIN   binary paths (default: look up on PATH)
@@ -22,8 +22,8 @@
 set -uo pipefail
 
 # The e2e only talks to localhost (zot, store-ctl, docker, curl); keep any
-# ambient proxy out of that path. (The zot download in the Makefile uses the
-# proxy separately, before this script runs.)
+# ambient proxy out of that path. zot is supplied by ZOT_BIN, PATH, or the
+# release-builder umbrella bin/.
 export NO_PROXY=127.0.0.1,localhost no_proxy=127.0.0.1,localhost
 
 # --------------------------------------------------------------------------
@@ -301,45 +301,41 @@ grep -qi "referrer written" "$WORK/t3.err" && ok "different owner did not match 
 # TEST 4 — basic-auth registry: credentials via FLATTEN_REGISTRY_* env
 # ==========================================================================
 log "TEST 4: basic-auth registry"
-if ! have htpasswd; then
-	if [ "${REQUIRE_GUEST_RUNTIME:-0}" = "1" ]; then
-		bad "htpasswd not found"
-	else
-		echo "  [SKIP] htpasswd not found — skipping auth sub-test"
-	fi
+AUTH_PORT="$(free_port)"
+mkdir -p "$WORK/zot-auth"
+# Static bcrypt htpasswd line for AUTH_USER=e2euser, AUTH_PASS=e2epass.
+# Keeping this fixture in the script avoids a dependency on apache2-utils.
+cat >"$WORK/htpasswd" <<'EOF'
+e2euser:$2y$05$/Jvk/Gj8hT1jwrfwYfy89OeTyXpVOpkH3Bpy3UrFx0XnTG5rmy6eq
+EOF
+start_zot "$WORK/zot-auth" "$AUTH_PORT" "$WORK/htpasswd" || bad "auth zot start"
+
+AUTH_REF="127.0.0.1:$AUTH_PORT/e2e/app:v1"
+docker login "127.0.0.1:$AUTH_PORT" -u "$AUTH_USER" --password-stdin <<<"$AUTH_PASS" >/dev/null 2>&1 \
+	&& AUTH_LOGGED_IN="127.0.0.1:$AUTH_PORT" || bad "docker login to auth zot"
+seed "$E2E_IMAGE" "$AUTH_REF" || bad "seed auth zot"
+docker logout "127.0.0.1:$AUTH_PORT" >/dev/null 2>&1 && AUTH_LOGGED_IN=""
+
+write_remote "$WORK/remote-auth.yaml" "$WORK/cache-auth"
+
+# No credentials -> must fail (auth is actually enforced).
+if FLATTEN_REGISTRY_USERNAME="" FLATTEN_REGISTRY_PASSWORD="" \
+	"$FLATTEN_CTL" export --output "$WORK/auth-noauth.erofs" \
+	--config "$WORK/remote-auth.yaml" --no-progress "$AUTH_REF" >/dev/null 2>"$WORK/t4noauth.err"; then
+	bad "anonymous pull from auth registry unexpectedly succeeded"
 else
-	AUTH_PORT="$(free_port)"
-	mkdir -p "$WORK/zot-auth"
-	htpasswd -bBn "$AUTH_USER" "$AUTH_PASS" >"$WORK/htpasswd" 2>/dev/null
-	start_zot "$WORK/zot-auth" "$AUTH_PORT" "$WORK/htpasswd" || bad "auth zot start"
-
-	AUTH_REF="127.0.0.1:$AUTH_PORT/e2e/app:v1"
-	docker login "127.0.0.1:$AUTH_PORT" -u "$AUTH_USER" --password-stdin <<<"$AUTH_PASS" >/dev/null 2>&1 \
-		&& AUTH_LOGGED_IN="127.0.0.1:$AUTH_PORT" || bad "docker login to auth zot"
-	seed "$E2E_IMAGE" "$AUTH_REF" || bad "seed auth zot"
-	docker logout "127.0.0.1:$AUTH_PORT" >/dev/null 2>&1 && AUTH_LOGGED_IN=""
-
-	write_remote "$WORK/remote-auth.yaml" "$WORK/cache-auth"
-
-	# No credentials -> must fail (auth is actually enforced).
-	if FLATTEN_REGISTRY_USERNAME="" FLATTEN_REGISTRY_PASSWORD="" \
-		"$FLATTEN_CTL" export --output "$WORK/auth-noauth.erofs" \
-		--config "$WORK/remote-auth.yaml" --no-progress "$AUTH_REF" >/dev/null 2>"$WORK/t4noauth.err"; then
-		bad "anonymous pull from auth registry unexpectedly succeeded"
-	else
-		ok "anonymous pull rejected by the authed registry"
-	fi
-
-	# With credentials -> full upload + referrer flow succeeds.
-	ID4="$(FLATTEN_REGISTRY_USERNAME="$AUTH_USER" FLATTEN_REGISTRY_PASSWORD="$AUTH_PASS" \
-		MANIFEST_KEY="$MANIFEST_KEY_A" "$FLATTEN_CTL" export --upload --with-referer \
-		--manifest-config "$WORK/manifest.yaml" --config "$WORK/remote-auth.yaml" "$AUTH_REF" 2>"$WORK/t4.err")" || {
-		echo "authed run failed:" >&2
-		cat "$WORK/t4.err" >&2
-		bad "authed upload+referer"
-	}
-	is_hex64 "$ID4" && ok "credentialed pull + flatten + upload + referer succeeded ($ID4)" || bad "authed run: not a 64-hex id ('$ID4')"
+	ok "anonymous pull rejected by the authed registry"
 fi
+
+# With credentials -> full upload + referrer flow succeeds.
+ID4="$(FLATTEN_REGISTRY_USERNAME="$AUTH_USER" FLATTEN_REGISTRY_PASSWORD="$AUTH_PASS" \
+	MANIFEST_KEY="$MANIFEST_KEY_A" "$FLATTEN_CTL" export --upload --with-referer \
+	--manifest-config "$WORK/manifest.yaml" --config "$WORK/remote-auth.yaml" "$AUTH_REF" 2>"$WORK/t4.err")" || {
+	echo "authed run failed:" >&2
+	cat "$WORK/t4.err" >&2
+	bad "authed upload+referer"
+}
+is_hex64 "$ID4" && ok "credentialed pull + flatten + upload + referer succeeded ($ID4)" || bad "authed run: not a 64-hex id ('$ID4')"
 
 # --------------------------------------------------------------------------
 # summary

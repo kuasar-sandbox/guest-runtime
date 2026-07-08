@@ -46,8 +46,9 @@ make build TARGET_ARCH=aarch64
 
 跨仓发布由 `orchestrator/release-builder` 编排:
 
-- `guest-runtime-<version>-linux-<arch>.tar.gz`:包含 `flatten-ctl`、erofs tools、
-  `envd`、本仓文档和 flatten e2e。
+- `guest-runtime-<version>-linux-<arch>.tar.gz`:包含 `flatten-ctl`、
+  `mkfs.erofs`、本仓文档和 flatten e2e。`envd` 只随 runtime 镜像内置,
+  `fsck.erofs` 只作为源码树诊断/测试辅助产物。
 - `sandbox-runtime-<arch>-<version>.tar.gz`:runtime 镜像专用包,包含版本化
   `.bundle` 文件和 `bin/sandbox-runtime.erofs` 兼容别名。
 - `vmlinux-<arch>-<version>.tar.gz`:guest kernel 专用包,包含版本化 kernel 文件

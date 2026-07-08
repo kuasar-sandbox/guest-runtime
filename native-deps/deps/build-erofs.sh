@@ -2,11 +2,11 @@
 #
 # Build mkfs.erofs + fsck.erofs (no compression, no fuse) into $BINDIR.
 # mkfs.erofs sits alongside flatten-ctl (it locates mkfs.erofs via its own binary
-# directory when MKFS_EROFS_PATH is unset); fsck.erofs ships with the native
-# dependency set for diagnostics and release artifact inspection.
+# directory when MKFS_EROFS_PATH is unset); fsck.erofs stays in the native
+# dependency build output as a source-tree diagnostic/test helper.
 #
-# Both are TARGET-ARCH binaries (not host tools): they ship in the release tarball
-# for the target they run on. Cross-compilation uses CROSS_PREFIX for the C toolchain.
+# Both are TARGET-ARCH binaries (not host tools). Component release packages only
+# need mkfs.erofs; cross-compilation uses CROSS_PREFIX for the C toolchain.
 #
 # STATIC linking is required, not cosmetic: mkfs.erofs rides the builder guest
 # runtime (/opt/sandbox-runtime/bin, projected into ANY app rootfs — empty ones

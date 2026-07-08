@@ -24,7 +24,7 @@ native-deps 目录的构建工作流:从上游源码构建 kuasar-sandbox 平台
 
 | 产物 | 上游(pin) | 本仓输入 | 消费方 |
 |---|---|---|---|
-| `mkfs.erofs` `fsck.erofs` | erofs-utils v1.9.1 | — | `accelerator`(展平)、`guest-runtime`(打 guest erofs)、发布包诊断 / accelerator 测试 |
+| `mkfs.erofs` `fsck.erofs` | erofs-utils v1.9.1 | — | `accelerator`(展平)、`guest-runtime`(打 guest erofs)、源码树诊断 / accelerator 测试 |
 | `vmlinux` | linux 6.1.169(LTS,cdn.kernel.org) | `deps/linux-patches/`(1 个)+ `deps/vmlinux/*.config` | `sandboxer`/`sandbox-ctl`(guest 内核) |
 | `envd` | e2b-dev/infra 2026.22(发布 tarball) | — | `guest-runtime`(注入 `sandbox-runtime.erofs`) |
 
@@ -204,5 +204,5 @@ WSL2 的 `/mnt/<drive>/`(DrvFs)上每个小文件有 5-10 倍 I/O 开销,而内�
 - [`../../docs/vmlinux.md`](../../docs/vmlinux.md) —— guest 内核配置体系、架构差异与关键
   决策(随发布包)。
 - `orchestrator/release-builder/Makefile` + `orchestrator/release-builder/scripts/release.sh`
-  —— 平台级聚合构建与发布打包;本目录产物经
+  —— 平台级聚合构建与发布打包;本目录的运行期必需产物经
   `orchestrator/release-builder/scripts/bin-inputs.manifest` 收集进共享 `bin/`。

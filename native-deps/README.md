@@ -10,7 +10,7 @@
 | 产物 | 来源 | 消费方 |
 |---|---|---|
 | `mkfs.erofs` | erofs-utils v1.9.1 | `accelerator`(展平)、`guest-runtime`(打 guest runtime 镜像) |
-| `fsck.erofs` | erofs-utils v1.9.1 | 发布包诊断与 accelerator EROFS 内容断言测试 |
+| `fsck.erofs` | erofs-utils v1.9.1 | 源码树诊断与 accelerator EROFS 内容断言测试 |
 | `vmlinux` | Linux 6.1.169 + `deps/linux-patches` + `deps/vmlinux/*.config` | `sandboxer`/`sandbox-ctl`(guest 内核) |
 | `envd` | e2b-dev/infra 发布 tarball(tag `2026.22`) | `guest-runtime`(注入 `sandbox-runtime.erofs` 的 guest agent) |
 
@@ -22,7 +22,7 @@ accelerator 仓内构建,不在此处。
 
 | 路径 | 角色 |
 |---|---|
-| `deps/build-{erofs,vmlinux,envd}.sh` | 构建脚本(vmlinux 为 STAGE 多阶段 dispatcher) |
+| `deps/build-{erofs,vmlinux,envd}.sh` | 源码构建脚本(vmlinux 为 STAGE 多阶段 dispatcher) |
 | `deps/common.sh` | tarball 下载 / 缓存 / 解压共享逻辑 |
 | `deps/linux-patches/` | guest 内核补丁(1 个,arch-neutral) |
 | `deps/vmlinux/*.config` | 内核 defconfig 片段(common + per-arch) |
