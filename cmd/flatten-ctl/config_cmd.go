@@ -60,8 +60,5 @@ cache:
   dir: ""                  # persistent blob cache dir ("" -> ephemeral, removed after the run)
   max_size: "10GiB"        # cache cap ("" -> default, "0" -> unlimited)
 referer:
-  enabled: false           # default-enable the idempotent OCI-Referrers flow (= --with-referer)
-  desc: ""                 # public owner descriptor (annotation)
-  key: ""                  # HMAC message paired with the customer key (defaults to desc)
-  validity: ""             # optional Go duration -> referrer expiry
+  validity: ""             # optional Go duration for referer put expiry; --validity overrides
 `

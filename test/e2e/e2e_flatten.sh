@@ -36,6 +36,8 @@ E2E_IMAGE="${E2E_IMAGE:-python:3.12-alpine}"
 # 32-byte hex customer key — also the referrer owner HMAC key. Test fixture.
 MANIFEST_KEY_A="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 MANIFEST_KEY_B="fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+OWNER_A="owner-a e2e-owner"
+OWNER_B="owner-b e2e-owner"
 AUTH_USER="e2euser"
 AUTH_PASS="e2epass"
 
@@ -59,6 +61,8 @@ skip() {
 	exit 0
 }
 have() { command -v "$1" >/dev/null 2>&1; }
+json_bool_true() { grep -q "\"$2\":true" "$1"; }
+json_string() { sed -n "s/.*\"$2\":\"\\([^\"]*\\)\".*/\\1/p" "$1"; }
 
 # port_free PORT -> 0 if nothing is listening on 127.0.0.1:PORT
 port_free() { ! (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null; }
@@ -219,8 +223,6 @@ cache:
   dir: $2
   max_size: 2GiB
 referer:
-  desc: e2e-owner
-  key: e2e-owner
   validity: 24h
 EOF
 }
@@ -252,26 +254,41 @@ else
 fi
 
 # ==========================================================================
-# TEST 2 — upload + --with-referer, idempotent skip, real Referrers API
+# TEST 2 — referer lookup + upload + put, idempotent skip, real Referrers API
 # ==========================================================================
-log "TEST 2: upload + --with-referer (idempotent)"
-ID1="$(MANIFEST_KEY="$MANIFEST_KEY_A" "$FLATTEN_CTL" export --upload --with-referer \
-	--manifest-config "$WORK/manifest.yaml" --config "$WORK/remote.yaml" "$REF" 2>"$WORK/t2a.err")" || {
-	echo "first --with-referer run failed:" >&2
-	cat "$WORK/t2a.err" >&2
-	bad "first upload+referer"
+log "TEST 2: referer lookup + upload + put (idempotent)"
+"$FLATTEN_CTL" referer lookup --json --owner "$OWNER_A" --config "$WORK/remote.yaml" "$REF" >"$WORK/t2lookup1.json" 2>"$WORK/t2lookup1.err" || {
+	echo "first referer lookup failed:" >&2
+	cat "$WORK/t2lookup1.err" >&2
+	bad "first referer lookup"
 }
-is_hex64 "$ID1" && ok "1st run printed manifest id ($ID1)" || bad "1st run: not a 64-hex id ('$ID1')"
-grep -qi "referrer written" "$WORK/t2a.err" && ok "1st run wrote a referrer" || bad "1st run: no 'referrer written'"
+json_bool_true "$WORK/t2lookup1.json" supported && ok "zot reports Referrers support" || bad "lookup did not report supported=true"
+if json_bool_true "$WORK/t2lookup1.json" hit; then bad "initial lookup unexpectedly hit"; else ok "initial lookup missed"; fi
+SUBJECT_REF="$(json_string "$WORK/t2lookup1.json" subject)"
+[[ "$SUBJECT_REF" == *@sha256:* ]] && ok "lookup returned subject $SUBJECT_REF" || bad "lookup missing subject ('$SUBJECT_REF')"
 
-ID2="$(MANIFEST_KEY="$MANIFEST_KEY_A" "$FLATTEN_CTL" export --upload --with-referer \
-	--manifest-config "$WORK/manifest.yaml" --config "$WORK/remote.yaml" "$REF" 2>"$WORK/t2b.err")" || {
-	echo "second --with-referer run failed:" >&2
-	cat "$WORK/t2b.err" >&2
-	bad "second upload+referer"
+ID1="$(MANIFEST_KEY="$MANIFEST_KEY_A" "$FLATTEN_CTL" export --upload \
+	--manifest-config "$WORK/manifest.yaml" --config "$WORK/remote.yaml" "$REF" 2>"$WORK/t2a.err")" || {
+	echo "export upload run failed:" >&2
+	cat "$WORK/t2a.err" >&2
+	bad "export upload"
 }
+is_hex64 "$ID1" && ok "export printed manifest id ($ID1)" || bad "export: not a 64-hex id ('$ID1')"
+"$FLATTEN_CTL" referer put --owner "$OWNER_A" --manifest-id "$ID1" --config "$WORK/remote.yaml" "$SUBJECT_REF" >"$WORK/t2put.out" 2>"$WORK/t2put.err" || {
+	echo "referer put failed:" >&2
+	cat "$WORK/t2put.err" >&2
+	bad "referer put"
+}
+grep -q "written" "$WORK/t2put.out" && ok "referer put wrote owner/id annotation" || bad "referer put did not report written"
+
+"$FLATTEN_CTL" referer lookup --json --owner "$OWNER_A" --config "$WORK/remote.yaml" "$REF" >"$WORK/t2lookup2.json" 2>"$WORK/t2lookup2.err" || {
+	echo "second referer lookup failed:" >&2
+	cat "$WORK/t2lookup2.err" >&2
+	bad "second referer lookup"
+}
+ID2="$(json_string "$WORK/t2lookup2.json" manifest_id)"
 [ "$ID2" = "$ID1" ] && ok "2nd run reused the same manifest id (deterministic)" || bad "2nd run id differs ('$ID2' != '$ID1')"
-grep -qi "referrer hit" "$WORK/t2b.err" && ok "2nd run hit the referrer and skipped re-export" || bad "2nd run: no 'referrer hit' (idempotent skip failed)"
+json_bool_true "$WORK/t2lookup2.json" hit && ok "2nd lookup hit the referrer and can skip re-export" || bad "2nd lookup did not hit"
 
 # Direct check of zot's OCI 1.1 Referrers API for the subject.
 if [ "$SUBJECT_DIGEST" != "${SUBJECT_DIGEST#sha256:}" ]; then
@@ -288,14 +305,23 @@ fi
 # ==========================================================================
 log "TEST 3: owner isolation (different MANIFEST_KEY)"
 write_remote "$WORK/remote-b.yaml" "$WORK/cache-b"
-ID3="$(MANIFEST_KEY="$MANIFEST_KEY_B" "$FLATTEN_CTL" export --upload --with-referer \
+"$FLATTEN_CTL" referer lookup --json --owner "$OWNER_B" --config "$WORK/remote-b.yaml" "$REF" >"$WORK/t3lookup.json" 2>"$WORK/t3lookup.err" || {
+	echo "owner-isolation lookup failed:" >&2
+	cat "$WORK/t3lookup.err" >&2
+	bad "owner-isolation lookup"
+}
+if json_bool_true "$WORK/t3lookup.json" hit; then bad "different owner unexpectedly hit an existing referrer"; else ok "different owner did not match existing referrer"; fi
+ID3="$(MANIFEST_KEY="$MANIFEST_KEY_B" "$FLATTEN_CTL" export --upload \
 	--manifest-config "$WORK/manifest.yaml" --config "$WORK/remote-b.yaml" "$REF" 2>"$WORK/t3.err")" || {
 	echo "owner-isolation run failed:" >&2
 	cat "$WORK/t3.err" >&2
 	bad "owner-isolation run"
 }
-grep -qi "referrer written" "$WORK/t3.err" && ok "different owner did not match -> re-exported + wrote its own referrer" || bad "different owner unexpectedly hit an existing referrer"
 [ -n "$ID3" ] && [ "$ID3" != "$ID1" ] && ok "different key -> different manifest id" || bad "different key produced same id ('$ID3')"
+"$FLATTEN_CTL" referer put --owner "$OWNER_B" --manifest-id "$ID3" --config "$WORK/remote-b.yaml" "$SUBJECT_REF" >/dev/null 2>"$WORK/t3put.err" || {
+	cat "$WORK/t3put.err" >&2
+	bad "owner-isolation referer put"
+}
 
 # ==========================================================================
 # TEST 4 — basic-auth registry: credentials via FLATTEN_REGISTRY_* env
@@ -328,14 +354,28 @@ else
 fi
 
 # With credentials -> full upload + referrer flow succeeds.
+FLATTEN_REGISTRY_USERNAME="$AUTH_USER" FLATTEN_REGISTRY_PASSWORD="$AUTH_PASS" \
+	"$FLATTEN_CTL" referer lookup --json --owner "$OWNER_A" --config "$WORK/remote-auth.yaml" "$AUTH_REF" >"$WORK/t4lookup.json" 2>"$WORK/t4lookup.err" || {
+	echo "authed lookup failed:" >&2
+	cat "$WORK/t4lookup.err" >&2
+	bad "authed referer lookup"
+}
+AUTH_SUBJECT_REF="$(json_string "$WORK/t4lookup.json" subject)"
 ID4="$(FLATTEN_REGISTRY_USERNAME="$AUTH_USER" FLATTEN_REGISTRY_PASSWORD="$AUTH_PASS" \
-	MANIFEST_KEY="$MANIFEST_KEY_A" "$FLATTEN_CTL" export --upload --with-referer \
+	MANIFEST_KEY="$MANIFEST_KEY_A" "$FLATTEN_CTL" export --upload \
 	--manifest-config "$WORK/manifest.yaml" --config "$WORK/remote-auth.yaml" "$AUTH_REF" 2>"$WORK/t4.err")" || {
 	echo "authed run failed:" >&2
 	cat "$WORK/t4.err" >&2
-	bad "authed upload+referer"
+	bad "authed upload"
 }
-is_hex64 "$ID4" && ok "credentialed pull + flatten + upload + referer succeeded ($ID4)" || bad "authed run: not a 64-hex id ('$ID4')"
+is_hex64 "$ID4" && ok "credentialed pull + flatten + upload succeeded ($ID4)" || bad "authed run: not a 64-hex id ('$ID4')"
+FLATTEN_REGISTRY_USERNAME="$AUTH_USER" FLATTEN_REGISTRY_PASSWORD="$AUTH_PASS" \
+	"$FLATTEN_CTL" referer put --owner "$OWNER_A" --manifest-id "$ID4" --config "$WORK/remote-auth.yaml" "$AUTH_SUBJECT_REF" >/dev/null 2>"$WORK/t4put.err" || {
+	echo "authed referer put failed:" >&2
+	cat "$WORK/t4put.err" >&2
+	bad "authed referer put"
+}
+ok "credentialed referer put succeeded"
 
 # --------------------------------------------------------------------------
 # summary

@@ -59,14 +59,15 @@ mkfs 层归一,不触碰源树)。**
 
 ## 2. 命令行接口
 
-六个子命令:`export`(展平为镜像工件,可选直接入库)、`info`(检视镜像工件 /
-`manifest://` 引用)、`cache`(检视/回收本地拉取缓存)、`config`(输出/校验
-flatten 配置)、`tar`(通用 tar 提取/封装)、`mountpoint`(自 bind 造挂载点,
+七个子命令:`export`(展平为镜像工件,可选直接入库)、`referer`(OCI Referrers
+lookup/put 原子操作)、`info`(检视镜像工件 / `manifest://` 引用)、`cache`
+(检视/回收本地拉取缓存)、`config`(输出/校验 flatten 配置)、`tar`(通用 tar 提取/封装)、`mountpoint`(自 bind 造挂载点,
 guest 内导出配套)。
 
 | 子命令 | 用途 |
 |--------|------|
-| `export` | registry 镜像 / docker-archive / rootfs 目录 → 确定性 EROFS 的 **tarstream 镜像工件**(条目 `image`,约定后缀 `.img`);`--upload` 时顺带 ingest 进 store 并打印 manifest key;`--with-referer` 经 Referrers 幂等跳过/回写(§2.4) |
+| `export` | registry 镜像 / docker-archive / rootfs 目录 → 确定性 EROFS 的 **tarstream 镜像工件**(条目 `image`,约定后缀 `.img`);`--upload` 时顺带 ingest 进 store 并打印 manifest key |
+| `referer` | `lookup` 查询源镜像是否已有可复用 manifest id;`put` 将宿主上传得到的 manifest id 回写到源 repo 的 OCI Referrers(§2.4) |
 | `info` | 读镜像工件(经信封)的 EROFS superblock + 末尾 ZIP 里的 OCI runtime config 并打印 |
 | `cache` | `cache info` 看缓存占用、`cache gc` 按 LRU 回收到上限(§2.5) |
 | `config` | 输出规范化的 flatten 配置(`--config`/`FLATTEN_CONFIG`,加载即校验),或 `--template` 骨架;`-o <file>` 写文件(默认 stdout) |
@@ -87,9 +88,8 @@ guest 内导出配套)。
 flag 在首个非 flag 实参处停止解析)。
 
 展平保留镜像内文件的属主与权限位(§4.3),因此 `export` 需要 root 或
-`CAP_CHOWN`;启动时即预检,避免昂贵的拉取+解包后才在首层 chown 上失败
-(`--with-referer` 命中即复用 manifest id、不展平,无需特权)。`info`/`cache`/`config`
-不需要特权。
+`CAP_CHOWN`;启动时即预检,避免昂贵的拉取+解包后才在首层 chown 上失败。
+`referer`/`info`/`cache`/`config` 不需要特权。
 
 进度与诊断一律走 stderr,stdout 只承载交付物(镜像工件流 / manifest key /
 `--print-digest` 的 digest);`export`/`cache gc` 经 `--no-progress` 关闭。
@@ -119,9 +119,6 @@ flatten-ctl export [flags] <ref|path|->
   # 远程 registry 源(详见 §2.4)
   --print-digest          stdout 打印解析后的源镜像 digest(repo@sha256:..);与 --output - 互斥
   --registry / --archive  强制把位置参数当 registry 引用 / 本地文件(消歧)
-  --with-referer          强制启用幂等 Referrers 流(亦可由配置 referer.enabled 默认开启);
-                          命中则复用 manifest id 跳过重导,否则导出后回写(需 --upload;§2.4)
-
   # rootfs 目录源(位置参数是本地目录时;见下文)
   --skip <rel>            排除 rootfs 内的该路径(节点连同子树,mkfs --exclude-path 语义);可重复
   --skip-mounts           排除严格位于 rootfs 之下的全部挂载点(/proc/self/mountinfo)
@@ -146,9 +143,14 @@ docker save myapp:v1 | flatten-ctl export --output my-app.img
 # 本地 docker-archive 文件(位置参数在 flags 之后)
 flatten-ctl export --output my-app.img ./my-app.tar
 
-# 幂等:已展平过即复用 manifest id,跳过拉取+展平+上传(或在 flatten.yaml 设 referer.enabled: true 省去 --with-referer)
-flatten-ctl export --upload --with-referer --manifest-config manifest.yaml \
-    --config flatten.yaml registry.example.com/team/app:v1 > app.key
+# Referrers 原子流程:lookup 命中则宿主直接复用 manifest id;miss 后由宿主 export+store,
+# 再把得到的 manifest id 回写
+flatten-ctl referer lookup --json --owner "$OWNER" --config flatten.yaml \
+    registry.example.com/team/app:v1
+flatten-ctl export --output app.img --config flatten.yaml registry.example.com/team/app:v1
+APP_KEY=$(manifest-ctl store --manifest-config manifest.yaml app.img)
+flatten-ctl referer put --owner "$OWNER" --manifest-id "$APP_KEY" --config flatten.yaml \
+    registry.example.com/team/app@sha256:…
 
 # /tmp 不够大时在 flatten.yaml 设 tmpdir: /var/tmp,再 --config flatten.yaml
 flatten-ctl export --output big.img --config flatten.yaml ./big.tar
@@ -160,7 +162,7 @@ flatten-ctl export --output big.img --config flatten.yaml ./big.tar
 `--skip` / `--skip-mounts` 排除的路径**节点整体消失**(目录本身也不在镜像里);
 输出文件落在 rootfs 内时自动排除自身。导出 `/` 必须带 `--skip-mounts`(否则会
 走读 /proc、/sys)。registry 专属 flags(`--platform`/`--print-digest`/
-`--registry`/`--archive`/`--with-referer`)与目录源互斥。
+`--registry`/`--archive`)与目录源互斥。
 
 ```bash
 # 把一台机器/一个 guest 的根做成沙箱镜像(挂载点全部剔除)
@@ -262,11 +264,8 @@ tls:                           # HTTPS 证书校验(registry 与 CDN blob 重定
 cache:
   dir: ""                      # OCI-layout 持久缓存根;空(默认)= 临时缓存(tmpdir 下,跑完清理)
   max_size: 10GiB              # 上限,超出按 LRU 回收;"0" = 不限,仅手动 cache gc
-referer:                       # --with-referer / referer.enabled 用(见下)
-  enabled: false               # 置 true 默认启用幂等 Referrers 流(等价命令行 --with-referer)
-  desc: acme-prod              # 公开 owner 描述
-  key:  acme-prod              # HMAC 消息,默认 == desc
-  validity: 720h               # 可选;写入 valid_at 的过期段
+referer:
+  validity: 720h               # 可选;referer put 写入 valid_at 的过期段
 ```
 
 artifact_type 固定为常量 `application/vnd.kuasar.flatten-manifest.v1`(不可配置,保证跨工具/版本一致)。
@@ -296,22 +295,31 @@ grace 期保护近期写入的 blob 不被并发拉取误删。`cache.dir` 指�
 解析到的 `repo@sha256:..` 打到 stderr(`--no-progress` 关闭),`--print-digest` 另打到
 stdout。复现性以 digest 为准:对 tag 只与其当前指向一样稳,对 digest 永远稳定。
 
-#### Referrers 回写与幂等跳过(`--with-referer`)
+#### Referrers 原子操作(`referer lookup` / `referer put`)
 
 展平产出的 manifest id(= `--upload` 入库的 manifest 内容键)可经 **OCI Referrers API**
-回写到**源镜像所在 repo**,作为 registry 侧、按 owner 作用域的去重备忘,让重复 `export`
-直接复用、跳过拉取+展平+上传。
+回写到**源镜像所在 repo**,作为 registry 侧、按 owner 作用域的去重备忘。`flatten-ctl`
+只暴露 lookup/put 原子能力;是否跳过 export、何时 upload、writeback 失败是否中止,由
+调用方(如 `node-ctl run-builder`)编排。
 
-启用 `--with-referer`(需同时给 `--upload` 与 manifest 配置;交付物是 stdout 的
-manifest key,故与 `--output` / `--print-digest` 互斥):
+```
+flatten-ctl referer lookup --json --owner <owner-token> [--config <p>] [--platform <p>] [--insecure] <ref>
+flatten-ctl referer put --owner <owner-token> --manifest-id <64hex> [--validity <dur>] [--config <p>] [--insecure] <subject>
+```
 
-1. 解析源 → 平台镜像 digest `D`;
-2. `Referrers(repo@D)` 取各 referrer 注解(描述符不带注解的 tag-schema 回落,先按
-   `artifact_type` 过滤再回读其 manifest),匹配 `owner` 且未过期(`valid_at`)→ 直接
-   打印其 `id`,**不拉层 / 不展平 / 不上传**;查询失败仅告警并回退完整导出;
-3. 未命中 → 拉取+展平+ingest 得 manifest key → 构造 referrer artifact(OCI image
-   manifest:subject=`D`、artifact type 经 config media type 承载、注解
-   `owner`/`id`/`valid_at`)推回源 repo → 打印 key。
+`lookup` 解析源 → 平台镜像 digest `D`,直接探测 OCI 1.1 Referrers API。输出:
+
+```json
+{"supported":true,"subject":"repo/app@sha256:...","hit":true,"manifest_id":"..."}
+```
+
+- `supported=false`:registry 不支持 Referrers API,调用方可按策略 fallback 或失败;
+- `supported=true, hit=false`:支持但未命中,调用方继续 `export` 并在宿主侧上传;
+- `supported=true, hit=true`:返回的 `manifest_id` 可由宿主校验后直接复用,无需拉取/展平。
+
+`put` 构造 referrer artifact(OCI image manifest:subject=`D`、artifact type 经 config
+media type 承载、注解 `owner`/`id`/`valid_at`)并推回源 repo。`put` 需要源 repo push
+权限;失败由调用方决定是否使构建失败。
 
 referrer 注解:
 
@@ -321,12 +329,12 @@ vnd.kuasar.flatten-manifest.id       = <manifest_id>                        # in
 vnd.kuasar.flatten-manifest.valid_at = <import RFC3339>[ <expiry RFC3339>]
 ```
 
-其中 `hmac = HMAC-SHA256(key = 客户秘钥 MANIFEST_KEY, msg = referer.key)`——按
-(租户秘钥, referer key) 恒定、导出前即可算、无客户秘钥不可伪造,使不同租户在同一公有 base
-镜像上的 referrer 互不碰撞。
+其中 owner token 通常由宿主计算:`hmac = HMAC-SHA256(key = 客户秘钥 MANIFEST_KEY,
+msg = referer.key)`,注解值为 `<hmac-hex> <referer_desc>`。guest 命令只接收
+`--owner`,不需要也不应接收 `MANIFEST_KEY`。
 
-**前提与注意**:OCI 规范要求 referrer 与 subject 同 repo → `--with-referer` 需对**源
-repo 有 push 权限**(面向租户自有 registry;对只读上游写不进会**硬失败**)。referrer
+**前提与注意**:OCI 规范要求 referrer 与 subject 同 repo → `referer put` 需对**源
+repo 有 push 权限**(面向租户自有 registry;对只读上游写不进会失败)。referrer
 artifact 含时间戳,本身每次不同,但展平产物 / manifest id 仍确定。对公开 base 镜像,
 referrer(owner token / id / 时间)对能读该 repo 者可见——owner 经 HMAC、id 为不透明内容
 键,但"某 owner 在某时刻展平过该镜像"这一事实会暴露。

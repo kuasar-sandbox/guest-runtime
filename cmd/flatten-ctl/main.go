@@ -4,7 +4,8 @@
 // Subcommands:
 //
 //	flatten-ctl export   [--output <path|->] [--config <path>]
-//	                     [--manifest-config <path>] [--upload] [--with-referer]  <path|->
+//	                     [--manifest-config <path>] [--upload]  <path|->
+//	flatten-ctl referer  lookup | put
 //	flatten-ctl info     [--json] [--manifest-config <path>]  <path|manifest://hex>
 //	flatten-ctl cache    gc | info
 //	flatten-ctl config   [--config <path>] [--template] [-o <file>]
@@ -59,6 +60,8 @@ func main() {
 	switch os.Args[1] {
 	case "export":
 		cmdExport(os.Args[2:])
+	case "referer":
+		cmdReferer(os.Args[2:])
 	case "info":
 		cmdInfo(os.Args[2:])
 	case "cache":
@@ -83,6 +86,7 @@ func printUsage() {
 
 Commands:
   export   Flatten OCI/docker-archive or a registry image → EROFS (optionally upload).
+  referer  Lookup or write OCI Referrers records for flattened image manifests.
   info     Print EROFS metadata + OCI runtime config.
   cache    Inspect or garbage-collect the registry blob cache.
   config   Emit/validate a flatten config (FLATTEN_CONFIG): tmpdir/platform/cache/referer.
@@ -108,7 +112,6 @@ func cmdExport(args []string) {
 	printDigest := fs.Bool("print-digest", false, "print the resolved source image digest (repo@sha256:...) on stdout (registry sources; incompatible with --output -)")
 	forceRegistry := fs.Bool("registry", false, "force the positional arg to be a registry reference")
 	forceArchive := fs.Bool("archive", false, "force the positional arg to be a local docker-archive")
-	withReferer := fs.Bool("with-referer", false, "force the idempotent OCI-Referrers flow (also enableable via referer.enabled in --config); requires --upload")
 	var skips stringList
 	fs.Var(&skips, "skip", "rootfs-dir source: exclude this path (relative to the rootfs, node and subtree); repeatable")
 	skipMounts := fs.Bool("skip-mounts", false, "rootfs-dir source: exclude every mount point under the rootfs")
@@ -143,10 +146,6 @@ func cmdExport(args []string) {
 			fatal("tmpdir: %v", err)
 		}
 	}
-	// referer.enabled in a shared config is a registry-source concern;
-	// a rootfs-directory source ignores it (only the explicit flag errors).
-	withRef := !dirSrc && (*withReferer || cfg.Referer.Enabled)
-
 	if !*upload && (*output == "" || *output == "/dev/null") {
 		fatal("--output is required when --upload is not set")
 	}
@@ -156,8 +155,8 @@ func cmdExport(args []string) {
 	if dirSrc {
 		for flagName, set := range map[string]bool{
 			"--registry": *forceRegistry, "--archive": *forceArchive,
-			"--print-digest": *printDigest, "--with-referer": *withReferer,
-			"--platform": *platform != "",
+			"--print-digest": *printDigest,
+			"--platform":     *platform != "",
 		} {
 			if set {
 				fatal("%s does not apply to a rootfs-directory source", flagName)
@@ -172,26 +171,6 @@ func cmdExport(args []string) {
 	}
 	if *printDigest && *output == "-" {
 		fatal("--print-digest is incompatible with --output - (both write stdout)")
-	}
-
-	// The idempotent OCI-Referrers flow (--with-referer or referer.enabled): its
-	// deliverable is the manifest key on stdout, so it owns its own pull /
-	// flatten / ingest path and returns early.
-	if withRef {
-		if !remoteSrc {
-			fatal("--with-referer / referer.enabled applies only to registry sources")
-		}
-		if !*upload {
-			fatal("--with-referer / referer.enabled requires --upload")
-		}
-		if *output != "" {
-			fatal("--with-referer is incompatible with --output (deliverable is the manifest key)")
-		}
-		if *printDigest {
-			fatal("--with-referer is incompatible with --print-digest (stdout carries the manifest key)")
-		}
-		runReferrerExport(input, cfg, *manifestCfg, *noProgress)
-		return
 	}
 
 	// Preserving the source image's file ownership needs root/CAP_CHOWN
@@ -433,8 +412,7 @@ func runRemoteFlatten(ref, outputPath string, cfg *remote.Config, printDigest, n
 }
 
 // ingestEROFS uploads the EROFS at path into the content store via the
-// manifest ingester and returns the hex manifest key. Shared by the plain
-// --upload tail and the --with-referer flow.
+// manifest ingester and returns the hex manifest key.
 func ingestEROFS(path string, mcfg *manifest.Config, noProgress bool) (string, error) {
 	ing, err := mcfg.NewIngester(mcfg.IngestKeyFunc(), nil)
 	if err != nil {
@@ -462,107 +440,133 @@ func ingestEROFS(path string, mcfg *manifest.Config, noProgress bool) (string, e
 	return hex.EncodeToString(res.ManifestKey[:]), nil
 }
 
-// runReferrerExport implements --with-referer: resolve the source, look up an
-// existing flatten-manifest referrer for this owner and (on a hit) print its
-// manifest id without re-exporting; otherwise pull + flatten + ingest, then
-// write the referrer back to the source repo. Requires manifest config (for
-// the customer key / ingest) and push access to the source repo.
-func runReferrerExport(ref string, rcfg *remote.Config, manifestCfgPath string, noProgress bool) {
-	mcfg := loadManifestCfg(manifestCfgPath)
-	ck, err := mcfg.CustomerKey()
+// ---------------------------------------------------------------------------
+// referer
+// ---------------------------------------------------------------------------
+
+type refererLookupResult struct {
+	Supported  bool   `json:"supported"`
+	Subject    string `json:"subject"`
+	Hit        bool   `json:"hit"`
+	ManifestID string `json:"manifest_id,omitempty"`
+}
+
+type refererPutResult struct {
+	Subject    string `json:"subject"`
+	ManifestID string `json:"manifest_id"`
+	Written    bool   `json:"written"`
+}
+
+func cmdReferer(args []string) {
+	if len(args) < 1 {
+		fatal("usage: flatten-ctl referer <lookup|put> [flags]")
+	}
+	switch args[0] {
+	case "lookup":
+		cmdRefererLookup(args[1:])
+	case "put":
+		cmdRefererPut(args[1:])
+	default:
+		fatal("unknown referer command %q", args[0])
+	}
+}
+
+func cmdRefererLookup(args []string) {
+	fs := flag.NewFlagSet("referer lookup", flag.ExitOnError)
+	configPath := fs.String("config", "", "flatten config YAML (overrides FLATTEN_CONFIG env)")
+	platform := fs.String("platform", "", "override the pull platform (os/arch[/variant]) from the config")
+	owner := fs.String("owner", "", "precomputed owner annotation value")
+	asJSON := fs.Bool("json", false, "machine-readable JSON output")
+	insecure := fs.Bool("insecure", false, "allow plain-HTTP / skip-TLS registries (overrides the config)")
+	fs.Parse(args)
+	ref := fs.Arg(0)
+	if ref == "" || *owner == "" {
+		fatal("usage: flatten-ctl referer lookup --owner <owner> [--json] <registry-ref>")
+	}
+	cfg, err := remote.LoadConfig(*configPath, flattenConfigEnv)
 	if err != nil {
 		fatal("%v", err)
 	}
-
+	if err := cfg.SetPlatform(*platform); err != nil {
+		fatal("%v", err)
+	}
+	if *insecure {
+		cfg.Insecure = true
+	}
 	ctx := context.Background()
-	res, err := rcfg.Resolve(ctx, ref)
+	res, err := cfg.Resolve(ctx, ref)
 	if err != nil {
 		fatal("%v", err)
 	}
-	if !noProgress {
-		fmt.Fprintf(os.Stderr, "resolved: %s\n", res.Digest)
+	id, supported, hit, err := cfg.FindReferrerByOwner(ctx, res, *owner)
+	if err != nil {
+		fatal("%v", err)
 	}
-
-	// Idempotent skip: a matching, unexpired referrer means the manifest was
-	// already produced — reuse its id, no pull/flatten/upload.
-	if id, ok, err := rcfg.FindReferrer(ctx, res, ck[:]); err != nil {
-		if !noProgress {
-			fmt.Fprintf(os.Stderr, "referrer lookup failed (%v); proceeding with export\n", err)
+	out := refererLookupResult{
+		Supported:  supported,
+		Subject:    res.Digest.String(),
+		Hit:        hit,
+		ManifestID: id,
+	}
+	if *asJSON {
+		if err := json.NewEncoder(os.Stdout).Encode(out); err != nil {
+			fatal("write json: %v", err)
 		}
-	} else if ok {
-		if !noProgress {
-			fmt.Fprintf(os.Stderr, "referrer hit: reusing manifest %s (skipped flatten+upload)\n", id)
-		}
-		fmt.Println(id)
 		return
 	}
+	switch {
+	case !supported:
+		fmt.Printf("unsupported %s\n", out.Subject)
+	case hit:
+		fmt.Println(id)
+	default:
+		fmt.Printf("miss %s\n", out.Subject)
+	}
+}
 
-	// Miss: pull + flatten + ingest, then write the referrer back. The flatten
-	// preserves image file ownership, so it needs root/CAP_CHOWN — check before
-	// the expensive pull rather than partway through the first layer's chown.
-	// (A referrer hit above returns without flattening and needs no privilege.)
-	if err := flatten.RequireOwnershipCap(); err != nil {
-		fatal("%v", err)
+func cmdRefererPut(args []string) {
+	fs := flag.NewFlagSet("referer put", flag.ExitOnError)
+	configPath := fs.String("config", "", "flatten config YAML (overrides FLATTEN_CONFIG env)")
+	platform := fs.String("platform", "", "override the pull platform (os/arch[/variant]) from the config")
+	owner := fs.String("owner", "", "precomputed owner annotation value")
+	manifestID := fs.String("manifest-id", "", "64-hex manifest id to write into the referrer annotation")
+	validity := fs.String("validity", "", "optional Go duration for referrer expiry")
+	asJSON := fs.Bool("json", false, "machine-readable JSON output")
+	insecure := fs.Bool("insecure", false, "allow plain-HTTP / skip-TLS registries (overrides the config)")
+	fs.Parse(args)
+	ref := fs.Arg(0)
+	if ref == "" || *owner == "" || *manifestID == "" {
+		fatal("usage: flatten-ctl referer put --owner <owner> --manifest-id <hex> <subject-ref>")
 	}
-	cache, cleanup, err := rcfg.OpenCache()
+	cfg, err := remote.LoadConfig(*configPath, flattenConfigEnv)
 	if err != nil {
 		fatal("%v", err)
 	}
-	defer cleanup()
-	rcfg.OnPullProgress = pullProgress(!noProgress)
-	src, err := rcfg.Pull(ctx, res, cache)
+	if err := cfg.SetPlatform(*platform); err != nil {
+		fatal("%v", err)
+	}
+	if *insecure {
+		cfg.Insecure = true
+	}
+	if *validity != "" {
+		cfg.Referer.Validity = *validity
+	}
+	ctx := context.Background()
+	res, err := cfg.Resolve(ctx, ref)
 	if err != nil {
 		fatal("%v", err)
 	}
-	tmpOut, err := os.CreateTemp(rcfg.TmpDir, "flatten-out-*.img")
-	if err != nil {
-		fatal("create temp output: %v", err)
-	}
-	tmpOut.Close()
-	defer os.Remove(tmpOut.Name())
-	opts := flatten.Options{TmpDir: rcfg.TmpDir, Progress: flattenProgress(!noProgress)}
-	if err := flatten.Build(src, tmpOut.Name(), opts); err != nil {
+	if err := cfg.PutReferrerByOwner(ctx, res, *manifestID, *owner); err != nil {
 		fatal("%v", err)
 	}
-	if err := cache.MaybeEvict(); err != nil && !noProgress {
-		fmt.Fprintf(os.Stderr, "cache gc warning: %v\n", err)
+	out := refererPutResult{Subject: res.Digest.String(), ManifestID: *manifestID, Written: true}
+	if *asJSON {
+		if err := json.NewEncoder(os.Stdout).Encode(out); err != nil {
+			fatal("write json: %v", err)
+		}
+		return
 	}
-	info, err := os.Stat(tmpOut.Name())
-	if err != nil {
-		fatal("stat output: %v", err)
-	}
-	if !noProgress {
-		fmt.Fprintf(os.Stderr, "EROFS image: %s\n", formatSize(info.Size()))
-	}
-
-	// Pack the raw erofs into a tarstream image artifact (the platform
-	// container) before ingest — ingestEROFS opens it via OpenTarStream, exactly
-	// as the --output/--upload path does (see packImageArtifact). Without this the
-	// referrer flow would ingest a bare erofs and fail "not a tarstream artifact".
-	artTmp, err := os.CreateTemp(rcfg.TmpDir, "flatten-image-*.img")
-	if err != nil {
-		fatal("create temp artifact: %v", err)
-	}
-	defer os.Remove(artTmp.Name())
-	if err := packImageArtifact(tmpOut.Name(), artTmp); err != nil {
-		artTmp.Close()
-		fatal("%v", err)
-	}
-	if err := artTmp.Close(); err != nil {
-		fatal("close artifact: %v", err)
-	}
-
-	key, err := ingestEROFS(artTmp.Name(), mcfg, noProgress)
-	if err != nil {
-		fatal("%v", err)
-	}
-	if err := rcfg.PutReferrer(ctx, res, key, ck[:]); err != nil {
-		fatal("%v", err) // hard fail (e.g. no push access to source repo) per design
-	}
-	if !noProgress {
-		fmt.Fprintf(os.Stderr, "referrer written: %s\n", res.Digest)
-	}
-	fmt.Println(key)
+	fmt.Printf("written %s %s\n", out.Subject, out.ManifestID)
 }
 
 // ---------------------------------------------------------------------------

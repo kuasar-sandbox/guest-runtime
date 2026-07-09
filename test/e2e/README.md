@@ -4,7 +4,7 @@ End-to-end test driving the real `flatten-ctl` binary against a real OCI 1.1
 registry ([zot](https://github.com/project-zot/zot)). It validates the remote
 path the unit tests can't: pulling from a registry over HTTP, flattening,
 ingesting into a store, writing the manifest referrer back via zot's real
-Referrers API, and skipping re-export on a second run. (The unit tests use an
+Referrers API, and proving a second lookup can skip re-export. (The unit tests use an
 in-memory ggcr registry that only does the tag-schema referrers fallback.)
 
 ## Run
@@ -25,8 +25,9 @@ prerequisites for local convenience.
 2. Seeds a locally-cached docker image into zot via `docker push`.
 3. Runs flatten-ctl and asserts:
    - pull + flatten + `info` produce a valid EROFS;
-   - `--upload --with-referer` prints a manifest id and writes a referrer;
-   - a second run reuses the same id and skips re-export (idempotent), proving
+   - `referer lookup` misses, `export --upload` prints a manifest id, and
+     `referer put` writes a referrer;
+   - a second lookup returns the same id and can skip re-export (idempotent), proving
      the round-trip through zot's real Referrers API;
    - a different customer key does not reuse the referrer (owner isolation);
    - a basic-auth registry rejects anonymous pulls and accepts credentialed
