@@ -314,8 +314,12 @@ flatten-ctl referer put --owner <owner-token> --manifest-id <64hex> [--validity 
 ```
 
 - `supported=false`:registry 不支持 Referrers API,调用方可按策略 fallback 或失败;
-- `supported=true, hit=false`:支持但未命中,调用方继续 `export` 并在宿主侧上传;
+- `supported=true, hit=false`:支持但没有 owner 匹配且格式有效、尚未过期的记录,
+  调用方继续 `export` 并在宿主侧上传;
 - `supported=true, hit=true`:返回的 `manifest_id` 可由宿主校验后直接复用,无需拉取/展平。
+
+`lookup` 严格校验 `valid_at`。缺失或格式错误的时间、未来的 import 时间、已经到期
+或早于 import 的 expiry 都作为 miss 跳过;存在多条有效记录时返回 import 时间最新者。
 
 `put` 构造 referrer artifact(OCI image manifest:subject=`D`、artifact type 经 config
 media type 承载、注解 `owner`/`id`/`valid_at`)并推回源 repo。`put` 需要源 repo push
