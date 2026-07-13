@@ -435,7 +435,6 @@ func ingestEROFS(path string, mcfg *manifest.Config, noProgress bool) (string, e
 	if !noProgress {
 		fmt.Fprintf(os.Stderr, "stored: %s (chunks stored=%d dedup=%d zero=%d)\n",
 			formatSize(int64(res.StoredBytes)), res.StoredChunks, res.DedupChunks, res.ZeroChunks)
-		fmt.Fprintf(os.Stderr, "generation: %s\n", res.Generation)
 	}
 	return hex.EncodeToString(res.ManifestKey[:]), nil
 }
