@@ -35,7 +35,7 @@ script_dir="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck disable=SC1091
 source "$script_dir/common.sh"
 
-: "${VERSITYGW_TARBALL:=https://github.com/versity/versitygw/archive/refs/tags/v1.5.0.tar.gz#versitygw-1.5.0.tar.gz}"
+: "${VERSITYGW_TARBALL:=https://codeload.github.com/versity/versitygw/tar.gz/refs/tags/v1.5.0#versitygw-1.5.0.tar.gz}"
 : "${VERSITYGW_TARBALL_SHA256:=}"
 : "${BUILD_DIR:=$(pwd)/build}"
 : "${BINDIR:=$(pwd)/bin}"

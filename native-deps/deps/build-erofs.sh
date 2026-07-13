@@ -33,7 +33,7 @@ script_dir="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck disable=SC1091
 source "$script_dir/common.sh"
 
-: "${EROFS_TARBALL:=https://github.com/erofs/erofs-utils/archive/refs/tags/v1.9.1.tar.gz#erofs-utils-v1.9.1.tar.gz}"
+: "${EROFS_TARBALL:=https://codeload.github.com/erofs/erofs-utils/tar.gz/refs/tags/v1.9.1#erofs-utils-v1.9.1.tar.gz}"
 : "${EROFS_TARBALL_SHA256:=}"
 : "${BUILD_DIR:=$(pwd)/build}"
 : "${BINDIR:=$(pwd)/bin}"

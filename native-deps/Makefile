@@ -60,13 +60,13 @@ ENVD_BIN      := $(abspath $(BINDIR)/envd)
 VERSITYGW_BIN := $(abspath $(BINDIR)/versitygw)
 
 # Upstream tarballs + optional SHA256 (scripts skip verify when empty).
-EROFS_TARBALL                   ?= https://github.com/erofs/erofs-utils/archive/refs/tags/v1.9.1.tar.gz\#erofs-utils-v1.9.1.tar.gz
+EROFS_TARBALL                   ?= https://codeload.github.com/erofs/erofs-utils/tar.gz/refs/tags/v1.9.1\#erofs-utils-v1.9.1.tar.gz
 EROFS_TARBALL_SHA256            ?=
 LINUX_TARBALL                   ?= https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.1.169.tar.gz
 LINUX_TARBALL_SHA256            ?=
-ENVD_TARBALL                    ?= https://github.com/e2b-dev/infra/archive/refs/tags/2026.22.tar.gz\#e2b-infra-2026.22.tar.gz
+ENVD_TARBALL                    ?= https://codeload.github.com/e2b-dev/infra/tar.gz/refs/tags/2026.22\#e2b-infra-2026.22.tar.gz
 ENVD_TARBALL_SHA256             ?=
-VERSITYGW_TARBALL               ?= https://github.com/versity/versitygw/archive/refs/tags/v1.5.0.tar.gz\#versitygw-1.5.0.tar.gz
+VERSITYGW_TARBALL               ?= https://codeload.github.com/versity/versitygw/tar.gz/refs/tags/v1.5.0\#versitygw-1.5.0.tar.gz
 VERSITYGW_TARBALL_SHA256        ?=
 
 # WSL2 + /mnt/<drive>/ detection: kernel tags itself "microsoft" and cwd is on
