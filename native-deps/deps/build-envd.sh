@@ -35,7 +35,7 @@ script_dir="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck disable=SC1091
 source "$script_dir/common.sh"
 
-: "${ENVD_TARBALL:=https://github.com/e2b-dev/infra/archive/refs/tags/2026.22.tar.gz#e2b-infra-2026.22.tar.gz}"
+: "${ENVD_TARBALL:=https://codeload.github.com/e2b-dev/infra/tar.gz/refs/tags/2026.22#e2b-infra-2026.22.tar.gz}"
 : "${ENVD_TARBALL_SHA256:=}"
 : "${BUILD_DIR:=$(pwd)/build}"
 : "${BINDIR:=$(pwd)/bin}"
