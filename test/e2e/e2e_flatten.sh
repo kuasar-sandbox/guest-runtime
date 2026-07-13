@@ -141,7 +141,7 @@ is_hex64() { [[ "$1" =~ ^[0-9a-f]{64}$ ]]; }
 # re-exec under sudo so the flattened rootfs keeps ownership (e.g. /home/<user>).
 if [ "$(id -u)" -ne 0 ]; then
 	command -v sudo >/dev/null 2>&1 || skip "not root and sudo unavailable (flatten preserves ownership; needs root)"
-	exec sudo -nE "$0" "$@"
+	exec sudo -nE bash "$0" "$@"
 fi
 log "preflight"
 have curl || skip "curl not found"
