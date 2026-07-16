@@ -61,11 +61,11 @@ VERSITYGW_BIN := $(abspath $(BINDIR)/versitygw)
 
 # Upstream tarballs + optional SHA256 (scripts skip verify when empty).
 EROFS_TARBALL                   ?= https://codeload.github.com/erofs/erofs-utils/tar.gz/refs/tags/v1.9.1\#erofs-utils-v1.9.1.tar.gz
-EROFS_TARBALL_SHA256            ?=
+EROFS_TARBALL_SHA256            ?= a9ef5ab67c4b8d2d3e9ed71f39cd008bda653142a720d8a395a36f1110d0c432
 LINUX_TARBALL                   ?= https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.1.169.tar.gz
-LINUX_TARBALL_SHA256            ?=
+LINUX_TARBALL_SHA256            ?= ab28b4ca2a2eca38b3da9aa33b231288168c3560bbc866359045f1c8f4d48d94
 ENVD_TARBALL                    ?= https://codeload.github.com/e2b-dev/infra/tar.gz/refs/tags/2026.22\#e2b-infra-2026.22.tar.gz
-ENVD_TARBALL_SHA256             ?=
+ENVD_TARBALL_SHA256             ?= 9e1e81f2963fda1805466c337cd0a33638182a15a66295fd19bba6b9c454d92c
 VERSITYGW_TARBALL               ?= https://codeload.github.com/versity/versitygw/tar.gz/refs/tags/v1.5.0\#versitygw-1.5.0.tar.gz
 VERSITYGW_TARBALL_SHA256        ?=
 
@@ -182,8 +182,12 @@ linux-patches-format:
 	STAGE=patches-format $(LINUX_INVOKE) bash deps/build-vmlinux.sh
 linux-build:
 	STAGE=build $(LINUX_INVOKE) bash deps/build-vmlinux.sh
-vmlinux: linux-patches-apply linux-build
+vmlinux: $(VMLINUX_BIN)
 	$(call link_bin,vmlinux)
+$(VMLINUX_BIN):
+	STAGE=fetch $(LINUX_INVOKE) bash deps/build-vmlinux.sh
+	STAGE=patches-apply $(LINUX_INVOKE) bash deps/build-vmlinux.sh
+	STAGE=build $(LINUX_INVOKE) bash deps/build-vmlinux.sh
 
 test:
 	bash -n deps/*.sh
