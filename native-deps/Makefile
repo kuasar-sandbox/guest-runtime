@@ -182,8 +182,12 @@ linux-patches-format:
 	STAGE=patches-format $(LINUX_INVOKE) bash deps/build-vmlinux.sh
 linux-build:
 	STAGE=build $(LINUX_INVOKE) bash deps/build-vmlinux.sh
-vmlinux: linux-patches-apply linux-build
+vmlinux: $(VMLINUX_BIN)
 	$(call link_bin,vmlinux)
+$(VMLINUX_BIN):
+	STAGE=fetch $(LINUX_INVOKE) bash deps/build-vmlinux.sh
+	STAGE=patches-apply $(LINUX_INVOKE) bash deps/build-vmlinux.sh
+	STAGE=build $(LINUX_INVOKE) bash deps/build-vmlinux.sh
 
 test:
 	bash -n deps/*.sh
