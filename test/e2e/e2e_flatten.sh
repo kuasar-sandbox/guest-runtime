@@ -328,7 +328,7 @@ ID3="$(MANIFEST_KEY="$MANIFEST_KEY_B" "$FLATTEN_CTL" export --upload \
 # ==========================================================================
 log "TEST 4: expired referrer filtering"
 EXPIRED_REF="127.0.0.1:$ZOT_PORT/e2e/expired:v1"
-EXPIRY_TTL_SECONDS=30
+EXPIRY_TTL_SECONDS=5
 seed "$E2E_IMAGE" "$EXPIRED_REF" || bad "seed expiry test image"
 "$FLATTEN_CTL" referer lookup --json --owner "$OWNER_A" --config "$WORK/remote.yaml" "$EXPIRED_REF" >"$WORK/t4lookup1.json" 2>"$WORK/t4lookup1.err" || {
 	cat "$WORK/t4lookup1.err" >&2
