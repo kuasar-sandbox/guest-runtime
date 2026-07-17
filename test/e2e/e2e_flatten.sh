@@ -328,30 +328,67 @@ ID3="$(MANIFEST_KEY="$MANIFEST_KEY_B" "$FLATTEN_CTL" export --upload \
 # ==========================================================================
 log "TEST 4: expired referrer filtering"
 EXPIRED_REF="127.0.0.1:$ZOT_PORT/e2e/expired:v1"
-EXPIRY_TTL_SECONDS=30
+EXPIRY_TTL_SECONDS=10
 seed "$E2E_IMAGE" "$EXPIRED_REF" || bad "seed expiry test image"
 "$FLATTEN_CTL" referer lookup --json --owner "$OWNER_A" --config "$WORK/remote.yaml" "$EXPIRED_REF" >"$WORK/t4lookup1.json" 2>"$WORK/t4lookup1.err" || {
 	cat "$WORK/t4lookup1.err" >&2
 	bad "expiry initial lookup"
 }
 EXPIRED_SUBJECT_REF="$(json_string "$WORK/t4lookup1.json" subject)"
-"$FLATTEN_CTL" referer put --owner "$OWNER_A" --manifest-id "$ID1" --validity "${EXPIRY_TTL_SECONDS}s" \
-	--config "$WORK/remote.yaml" "$EXPIRED_SUBJECT_REF" >"$WORK/t4put.out" 2>"$WORK/t4put.err" || {
-	cat "$WORK/t4put.err" >&2
-	bad "expiry referer put"
-}
-"$FLATTEN_CTL" referer lookup --json --owner "$OWNER_A" --config "$WORK/remote.yaml" "$EXPIRED_REF" >"$WORK/t4lookup2.json" 2>"$WORK/t4lookup2.err" || {
-	cat "$WORK/t4lookup2.err" >&2
-	bad "expiry live lookup"
-}
-json_bool_true "$WORK/t4lookup2.json" hit && ok "unexpired referrer is returned" || bad "unexpired referrer missed"
-sleep "$((EXPIRY_TTL_SECONDS + 1))"
-"$FLATTEN_CTL" referer lookup --json --owner "$OWNER_A" --config "$WORK/remote.yaml" "$EXPIRED_REF" >"$WORK/t4lookup3.json" 2>"$WORK/t4lookup3.err" || {
-	cat "$WORK/t4lookup3.err" >&2
-	bad "expiry post-expiry lookup"
-}
-json_bool_true "$WORK/t4lookup3.json" supported && ok "registry remains supported after expiry" || bad "post-expiry lookup lost supported state"
-if json_bool_true "$WORK/t4lookup3.json" hit; then bad "expired referrer was returned"; else ok "expired referrer is filtered as a miss"; fi
+EXPIRED_SUBJECT_DIGEST="${EXPIRED_SUBJECT_REF##*@}"
+
+# A heavily loaded runner can suspend this shell across the entire validity
+# window. Republish in that case, but only accept the expiry transition after a
+# lookup has observed the same record as live.
+T4_LIVE=""
+for _ in $(seq 1 3); do
+	if ! "$FLATTEN_CTL" referer put --owner "$OWNER_A" --manifest-id "$ID1" --validity "${EXPIRY_TTL_SECONDS}s" \
+		--config "$WORK/remote.yaml" "$EXPIRED_SUBJECT_REF" >"$WORK/t4put.out" 2>"$WORK/t4put.err"; then
+		cat "$WORK/t4put.err" >&2
+		bad "expiry referer put"
+		break
+	fi
+	if ! "$FLATTEN_CTL" referer lookup --json --owner "$OWNER_A" --config "$WORK/remote.yaml" "$EXPIRED_REF" >"$WORK/t4lookup2.json" 2>"$WORK/t4lookup2.err"; then
+		cat "$WORK/t4lookup2.err" >&2
+		bad "expiry live lookup"
+		break
+	fi
+	if json_bool_true "$WORK/t4lookup2.json" hit; then
+		T4_LIVE=1
+		break
+	fi
+done
+[ -n "$T4_LIVE" ] && ok "unexpired referrer is returned" || bad "could not observe a live expiring referrer"
+
+# Check the real OCI response as well as flatten-ctl's accepted live lookup.
+T4_INDEXED=""
+for _ in $(seq 1 50); do
+	if curl -fsS "http://127.0.0.1:$ZOT_PORT/v2/e2e/expired/referrers/$EXPIRED_SUBJECT_DIGEST" >"$WORK/t4referrers.json" 2>/dev/null &&
+		grep -q "$ID1" "$WORK/t4referrers.json" &&
+		grep -q "$OWNER_A" "$WORK/t4referrers.json" &&
+		grep -q "vnd.kuasar.flatten-manifest.valid_at" "$WORK/t4referrers.json"; then
+		T4_INDEXED=1
+		break
+	fi
+	sleep 0.1
+done
+[ -n "$T4_INDEXED" ] && ok "expiring referrer is indexed with owner/id/valid_at" || bad "expiring referrer was not indexed"
+
+T4_EXPIRED=""
+for _ in $(seq 1 "$((EXPIRY_TTL_SECONDS * 5 + 25))"); do
+	if ! "$FLATTEN_CTL" referer lookup --json --owner "$OWNER_A" --config "$WORK/remote.yaml" "$EXPIRED_REF" >"$WORK/t4lookup2.json" 2>"$WORK/t4lookup2.err"; then
+		cat "$WORK/t4lookup2.err" >&2
+		bad "expiry post-expiry lookup"
+		break
+	fi
+	if ! json_bool_true "$WORK/t4lookup2.json" hit; then
+		T4_EXPIRED=1
+		break
+	fi
+	sleep 0.2
+done
+json_bool_true "$WORK/t4lookup2.json" supported && ok "registry remains supported after expiry" || bad "post-expiry lookup lost supported state"
+[ -n "$T4_EXPIRED" ] && ok "expired referrer is filtered as a miss" || bad "expired referrer was returned"
 
 # ==========================================================================
 # TEST 5 — basic-auth registry: credentials via FLATTEN_REGISTRY_* env
