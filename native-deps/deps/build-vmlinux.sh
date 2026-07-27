@@ -256,6 +256,18 @@ do_build() {
     log "make olddefconfig (resolve any new options)"
     make "${make_args[@]}" olddefconfig >/dev/null
 
+    # Cloud Hypervisor emits Processor Local x2APIC (MADT type 9) entries for
+    # x86_64 vCPUs. Kconfig silently dropping X86_X2APIC leaves the guest with
+    # only its fallback boot CPU, despite --cpus boot=N and NR_CPUS > 1. Check
+    # the resolved config, not just the input fragment, so dependency changes
+    # fail the build instead of producing a kernel that misreports its CPU count.
+    if [ "$KERNEL_ARCH" = x86_64 ]; then
+        for expected in CONFIG_SMP=y CONFIG_NR_CPUS=4 CONFIG_X86_X2APIC=y; do
+            grep -qx "$expected" "$out_obj/.config" ||
+                die "resolved x86_64 kernel config is missing $expected"
+        done
+    fi
+
     log "make $kbuild_target -j$(nproc) (this takes ~5-10 minutes on first build)"
     make "${make_args[@]}" -j"$(nproc)" "$kbuild_target"
 
