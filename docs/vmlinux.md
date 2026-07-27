@@ -123,6 +123,8 @@ FUSE_FS=y                       沙箱经 s3fs 挂载 S3(用户态 FUSE;/dev/fus
 SMP=y, NR_CPUS=4                沙箱 capacity.cpu ≤ 4(平台 fixed-spec 上限)。
                                 CONFIG_SMP 不开 NR_CPUS 静默回到 1,
                                 cpu>1 沙箱启动失败
+X86_X2APIC=y(x86_64)            CH 以 MADT type 9 描述 vCPU;关闭时 guest 会忽略
+                                全部表项并退化为单个 fallback boot CPU
 HZ_100, NO_HZ_IDLE              低 tick 频率 + idle 时不 tick,密度场景关键
 HIGH_RES_TIMERS                 hrtimer 子系统(应用 epoll/timerfd 依赖)
 HW_RANDOM=y, RANDOM_TRUST_CPU=y rdrand 直接信任,跳过 jitterentropy 慢启动
