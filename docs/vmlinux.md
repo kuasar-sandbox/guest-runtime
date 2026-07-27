@@ -104,7 +104,8 @@ VIRTIO_VSOCKETS=y               sandbox-init ↔ sandbox-ctl 控制面
 VIRTIO_BALLOON=y                host 内存回收(host 通过 vm.resize 推 inflate;
                                 平台不启用 free_page_reporting,见 §5.5)
 VIRTIO_MEM=y                    host 主动 unplug 内存块
-LIBNVDIMM + DAX                 virtio-pmem DAX 直接映射 host page cache
+LIBNVDIMM + ZONE_DEVICE +       virtio-pmem FS DAX 直接映射 host page cache;
+FS_DAX                          最终配置在 olddefconfig 后强制校验
 EROFS_FS=y                      只读根文件系统
 EXT4_FS=y                       overlayfs 写层
 OVERLAY_FS=y                    EROFS lower + ext4 upper 合并出 / 视图

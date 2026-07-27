@@ -101,6 +101,10 @@ make help                # 列举目标
 `make olddefconfig`(解析依赖闭包、暴露 silent regression)→
 `make -j$(nproc) <target>` → 拷出 `bin/<arch>/vmlinux`。
 
+- `olddefconfig` 后校验 DAX 必需项及 arch 专属关键项；Kconfig 静默丢弃请求项时
+  构建立刻失败。
+- `vmlinux` 的 Make 依赖包含构建脚本、common/arch 配置片段与 tracked kernel
+  patches；任一输入变化都会重新求值配置并使用 Kbuild 增量重建。
 - 产物格式:x86_64 为 ELF(kbuild target `vmlinux`),aarch64 为 PE Image
   (target `Image`,取 `arch/arm64/boot/Image`);文件名统一 `vmlinux`。
 - 源树 `build/src/linux/` 跨架构共享(kbuild 以 `ARCH=` 选目标,输出进 per-arch
