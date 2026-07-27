@@ -173,6 +173,12 @@ LINUX_INVOKE = $(DEPS_ENV) \
     LINUX_BUILD_OUT="$(LINUX_BUILD_OUT)" \
     LINUX_PATCHES_DIR="$(LINUX_PATCHES_DIR)"
 
+VMLINUX_INPUTS := deps/build-vmlinux.sh deps/common.sh \
+    deps/vmlinux/sandbox-common.config \
+    deps/vmlinux/sandbox-$(KERNEL_ARCH).config \
+    deps/linux-patches \
+    $(wildcard deps/linux-patches/*.patch)
+
 linux-fetch:
 	STAGE=fetch $(LINUX_INVOKE) bash deps/build-vmlinux.sh
 linux-patches-apply: linux-fetch
@@ -184,7 +190,7 @@ linux-build:
 	STAGE=build $(LINUX_INVOKE) bash deps/build-vmlinux.sh
 vmlinux: $(VMLINUX_BIN)
 	$(call link_bin,vmlinux)
-$(VMLINUX_BIN):
+$(VMLINUX_BIN): $(VMLINUX_INPUTS)
 	STAGE=fetch $(LINUX_INVOKE) bash deps/build-vmlinux.sh
 	STAGE=patches-apply $(LINUX_INVOKE) bash deps/build-vmlinux.sh
 	STAGE=build $(LINUX_INVOKE) bash deps/build-vmlinux.sh

@@ -18,8 +18,9 @@
 #     already applied (subject compare) and no-ops; otherwise refuses.
 #   - patches-format clears stale *.patch (keeps the curated
 #     0000-cover-letter.txt) before regenerating from commits.
-#   - build skips if $BINDIR/vmlinux already exists; kbuild is otherwise
-#     incremental.
+#   - build always re-resolves the merged config; kbuild remains incremental.
+#     The Makefile avoids invoking it when neither the config, script, nor
+#     tracked kernel patches changed.
 #
 # The output file lives at $BINDIR/vmlinux for both architectures, but
 # the on-disk format differs:
@@ -210,11 +211,6 @@ do_patches_format() {
 }
 
 do_build() {
-    if [ -x "$out_bin" ]; then
-        log "already built: $out_bin (delete it to force rebuild)"
-        exit 0
-    fi
-
     local common_frag arch_frag
     common_frag="$script_dir/vmlinux/sandbox-common.config"
     arch_frag="$script_dir/vmlinux/sandbox-$KERNEL_ARCH.config"
@@ -256,17 +252,19 @@ do_build() {
     log "make olddefconfig (resolve any new options)"
     make "${make_args[@]}" olddefconfig >/dev/null
 
-    # Cloud Hypervisor emits Processor Local x2APIC (MADT type 9) entries for
-    # x86_64 vCPUs. Kconfig silently dropping X86_X2APIC leaves the guest with
-    # only its fallback boot CPU, despite --cpus boot=N and NR_CPUS > 1. Check
-    # the resolved config, not just the input fragment, so dependency changes
-    # fail the build instead of producing a kernel that misreports its CPU count.
+    # Check the resolved config rather than trusting the fragments: Kconfig
+    # silently drops requested symbols when their dependency closure changes.
+    local required=(CONFIG_ZONE_DEVICE=y CONFIG_FS_DAX=y)
     if [ "$KERNEL_ARCH" = x86_64 ]; then
-        for expected in CONFIG_SMP=y CONFIG_NR_CPUS=4 CONFIG_X86_X2APIC=y; do
-            grep -qx "$expected" "$out_obj/.config" ||
-                die "resolved x86_64 kernel config is missing $expected"
-        done
+        # Cloud Hypervisor emits Processor Local x2APIC (MADT type 9) entries.
+        # Dropping X86_X2APIC leaves only the fallback boot CPU.
+        required+=(CONFIG_SMP=y CONFIG_NR_CPUS=4 CONFIG_X86_X2APIC=y)
     fi
+    local expected
+    for expected in "${required[@]}"; do
+        grep -qx "$expected" "$out_obj/.config" ||
+            die "resolved $KERNEL_ARCH kernel config is missing $expected"
+    done
 
     log "make $kbuild_target -j$(nproc) (this takes ~5-10 minutes on first build)"
     make "${make_args[@]}" -j"$(nproc)" "$kbuild_target"
