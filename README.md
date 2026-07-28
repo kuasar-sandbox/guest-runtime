@@ -1,6 +1,6 @@
 # guest-runtime
 
-Guest 运行时镜像与构建工具仓:负责构建 `sandbox-runtime.erofs`、`flatten-ctl`
+Guest 运行时镜像与构建工具仓:负责构建 `sandbox-runtime.bundle`、`flatten-ctl`
 以及 guest 侧 native 产物。host 生命周期、快照、恢复和 `sandbox-init` 源码属于
 `sandboxer`;内容寻址、manifest/cache/store 与展平公共库属于 `accelerator`。
 
@@ -25,7 +25,7 @@ runtime 镜像,分别由 `guest-runtime` 专用包和 `sandboxer` 发布。
 ```bash
 make native-deps                 # vmlinux / erofs tools / envd
 make flatten-ctl                 # OCI/dir -> deterministic EROFS builder
-make build                       # sandbox-runtime.erofs with envd/flatten-ctl/mkfs.erofs
+make build                       # sandbox-runtime.bundle with envd/flatten-ctl/mkfs.erofs
 make sandbox-runtime             # same image target, builds ../sandboxer sandbox-init if needed
 make build TARGET_ARCH=aarch64
 ```
@@ -39,7 +39,7 @@ make build TARGET_ARCH=aarch64
 | 产物 | 生成入口 |
 |---|---|
 | `bin/<arch>/flatten-ctl` | `make flatten-ctl` |
-| `bin/<arch>/sandbox-runtime.erofs` | `make sandbox-runtime` |
+| `bin/<arch>/sandbox-runtime.bundle` | `make sandbox-runtime` |
 | `native-deps/bin/<arch>/vmlinux` | `make native-deps` |
 | `native-deps/bin/<arch>/mkfs.erofs` / `fsck.erofs` | `make native-deps` |
 | `native-deps/bin/<arch>/envd` | `make native-deps` |
@@ -50,7 +50,7 @@ make build TARGET_ARCH=aarch64
   `mkfs.erofs`、本仓文档和 flatten e2e。`envd` 只随 runtime 镜像内置,
   `fsck.erofs` 只作为源码树诊断/测试辅助产物。
 - `sandbox-runtime-<arch>-<version>.tar.gz`:runtime 镜像专用包,包含版本化
-  `.bundle` 文件和 `bin/sandbox-runtime.erofs` 兼容别名。
+  `.bundle` 文件和供部署脚本使用的稳定入口 `bin/sandbox-runtime.bundle`。
 - `vmlinux-<arch>-<version>.tar.gz`:guest kernel 专用包,包含版本化 kernel 文件
   和 `bin/vmlinux` 兼容别名。
 

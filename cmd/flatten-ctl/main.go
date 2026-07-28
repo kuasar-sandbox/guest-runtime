@@ -288,7 +288,7 @@ func cmdExport(args []string) {
 }
 
 // packImageArtifact wraps the raw erofs(+config ZIP) at rawPath as a
-// tarstream artifact (single entry "image") on w: the platform
+// tarstream artifact (payload "image" + digest marker) on w: the platform
 // container for images. Holes come from the filesystem (the raw file
 // is the live scratch source); the artifact itself is dense and
 // self-describing.
@@ -310,7 +310,7 @@ func packImageArtifact(rawPath string, w io.Writer) error {
 	if err != nil {
 		return err
 	}
-	if err := tarstream.WriteTo(context.Background(), w, "image", src); err != nil {
+	if _, err := tarstream.WriteTo(context.Background(), w, "image", src); err != nil {
 		return fmt.Errorf("pack image artifact: %w", err)
 	}
 	return nil

@@ -384,7 +384,7 @@ flatten-ctl tar stream  [-f tarfile] [--size N] [tar内名[:源]]
 - `--dense`:显式整体关闭稀疏处理,回 stdlib 逻辑字节致密落盘(声明洞落为
   已分配零)。
 
-便捷形态:**无规则 + `-f` 单条目归档**(平台工件形态)自动洞精确解出该条目
+便捷形态:**无规则 + `-f` 平台工件**(一个 payload + digest marker)自动洞精确解出 payload
 (`tar extract -f image.img` 即可);**单条显式文件规则**(`成员[:目标文件]`)
 走 tarstream 视图,stdin 也能洞精确(成员实为目录等情形:`-f` 输入回退通用引擎,
 stdin 报错引导)。`..` 成员跳过告警,穿 symlink 写出是硬错误;条目命中多条规则时
@@ -406,8 +406,9 @@ stdin 报错引导)。`..` 成员跳过告警,穿 symlink 写出是硬错误;条
 取该用户主组,纯数字 `1000` 镜像为 `1000:1000`。node-ctl 的 COPY step 即以
 `extract --dense --chown` 把上下文 tar 摊进 guest rootfs(见 node.md §12)。
 
-**stream** 把**一个文件**封装为 tarstream(单文件稀疏 tar,
-`accelerator/pkg/tarstream`)。文件源的洞图来自文件系统元数据
+**stream** 把**一个文件**封装为 tarstream(一个稀疏 payload + 一个空的
+`.kuasar.sha256.<hex>` marker,`accelerator/pkg/tarstream`)。writer 在写 payload
+时同步生成摘要,不二次读取。文件源的洞图来自文件系统元数据
 (SEEK_HOLE),稀疏保真;stdin 源**必须给 `--size N`**(tar 头先含 size,这是
 格式下界),全程直通、**零落盘**,按致密封装(一次性流没有权威洞元数据,
 也不做内容探洞)。`--size` 仅限 stdin 源(文件长度以文件系统为准)。
@@ -421,8 +422,8 @@ stdin 报错引导)。`..` 成员跳过告警,穿 symlink 写出是硬错误;条
 | `名:-` | 条目名指定,内容来自 stdin |
 | `名:源` | 全显式 |
 
-产物本身是合法 tar:`extract`、GNU tar、`archive/tar` 都能读回;空洞只占
-map 字节,不占流量。
+产物本身是合法 tar:`extract`、GNU tar、`archive/tar` 都能读回;平台
+`extract` 把 marker 当作保留元数据而不落盘。空洞只占 map 字节,不占流量。
 
 ```bash
 # 稀疏快照盘 → tarstream → 异地还原(声明洞全程精确保持;16G 逻辑/100M 数据只传 ~100M)
@@ -435,10 +436,11 @@ gen-disk | flatten-ctl tar stream --size $((16<<20)) disk.img:- | flatten-ctl ta
 # 程序化读写(含洞图精确取回、tar 内随机访问)见 accelerator/pkg/tarstream
 ```
 
-编程接口:`accelerator/pkg/tarstream` 的 `WriteTo`(吃任意
-`sparse.Source`)/`ReadFrom`/`ReadSeekFrom`(洞图精确往返、tar 内零拷贝随机
+编程接口:`accelerator/pkg/tarstream` 的 `WriteTo`(吃任意 `sparse.Source`,返回
+写入时生成的摘要)/`ReadFrom`/`ReadSeekFrom`(洞图精确往返、tar 内零拷贝随机
 访问)/`SourceFrom`(tar 流直接开成 `sparse.Source`,可直通 manifest ingest
-等管线消费者),本仓与各下游仓均可 import。
+等管线消费者)/`SourceAt`(随机访问,完整平台工件通过可选 `Digester` 暴露 marker),
+本仓与各下游仓均可 import。
 
 ## 3. 镜像格式
 

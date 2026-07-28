@@ -26,7 +26,7 @@ native-deps 目录的构建工作流:从上游源码构建 kuasar-sandbox 平台
 |---|---|---|---|
 | `mkfs.erofs` `fsck.erofs` | erofs-utils v1.9.1 | — | `accelerator`(展平)、`guest-runtime`(打 guest erofs)、源码树诊断 / accelerator 测试 |
 | `vmlinux` | linux 6.1.169(LTS,cdn.kernel.org) | `deps/linux-patches/`(1 个)+ `deps/vmlinux/*.config` | `sandboxer`/`sandbox-ctl`(guest 内核) |
-| `envd` | e2b-dev/infra 2026.22(发布 tarball) | — | `guest-runtime`(注入 `sandbox-runtime.erofs`) |
+| `envd` | e2b-dev/infra 2026.22(发布 tarball) | — | `guest-runtime`(注入 `sandbox-runtime.bundle`) |
 
 pin 全部落在 Makefile 变量(`EROFS_TARBALL` / `LINUX_TARBALL` / `ENVD_TARBALL`,
 支持 `url#filename` 与本地路径两种形式),配套的 `*_TARBALL_SHA256`
@@ -123,7 +123,7 @@ CGO_ENABLED=0 -trimpath -ldflags "-s -w"`)→ `bin/<arch>/envd`。GOARCH 即选�
 架构,交叉无需 C 工具链。
 
 - 产物由 `guest-runtime` 的 `make sandbox-runtime` 注入
-  `sandbox-runtime.erofs` 的 `/opt/sandbox-runtime/bin/envd`,作为 e2b profile
+  `sandbox-runtime.bundle` 的 `/opt/sandbox-runtime/bin/envd`,作为 e2b profile
   guest 内的数据面 agent(端口 49983)。
 - 工具链注意:envd 的 `go.mod` pin 较新的 Go(如 `go 1.26.3`),`GOTOOLCHAIN=auto`
   按需下载;该下载要求 GOSUMDB 开启——Go 拒绝在 `GOSUMDB=off` 下下载并运行工具链。

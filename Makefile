@@ -2,7 +2,7 @@
 #
 # This repo builds guest runtime artifacts:
 #   flatten-ctl               OCI/dir -> deterministic EROFS builder
-#   sandbox-runtime.erofs     virtio-pmem/DAX guest runtime image
+#   sandbox-runtime.bundle    virtio-pmem/DAX guest runtime image
 #   native-deps/bin/*         vmlinux, mkfs.erofs, fsck.erofs, envd
 #
 # The sandbox-init binary is produced by the sibling sandboxer repo. This
@@ -49,7 +49,7 @@ FLATTEN_CTL   ?= $(BINDIR)/flatten-ctl
 STORE_CTL     ?= ../accelerator/$(BINDIR)/store-ctl
 ZOT_BIN       ?= zot
 
-# BUILD_MKFS_EROFS is the host executable that packs sandbox-runtime.erofs.
+# BUILD_MKFS_EROFS is the host executable that packs the raw runtime EROFS.
 # GUEST_MKFS_EROFS is the target-arch static binary shipped inside the guest
 # runtime image. Cross builds must keep them separate.
 BUILD_MKFS_EROFS ?= $(shell \
@@ -114,7 +114,7 @@ sandbox-runtime:
 	           $(BUILD_DIR)/sandbox-runtime/opt/sandbox-runtime/bin/flatten-ctl \
 	           $(BUILD_DIR)/sandbox-runtime/opt/sandbox-runtime/bin/mkfs.erofs
 	mkdir -p $(BINDIR)
-	rm -f $(BINDIR)/sandbox-runtime.erofs
+	rm -f $(BUILD_DIR)/sandbox-runtime.erofs $(BINDIR)/sandbox-runtime.bundle
 	"$(BUILD_MKFS_EROFS)" \
 	    -Ededupe \
 	    --chunksize=4096 \
@@ -123,14 +123,12 @@ sandbox-runtime:
 	    -b4096 \
 	    -x-1 \
 	    -U 00000000-0000-0000-0000-000000000000 \
-	    $(BINDIR)/sandbox-runtime.erofs $(BUILD_DIR)/sandbox-runtime 2>/dev/null
-	@# virtio-pmem requires 2 MiB-aligned backing. EROFS self-describes its
-	@# extent in the superblock so sparse padding is invisible to mount.
-	@actual=$$(stat -c %s $(BINDIR)/sandbox-runtime.erofs); \
-	 aligned=$$(( ($$actual + 2097151) / 2097152 * 2097152 )); \
-	 [ "$$aligned" = "$$actual" ] || truncate -s $$aligned $(BINDIR)/sandbox-runtime.erofs
-	$(call link_bin,sandbox-runtime.erofs)
-	@echo "==> built $(BINDIR)/sandbox-runtime.erofs"
+	    $(BUILD_DIR)/sandbox-runtime.erofs $(BUILD_DIR)/sandbox-runtime 2>/dev/null
+	$(GO) run ./cmd/runtime-bundle \
+	    -input $(BUILD_DIR)/sandbox-runtime.erofs \
+	    -output $(BINDIR)/sandbox-runtime.bundle
+	$(call link_bin,sandbox-runtime.bundle)
+	@echo "==> built $(BINDIR)/sandbox-runtime.bundle"
 
 test:
 	$(MAKE) -C native-deps test
@@ -149,7 +147,7 @@ clean:
 
 help:
 	@echo "guest-runtime. Targets:"
-	@echo "  build              build flatten-ctl + sandbox-runtime.erofs"
+	@echo "  build              build flatten-ctl + sandbox-runtime.bundle"
 	@echo "  flatten-ctl        OCI/dir -> deterministic EROFS builder"
 	@echo "  sandbox-runtime    pack sandboxer sandbox-init into guest erofs"
 	@echo "  sandbox-init       delegate to ../sandboxer sandbox-init"

@@ -12,7 +12,7 @@
 | `mkfs.erofs` | erofs-utils v1.9.1 | `accelerator`(展平)、`guest-runtime`(打 guest runtime 镜像) |
 | `fsck.erofs` | erofs-utils v1.9.1 | 源码树诊断与 accelerator EROFS 内容断言测试 |
 | `vmlinux` | Linux 6.1.169 + `deps/linux-patches` + `deps/vmlinux/*.config` | `sandboxer`/`sandbox-ctl`(guest 内核) |
-| `envd` | e2b-dev/infra 发布 tarball(tag `2026.22`) | `guest-runtime`(注入 `sandbox-runtime.erofs` 的 guest agent) |
+| `envd` | e2b-dev/infra 发布 tarball(tag `2026.22`) | `guest-runtime`(注入 `sandbox-runtime.bundle` 的 guest agent) |
 
 patched `cloud-hypervisor` 是 `sandbox-ctl` 的 VMM 运行件,由
 `sandboxer/native-deps` 构建;`librocksdb`(`accelerator` 的 CGO 链接依赖)在

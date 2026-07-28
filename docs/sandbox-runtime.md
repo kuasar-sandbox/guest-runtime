@@ -1,6 +1,6 @@
 # sandbox-runtime — guest runtime 镜像
 
-`sandbox-runtime.erofs` 是平台随每个 microVM 挂入的一份只读 Guest runtime
+`sandbox-runtime.bundle` 是平台随每个 microVM 挂入的一份只读 Guest runtime
 镜像。它包含 `sandboxer` 构建出的 guest PID 1(`sandbox-init`)和平台在
 guest 内需要的辅助工具,由本仓打包、发布,再由 `sandboxer/sandbox-ctl` 在
 启动沙箱时作为 virtio-pmem 设备提供给 guest。
@@ -20,7 +20,7 @@ rootfs 组装、vsock 控制面、stdio MUX、exec/attach/quiesce 等 ABI 由
 | `guest-runtime/native-deps` | 构建 `mkfs.erofs`、`fsck.erofs`、`vmlinux`、`envd` |
 | `accelerator` | 提供 `flatten-ctl` 复用的 `pkg/{flatten,image,remote,tar}` 和 manifest/cache/store 能力 |
 
-`sandbox-runtime.erofs` 不包含用户 rootfs、用户依赖、guest kernel 或
+`sandbox-runtime.bundle` 不包含用户 rootfs、用户依赖、guest kernel 或
 cloud-hypervisor。用户 rootfs 来自 `boot.root.base`/`boot.disks[]`;guest
 kernel 由 `vmlinux` 包发布;VMM 由 `sandboxer` 发布。
 
@@ -30,7 +30,7 @@ kernel 由 `vmlinux` 包发布;VMM 由 `sandboxer` 发布。
                  build time                                      run time
 
   sandboxer/bin/<arch>/sandbox-init ─┐
-  guest-runtime/bin/<arch>/flatten-ctl├─► sandbox-runtime.erofs ──► sandbox-ctl
+  guest-runtime/bin/<arch>/flatten-ctl├─► sandbox-runtime.bundle ──► sandbox-ctl
   native-deps/bin/<arch>/envd ────────┤          ▲                     │
   native-deps/bin/<arch>/mkfs.erofs ──┘          │                     │ virtio-pmem+DAX
                                                  │                     ▼
@@ -85,6 +85,25 @@ DAX 映射同一份 host 文件,避免每个 sandbox 独立复制 runtime 文件
 `fsck.erofs` 是诊断/测试工具,不进入 runtime 镜像。`vmlinux` 不是 runtime
 镜像内容,由 `vmlinux-<arch>-<version>.tar.gz` 独立发布。
 
+### 2.2 host bundle
+
+发布文件不是裸 EROFS,而是可直接作为 virtio-pmem backing 的 bundle:
+
+```text
+raw EROFS | zero padding | trailing ZIP
+```
+
+raw EROFS 保持从 offset 0 开始。尾部 ZIP 只包含一个 size=0 的 marker:
+
+```text
+.kuasar.sha256.<64-lowercase-hex>
+```
+
+摘要覆盖 ZIP 之前的全部字节,即 EROFS 和对齐 padding。构建器复制 EROFS 的
+同时计算 SHA256,再写 marker;运行和恢复只从 EOF 读取 marker,不重新扫描
+EROFS。bundle 最终大小保持 2 MiB 对齐,因此 Cloud Hypervisor 无需 offset
+能力即可继续直接映射,EROFS 依据自身 superblock 忽略尾部 padding 和 ZIP。
+
 ## 3. 构建
 
 常用入口:
@@ -92,7 +111,7 @@ DAX 映射同一份 host 文件,避免每个 sandbox 独立复制 runtime 文件
 ```bash
 make flatten-ctl                 # 构建 guest 内 flatten-ctl
 make native-deps                 # 构建 mkfs.erofs / fsck.erofs / vmlinux / envd
-make sandbox-runtime             # 生成 bin/<arch>/sandbox-runtime.erofs
+make sandbox-runtime             # 生成 bin/<arch>/sandbox-runtime.bundle
 make build                       # 构建 flatten-ctl + sandbox-runtime
 make build TARGET_ARCH=aarch64
 ```
@@ -105,16 +124,17 @@ make build TARGET_ARCH=aarch64
    构建。
 3. 使用 `native-deps/bin/<arch>/envd`;缺失时触发 envd 构建。
 4. 使用本仓 `bin/<arch>/flatten-ctl`;缺失时触发 `make flatten-ctl`。
-5. 组装 staging 目录并调用 `mkfs.erofs` 生成
-   `bin/<arch>/sandbox-runtime.erofs`。
+5. 组装 staging 目录并调用 `mkfs.erofs` 生成临时 raw EROFS。
+6. host `runtime-bundle` 构建工具复制 EROFS、补齐 PMEM 对齐、同步计算 SHA256,
+   并追加空 marker ZIP,原子发布为 `bin/<arch>/sandbox-runtime.bundle`。
 
 `mkfs.erofs` 和 `envd` 的构建流程见 `guest-runtime/native-deps/docs/build.md`。
 `sandbox-init` 的实现与 ABI 见 `sandboxer/docs/sandbox-init.md`。
 
 ### 3.1 架构
 
-runtime 镜像按 target arch 构建。镜像文件名在构建目录统一为
-`sandbox-runtime.erofs`,但内部 `/sbin/init`、`envd`、`flatten-ctl`、`mkfs.erofs`
+runtime 镜像按 target arch 构建。发布文件名在构建目录统一为
+`sandbox-runtime.bundle`,其 EROFS prefix 内的 `/sbin/init`、`envd`、`flatten-ctl`、`mkfs.erofs`
 都必须是同一 target arch 的可执行文件。
 
 `TARGET_ARCH=amd64` 会归一化为 `x86_64`;`TARGET_ARCH=arm64` 会归一化为
@@ -123,7 +143,7 @@ runtime 镜像按 target arch 构建。镜像文件名在构建目录统一为
 
 ## 4. 运行期消费契约
 
-`sandbox-ctl` 把 `sandbox-runtime.erofs` 作为只读 virtio-pmem 设备传给
+`sandbox-ctl` 把 `sandbox-runtime.bundle` 作为只读 virtio-pmem 设备传给
 cloud-hypervisor。guest kernel 挂载该 pmem 后执行 `/sbin/init`,即
 `sandbox-init`。
 
@@ -137,7 +157,7 @@ cloud-hypervisor。guest kernel 挂载该 pmem 后执行 `/sbin/init`,即
 - `/opt/sandbox-runtime` 是平台保留路径。用户镜像里若已有该路径,运行时会被
   平台 bind mount 遮蔽。
 
-`sandbox-runtime.erofs` 不参与 manifest key、API key 或 access token 派生。
+`sandbox-runtime.bundle` 不参与 manifest key、API key 或 access token 派生。
 这些密钥由 orchestrator/placer/provider 和 manifest 配置管理;runtime 镜像只
 携带执行工具。
 
@@ -154,13 +174,13 @@ runtime 专用包内同时放置:
 
 ```
 bin/sandbox-runtime-<arch>-<version>.bundle
-bin/sandbox-runtime.erofs
+bin/sandbox-runtime.bundle
 docs/sandbox-runtime.md
 release/sandbox-runtime.json
 ```
 
-版本化 `.bundle` 文件用于归档和外部分发;`sandbox-runtime.erofs` 是当前脚本和
-默认配置使用的兼容别名。两者内容相同。
+版本化 `.bundle` 文件用于归档和外部分发;`sandbox-runtime.bundle` 是当前脚本和
+默认配置使用的稳定入口。两者都是相同的真实 bundle,不存在 raw EROFS 别名。
 
 聚合发布 `orchestrator` 仓的 `release-v<version>` 不重新打包,只上传各仓原始
 组件包和 `SHA256SUMS`。用户把需要的组件包解到同一目录即可得到共享的
@@ -176,8 +196,8 @@ release/sandbox-runtime.json
 节点可同时保留多份 runtime 镜像,例如:
 
 ```
-/opt/sandbox/runtime/v0.1.0/sandbox-runtime.erofs
-/opt/sandbox/runtime/v0.2.0/sandbox-runtime.erofs
+/opt/sandbox/runtime/v0.1.0/sandbox-runtime.bundle
+/opt/sandbox/runtime/v0.2.0/sandbox-runtime.bundle
 ```
 
 新沙箱使用新版本;运行中的沙箱继续持有启动时的 pmem 文件。删除旧版本前必须
@@ -201,7 +221,7 @@ release/sandbox-runtime.json
 | build sandbox 找不到 `flatten-ctl` | 检查 `/opt/sandbox-runtime/bin/flatten-ctl` 是否进入镜像 |
 | build sandbox 无法生成 EROFS | 检查 `/opt/sandbox-runtime/bin/mkfs.erofs` 和 guest 内权限 |
 | restore 后行为异常 | 检查 snapshot 使用的 runtime digest 与 restore 配置是否匹配 |
-| 发布包解压后脚本找不到 runtime | 确认已解压 `sandbox-runtime-<arch>-<version>.tar.gz`,且 `bin/sandbox-runtime.erofs` 存在 |
+| 发布包解压后脚本找不到 runtime | 确认已解压 `sandbox-runtime-<arch>-<version>.tar.gz`,且 `bin/sandbox-runtime.bundle` 存在 |
 
 ## 8. See Also
 

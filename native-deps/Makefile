@@ -3,7 +3,7 @@
 # Produces the runtime artifacts the Go repos consume but don't link:
 #   mkfs.erofs        (erofs-utils)        — used by accelerator, guest-runtime
 #   vmlinux           (guest kernel)       — used by sandboxer / sandbox-ctl
-#   envd              (e2b guest agent)    — injected into sandbox-runtime.erofs
+#   envd              (e2b guest agent)    — injected into sandbox-runtime.bundle
 #
 # (librocksdb, accelerator's CGO link dep, is built in that repo.)
 #
@@ -141,7 +141,7 @@ $(EROFS_BIN):
 		bash deps/build-erofs.sh
 	$(call link_bin,mkfs.erofs)
 
-# --- envd (e2b guest agent; injected into sandbox-runtime.erofs) -----------
+# --- envd (e2b guest agent; injected into sandbox-runtime.bundle) -----------
 envd: $(ENVD_BIN)
 $(ENVD_BIN):
 	$(DEPS_ENV) \

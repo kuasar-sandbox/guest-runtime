@@ -99,7 +99,7 @@ NET=y, INET=y                   socket family(AF_INET/AF_VSOCK/AF_NETLINK)伞
 VIRTIO=y, VIRTIO_PCI=y          virtio 总线
 VIRTIO_BLK=y                    blk0/blk1(基础磁盘 + COW 上层)
 VIRTIO_NET=y                    eth0(连到 host TAP)
-VIRTIO_PMEM=y                   sandbox-runtime.erofs 通过 virtio-pmem 挂入
+VIRTIO_PMEM=y                   sandbox-runtime.bundle 通过 virtio-pmem 挂入
 VIRTIO_VSOCKETS=y               sandbox-init ↔ sandbox-ctl 控制面
 VIRTIO_BALLOON=y                host 内存回收(host 通过 vm.resize 推 inflate;
                                 平台不启用 free_page_reporting,见 §5.5)
