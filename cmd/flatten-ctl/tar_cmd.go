@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -11,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/kuasar-sandbox/accelerator/pkg/manifest/fetch"
 	"github.com/kuasar-sandbox/accelerator/pkg/sparse"
 	btar "github.com/kuasar-sandbox/accelerator/pkg/tar"
 	"github.com/kuasar-sandbox/accelerator/pkg/tarstream"
@@ -96,11 +96,11 @@ func cmdTarExtract(args []string) {
 		return f // process exit closes it
 	}
 
-	// No rules + a single-entry archive file (the platform artifact
+	// No rules + a payload-plus-marker archive file (the platform artifact
 	// shape): unwrap the one entry hole-exact — `tar extract -f x.img`
 	// just works. Multi-entry archives fall through to the generic
 	// engine (which is also hole-exact via Reopen).
-	if len(fs.Args()) == 0 && !*dense && file != "-" && singleEntryArtifact(file) {
+	if len(fs.Args()) == 0 && !*dense && file != "-" && platformArtifact(file) {
 		f, err := os.Open(file)
 		if err != nil {
 			fatal("tar extract: %v", err)
@@ -113,7 +113,7 @@ func cmdTarExtract(args []string) {
 			}
 			return
 		}
-		// e.g. the single entry is not a regular file: generic engine.
+		// Any unexpected payload shape falls back to the generic engine.
 	}
 
 	in := openArchive()
@@ -141,16 +141,14 @@ func cmdTarExtract(args []string) {
 	}
 }
 
-// singleEntryArtifact reports whether the archive at path holds exactly
-// one real entry (the platform artifact shape).
-func singleEntryArtifact(path string) bool {
-	f, err := os.Open(path)
+// platformArtifact reports whether the archive at path has the platform
+// payload-plus-digest-marker shape.
+func platformArtifact(path string) bool {
+	stream, err := fetch.OpenTarStream(path)
 	if err != nil {
 		return false
 	}
-	defer f.Close()
-	_, err = tarstream.ReadSeekFromIndex(f, 1)
-	return errors.Is(err, tarstream.ErrNotFound)
+	return stream.Close() == nil
 }
 
 // singleFileRule reports whether the raw extract arguments are exactly
@@ -244,7 +242,7 @@ func cmdTarStream(args []string) {
 		}
 	}
 
-	if err := tarstream.WriteTo(context.Background(), out, name, src); err != nil {
+	if _, err := tarstream.WriteTo(context.Background(), out, name, src); err != nil {
 		fatal("%v", err)
 	}
 }
@@ -301,8 +299,8 @@ No rules takes everything. --chown/--chmod override ownership and
 permissions on every extracted entry. --no-chown skips ownership
 restoration when uid/gid metadata is irrelevant to the extraction.
 
-stream packages exactly one file as a tarstream (a single-file sparse
-tar; see accelerator/pkg/tarstream). A file source's holes
+stream packages exactly one payload as a tarstream (sparse payload + empty
+digest marker; see accelerator/pkg/tarstream). A file source's holes
 come from the filesystem (SEEK_HOLE) — never from scanning content. A
 stdin source requires --size N (the tar header carries the size up
 front), streams straight through with nothing spooled, and is packaged

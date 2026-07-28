@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # Build the e2b guest agent (envd) into $BINDIR. envd is injected into
-# sandbox-runtime.erofs at /opt/sandbox-runtime/bin/envd (done by
+# sandbox-runtime.bundle at /opt/sandbox-runtime/bin/envd (done by
 # guest-runtime's `make sandbox-runtime`), where sandbox-init
 # auto-bind-mounts it into the guest. It is treated as a TARGET-ARCH binary
 # (the guest's arch), built CGO-free so GOARCH alone handles cross-compilation.
