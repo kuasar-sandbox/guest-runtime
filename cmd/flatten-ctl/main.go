@@ -585,7 +585,7 @@ func cmdInfo(args []string) {
 	if strings.HasPrefix(input, "manifest://") {
 		hexKey := strings.TrimPrefix(input, "manifest://")
 		cfg := loadManifestCfg(*manifestCfg)
-		fc, err := cfg.NewFetcher(cfg.FetchKeyFunc())
+		fc, err := cfg.NewFetcher()
 		if err != nil {
 			fatal("fetcher: %v", err)
 		}
@@ -595,7 +595,7 @@ func cmdInfo(args []string) {
 			fatal("%v", err)
 		}
 		ctx := context.Background()
-		stream, err := fc.Fetch(ctx, key)
+		stream, err := fc.OpenManifest(ctx, key)
 		if err != nil {
 			fatal("fetch manifest: %v", err)
 		}
@@ -603,7 +603,7 @@ func cmdInfo(args []string) {
 		// Read only the EROFS superblock + trailing ZIP directly over
 		// the chunk-granular fetch path — no full materialization.
 		size := int64(stream.Size())
-		printInfo(fetch.NewReaderAt(ctx, stream, size), size, *asJSON)
+		printInfo(fetch.NewReaderAt(ctx, stream), size, *asJSON)
 		return
 	}
 
@@ -614,7 +614,7 @@ func cmdInfo(args []string) {
 	defer st.Close()
 	ctx := context.Background()
 	size := int64(st.Size())
-	printInfo(fetch.NewReaderAt(ctx, st, size), size, *asJSON)
+	printInfo(fetch.NewReaderAt(ctx, st), size, *asJSON)
 }
 
 // printInfo reports the EROFS image size and embedded RuntimeConfig from
