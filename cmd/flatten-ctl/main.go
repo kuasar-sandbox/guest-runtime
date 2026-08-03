@@ -43,7 +43,6 @@ import (
 	"github.com/kuasar-sandbox/accelerator/pkg/manifest/ingest"
 	"github.com/kuasar-sandbox/accelerator/pkg/remote"
 	"github.com/kuasar-sandbox/accelerator/pkg/sparse"
-	"github.com/kuasar-sandbox/accelerator/pkg/tarstream"
 	"github.com/kuasar-sandbox/guest-runtime/internal/util"
 )
 
@@ -310,7 +309,7 @@ func packImageArtifact(rawPath string, w io.Writer) error {
 	if err != nil {
 		return err
 	}
-	if _, err := tarstream.WriteTo(context.Background(), w, "image", src); err != nil {
+	if err := writeTarStream(context.Background(), w, "image", src); err != nil {
 		return fmt.Errorf("pack image artifact: %w", err)
 	}
 	return nil
