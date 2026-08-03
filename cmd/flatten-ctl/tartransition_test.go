@@ -36,6 +36,17 @@ func TestCallTarStreamWriteSignatures(t *testing.T) {
 	if err := callTarStreamWrite(func() {}, ctx, io.Discard, "image", src); err == nil {
 		t.Fatal("invalid WriteTo signature accepted")
 	}
+	hybridOldInputs := func(context.Context, io.Writer, string, sparse.Source) (string, string, error) {
+		return "sha256", "digest", nil
+	}
+	hybridFinalInputs := func(context.Context, io.Writer, string, sparse.Source, ...option) (string, error) {
+		return "sha256:digest", nil
+	}
+	for _, fn := range []any{hybridOldInputs, hybridFinalInputs} {
+		if err := callTarStreamWrite(fn, ctx, io.Discard, "image", src); err == nil {
+			t.Fatal("hybrid WriteTo signature accepted")
+		}
+	}
 }
 
 func TestWriteTarStreamUsesCurrentAccelerator(t *testing.T) {

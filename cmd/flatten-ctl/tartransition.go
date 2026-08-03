@@ -30,8 +30,14 @@ func callTarStreamWrite(fn any, ctx context.Context, w io.Writer, name string, s
 		return fmt.Errorf("tarstream transition: WriteTo is %T, not a function", fn)
 	}
 	t := v.Type()
-	if t.NumIn() != 4 && !(t.NumIn() == 5 && t.IsVariadic()) {
-		return fmt.Errorf("tarstream transition: unsupported WriteTo input signature %s", t)
+	errorType := reflect.TypeOf((*error)(nil)).Elem()
+	stringType := reflect.TypeOf("")
+	legacySignature := t.NumIn() == 4 && !t.IsVariadic() && t.NumOut() == 2 &&
+		t.Out(0) == stringType && t.Out(1) == errorType
+	finalSignature := t.NumIn() == 5 && t.IsVariadic() && t.NumOut() == 3 &&
+		t.Out(0) == stringType && t.Out(1) == stringType && t.Out(2) == errorType
+	if !legacySignature && !finalSignature {
+		return fmt.Errorf("tarstream transition: unsupported WriteTo signature %s", t)
 	}
 	args := []reflect.Value{
 		reflect.ValueOf(ctx),
@@ -46,20 +52,9 @@ func callTarStreamWrite(fn any, ctx context.Context, w io.Writer, name string, s
 	}
 
 	results := v.Call(args)
-	var errorIndex int
-	switch len(results) {
-	case 2:
-		if results[0].Kind() != reflect.String {
-			return fmt.Errorf("tarstream transition: legacy digest result is %s", results[0].Type())
-		}
-		errorIndex = 1
-	case 3:
-		if results[0].Kind() != reflect.String || results[1].Kind() != reflect.String {
-			return fmt.Errorf("tarstream transition: final digest results are %s and %s", results[0].Type(), results[1].Type())
-		}
+	errorIndex := 1
+	if finalSignature {
 		errorIndex = 2
-	default:
-		return fmt.Errorf("tarstream transition: unsupported WriteTo result count %d", len(results))
 	}
 	return transitionResultError(results[errorIndex])
 }
