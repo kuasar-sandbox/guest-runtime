@@ -242,7 +242,7 @@ func cmdTarStream(args []string) {
 		}
 	}
 
-	if err := writeTarStream(context.Background(), out, name, src); err != nil {
+	if _, _, err := tarstream.WriteTo(context.Background(), out, name, src); err != nil {
 		fatal("%v", err)
 	}
 }
