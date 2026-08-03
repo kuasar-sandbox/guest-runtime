@@ -32,9 +32,17 @@ func callTarStreamWrite(fn any, ctx context.Context, w io.Writer, name string, s
 	t := v.Type()
 	errorType := reflect.TypeOf((*error)(nil)).Elem()
 	stringType := reflect.TypeOf("")
-	legacySignature := t.NumIn() == 4 && !t.IsVariadic() && t.NumOut() == 2 &&
+	contextType := reflect.TypeOf((*context.Context)(nil)).Elem()
+	writerType := reflect.TypeOf((*io.Writer)(nil)).Elem()
+	sourceType := reflect.TypeOf((*sparse.Source)(nil)).Elem()
+	fixedInputs := t.NumIn() >= 4 && t.In(0) == contextType && t.In(1) == writerType &&
+		t.In(2) == stringType && t.In(3) == sourceType
+	legacySignature := fixedInputs && t.NumIn() == 4 && !t.IsVariadic() && t.NumOut() == 2 &&
 		t.Out(0) == stringType && t.Out(1) == errorType
-	finalSignature := t.NumIn() == 5 && t.IsVariadic() && t.NumOut() == 3 &&
+	finalOption := t.NumIn() == 5 && t.IsVariadic() && t.In(4).Kind() == reflect.Slice &&
+		t.In(4).Elem().PkgPath() == "github.com/kuasar-sandbox/accelerator/pkg/tarstream" &&
+		t.In(4).Elem().Name() == "WriteOption"
+	finalSignature := fixedInputs && finalOption && t.NumOut() == 3 &&
 		t.Out(0) == stringType && t.Out(1) == stringType && t.Out(2) == errorType
 	if !legacySignature && !finalSignature {
 		return fmt.Errorf("tarstream transition: unsupported WriteTo signature %s", t)

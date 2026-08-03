@@ -17,13 +17,8 @@ func TestCallTarStreamWriteSignatures(t *testing.T) {
 		return "sha256:digest", nil
 	}
 	type option string
-	newWrite := func(context.Context, io.Writer, string, sparse.Source, ...option) (string, string, error) {
-		return "hmac", "digest", nil
-	}
-	for _, fn := range []any{oldWrite, newWrite} {
-		if err := callTarStreamWrite(fn, ctx, io.Discard, "image", src); err != nil {
-			t.Fatal(err)
-		}
+	if err := callTarStreamWrite(oldWrite, ctx, io.Discard, "image", src); err != nil {
+		t.Fatal(err)
 	}
 
 	wantErr := errors.New("write failed")
@@ -42,9 +37,15 @@ func TestCallTarStreamWriteSignatures(t *testing.T) {
 	hybridFinalInputs := func(context.Context, io.Writer, string, sparse.Source, ...option) (string, error) {
 		return "sha256:digest", nil
 	}
-	for _, fn := range []any{hybridOldInputs, hybridFinalInputs} {
+	wrongFixedInput := func(any, io.Writer, string, sparse.Source) (string, error) {
+		return "sha256:digest", nil
+	}
+	wrongFinalOption := func(context.Context, io.Writer, string, sparse.Source, ...string) (string, string, error) {
+		return "hmac", "digest", nil
+	}
+	for _, fn := range []any{hybridOldInputs, hybridFinalInputs, wrongFixedInput, wrongFinalOption} {
 		if err := callTarStreamWrite(fn, ctx, io.Discard, "image", src); err == nil {
-			t.Fatal("hybrid WriteTo signature accepted")
+			t.Fatal("unexpected WriteTo signature accepted")
 		}
 	}
 }
