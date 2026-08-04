@@ -54,6 +54,10 @@ make build TARGET_ARCH=aarch64
 
 两条版本线独立演进,版本号不要求相同。`envd` 只随 runtime 镜像内置;
 `fsck.erofs` 只作为源码树诊断/测试辅助产物。
+正式版之前,两条 workflow 每天按上海日期分别发布
+`runtime-v0.1.0-preview.YYYYMMDD` 和 `vmlinux-v0.1.0-preview.YYYYMMDD`。
+preview 标记为 prerelease 且不更新 GitHub Latest;两个正式 `v0.1.0` 版本均由
+独立构建发布,不改名或覆盖 preview。
 
 ## 文档
 

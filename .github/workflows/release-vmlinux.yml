@@ -1,13 +1,16 @@
 name: Vmlinux Release
-run-name: Release ${{ inputs.version }}
+run-name: ${{ github.event_name == 'schedule' && 'Daily vmlinux-v0.1.0 preview' || format('Release {0}', inputs.version) }}
 
 on:
   workflow_dispatch:
     inputs:
       version:
-        description: Kernel version in vmlinux-vX.Y.Z form
+        description: Kernel version in vmlinux-vX.Y.Z or vmlinux-vX.Y.Z-preview.YYYYMMDD form
         required: true
         type: string
+  schedule:
+    - cron: "47 0 * * *"
+      timezone: Asia/Shanghai
 
 permissions:
   contents: read
@@ -19,26 +22,55 @@ concurrency:
 jobs:
   preflight:
     runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      publish: ${{ steps.request.outputs.publish }}
+      version: ${{ steps.request.outputs.version }}
     steps:
       - name: Check out trusted release tooling
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      - name: Validate release request
+      - name: Resolve release request
+        id: request
         env:
           GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ inputs.version }}
+          INPUT_VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
           [ "$GITHUB_REF" = refs/heads/main ] \
-            || { echo "Vmlinux Release must be dispatched from main" >&2; exit 1; }
-          [[ "$VERSION" =~ ^vmlinux-v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] \
-            || { echo "version must match vmlinux-vX.Y.Z" >&2; exit 1; }
+            || { echo "Vmlinux Release must run from main" >&2; exit 1; }
+          if [ "$GITHUB_EVENT_NAME" = schedule ]; then
+            if gh api "repos/$GITHUB_REPOSITORY/releases/tags/vmlinux-v0.1.0" >/dev/null 2>&1; then
+              echo "version=vmlinux-v0.1.0" >> "$GITHUB_OUTPUT"
+              echo "publish=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            created_at=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" --jq .created_at)
+            VERSION="vmlinux-v0.1.0-preview.$(TZ=Asia/Shanghai date -d "$created_at" +%Y%m%d)"
+            if gh api "repos/$GITHUB_REPOSITORY/releases/tags/$VERSION" > existing.json 2>/dev/null; then
+              jq -e --arg version "$VERSION" \
+                '.tag_name == $version and .draft == false and .prerelease == true' \
+                existing.json >/dev/null
+              echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+              echo "publish=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          else
+            VERSION="$INPUT_VERSION"
+          fi
+          [[ "$VERSION" =~ ^vmlinux-v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-preview\.[0-9]{8})?$ ]] \
+            || { echo "version must match vmlinux-vX.Y.Z or vmlinux-vX.Y.Z-preview.YYYYMMDD" >&2; exit 1; }
           bash scripts/publish-release.sh check "$VERSION"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "publish=true" >> "$GITHUB_OUTPUT"
 
   build:
     needs: preflight
+    if: needs.preflight.outputs.publish == 'true'
     runs-on:
       - self-hosted
       - Linux
@@ -110,7 +142,7 @@ jobs:
       - name: Package vmlinux release
         working-directory: src/guest-runtime
         env:
-          VERSION: ${{ inputs.version }}
+          VERSION: ${{ needs.preflight.outputs.version }}
           RELEASE_WORKFLOW_REPOSITORY: ${{ github.repository }}
           RELEASE_WORKFLOW_RUN_ID: ${{ github.run_id }}
           RELEASE_WORKFLOW_RUN_ATTEMPT: ${{ github.run_attempt }}
@@ -129,13 +161,15 @@ jobs:
       - name: Upload validated vmlinux bundle
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: vmlinux-release-${{ inputs.version }}-${{ github.run_id }}
+          name: vmlinux-release-${{ needs.preflight.outputs.version }}-${{ github.run_id }}
           path: src/guest-runtime/release-bundle
           if-no-files-found: error
           retention-days: 7
 
   publish:
-    needs: build
+    needs:
+      - preflight
+      - build
     runs-on: ubuntu-latest
     permissions:
       actions: read
@@ -149,7 +183,7 @@ jobs:
       - name: Download validated vmlinux bundle
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: vmlinux-release-${{ inputs.version }}-${{ github.run_id }}
+          name: vmlinux-release-${{ needs.preflight.outputs.version }}-${{ github.run_id }}
           path: release-bundle
 
       - name: Publish vmlinux release
