@@ -51,6 +51,8 @@ env "${common_env[@]}" "$ROOT/scripts/release.sh" package \
   vmlinux vmlinux-v2.3.4 x86_64 "$TMP/vmlinux-revisions.tsv" "$TMP/vmlinux-bundle"
 "$ROOT/scripts/release.sh" validate "$TMP/runtime-bundle"
 "$ROOT/scripts/release.sh" validate "$TMP/vmlinux-bundle"
+bash "$ROOT/scripts/test-publisher.sh" "$ROOT/scripts/publish-release.sh" \
+  "$TMP/vmlinux-bundle" kuasar-sandbox/guest-runtime vmlinux-v2.3.4
 
 runtime_archive="$TMP/runtime-bundle/assets/sandbox-runtime-x86_64-runtime-v1.2.3-preview.20260804.tar.gz"
 for path in \
