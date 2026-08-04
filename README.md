@@ -18,7 +18,7 @@ Guest 运行时镜像与构建工具仓:负责构建 `sandbox-runtime.bundle`、
 `guest-runtime` 把 `../sandboxer/bin/<arch>/sandbox-init` 和 guest payload 打进
 同一份 DAX-shared EROFS 镜像。镜像内 `/opt/sandbox-runtime/bin/` 首版包含
 `envd`、`flatten-ctl`、`mkfs.erofs`;`vmlinux` 和 `cloud-hypervisor` 不进入
-runtime 镜像,分别由 `guest-runtime` 专用包和 `sandboxer` 发布。
+runtime 镜像,分别由本仓的独立 `vmlinux-vX.Y.Z` 版本和 `sandboxer` 发布。
 
 ## 构建
 
@@ -44,15 +44,16 @@ make build TARGET_ARCH=aarch64
 | `native-deps/bin/<arch>/mkfs.erofs` / `fsck.erofs` | `make native-deps` |
 | `native-deps/bin/<arch>/envd` | `make native-deps` |
 
-跨仓发布由 `orchestrator/release-builder` 编排:
+本仓没有通用的 `guest-runtime-vX.Y.Z` 版本或同名归档,而是维护两条独立版本线:
 
-- `guest-runtime-<version>-linux-<arch>.tar.gz`:包含 `flatten-ctl`、
-  `mkfs.erofs`、本仓文档和 flatten e2e。`envd` 只随 runtime 镜像内置,
-  `fsck.erofs` 只作为源码树诊断/测试辅助产物。
-- `sandbox-runtime-<arch>-<version>.tar.gz`:runtime 镜像专用包,包含版本化
-  `.bundle` 文件和供部署脚本使用的稳定入口 `bin/sandbox-runtime.bundle`。
-- `vmlinux-<arch>-<version>.tar.gz`:guest kernel 专用包,包含版本化 kernel 文件
-  和 `bin/vmlinux` 兼容别名。
+- `runtime-vX.Y.Z`:发布 `sandbox-runtime-<arch>-runtime-vX.Y.Z.tar.gz`,包含
+  runtime bundle、`flatten-ctl`、`mkfs.erofs`、runtime 文档和 flatten e2e。
+  发布清单记录构建时嵌入的准确 `sandboxer` 版本和 commit。
+- `vmlinux-vX.Y.Z`:发布 `vmlinux-<arch>-vmlinux-vX.Y.Z.tar.gz`,包含稳定入口
+  `bin/vmlinux`、版本化 kernel 文件和 kernel 文档。
+
+两条版本线独立演进,版本号不要求相同。`envd` 只随 runtime 镜像内置;
+`fsck.erofs` 只作为源码树诊断/测试辅助产物。
 
 ## 文档
 
