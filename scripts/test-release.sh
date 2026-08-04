@@ -26,7 +26,7 @@ chmod +x "$TMP/bin/flatten-ctl" "$TMP/native-bin/mkfs.erofs"
     2222222222222222222222222222222222222222
   printf 'kuasar-sandbox/guest-runtime\tmain\t%s\tprimary\n' \
     3333333333333333333333333333333333333333
-  printf 'kuasar-sandbox/sandboxer\tv1.2.0\t%s\tdependency\n' \
+  printf 'kuasar-sandbox/sandboxer\tv1.2.0-preview.20260804\t%s\tdependency\n' \
     4444444444444444444444444444444444444444
 } > "$TMP/runtime-revisions.tsv"
 
@@ -45,16 +45,17 @@ common_env=(
 )
 
 env "${common_env[@]}" "$ROOT/scripts/release.sh" package \
-  runtime runtime-v1.2.3 x86_64 "$TMP/runtime-revisions.tsv" "$TMP/runtime-bundle"
+  runtime runtime-v1.2.3-preview.20260804 x86_64 \
+  "$TMP/runtime-revisions.tsv" "$TMP/runtime-bundle"
 env "${common_env[@]}" "$ROOT/scripts/release.sh" package \
   vmlinux vmlinux-v2.3.4 x86_64 "$TMP/vmlinux-revisions.tsv" "$TMP/vmlinux-bundle"
 "$ROOT/scripts/release.sh" validate "$TMP/runtime-bundle"
 "$ROOT/scripts/release.sh" validate "$TMP/vmlinux-bundle"
 
-runtime_archive="$TMP/runtime-bundle/assets/sandbox-runtime-x86_64-runtime-v1.2.3.tar.gz"
+runtime_archive="$TMP/runtime-bundle/assets/sandbox-runtime-x86_64-runtime-v1.2.3-preview.20260804.tar.gz"
 for path in \
   ./bin/sandbox-runtime.bundle \
-  ./bin/sandbox-runtime-x86_64-runtime-v1.2.3.bundle \
+  ./bin/sandbox-runtime-x86_64-runtime-v1.2.3-preview.20260804.bundle \
   ./bin/flatten-ctl \
   ./bin/mkfs.erofs \
   ./release/runtime.json; do
@@ -69,10 +70,15 @@ for path in ./bin/vmlinux ./bin/vmlinux-x86_64-vmlinux-v2.3.4 ./release/vmlinux.
 done
 
 cp -a "$TMP/runtime-bundle" "$TMP/tampered"
-printf 'tampered\n' >> "$TMP/tampered/assets/sandbox-runtime-x86_64-runtime-v1.2.3.tar.gz"
+printf 'tampered\n' >> \
+  "$TMP/tampered/assets/sandbox-runtime-x86_64-runtime-v1.2.3-preview.20260804.tar.gz"
 if "$ROOT/scripts/release.sh" validate "$TMP/tampered" >/dev/null 2>&1; then
   fail "validator accepted a tampered runtime archive"
 fi
+
+bash "$ROOT/scripts/test-publisher.sh" "$ROOT/scripts/publish-release.sh" \
+  "$TMP/runtime-bundle" kuasar-sandbox/guest-runtime \
+  runtime-v1.2.3-preview.20260804
 
 if env "${common_env[@]}" "$ROOT/scripts/release.sh" package \
   runtime v1.2.3 x86_64 "$TMP/runtime-revisions.tsv" "$TMP/invalid" >/dev/null 2>&1; then
@@ -80,7 +86,8 @@ if env "${common_env[@]}" "$ROOT/scripts/release.sh" package \
 fi
 
 cp "$TMP/runtime-revisions.tsv" "$TMP/unversioned-sandboxer.tsv"
-sed -i 's/sandboxer\tv1\.2\.0/sandboxer\tmain/' "$TMP/unversioned-sandboxer.tsv"
+sed -i 's/sandboxer\tv1\.2\.0-preview\.20260804/sandboxer\tmain/' \
+  "$TMP/unversioned-sandboxer.tsv"
 if env "${common_env[@]}" "$ROOT/scripts/release.sh" package \
   runtime runtime-v1.2.4 x86_64 "$TMP/unversioned-sandboxer.tsv" "$TMP/unversioned" \
   >/dev/null 2>&1; then

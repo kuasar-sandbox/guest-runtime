@@ -14,12 +14,12 @@ validate_version() {
   local version="$2"
   case "$name" in
     runtime)
-      [[ "$version" =~ ^runtime-v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] \
-        || fail "runtime version must match runtime-vX.Y.Z without leading zeroes"
+      [[ "$version" =~ ^runtime-v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-preview\.[0-9]{8})?$ ]] \
+        || fail "runtime version must match runtime-vX.Y.Z or runtime-vX.Y.Z-preview.YYYYMMDD without leading zeroes"
       ;;
     vmlinux)
-      [[ "$version" =~ ^vmlinux-v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] \
-        || fail "vmlinux version must match vmlinux-vX.Y.Z without leading zeroes"
+      [[ "$version" =~ ^vmlinux-v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-preview\.[0-9]{8})?$ ]] \
+        || fail "vmlinux version must match vmlinux-vX.Y.Z or vmlinux-vX.Y.Z-preview.YYYYMMDD without leading zeroes"
       ;;
     *) fail "release name must be runtime or vmlinux" ;;
   esac
@@ -136,7 +136,7 @@ package_release() {
   case "$name" in
     runtime)
       [ "$(jq --arg repository kuasar-sandbox/sandboxer '
-        [.[] | select(.repository == $repository and (.requestedRef | test("^v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$")))] | length
+        [.[] | select(.repository == $repository and (.requestedRef | test("^v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-preview\\.[0-9]{8})?$")))] | length
       ' "$WORK/revisions.json")" -eq 1 ] \
         || fail "runtime revision manifest must identify one versioned sandboxer source"
       copy_external_file "$bin_dir/sandbox-runtime.bundle" bin/sandbox-runtime.bundle
@@ -238,8 +238,8 @@ validate_bundle() {
       and (.name == "runtime" or .name == "vmlinux")
       and .repository == $repository
       and (
-        (.name == "runtime" and (.version | test("^runtime-v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$")))
-        or (.name == "vmlinux" and (.version | test("^vmlinux-v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$")))
+        (.name == "runtime" and (.version | test("^runtime-v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-preview\\.[0-9]{8})?$")))
+        or (.name == "vmlinux" and (.version | test("^vmlinux-v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-preview\\.[0-9]{8})?$")))
       )
       and .tag == .version
       and (.architecture == "x86_64" or .architecture == "aarch64")
@@ -254,7 +254,7 @@ validate_bundle() {
         .name != "runtime"
         or ([.sources[] | select(
           .repository == "kuasar-sandbox/sandboxer"
-          and (.requestedRef | test("^v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"))
+          and (.requestedRef | test("^v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-preview\\.[0-9]{8})?$"))
         )] | length == 1)
       )
       and (.artifacts | length == 2)
