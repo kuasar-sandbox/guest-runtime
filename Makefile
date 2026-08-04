@@ -12,7 +12,7 @@
 
 SHELL := /bin/bash
 
-.PHONY: all build flatten-ctl sandbox-init sandbox-runtime native-deps erofs envd test vet test-e2e clean help
+.PHONY: all build flatten-ctl sandbox-init sandbox-runtime native-deps erofs envd vmlinux test vet test-e2e release-runtime release-vmlinux test-release clean help
 
 # ---------------------------------------------------------------------------
 # Architecture selection (identical block across all kuasar-sandbox repos)
@@ -88,6 +88,9 @@ sandbox-init:
 envd:
 	$(MAKE) -C native-deps envd
 
+vmlinux:
+	$(MAKE) -C native-deps vmlinux
+
 # Pack sandbox-init into the guest "/" image (virtio-pmem, DAX, read-only,
 # shared across sandboxes via host page cache). envd, flatten-ctl, and mkfs.erofs
 # are projected into application roots by sandbox-init through
@@ -141,6 +144,36 @@ vet:
 test-e2e: flatten-ctl
 	REQUIRE_GUEST_RUNTIME=1 FLATTEN_CTL="$(FLATTEN_CTL)" STORE_CTL="$(STORE_CTL)" ZOT_BIN="$(ZOT_BIN)" bash test/e2e/e2e_flatten.sh
 
+RUNTIME_VERSION ?= runtime-v0.1.0
+VMLINUX_VERSION ?= vmlinux-v0.1.0
+SANDBOXER_VERSION ?=
+
+release-runtime: sandbox-runtime
+	@[[ "$(SANDBOXER_VERSION)" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$$ ]] \
+		|| { echo "SANDBOXER_VERSION must match vX.Y.Z" >&2; exit 1; }
+	@{ \
+		printf 'repository\trequested_ref\tresolved_sha\trole\n'; \
+		printf 'kuasar-sandbox/accelerator\tHEAD\t%s\tdependency\n' "$$(git -C ../accelerator rev-parse HEAD)"; \
+		printf 'kuasar-sandbox/connector\tHEAD\t%s\tdependency\n' "$$(git -C ../connector rev-parse HEAD)"; \
+		printf 'kuasar-sandbox/guest-runtime\tHEAD\t%s\tprimary\n' "$$(git rev-parse HEAD)"; \
+		printf 'kuasar-sandbox/sandboxer\t$(SANDBOXER_VERSION)\t%s\tdependency\n' "$$(git -C ../sandboxer rev-parse HEAD)"; \
+	} > $(BUILD_DIR)/runtime-revisions.tsv
+	rm -rf $(BUILD_DIR)/release-runtime-bundle
+	SOURCE_DATE_EPOCH="$$(git show -s --format=%ct HEAD)" \
+		bash scripts/release.sh package runtime "$(RUNTIME_VERSION)" "$(TARGET_ARCH)" \
+		$(BUILD_DIR)/runtime-revisions.tsv $(BUILD_DIR)/release-runtime-bundle
+
+release-vmlinux: vmlinux
+	@printf 'repository\trequested_ref\tresolved_sha\trole\n' > $(BUILD_DIR)/vmlinux-revisions.tsv
+	@printf 'kuasar-sandbox/guest-runtime\tHEAD\t%s\tprimary\n' "$$(git rev-parse HEAD)" >> $(BUILD_DIR)/vmlinux-revisions.tsv
+	rm -rf $(BUILD_DIR)/release-vmlinux-bundle
+	SOURCE_DATE_EPOCH="$$(git show -s --format=%ct HEAD)" \
+		bash scripts/release.sh package vmlinux "$(VMLINUX_VERSION)" "$(TARGET_ARCH)" \
+		$(BUILD_DIR)/vmlinux-revisions.tsv $(BUILD_DIR)/release-vmlinux-bundle
+
+test-release:
+	bash scripts/test-release.sh
+
 clean:
 	rm -rf bin build
 	$(MAKE) -C native-deps clean
@@ -153,9 +186,13 @@ help:
 	@echo "  sandbox-init       delegate to ../sandboxer sandbox-init"
 	@echo "  erofs              build target-arch guest mkfs.erofs"
 	@echo "  envd               build e2b guest agent"
+	@echo "  vmlinux            build the guest kernel"
 	@echo "  native-deps        build vmlinux / mkfs.erofs / fsck.erofs / envd"
 	@echo "  test               unit/static checks"
 	@echo "  vet                Go static analysis"
 	@echo "  test-e2e           full flatten-ctl registry/store e2e"
+	@echo "  release-runtime    package runtime-vX.Y.Z (requires SANDBOXER_VERSION=vX.Y.Z)"
+	@echo "  release-vmlinux    package vmlinux-vX.Y.Z"
+	@echo "  test-release       test both independent release lines"
 	@echo "  clean"
 	@echo "  TARGET_ARCH        x86_64 (default) | aarch64"

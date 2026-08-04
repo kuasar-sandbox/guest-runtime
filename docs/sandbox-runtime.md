@@ -83,7 +83,7 @@ DAX 映射同一份 host 文件,避免每个 sandbox 独立复制 runtime 文件
 | `/opt/sandbox-runtime/bin/mkfs.erofs` | `native-deps/bin/<arch>/mkfs.erofs` | build sandbox 内生成 EROFS base 镜像 |
 
 `fsck.erofs` 是诊断/测试工具,不进入 runtime 镜像。`vmlinux` 不是 runtime
-镜像内容,由 `vmlinux-<arch>-<version>.tar.gz` 独立发布。
+镜像内容,由 `vmlinux-<arch>-vmlinux-vX.Y.Z.tar.gz` 独立发布。
 
 ### 2.2 host bundle
 
@@ -163,28 +163,33 @@ cloud-hypervisor。guest kernel 挂载该 pmem 后执行 `/sbin/init`,即
 
 ## 5. 发布件
 
-发布流程由 `orchestrator/release-builder` 编排。本仓会产生两个相关包:
+runtime 镜像由本仓的 `Runtime Release` workflow 独立发布:
 
 | 包 | 内容 | Release |
 |---|---|---|
-| `guest-runtime-<version>-linux-<arch>.tar.gz` | `flatten-ctl`、`mkfs.erofs`、本仓文档和 flatten e2e | `guest-runtime` 仓 `v<version>` |
-| `sandbox-runtime-<arch>-<version>.tar.gz` | runtime 镜像本体和 `docs/sandbox-runtime.md` | `guest-runtime` 仓 `runtime-v<version>` |
+| `sandbox-runtime-<arch>-runtime-vX.Y.Z.tar.gz` | runtime 镜像、`flatten-ctl`、`mkfs.erofs`、runtime 文档和 flatten e2e | `guest-runtime` 仓 `runtime-vX.Y.Z` |
 
 runtime 专用包内同时放置:
 
 ```
-bin/sandbox-runtime-<arch>-<version>.bundle
+bin/sandbox-runtime-<arch>-runtime-vX.Y.Z.bundle
 bin/sandbox-runtime.bundle
+bin/flatten-ctl
+bin/mkfs.erofs
 docs/sandbox-runtime.md
-release/sandbox-runtime.json
+release/runtime.json
 ```
 
 版本化 `.bundle` 文件用于归档和外部分发;`sandbox-runtime.bundle` 是当前脚本和
 默认配置使用的稳定入口。两者都是相同的真实 bundle,不存在 raw EROFS 别名。
 
-聚合发布 `orchestrator` 仓的 `release-v<version>` 不重新打包,只上传各仓原始
+聚合发布 `orchestrator` 仓的 `release-vX.Y.Z` 不重新打包,只上传各独立版本原始
 组件包和 `SHA256SUMS`。用户把需要的组件包解到同一目录即可得到共享的
 `bin/`、`docs/`、`test/`、`deploy/`、`release/` 布局。
+
+`vmlinux` 不属于 runtime 版本,由本仓的 `vmlinux-vX.Y.Z` 独立版本线发布。
+runtime 发布清单保存实际嵌入 `sandbox-init` 的 `sandboxer` tag 与 commit;
+runtime 与 vmlinux 的版本号均独立演进。
 
 `envd` 已内置在 `sandbox-runtime` 镜像中,不作为独立 `bin/envd` 发布;
 `fsck.erofs` 是源码树诊断/测试辅助工具,不进入通用组件包。
@@ -221,7 +226,7 @@ release/sandbox-runtime.json
 | build sandbox 找不到 `flatten-ctl` | 检查 `/opt/sandbox-runtime/bin/flatten-ctl` 是否进入镜像 |
 | build sandbox 无法生成 EROFS | 检查 `/opt/sandbox-runtime/bin/mkfs.erofs` 和 guest 内权限 |
 | restore 后行为异常 | 检查 snapshot 使用的 runtime digest 与 restore 配置是否匹配 |
-| 发布包解压后脚本找不到 runtime | 确认已解压 `sandbox-runtime-<arch>-<version>.tar.gz`,且 `bin/sandbox-runtime.bundle` 存在 |
+| 发布包解压后脚本找不到 runtime | 确认已解压 `sandbox-runtime-<arch>-runtime-vX.Y.Z.tar.gz`,且 `bin/sandbox-runtime.bundle` 存在 |
 
 ## 8. See Also
 

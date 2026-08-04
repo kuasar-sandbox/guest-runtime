@@ -207,6 +207,6 @@ WSL2 的 `/mnt/<drive>/`(DrvFs)上每个小文件有 5-10 倍 I/O 开销,而内�
 
 - [`../../docs/vmlinux.md`](../../docs/vmlinux.md) —— guest 内核配置体系、架构差异与关键
   决策(随发布包)。
-- `orchestrator/release-builder/Makefile` + `orchestrator/release-builder/scripts/release.sh`
-  —— 平台级聚合构建与发布打包;本目录的运行期必需产物经
+- `orchestrator/release-builder/docs/release.md`
+  —— runtime、vmlinux 独立版本与平台聚合发布;本目录的运行期必需产物经
   `orchestrator/release-builder/scripts/bin-inputs.manifest` 收集进共享 `bin/`。
