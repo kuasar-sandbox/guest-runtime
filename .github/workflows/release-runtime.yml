@@ -13,14 +13,16 @@ on:
         required: true
         type: string
   schedule:
-    - cron: "17 2 * * *"
+    - cron: "47 2 * * *"
+      timezone: Asia/Shanghai
+    - cron: "47 4 * * *"
       timezone: Asia/Shanghai
 
 permissions:
   contents: read
 
 concurrency:
-  group: runtime-release-${{ github.repository }}
+  group: runtime-release-${{ github.repository }}-${{ github.event_name }}
   cancel-in-progress: false
 
 jobs:
@@ -91,7 +93,7 @@ jobs:
       - Linux
       - X64
       - kuasar-e2e
-    timeout-minutes: 30
+    timeout-minutes: 60
     permissions:
       contents: read
     env:
@@ -131,6 +133,18 @@ jobs:
             sandboxer-release.json >/dev/null
 
       - name: Check out exact guest-runtime source
+        id: checkout-guest-runtime
+        continue-on-error: true
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: kuasar-sandbox/guest-runtime
+          ref: ${{ github.sha }}
+          path: src/guest-runtime
+          token: ${{ steps.source-token.outputs.token }}
+          persist-credentials: false
+
+      - name: Retry exact guest-runtime source checkout
+        if: steps.checkout-guest-runtime.outcome == 'failure'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: kuasar-sandbox/guest-runtime
@@ -140,6 +154,18 @@ jobs:
           persist-credentials: false
 
       - name: Check out accelerator dependency
+        id: checkout-accelerator
+        continue-on-error: true
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: kuasar-sandbox/accelerator
+          ref: main
+          path: src/accelerator
+          token: ${{ steps.source-token.outputs.token }}
+          persist-credentials: false
+
+      - name: Retry accelerator dependency checkout
+        if: steps.checkout-accelerator.outcome == 'failure'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: kuasar-sandbox/accelerator
@@ -149,6 +175,18 @@ jobs:
           persist-credentials: false
 
       - name: Check out connector dependency
+        id: checkout-connector
+        continue-on-error: true
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: kuasar-sandbox/connector
+          ref: main
+          path: src/connector
+          token: ${{ steps.source-token.outputs.token }}
+          persist-credentials: false
+
+      - name: Retry connector dependency checkout
+        if: steps.checkout-connector.outcome == 'failure'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: kuasar-sandbox/connector
@@ -158,6 +196,18 @@ jobs:
           persist-credentials: false
 
       - name: Check out versioned sandboxer dependency
+        id: checkout-sandboxer
+        continue-on-error: true
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: kuasar-sandbox/sandboxer
+          ref: ${{ needs.preflight.outputs.sandboxer_version }}
+          path: src/sandboxer
+          token: ${{ steps.source-token.outputs.token }}
+          persist-credentials: false
+
+      - name: Retry versioned sandboxer dependency checkout
+        if: steps.checkout-sandboxer.outcome == 'failure'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: kuasar-sandbox/sandboxer
@@ -167,6 +217,18 @@ jobs:
           persist-credentials: false
 
       - name: Check out native cache tooling
+        id: checkout-orchestrator
+        continue-on-error: true
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: kuasar-sandbox/orchestrator
+          ref: main
+          path: src/orchestrator
+          token: ${{ steps.source-token.outputs.token }}
+          persist-credentials: false
+
+      - name: Retry native cache tooling checkout
+        if: steps.checkout-orchestrator.outcome == 'failure'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: kuasar-sandbox/orchestrator
@@ -180,13 +242,20 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.source-token.outputs.token }}
         run: |
-          curl --fail --show-error --silent \
+          set -euo pipefail
+          status=$(curl --show-error --silent \
+            --retry 4 --retry-all-errors --connect-timeout 10 --max-time 60 \
             --request DELETE \
             --output /dev/null \
+            --write-out '%{http_code}' \
             -H "Accept: application/vnd.github+json" \
             -H "Authorization: Bearer $GH_TOKEN" \
             -H "X-GitHub-Api-Version: 2022-11-28" \
-            https://api.github.com/installation/token
+            https://api.github.com/installation/token)
+          case "$status" in
+            204|401) ;;
+            *) echo "failed to revoke source token: HTTP $status" >&2; exit 1 ;;
+          esac
 
       - name: Assemble source workspace and caches
         run: |
@@ -251,6 +320,9 @@ jobs:
       - preflight
       - build
     runs-on: ubuntu-latest
+    concurrency:
+      group: runtime-publish-${{ github.repository }}
+      cancel-in-progress: false
     permissions:
       actions: read
       contents: write
@@ -269,4 +341,21 @@ jobs:
       - name: Publish runtime release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: bash scripts/publish-release.sh publish release-bundle
+          STABLE_VERSION: runtime-v0.1.0
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_EVENT_NAME" = schedule ]; then
+            status=$(curl --show-error --silent \
+              --retry 4 --retry-all-errors --connect-timeout 10 --max-time 60 \
+              --output /dev/null --write-out '%{http_code}' \
+              -H "Accept: application/vnd.github+json" \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/tags/$STABLE_VERSION")
+            case "$status" in
+              200) echo "stable release $STABLE_VERSION exists; skipping preview publication"; exit 0 ;;
+              404) ;;
+              *) echo "failed to check stable release $STABLE_VERSION: HTTP $status" >&2; exit 1 ;;
+            esac
+          fi
+          bash scripts/publish-release.sh publish release-bundle
