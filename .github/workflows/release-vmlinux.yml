@@ -9,7 +9,9 @@ on:
         required: true
         type: string
   schedule:
-    - cron: "47 0 * * *"
+    - cron: "22 2 * * *"
+      timezone: Asia/Shanghai
+    - cron: "22 4 * * *"
       timezone: Asia/Shanghai
 
 permissions:
@@ -76,11 +78,14 @@ jobs:
       - Linux
       - X64
       - kuasar-e2e
-    timeout-minutes: 45
+    timeout-minutes: 60
     permissions:
       contents: read
     env:
       TARGET_ARCH: x86_64
+      http_proxy: ${{ secrets.KUASAR_CI_PROXY_URL }}
+      https_proxy: ${{ secrets.KUASAR_CI_PROXY_URL }}
+      no_proxy: ${{ vars.KUASAR_CI_NO_PROXY }}
     steps:
       - name: Create read-only source token
         id: source-token
@@ -94,6 +99,18 @@ jobs:
           skip-token-revoke: true
 
       - name: Check out exact guest-runtime source
+        id: checkout-guest-runtime
+        continue-on-error: true
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: kuasar-sandbox/guest-runtime
+          ref: ${{ github.sha }}
+          path: src/guest-runtime
+          token: ${{ steps.source-token.outputs.token }}
+          persist-credentials: false
+
+      - name: Retry exact guest-runtime source checkout
+        if: steps.checkout-guest-runtime.outcome == 'failure'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: kuasar-sandbox/guest-runtime
@@ -103,6 +120,18 @@ jobs:
           persist-credentials: false
 
       - name: Check out native cache tooling
+        id: checkout-orchestrator
+        continue-on-error: true
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: kuasar-sandbox/orchestrator
+          ref: main
+          path: src/orchestrator
+          token: ${{ steps.source-token.outputs.token }}
+          persist-credentials: false
+
+      - name: Retry native cache tooling checkout
+        if: steps.checkout-orchestrator.outcome == 'failure'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: kuasar-sandbox/orchestrator
@@ -117,6 +146,7 @@ jobs:
           GH_TOKEN: ${{ steps.source-token.outputs.token }}
         run: |
           curl --fail --show-error --silent \
+            --retry 4 --retry-all-errors --connect-timeout 10 --max-time 60 \
             --request DELETE \
             --output /dev/null \
             -H "Accept: application/vnd.github+json" \
@@ -130,6 +160,9 @@ jobs:
           install -d -m 0755 /var/cache/kuasar/tarballs
           mkdir -p src/guest-runtime/native-deps/build
           ln -sfn /var/cache/kuasar/tarballs src/guest-runtime/native-deps/build/tarball
+          linux_file=$(awk '/^LINUX_TARBALL[[:space:]]*\?=/ { url=$3; sub(/\\#.*/, "", url); n=split(url, part, "/"); print part[n]; exit }' src/guest-runtime/native-deps/Makefile)
+          [[ "$linux_file" =~ ^linux-([0-9]+)\..*\.tar\.gz$ ]]
+          echo "LINUX_TARBALL=https://mirrors.tuna.tsinghua.edu.cn/kernel/v${BASH_REMATCH[1]}.x/$linux_file" >> "$GITHUB_ENV"
 
       - name: Restore or build guest kernel
         env:
