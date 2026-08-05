@@ -207,6 +207,9 @@ jobs:
       - preflight
       - build
     runs-on: ubuntu-latest
+    concurrency:
+      group: vmlinux-publish-${{ github.repository }}
+      cancel-in-progress: false
     permissions:
       actions: read
       contents: write
