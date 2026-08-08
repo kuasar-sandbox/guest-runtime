@@ -12,10 +12,10 @@ native-deps 目录的构建工作流:从上游源码构建 kuasar-sandbox 平台
 `cloud-hypervisor` 是 `sandbox-ctl` 的 VMM 运行件,构建与 patch 契约见
 `sandboxer/docs/cloud-hypervisor.md`。
 
-平台级聚合由 `orchestrator/release-builder` 编排:
-`make -C orchestrator/release-builder build` 首先驱动本目录 `make build`,再把
-产物按 `orchestrator/release-builder/scripts/bin-inputs.manifest` 收集进
-`orchestrator/release-builder/bin/<arch>/`,供 e2e、demo 与 release packaging
+平台级聚合由 `platform` 编排:
+`make -C platform build` 首先驱动本目录 `make build`,再把
+产物按 `platform/release/bin-inputs.manifest` 收集进
+`platform/bin/<arch>/`,供 e2e、demo 与本地集成
 复用。
 
 ## 1. 概述
@@ -207,6 +207,6 @@ WSL2 的 `/mnt/<drive>/`(DrvFs)上每个小文件有 5-10 倍 I/O 开销,而内�
 
 - [`../../docs/vmlinux.md`](../../docs/vmlinux.md) —— guest 内核配置体系、架构差异与关键
   决策(随发布包)。
-- `orchestrator/release-builder/docs/release.md`
+- `platform/docs/release.md`
   —— runtime、vmlinux 独立版本与平台聚合发布;本目录的运行期必需产物经
-  `orchestrator/release-builder/scripts/bin-inputs.manifest` 收集进共享 `bin/`。
+  `platform/release/bin-inputs.manifest` 收集进共享 `bin/`。
