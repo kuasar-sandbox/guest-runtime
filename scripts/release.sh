@@ -61,9 +61,9 @@ copy_executable() {
   install -m 0755 "$source" "$STAGE/$destination"
 }
 
-copy_root_executable() {
+copy_root_script() {
   local source="$1" destination="$2"
-  [ -x "$ROOT/$source" ] || fail "missing executable release input: $ROOT/$source"
+  [ -f "$ROOT/$source" ] || fail "missing script release input: $ROOT/$source"
   mkdir -p "$(dirname "$STAGE/$destination")"
   install -m 0755 "$ROOT/$source" "$STAGE/$destination"
 }
@@ -130,6 +130,8 @@ validate_bundle() {
         test/e2e/e2e_flatten.sh test/e2e/README.md; do
         [ -f "$extract/$file" ] || fail "$archive is missing $file"
       done
+      [ -x "$extract/test/e2e/e2e_flatten.sh" ] \
+        || fail "$archive contains a non-executable test/e2e/e2e_flatten.sh"
       ;;
     vmlinux)
       [ -f "$extract/bin/vmlinux" ] || fail "$archive is missing bin/vmlinux"
@@ -164,7 +166,7 @@ package_release() {
       copy_file README.md docs/guest-runtime.md
       copy_file docs/sandbox-runtime.md docs/sandbox-runtime.md
       copy_file docs/flatten.md docs/flatten.md
-      copy_root_executable test/e2e/e2e_flatten.sh test/e2e/e2e_flatten.sh
+      copy_root_script test/e2e/e2e_flatten.sh test/e2e/e2e_flatten.sh
       copy_file test/e2e/README.md test/e2e/README.md
       ;;
     vmlinux)

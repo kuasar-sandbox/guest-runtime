@@ -34,11 +34,11 @@ env "${common_env[@]}" "$ROOT/scripts/release.sh" package \
 "$ROOT/scripts/release.sh" validate \
   vmlinux vmlinux-v2.3.4 x86_64 "$TMP/vmlinux-bundle"
 
-RELEASE_KIND=runtime "$ROOT/scripts/test-publisher.sh" \
+RELEASE_KIND=runtime bash "$ROOT/scripts/test-publisher.sh" \
   "$ROOT/scripts/publish-release.sh" "$TMP/runtime-bundle" \
   kuasar-sandbox/guest-runtime runtime-v1.2.3-preview.20260804 \
   1111111111111111111111111111111111111111
-RELEASE_KIND=vmlinux "$ROOT/scripts/test-publisher.sh" \
+RELEASE_KIND=vmlinux bash "$ROOT/scripts/test-publisher.sh" \
   "$ROOT/scripts/publish-release.sh" "$TMP/vmlinux-bundle" \
   kuasar-sandbox/guest-runtime vmlinux-v2.3.4 \
   2222222222222222222222222222222222222222
