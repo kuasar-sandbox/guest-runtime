@@ -97,7 +97,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: kuasar-sandbox/platform
-          ref: 51d424aca1b9fab8687ce917228a6542d6ce9832
+          ref: caf322e48fc11c96a5e4984b91d6ee7cba68a991
           path: src/platform
           token: ${{ steps.source-token.outputs.token }}
           persist-credentials: false
@@ -107,7 +107,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: kuasar-sandbox/platform
-          ref: 51d424aca1b9fab8687ce917228a6542d6ce9832
+          ref: caf322e48fc11c96a5e4984b91d6ee7cba68a991
           path: src/platform
           token: ${{ steps.source-token.outputs.token }}
           persist-credentials: false
