@@ -9,11 +9,11 @@ in-memory ggcr registry that only does the tag-schema referrers fallback.)
 
 ## Run
 
-    make test-e2e              # also runs as part of the release-builder umbrella gate
+    make test-e2e              # also runs as part of the platform umbrella gate
 
 This builds `flatten-ctl` + the sibling `store-ctl` and runs
 `test/e2e/e2e_flatten.sh` against `ZOT_BIN` or a `zot` already on `PATH`.
-When run from the source-tree release-builder umbrella, `make e2e-tools`
+When run from the source-tree platform umbrella, `make e2e-tools`
 downloads zot into `build/e2e-tools/` and passes `ZOT_BIN`; release packages do
 not ship zot. Under `make test-e2e`, missing requirements fail via
 `REQUIRE_GUEST_RUNTIME=1`; direct ad-hoc script runs may still skip soft

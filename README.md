@@ -46,15 +46,14 @@ make build TARGET_ARCH=aarch64
 
 本仓没有通用的 `guest-runtime-vX.Y.Z` 版本或同名归档,而是维护两条独立版本线:
 
-- `runtime-vX.Y.Z`:发布 `sandbox-runtime-<arch>-runtime-vX.Y.Z.tar.gz`,包含
+- `runtime-vX.Y.Z`:发布 `sandbox-runtime-<arch>-vX.Y.Z.tar.gz`,包含
   runtime bundle、`flatten-ctl`、`mkfs.erofs`、runtime 文档和 flatten e2e。
-  发布清单记录构建时嵌入的准确 `sandboxer` 版本和 commit。
-- `vmlinux-vX.Y.Z`:发布 `vmlinux-<arch>-vmlinux-vX.Y.Z.tar.gz`,包含稳定入口
-  `bin/vmlinux`、版本化 kernel 文件和 kernel 文档。
+- `vmlinux-vX.Y.Z`:发布 `vmlinux-<arch>-vX.Y.Z.tar.gz`,包含稳定入口
+  `bin/vmlinux` 和 kernel 文档。
 
 两条版本线独立演进,版本号不要求相同。`envd` 只随 runtime 镜像内置;
 `fsck.erofs` 只作为源码树诊断/测试辅助产物。
-正式版之前,两条 workflow 每天按上海日期分别发布
+正式版之前,`platform` 仓的每日协调器按上海日期分别触发
 `runtime-v0.1.0-preview.YYYYMMDD` 和 `vmlinux-v0.1.0-preview.YYYYMMDD`。
 preview 标记为 prerelease 且不更新 GitHub Latest;两个正式 `v0.1.0` 版本均由
 独立构建发布,不改名或覆盖 preview。

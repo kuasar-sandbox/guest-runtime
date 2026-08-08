@@ -23,7 +23,7 @@ set -uo pipefail
 
 # The e2e only talks to localhost (zot, store-ctl, docker, curl); keep any
 # ambient proxy out of that path. zot is supplied by ZOT_BIN, PATH, or the
-# release-builder umbrella bin/.
+# platform umbrella bin/.
 export NO_PROXY=127.0.0.1,localhost no_proxy=127.0.0.1,localhost
 
 # --------------------------------------------------------------------------

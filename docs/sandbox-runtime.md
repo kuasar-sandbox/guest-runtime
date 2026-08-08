@@ -83,7 +83,7 @@ DAX 映射同一份 host 文件,避免每个 sandbox 独立复制 runtime 文件
 | `/opt/sandbox-runtime/bin/mkfs.erofs` | `native-deps/bin/<arch>/mkfs.erofs` | build sandbox 内生成 EROFS base 镜像 |
 
 `fsck.erofs` 是诊断/测试工具,不进入 runtime 镜像。`vmlinux` 不是 runtime
-镜像内容,由 `vmlinux-<arch>-vmlinux-vX.Y.Z.tar.gz` 独立发布。
+镜像内容,由 `vmlinux-<arch>-vX.Y.Z.tar.gz` 独立发布。
 
 ### 2.2 host bundle
 
@@ -167,29 +167,26 @@ runtime 镜像由本仓的 `Runtime Release` workflow 独立发布:
 
 | 包 | 内容 | Release |
 |---|---|---|
-| `sandbox-runtime-<arch>-runtime-vX.Y.Z.tar.gz` | runtime 镜像、`flatten-ctl`、`mkfs.erofs`、runtime 文档和 flatten e2e | `guest-runtime` 仓 `runtime-vX.Y.Z` |
+| `sandbox-runtime-<arch>-vX.Y.Z.tar.gz` | runtime 镜像、`flatten-ctl`、`mkfs.erofs`、runtime 文档和 flatten e2e | `guest-runtime` 仓 `runtime-vX.Y.Z` |
 
 runtime 专用包内同时放置:
 
 ```
-bin/sandbox-runtime-<arch>-runtime-vX.Y.Z.bundle
 bin/sandbox-runtime.bundle
 bin/flatten-ctl
 bin/mkfs.erofs
 docs/sandbox-runtime.md
-release/runtime.json
 ```
 
-版本化 `.bundle` 文件用于归档和外部分发;`sandbox-runtime.bundle` 是当前脚本和
-默认配置使用的稳定入口。两者都是相同的真实 bundle,不存在 raw EROFS 别名。
+`sandbox-runtime.bundle` 是当前脚本、默认配置和外部分发共同使用的稳定入口。
 
-聚合发布 `orchestrator` 仓的 `release-vX.Y.Z` 不重新打包,只上传各独立版本原始
-组件包和 `SHA256SUMS`。用户把需要的组件包解到同一目录即可得到共享的
-`bin/`、`docs/`、`test/`、`deploy/`、`release/` 布局。
+聚合发布由 `platform` 仓的 `release-vX.Y.Z` 承载,同时上传 platform 包、各独立
+版本的原始组件包和聚合 `SHA256SUMS`。用户把需要的包解到同一目录即可得到共享的
+`bin/`、`docs/`、`test/`、`deploy/` 布局。
 
 `vmlinux` 不属于 runtime 版本,由本仓的 `vmlinux-vX.Y.Z` 独立版本线发布。
-runtime 发布清单保存实际嵌入 `sandbox-init` 的 `sandboxer` tag 与 commit;
-runtime 与 vmlinux 的版本号均独立演进。
+runtime workflow 显式选择已发布的 `sandboxer` tag 构建镜像;runtime 与 vmlinux
+的版本号均独立演进。
 
 `envd` 已内置在 `sandbox-runtime` 镜像中,不作为独立 `bin/envd` 发布;
 `fsck.erofs` 是源码树诊断/测试辅助工具,不进入通用组件包。
@@ -226,7 +223,7 @@ runtime 与 vmlinux 的版本号均独立演进。
 | build sandbox 找不到 `flatten-ctl` | 检查 `/opt/sandbox-runtime/bin/flatten-ctl` 是否进入镜像 |
 | build sandbox 无法生成 EROFS | 检查 `/opt/sandbox-runtime/bin/mkfs.erofs` 和 guest 内权限 |
 | restore 后行为异常 | 检查 snapshot 使用的 runtime digest 与 restore 配置是否匹配 |
-| 发布包解压后脚本找不到 runtime | 确认已解压 `sandbox-runtime-<arch>-runtime-vX.Y.Z.tar.gz`,且 `bin/sandbox-runtime.bundle` 存在 |
+| 发布包解压后脚本找不到 runtime | 确认已解压 `sandbox-runtime-<arch>-vX.Y.Z.tar.gz`,且 `bin/sandbox-runtime.bundle` 存在 |
 
 ## 8. See Also
 
@@ -235,4 +232,4 @@ runtime 与 vmlinux 的版本号均独立演进。
 - `guest-runtime/native-deps/docs/build.md` - `mkfs.erofs`、`vmlinux`、`envd` 构建流程。
 - `guest-runtime/docs/vmlinux.md` - guest kernel 镜像与 runtime 镜像的配合关系。
 - `guest-runtime/docs/flatten.md` - `flatten-ctl` 在 build sandbox 中的执行模型。
-- `orchestrator/release-builder/test/QUICKSTART.md` - 发布包解压和 e2e 运行入口。
+- `platform/test/QUICKSTART.md` - 发布包解压和 e2e 运行入口。

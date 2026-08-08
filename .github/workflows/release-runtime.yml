@@ -1,5 +1,5 @@
 name: Runtime Release
-run-name: ${{ github.event_name == 'schedule' && 'Daily runtime-v0.1.0 preview' || format('Release {0} with sandboxer {1}', inputs.version, inputs.sandboxer_version) }}
+run-name: Release ${{ inputs.version }}
 
 on:
   workflow_dispatch:
@@ -12,17 +12,12 @@ on:
         description: Published stable or preview sandboxer version embedded as sandbox-init
         required: true
         type: string
-  schedule:
-    - cron: "47 2 * * *"
-      timezone: Asia/Shanghai
-    - cron: "47 4 * * *"
-      timezone: Asia/Shanghai
 
 permissions:
   contents: read
 
 concurrency:
-  group: runtime-release-${{ github.repository }}-${{ github.event_name }}
+  group: runtime-release-${{ github.repository }}-${{ inputs.version }}
   cancel-in-progress: false
 
 jobs:
@@ -32,7 +27,6 @@ jobs:
       actions: read
       contents: read
     outputs:
-      publish: ${{ steps.request.outputs.publish }}
       sandboxer_version: ${{ steps.request.outputs.sandboxer_version }}
       version: ${{ steps.request.outputs.version }}
     steps:
@@ -41,53 +35,28 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Resolve release request
+      - name: Validate release request
         id: request
         env:
           GH_TOKEN: ${{ github.token }}
-          INPUT_VERSION: ${{ inputs.version }}
-          INPUT_SANDBOXER_VERSION: ${{ inputs.sandboxer_version }}
+          VERSION: ${{ inputs.version }}
+          SANDBOXER_VERSION: ${{ inputs.sandboxer_version }}
+          TARGET_ARCH: x86_64
+          RELEASE_KIND: runtime
         run: |
           set -euo pipefail
-          write_request() {
-            {
-              echo "version=$1"
-              echo "sandboxer_version=$2"
-              echo "publish=$3"
-            } >> "$GITHUB_OUTPUT"
-          }
           [ "$GITHUB_REF" = refs/heads/main ] \
             || { echo "Runtime Release must run from main" >&2; exit 1; }
-          if [ "$GITHUB_EVENT_NAME" = schedule ]; then
-            if gh api "repos/$GITHUB_REPOSITORY/releases/tags/runtime-v0.1.0" >/dev/null 2>&1; then
-              write_request runtime-v0.1.0 v0.1.0 false
-              exit 0
-            fi
-            created_at=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" --jq .created_at)
-            date=$(TZ=Asia/Shanghai date -d "$created_at" +%Y%m%d)
-            VERSION="runtime-v0.1.0-preview.$date"
-            SANDBOXER_VERSION="v0.1.0-preview.$date"
-            if gh api "repos/$GITHUB_REPOSITORY/releases/tags/$VERSION" > existing.json 2>/dev/null; then
-              jq -e --arg version "$VERSION" \
-                '.tag_name == $version and .draft == false and .prerelease == true' \
-                existing.json >/dev/null
-              write_request "$VERSION" "$SANDBOXER_VERSION" false
-              exit 0
-            fi
-          else
-            VERSION="$INPUT_VERSION"
-            SANDBOXER_VERSION="$INPUT_SANDBOXER_VERSION"
-          fi
           [[ "$VERSION" =~ ^runtime-v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-preview\.[0-9]{8})?$ ]] \
             || { echo "version must match runtime-vX.Y.Z or runtime-vX.Y.Z-preview.YYYYMMDD" >&2; exit 1; }
           [[ "$SANDBOXER_VERSION" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-preview\.[0-9]{8})?$ ]] \
             || { echo "sandboxer_version must match vX.Y.Z or vX.Y.Z-preview.YYYYMMDD" >&2; exit 1; }
-          bash scripts/publish-release.sh check "$VERSION"
-          write_request "$VERSION" "$SANDBOXER_VERSION" true
+          bash scripts/publish-release.sh check "$VERSION" "$TARGET_ARCH"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "sandboxer_version=$SANDBOXER_VERSION" >> "$GITHUB_OUTPUT"
 
   build:
     needs: preflight
-    if: needs.preflight.outputs.publish == 'true'
     runs-on:
       - self-hosted
       - Linux
@@ -110,7 +79,7 @@ jobs:
           client-id: ${{ vars.KUASAR_CI_APP_CLIENT_ID }}
           private-key: ${{ secrets.KUASAR_CI_APP_PRIVATE_KEY }}
           owner: kuasar-sandbox
-          repositories: accelerator,connector,guest-runtime,orchestrator,sandboxer
+          repositories: accelerator,connector,guest-runtime,platform,sandboxer
           permission-contents: read
           skip-token-revoke: true
 
@@ -216,24 +185,24 @@ jobs:
           token: ${{ steps.source-token.outputs.token }}
           persist-credentials: false
 
-      - name: Check out native cache tooling
-        id: checkout-orchestrator
+      - name: Check out pinned native cache tooling
+        id: checkout-platform
         continue-on-error: true
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          repository: kuasar-sandbox/orchestrator
-          ref: main
-          path: src/orchestrator
+          repository: kuasar-sandbox/platform
+          ref: 68f27a2bce0021c4108a1345acf8af3676c579ea
+          path: src/platform
           token: ${{ steps.source-token.outputs.token }}
           persist-credentials: false
 
       - name: Retry native cache tooling checkout
-        if: steps.checkout-orchestrator.outcome == 'failure'
+        if: steps.checkout-platform.outcome == 'failure'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          repository: kuasar-sandbox/orchestrator
-          ref: main
-          path: src/orchestrator
+          repository: kuasar-sandbox/platform
+          ref: 68f27a2bce0021c4108a1345acf8af3676c579ea
+          path: src/platform
           token: ${{ steps.source-token.outputs.token }}
           persist-credentials: false
 
@@ -270,7 +239,7 @@ jobs:
       - name: Restore or build runtime native inputs
         env:
           KUASAR_WORKSPACE_ROOT: ${{ github.workspace }}/src
-        run: src/orchestrator/release-builder/scripts/native-cache.sh restore-or-build erofs envd
+        run: src/platform/ci/native-cache/native-cache.sh restore-or-build erofs envd
 
       - name: Build and test runtime image
         run: |
@@ -284,28 +253,13 @@ jobs:
         working-directory: src/guest-runtime
         env:
           VERSION: ${{ needs.preflight.outputs.version }}
-          RELEASE_WORKFLOW_REPOSITORY: ${{ github.repository }}
-          RELEASE_WORKFLOW_RUN_ID: ${{ github.run_id }}
-          RELEASE_WORKFLOW_RUN_ATTEMPT: ${{ github.run_attempt }}
-          RELEASE_WORKFLOW_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
-          {
-            printf 'repository\trequested_ref\tresolved_sha\trole\n'
-            printf 'kuasar-sandbox/accelerator\tmain\t%s\tdependency\n' \
-              "$(git -C ../accelerator rev-parse HEAD)"
-            printf 'kuasar-sandbox/connector\tmain\t%s\tdependency\n' \
-              "$(git -C ../connector rev-parse HEAD)"
-            printf 'kuasar-sandbox/guest-runtime\tmain\t%s\tprimary\n' \
-              "$(git rev-parse HEAD)"
-            printf 'kuasar-sandbox/sandboxer\t%s\t%s\tdependency\n' \
-              "$SANDBOXER_VERSION" "$(git -C ../sandboxer rev-parse HEAD)"
-          } > revisions.tsv
           [ "$(git rev-parse HEAD)" = "$GITHUB_SHA" ]
-          SOURCE_DATE_EPOCH=$(git show -s --format=%ct "$GITHUB_SHA")
           export SOURCE_DATE_EPOCH
+          SOURCE_DATE_EPOCH=$(git show -s --format=%ct "$GITHUB_SHA")
           bash scripts/release.sh package runtime "$VERSION" "$TARGET_ARCH" \
-            revisions.tsv release-bundle
+            release-bundle
 
       - name: Upload validated runtime bundle
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -341,21 +295,10 @@ jobs:
       - name: Publish runtime release
         env:
           GH_TOKEN: ${{ github.token }}
-          STABLE_VERSION: runtime-v0.1.0
+          VERSION: ${{ needs.preflight.outputs.version }}
+          TARGET_ARCH: x86_64
+          RELEASE_KIND: runtime
         run: |
           set -euo pipefail
-          if [ "$GITHUB_EVENT_NAME" = schedule ]; then
-            status=$(curl --show-error --silent \
-              --retry 4 --retry-all-errors --connect-timeout 10 --max-time 60 \
-              --output /dev/null --write-out '%{http_code}' \
-              -H "Accept: application/vnd.github+json" \
-              -H "Authorization: Bearer $GH_TOKEN" \
-              -H "X-GitHub-Api-Version: 2022-11-28" \
-              "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/tags/$STABLE_VERSION")
-            case "$status" in
-              200) echo "stable release $STABLE_VERSION exists; skipping preview publication"; exit 0 ;;
-              404) ;;
-              *) echo "failed to check stable release $STABLE_VERSION: HTTP $status" >&2; exit 1 ;;
-            esac
-          fi
-          bash scripts/publish-release.sh publish release-bundle
+          bash scripts/publish-release.sh publish \
+            "$VERSION" "$TARGET_ARCH" "$GITHUB_SHA" release-bundle
