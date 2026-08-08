@@ -83,7 +83,7 @@ DAX 映射同一份 host 文件,避免每个 sandbox 独立复制 runtime 文件
 | `/opt/sandbox-runtime/bin/mkfs.erofs` | `native-deps/bin/<arch>/mkfs.erofs` | build sandbox 内生成 EROFS base 镜像 |
 
 `fsck.erofs` 是诊断/测试工具,不进入 runtime 镜像。`vmlinux` 不是 runtime
-镜像内容,由 `vmlinux-<arch>-vX.Y.Z.tar.gz` 独立发布。
+镜像内容,由 `vmlinux-x86_64-vX.Y.Z.tar.gz` 独立发布。
 
 ### 2.2 host bundle
 
@@ -167,7 +167,7 @@ runtime 镜像由本仓的 `Runtime Release` workflow 独立发布:
 
 | 包 | 内容 | Release |
 |---|---|---|
-| `sandbox-runtime-<arch>-vX.Y.Z.tar.gz` | runtime 镜像、`flatten-ctl`、`mkfs.erofs`、runtime 文档和 flatten e2e | `guest-runtime` 仓 `runtime-vX.Y.Z` |
+| `sandbox-runtime-x86_64-vX.Y.Z.tar.gz` | runtime 镜像、`flatten-ctl`、`mkfs.erofs`、runtime 文档和 flatten e2e | `guest-runtime` 仓 `runtime-vX.Y.Z` |
 
 runtime 专用包内同时放置:
 
@@ -223,7 +223,7 @@ runtime workflow 显式选择已发布的 `sandboxer` tag 构建镜像;runtime �
 | build sandbox 找不到 `flatten-ctl` | 检查 `/opt/sandbox-runtime/bin/flatten-ctl` 是否进入镜像 |
 | build sandbox 无法生成 EROFS | 检查 `/opt/sandbox-runtime/bin/mkfs.erofs` 和 guest 内权限 |
 | restore 后行为异常 | 检查 snapshot 使用的 runtime digest 与 restore 配置是否匹配 |
-| 发布包解压后脚本找不到 runtime | 确认已解压 `sandbox-runtime-<arch>-vX.Y.Z.tar.gz`,且 `bin/sandbox-runtime.bundle` 存在 |
+| 发布包解压后脚本找不到 runtime | 确认已解压 `sandbox-runtime-x86_64-vX.Y.Z.tar.gz`,且 `bin/sandbox-runtime.bundle` 存在 |
 
 ## 8. See Also
 

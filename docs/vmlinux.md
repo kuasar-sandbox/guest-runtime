@@ -39,7 +39,7 @@ bin/aarch64/vmlinux       PE 格式 Image,EFI stub + ACPI 启动,~14 MiB
 格式选择启动协议——sandbox-ctl 上层路径无 arch 分支。
 
 本仓通过 `Vmlinux Release` workflow 独立发布 `vmlinux-vX.Y.Z`,制品名为
-`vmlinux-<arch>-vX.Y.Z.tar.gz`。该版本线与 `runtime-vX.Y.Z` 独立,
+`vmlinux-x86_64-vX.Y.Z.tar.gz`。该版本线与 `runtime-vX.Y.Z` 独立,
 两者版本号不要求一致;平台聚合版本显式选择各自版本。
 
 ## 2. 构建工作流
