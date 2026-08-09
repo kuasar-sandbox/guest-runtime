@@ -11,6 +11,9 @@ fail() {
   exit 1
 }
 
+[ "$(git -C "$ROOT" ls-files -s -- test/e2e/run_all.sh | awk '{print $1}')" = 100755 ] \
+  || fail "test/e2e/run_all.sh is not executable in the Git index"
+
 mkdir -p "$TMP/bin" "$TMP/native-bin" "$TMP/src"
 printf 'package main\nfunc main() {}\n' > "$TMP/src/main.go"
 GO111MODULE=off go build -o "$TMP/bin/flatten-ctl" "$TMP/src/main.go"
@@ -44,16 +47,19 @@ RELEASE_KIND=vmlinux bash "$ROOT/scripts/test-publisher.sh" \
   2222222222222222222222222222222222222222
 
 runtime_archive="$TMP/runtime-bundle/assets/sandbox-runtime-x86_64-v1.2.3-preview.20260804.tar.gz"
-for path in ./bin/sandbox-runtime.bundle ./bin/flatten-ctl ./bin/mkfs.erofs \
-  ./docs/guest-runtime.md ./test/e2e/e2e_flatten.sh; do
+for path in ./bin/sandbox-runtime.bundle ./bin/flatten-ctl ./bin/mkfs.erofs; do
   tar -tzf "$runtime_archive" | grep -Fx "$path" >/dev/null \
     || fail "runtime archive is missing $path"
 done
 vmlinux_archive="$TMP/vmlinux-bundle/assets/vmlinux-x86_64-v2.3.4.tar.gz"
-for path in ./bin/vmlinux ./docs/vmlinux.md; do
+for path in ./bin/vmlinux; do
   tar -tzf "$vmlinux_archive" | grep -Fx "$path" >/dev/null \
     || fail "vmlinux archive is missing $path"
 done
+if tar -tzf "$runtime_archive" | grep -E '^\./(docs|test/e2e)(/|$)' >/dev/null \
+  || tar -tzf "$vmlinux_archive" | grep -E '^\./(docs|test/e2e)(/|$)' >/dev/null; then
+  fail "component archive contains documentation or E2E sources"
+fi
 if tar -tzf "$runtime_archive" | grep -E 'sandbox-runtime-x86_64-|(^|/)release/' >/dev/null; then
   fail "runtime archive contains a duplicate versioned payload or release metadata"
 fi
