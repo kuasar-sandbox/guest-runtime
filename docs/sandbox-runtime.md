@@ -167,7 +167,7 @@ runtime 镜像由本仓的 `Runtime Release` workflow 独立发布:
 
 | 包 | 内容 | Release |
 |---|---|---|
-| `sandbox-runtime-x86_64-vX.Y.Z.tar.gz` | runtime 镜像、`flatten-ctl`、`mkfs.erofs`、runtime 文档和 flatten e2e | `guest-runtime` 仓 `runtime-vX.Y.Z` |
+| `sandbox-runtime-x86_64-vX.Y.Z.tar.gz` | runtime 镜像、`flatten-ctl`、`mkfs.erofs` | `guest-runtime` 仓 `runtime-vX.Y.Z` |
 
 runtime 专用包内同时放置:
 
@@ -175,14 +175,15 @@ runtime 专用包内同时放置:
 bin/sandbox-runtime.bundle
 bin/flatten-ctl
 bin/mkfs.erofs
-docs/sandbox-runtime.md
 ```
 
 `sandbox-runtime.bundle` 是当前脚本、默认配置和外部分发共同使用的稳定入口。
 
 聚合发布由 `platform` 仓的 `release-vX.Y.Z` 承载,同时上传 platform 包、各独立
-版本的原始组件包和聚合 `SHA256SUMS`。用户把需要的包解到同一目录即可得到共享的
-`bin/`、`docs/`、`test/`、`deploy/` 布局。
+版本的原始组件包和聚合 `SHA256SUMS`。platform 包从所选 runtime tag 聚合本仓
+runtime 文档与 `test/e2e/`,从所选 vmlinux tag 取得 `docs/vmlinux.md`;组件包本身
+不重复携带这些内容。用户把需要的包解到同一目录即可得到共享的 `bin/`、`docs/`、
+`test/`、`deploy/` 布局。
 
 `vmlinux` 不属于 runtime 版本,由本仓的 `vmlinux-vX.Y.Z` 独立版本线发布。
 runtime workflow 显式选择已发布的 `sandboxer` tag 构建镜像;runtime 与 vmlinux

@@ -48,6 +48,7 @@ ENVD          ?= native-deps/$(BINDIR)/envd
 FLATTEN_CTL   ?= $(BINDIR)/flatten-ctl
 STORE_CTL     ?= ../accelerator/$(BINDIR)/store-ctl
 ZOT_BIN       ?= zot
+E2E_BIN       ?= $(abspath ../platform/bin/$(TARGET_ARCH))
 
 # BUILD_MKFS_EROFS is the host executable that packs the raw runtime EROFS.
 # GUEST_MKFS_EROFS is the target-arch static binary shipped inside the guest
@@ -141,8 +142,8 @@ test:
 vet:
 	CGO_ENABLED=0 $(GO) vet ./...
 
-test-e2e: flatten-ctl
-	REQUIRE_GUEST_RUNTIME=1 FLATTEN_CTL="$(FLATTEN_CTL)" STORE_CTL="$(STORE_CTL)" ZOT_BIN="$(ZOT_BIN)" bash test/e2e/e2e_flatten.sh
+test-e2e:
+	BIN="$(E2E_BIN)" ZOT_BIN="$(ZOT_BIN)" bash test/e2e/run_all.sh
 
 RUNTIME_VERSION ?= runtime-v0.1.0
 VMLINUX_VERSION ?= vmlinux-v0.1.0

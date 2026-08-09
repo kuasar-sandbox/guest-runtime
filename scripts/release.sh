@@ -84,8 +84,8 @@ validate_archive_paths() {
   fi
   awk '
     { path=$0; sub(/^\.\//, "", path) }
-    path != "" && path !~ /\/$/ && path !~ /^(bin|docs|test)\// { exit 1 }
-  ' "$listing" || fail "$archive contains a file outside bin/, docs/, or test/"
+    path != "" && path !~ /\/$/ && path !~ /^bin\// { exit 1 }
+  ' "$listing" || fail "$archive contains a file outside bin/"
 }
 
 validate_bundle() {
@@ -125,17 +125,9 @@ validate_bundle() {
       [ -x "$extract/bin/flatten-ctl" ] || fail "$archive is missing bin/flatten-ctl"
       [ -x "$extract/bin/mkfs.erofs" ] || fail "$archive is missing bin/mkfs.erofs"
       check_go_binary "$extract/bin/flatten-ctl"
-      local file
-      for file in docs/guest-runtime.md docs/sandbox-runtime.md docs/flatten.md \
-        test/e2e/e2e_flatten.sh test/e2e/README.md; do
-        [ -f "$extract/$file" ] || fail "$archive is missing $file"
-      done
-      [ -x "$extract/test/e2e/e2e_flatten.sh" ] \
-        || fail "$archive contains a non-executable test/e2e/e2e_flatten.sh"
       ;;
     vmlinux)
       [ -f "$extract/bin/vmlinux" ] || fail "$archive is missing bin/vmlinux"
-      [ -f "$extract/docs/vmlinux.md" ] || fail "$archive is missing docs/vmlinux.md"
       ;;
   esac
 }
@@ -163,15 +155,9 @@ package_release() {
       copy_executable "$bin_dir/flatten-ctl" bin/flatten-ctl
       copy_executable "$native_bin_dir/mkfs.erofs" bin/mkfs.erofs
       check_go_binary "$STAGE/bin/flatten-ctl"
-      copy_file README.md docs/guest-runtime.md
-      copy_file docs/sandbox-runtime.md docs/sandbox-runtime.md
-      copy_file docs/flatten.md docs/flatten.md
-      copy_root_script test/e2e/e2e_flatten.sh test/e2e/e2e_flatten.sh
-      copy_file test/e2e/README.md test/e2e/README.md
       ;;
     vmlinux)
       copy_external_file "$native_bin_dir/vmlinux" bin/vmlinux
-      copy_file docs/vmlinux.md docs/vmlinux.md
       ;;
   esac
 
@@ -182,7 +168,7 @@ package_release() {
   cat > "$output/release-notes.md" <<EOF
 $kind $version for Linux $arch.
 
-Extract the archive into a Kuasar Sandbox deployment root and verify it with \`SHA256SUMS\`. GitHub provides the source archives for this tag automatically.
+Extract the archive into a Kuasar Sandbox deployment root and verify it with \`SHA256SUMS\`. Documentation and E2E suites from this exact tag are collected by the aggregate platform release.
 EOF
   validate_bundle "$kind" "$version" "$arch" "$output"
   echo "==> prepared $output for $version"

@@ -47,9 +47,13 @@ make build TARGET_ARCH=aarch64
 本仓没有通用的 `guest-runtime-vX.Y.Z` 版本或同名归档,而是维护两条独立版本线:
 
 - `runtime-vX.Y.Z`:发布 `sandbox-runtime-x86_64-vX.Y.Z.tar.gz`,包含
-  runtime bundle、`flatten-ctl`、`mkfs.erofs`、runtime 文档和 flatten e2e。
+  runtime bundle、`flatten-ctl` 和 `mkfs.erofs`。
 - `vmlinux-vX.Y.Z`:发布 `vmlinux-x86_64-vX.Y.Z.tar.gz`,包含稳定入口
-  `bin/vmlinux` 和 kernel 文档。
+  `bin/vmlinux`。
+
+本仓文档与 `test/e2e/` 不进入上述组件包。platform 聚合版本从所选 runtime tag
+收集 runtime 文档与 flatten E2E,从所选 vmlinux tag 收集 kernel 文档,统一放入
+platform 包。
 
 两条版本线独立演进,版本号不要求相同。当前 Release 只发布已完成全量构建与
 BMS 验证的 Linux x86_64 目标。`envd` 只随 runtime 镜像内置;
