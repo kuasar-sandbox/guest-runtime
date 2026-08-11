@@ -69,3 +69,9 @@ preview 标记为 prerelease 且不更新 GitHub Latest;两个正式 `v0.1.0` �
 - [docs/vmlinux.md](docs/vmlinux.md) — guest kernel 配置、构建和平台 ABI。
 - [docs/flatten.md](docs/flatten.md) — `flatten-ctl` 命令和确定性展平。
 - [native-deps/docs/build.md](native-deps/docs/build.md) — native-deps 构建工作流。
+
+## License
+
+本仓库的项目原创内容采用 [Apache License 2.0](LICENSE).Linux 内核 patch 的
+GPL-2.0-only 边界见 [LICENSE_SCOPE.md](LICENSE_SCOPE.md).
+贡献授权说明见 [CONTRIBUTING.md](CONTRIBUTING.md).
