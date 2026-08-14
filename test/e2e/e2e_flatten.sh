@@ -85,6 +85,36 @@ wait_port() { # host port label
 	return 1
 }
 
+stop_pid() {
+	local pid="$1"
+	if kill -0 "$pid" 2>/dev/null; then
+		kill "$pid" 2>/dev/null || true
+		for _ in $(seq 1 20); do
+			kill -0 "$pid" 2>/dev/null || break
+			sleep 0.1
+		done
+		kill -KILL "$pid" 2>/dev/null || true
+	fi
+	wait "$pid" 2>/dev/null || true
+}
+
+forget_pid() {
+	local target="$1" pid
+	local kept=()
+	for pid in "${PIDS[@]}"; do
+		[ "$pid" = "$target" ] || kept+=("$pid")
+	done
+	PIDS=("${kept[@]}")
+}
+
+dump_zot_start_failure() {
+	local dir="$1"
+	echo "zot config:" >&2
+	cat "$dir/zot-config.json" >&2 2>/dev/null || true
+	echo "zot logs:" >&2
+	cat "$dir/zot.stdout" "$dir/zot.log" >&2 2>/dev/null || true
+}
+
 cleanup() {
 	[ -n "${E2E_KEEP:-}" ] && { echo "E2E_KEEP set — leaving $WORK and processes"; return; }
 	local pid
@@ -99,6 +129,8 @@ trap cleanup EXIT
 # start_zot DIR PORT [HTPASSWD] -> writes config, starts zot, waits ready
 start_zot() {
 	local dir="$1" port="$2" htp="${3:-}" cfg="$1/zot-config.json" auth=""
+	local pid status deadline
+	mkdir -p "$dir"
 	[ -n "$htp" ] && auth=", \"auth\": {\"htpasswd\": {\"path\": \"$htp\"}}"
 	cat >"$cfg" <<EOF
 {
@@ -108,16 +140,45 @@ start_zot() {
 }
 EOF
 	"$ZOT_BIN" serve "$cfg" >"$dir/zot.stdout" 2>&1 &
-	PIDS+=("$!")
-	if ! wait_port 127.0.0.1 "$port" "zot"; then
-		echo "zot failed to start; logs:" >&2
-		cat "$dir/zot.stdout" "$dir/zot.log" 2>/dev/null >&2
-		return 1
-	fi
-	# /v2/ answers (200 anon, 401 authed) once routes are wired.
-	curl -sS --retry 40 --retry-connrefused --retry-delay 1 --retry-max-time 40 \
-		-o /dev/null "http://127.0.0.1:$port/v2/" 2>/dev/null || true
-	return 0
+	pid=$!
+	PIDS+=("$pid")
+	deadline=$((SECONDS + 30))
+	while [ "$SECONDS" -lt "$deadline" ]; do
+		if ! kill -0 "$pid" 2>/dev/null; then
+			if wait "$pid"; then status=0; else status=$?; fi
+			forget_pid "$pid"
+			echo "zot startup attempt exited before readiness on 127.0.0.1:$port (status $status)" >&2
+			dump_zot_start_failure "$dir"
+			return 1
+		fi
+		status="$(curl -sS --max-time 1 -o /dev/null -w '%{http_code}' \
+			"http://127.0.0.1:$port/v2/" 2>/dev/null || true)"
+		case "$status" in
+			200|401) return 0 ;;
+		esac
+		sleep 0.2
+	done
+	echo "zot startup attempt timed out on 127.0.0.1:$port (pid $pid)" >&2
+	ps -o pid=,stat=,etime=,cmd= -p "$pid" >&2 || true
+	stop_pid "$pid"
+	forget_pid "$pid"
+	dump_zot_start_failure "$dir"
+	return 1
+}
+
+# start_zot_with_retry DIR PORT_VAR [HTPASSWD] -> retries once on a fresh port
+start_zot_with_retry() {
+	local root="$1" port_var="$2" htp="${3:-}" attempt port
+	for attempt in 1 2; do
+		port="$(free_port)" || return 1
+		if start_zot "$root/attempt-$attempt" "$port" "$htp"; then
+			printf -v "$port_var" '%s' "$port"
+			return 0
+		fi
+		[ "$attempt" -eq 2 ] || echo "e2e: retrying zot startup on a fresh port" >&2
+	done
+	echo "e2e: zot failed to start after 2 attempts" >&2
+	return 1
 }
 
 # seed IMAGE REGHOST/REPO:TAG -> docker tag + push (assumes insecure 127.0.0.1)
@@ -188,9 +249,8 @@ PIDS+=("$!")
 wait_port 127.0.0.1 "$STORE_PORT" "store-ctl" || exit 1
 
 log "start zot (anonymous)"
-ZOT_PORT="$(free_port)"
-mkdir -p "$WORK/zot-anon"
-start_zot "$WORK/zot-anon" "$ZOT_PORT" || exit 1
+ZOT_PORT=""
+start_zot_with_retry "$WORK/zot-anon" ZOT_PORT || exit 1
 
 # --------------------------------------------------------------------------
 # configs
@@ -394,14 +454,14 @@ json_bool_true "$WORK/t4lookup2.json" supported && ok "registry remains supporte
 # TEST 5 — basic-auth registry: credentials via FLATTEN_REGISTRY_* env
 # ==========================================================================
 log "TEST 5: basic-auth registry"
-AUTH_PORT="$(free_port)"
-mkdir -p "$WORK/zot-auth"
+AUTH_PORT=""
 # Static bcrypt htpasswd line for AUTH_USER=e2euser, AUTH_PASS=e2epass.
 # Keeping this fixture in the script avoids a dependency on apache2-utils.
 cat >"$WORK/htpasswd" <<'EOF'
 e2euser:$2y$05$/Jvk/Gj8hT1jwrfwYfy89OeTyXpVOpkH3Bpy3UrFx0XnTG5rmy6eq
 EOF
-start_zot "$WORK/zot-auth" "$AUTH_PORT" "$WORK/htpasswd" || bad "auth zot start"
+start_zot_with_retry "$WORK/zot-auth" AUTH_PORT "$WORK/htpasswd" \
+	|| { bad "auth zot start"; exit 1; }
 
 AUTH_REF="127.0.0.1:$AUTH_PORT/e2e/app:v1"
 docker login "127.0.0.1:$AUTH_PORT" -u "$AUTH_USER" --password-stdin <<<"$AUTH_PASS" >/dev/null 2>&1 \
