@@ -273,7 +273,7 @@ artifact_type 固定为常量 `application/vnd.kuasar.flatten-manifest.v1`(不�
 **凭据(命名空间环境变量,匿名回落)**:`FLATTEN_REGISTRY_TOKEN`(Bearer,优先)或
 `FLATTEN_REGISTRY_USERNAME` + `FLATTEN_REGISTRY_PASSWORD`(Basic);都不设则匿名拉公有
 镜像。密钥只走 env(不上 argv、不入配置文件),契合 orchestrator 经 exec env 把租户拉取凭据
-下发进构建沙箱的模型(`platform/docs/deployment.md` §5)。
+下发进构建沙箱的模型(`kuasar-sandbox/docs/deployment.md` §5)。
 
 **TLS(`tls.*`)**:作用于全部 HTTPS 请求——既包括 registry API,也包括层 blob 的 CDN
 重定向(拦截式代理会用私有 CA 重签这些证书,系统信任库默认拒绝)。`ca_cert` 把额外的
@@ -663,4 +663,4 @@ OCI image config 字段繁多,大量与启动无关:`created` / `author` / `hist
 - `guest-runtime/native-deps/docs/build.md` —— 构建 mkfs.erofs(`make -C
   guest-runtime/native-deps erofs`);本仓 `make build` 只构建 flatten-ctl,运行期
   经同目录 / `PATH` 定位 mkfs.erofs
-- `platform/docs/kuasar-sandbox.md` §2.2 / §3.1 —— 展平在系统中的位置与目标
+- `kuasar-sandbox/docs/kuasar-sandbox.md` §2.2 / §3.1 —— 展平在系统中的位置与目标

@@ -13,9 +13,9 @@ native-deps 目录的构建工作流:从上游源码构建 kuasar-sandbox 平台
 `sandboxer/docs/cloud-hypervisor.md`。
 
 平台级聚合由 `platform` 编排:
-`make -C platform build` 首先驱动本目录 `make build`,再把
-产物按 `platform/release/bin-inputs.manifest` 收集进
-`platform/bin/<arch>/`,供 e2e、demo 与本地集成
+`make -C kuasar-sandbox build` 首先驱动本目录 `make build`,再把
+产物按 `kuasar-sandbox/release/bin-inputs.manifest` 收集进
+`kuasar-sandbox/bin/<arch>/`,供 e2e、demo 与本地集成
 复用。
 
 ## 1. 概述
@@ -207,6 +207,6 @@ WSL2 的 `/mnt/<drive>/`(DrvFs)上每个小文件有 5-10 倍 I/O 开销,而内�
 
 - [`../../docs/vmlinux.md`](../../docs/vmlinux.md) —— guest 内核配置体系、架构差异与关键
   决策(随发布包)。
-- `platform/docs/release.md`
+- `kuasar-sandbox/docs/release.md`
   —— runtime、vmlinux 独立版本与平台聚合发布;本目录的运行期必需产物经
-  `platform/release/bin-inputs.manifest` 收集进共享 `bin/`。
+  `kuasar-sandbox/release/bin-inputs.manifest` 收集进共享 `bin/`。

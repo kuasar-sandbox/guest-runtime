@@ -3,6 +3,8 @@
 Guest 运行时镜像与构建工具仓:负责构建 `sandbox-runtime.bundle`、`flatten-ctl`
 以及 guest 侧 native 产物。host 生命周期、快照、恢复和 `sandbox-init` 源码属于
 `sandboxer`;内容寻址、manifest/cache/store 与展平公共库属于 `accelerator`。
+系统集成、跨仓验证和聚合发布由
+[Kuasar Sandbox 项目主仓](https://github.com/kuasar-sandbox/kuasar-sandbox)维护。
 
 ## 组成
 
@@ -51,14 +53,14 @@ make build TARGET_ARCH=aarch64
 - `vmlinux-vX.Y.Z`:发布 `vmlinux-x86_64-vX.Y.Z.tar.gz`,包含稳定入口
   `bin/vmlinux`。
 
-本仓文档与 `test/e2e/` 不进入上述组件包。platform 聚合版本从所选 runtime tag
+本仓文档与 `test/e2e/` 不进入上述组件包。项目主仓的 platform 聚合版本从所选 runtime tag
 收集 runtime 文档与 flatten E2E,从所选 vmlinux tag 收集 kernel 文档,统一放入
 platform 包。
 
 两条版本线独立演进,版本号不要求相同。当前 Release 只发布已完成全量构建与
 BMS 验证的 Linux x86_64 目标。`envd` 只随 runtime 镜像内置;
 `fsck.erofs` 只作为源码树诊断/测试辅助产物。
-正式版之前,`platform` 仓的每日协调器按上海日期分别触发
+正式版之前,项目主仓的每日协调器按上海日期分别触发
 `runtime-v0.1.0-preview.YYYYMMDD` 和 `vmlinux-v0.1.0-preview.YYYYMMDD`。
 preview 标记为 prerelease 且不更新 GitHub Latest;两个正式 `v0.1.0` 版本均由
 独立构建发布,不改名或覆盖 preview。
