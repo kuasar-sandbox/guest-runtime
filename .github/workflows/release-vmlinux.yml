@@ -66,7 +66,7 @@ jobs:
           client-id: ${{ vars.KUASAR_CI_APP_CLIENT_ID }}
           private-key: ${{ secrets.KUASAR_CI_APP_PRIVATE_KEY }}
           owner: kuasar-sandbox
-          repositories: guest-runtime,platform
+          repositories: guest-runtime,kuasar-sandbox
           permission-contents: read
           skip-token-revoke: true
 
@@ -96,7 +96,7 @@ jobs:
         continue-on-error: true
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          repository: kuasar-sandbox/platform
+          repository: kuasar-sandbox/kuasar-sandbox
           ref: caf322e48fc11c96a5e4984b91d6ee7cba68a991
           path: src/platform
           token: ${{ steps.source-token.outputs.token }}
@@ -106,7 +106,7 @@ jobs:
         if: steps.checkout-platform.outcome == 'failure'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          repository: kuasar-sandbox/platform
+          repository: kuasar-sandbox/kuasar-sandbox
           ref: caf322e48fc11c96a5e4984b91d6ee7cba68a991
           path: src/platform
           token: ${{ steps.source-token.outputs.token }}

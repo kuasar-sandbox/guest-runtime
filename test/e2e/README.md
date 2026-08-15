@@ -11,7 +11,7 @@ in-memory ggcr registry that only does the tag-schema referrers fallback.)
 
     make test-e2e              # executes test/e2e/run_all.sh
 
-The runner uses the assembled platform `BIN` (default `../platform/bin/<arch>`),
+The runner uses the assembled platform `BIN` (default `../kuasar-sandbox/bin/<arch>`),
 which provides `flatten-ctl`, `store-ctl`, and `mkfs.erofs`, and runs
 `test/e2e/e2e_flatten.sh` against `ZOT_BIN`. In platform BMS, `make e2e-tools`
 provides zot and passes its path; release packages do not ship zot. Under

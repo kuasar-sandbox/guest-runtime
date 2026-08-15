@@ -48,7 +48,7 @@ ENVD          ?= native-deps/$(BINDIR)/envd
 FLATTEN_CTL   ?= $(BINDIR)/flatten-ctl
 STORE_CTL     ?= ../accelerator/$(BINDIR)/store-ctl
 ZOT_BIN       ?= zot
-E2E_BIN       ?= $(abspath ../platform/bin/$(TARGET_ARCH))
+E2E_BIN       ?= $(abspath ../kuasar-sandbox/bin/$(TARGET_ARCH))
 
 # BUILD_MKFS_EROFS is the host executable that packs the raw runtime EROFS.
 # GUEST_MKFS_EROFS is the target-arch static binary shipped inside the guest

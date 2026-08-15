@@ -423,7 +423,7 @@ file bin/aarch64/vmlinux
 # /proc/config.gz 不存在(IKCONFIG 关闭)
 ```
 
-跨实例 RAM 去重率(`platform/docs/kuasar-sandbox.md` §4.6):同 vmlinux + 同 sandbox-runtime + 同应用,
+跨实例 RAM 去重率(`kuasar-sandbox/docs/kuasar-sandbox.md` §4.6):同 vmlinux + 同 sandbox-runtime + 同应用,
 冷启动到 settled 的 RAM 内容跨实例 hash 相同区段应 > 90%。低于 50% 通常
 是新启用的随机化(KASLR / SLAB 等)漏网,通过比对 `make olddefconfig`
 diff 排查。
@@ -452,5 +452,5 @@ diff 排查。
   沙箱配置如何引用 vmlinux,以及自带 kernel 的接入方式
 - `guest-runtime/native-deps/docs/build.md` —— `make vmlinux` 工作流、patch 开发循环、
   交叉编译
-- `platform/docs/kuasar-sandbox.md` §4.6(Guest 确定性配置)—— 跨实例 RAM
+- `kuasar-sandbox/docs/kuasar-sandbox.md` §4.6(Guest 确定性配置)—— 跨实例 RAM
   去重率目标的来源
