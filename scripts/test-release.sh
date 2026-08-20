@@ -11,6 +11,16 @@ fail() {
   exit 1
 }
 
+WORKFLOW="$ROOT/.github/workflows/release-runtime.yml"
+for input in accelerator_version connector_version sandboxer_version; do
+  grep -Fq "      $input:" "$WORKFLOW" \
+    || fail "runtime release workflow is missing required $input input"
+  [ "$(grep -Fc "ref: \${{ needs.preflight.outputs.$input }}" "$WORKFLOW")" -eq 2 ] \
+    || fail "runtime release workflow does not pin both $input checkouts"
+done
+grep -Fq "repos/kuasar-sandbox/\$repository/releases/tags/\$version" "$WORKFLOW" \
+  || fail "runtime release workflow does not verify dependency releases"
+
 [ "$(git -C "$ROOT" ls-files -s -- test/e2e/run_all.sh | awk '{print $1}')" = 100755 ] \
   || fail "test/e2e/run_all.sh is not executable in the Git index"
 
