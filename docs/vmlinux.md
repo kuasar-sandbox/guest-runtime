@@ -389,6 +389,11 @@ report 最多 inflate 64 MiB,并等 `memory_actual_size` 收敛后才允许下�
 inflate 处理路径里 `fallocate(PUNCH_HOLE) + madvise(DONTNEED)`。详见
 `sandboxer/docs/sandbox.md` §9.3。
 
+当前内核虽启用 `CONFIG_VIRTIO_BALLOON=y`,但真实 guest 的
+`/proc/meminfo` 不导出 `Balloon:` 字段。该字段不是 guest ABI,也不是
+Budget 控制的可选数据源;current 始终以 CH 的
+`memory_actual_size` 为准。
+
 `VIRTIO_MEM=y` 保留作扩展点:virtio-mem 是 host 主动 → guest unplug 路径,
 事件粒度大、批量少,适合 NUMA / 横向扩 zone 等场景。平台当前不依赖
 virtio-mem 路径,保留驱动使该扩展无需重打 vmlinux。
