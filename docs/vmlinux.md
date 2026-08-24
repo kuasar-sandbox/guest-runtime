@@ -380,11 +380,19 @@ mmap 做 `madvise(MADV_DONTNEED)` 释放进程 PTE。在平台的统一 memfd / 
 timeout)。因此平台**关闭 free_page_reporting**——内核侧 `VIRTIO_BALLOON=y`
 启用模块,但 CH 命令行不开 FPR feature。
 
-替代路径:host 端 BalloonController 周期(默认 5 s)从 guest 拉取 mem_report
-(MemAvailable/MemTotal,详见 `guest-runtime/docs/sandbox-runtime.md` §4.3),按反馈策略推
-`PUT /api/v1/vm.resize` 改变 balloon target;guest balloon 驱动按 target inflate,
-CH 在 inflate 处理路径里 `fallocate(PUNCH_HOLE) + madvise(DONTNEED)`。事件量
-被反馈环 `MaxStep`(默认 ≤ 256 MiB/tick)限速,不会形成 IPI 风暴。
+替代路径:guest `sandbox-init` 在 cold launch barrier 后立即推送一份
+`mem_report`,之后默认每 5 s 推送 `MemAvailable` 及诊断字段。host 仅从
+Cloud Hypervisor `vm.info` 取 balloon target 与 `memory_actual_size`,不从 guest
+`MemTotal` 反推 Capacity,也不要求 guest 上报 balloon current。sandbox-local
+Budget 控制器必要时以 `PUT /api/v1/vm.resize` 改变 target;shrink 每份 fresh
+report 最多 inflate 64 MiB,并等 `memory_actual_size` 收敛后才允许下一步。CH 在
+inflate 处理路径里 `fallocate(PUNCH_HOLE) + madvise(DONTNEED)`。详见
+`sandboxer/docs/sandbox.md` §9.3。
+
+当前内核虽启用 `CONFIG_VIRTIO_BALLOON=y`,但真实 guest 的
+`/proc/meminfo` 不导出 `Balloon:` 字段。该字段不是 guest ABI,也不是
+Budget 控制的可选数据源;current 始终以 CH 的
+`memory_actual_size` 为准。
 
 `VIRTIO_MEM=y` 保留作扩展点:virtio-mem 是 host 主动 → guest unplug 路径,
 事件粒度大、批量少,适合 NUMA / 横向扩 zone 等场景。平台当前不依赖
@@ -399,12 +407,15 @@ host BalloonController 按反馈推 `vm.resize` target(§5.5),目标值可能一
 在内存压力下又把刚充进去的气放掉。两股力来回拉扯,balloon 大小在零和满之间
 震荡、永不收敛,既没真正回收内存,又持续烧 CPU 与 mmu_notifier 流量。
 
-平台补丁改为**收敛**语义:当 inflate 遇到分配失败,driver 把"本轮能达到的
-最大值"作为一个**粘滞上限**记下,后续轮次以该上限为界 AIMD 逼近,而不是
-反复冲击不可行的 host target。效果:在不可行 target 下 balloon 在数秒内停在
-一个**可持续**的稳态(host 仍可在工作集回落后把 target 调高、driver 再爬升),
-不再活锁。这是纯 guest 侧鲁棒性修复,不改 host↔guest 协议,host 端反馈环
-(§5.5、`sandboxer/docs/sandbox.md` §9.3)语义不变。
+平台补丁改为**收敛**语义:当 inflate 遇到分配失败,driver 把可持续
+balloon 大小减去安全余量后记为**粘滞上限**,并主动 deflate 到该上限;
+后续压力事件只会继续向下收紧。它是保护 guest 应用免于 OOM 的应急机制,
+不是 Budget 调整,也不会自动恢复 host target。host 通过 CH
+`memory_actual_size` 看到 target/current 不一致后,把该阶段视为 unstable:不继续
+shrink,不释放 reservation,并保留已设置的 `memory.high` 软保证。正常 grow
+仍可通过降低 balloon target 给 guest 更多内存。这是纯 guest 侧鲁棒性
+修复,不改 host↔guest 协议;安全记账与后续控制见 §5.5 和
+`sandboxer/docs/sandbox.md` §9.3。
 
 ## 6. 验证
 
