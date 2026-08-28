@@ -166,6 +166,12 @@ jq -e --arg base "$base_sha" --arg head "$head_sha" \
     and .merge_commit_sha == $integration
   ' <<<"$final_pr_json" >/dev/null
 
+final_status=$(gh api "repos/$repo/commits/$integration_sha/status")
+jq -e --arg run "$bms_run_url" '
+  [.statuses[] | select(.context == "kuasar/bms-exact-head")][0]
+  | .state == "success" and .target_url == $run
+  ' <<<"$final_status" >/dev/null
+
 printf 'base=%s\nhead=%s\nintegration=%s\nBMS=%s\n' \
   "$base_sha" "$head_sha" "$integration_sha" "$bms_run_url"
 ```
