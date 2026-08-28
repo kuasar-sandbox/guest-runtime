@@ -1,8 +1,8 @@
 # vmlinux — guest 内核镜像
 
-平台为每个 sandbox 提供一份**最小化、确定性、跨实例一致**的 Linux 内核镜像
-(`bin/<arch>/vmlinux`)。本文档定义这份镜像的构建方式、启用/禁用的功能集合,
-以及为什么这些选择对沙箱模型(高密度、亚秒启动、跨实例去重)是必要的。
+平台为每个 sandbox 提供一份**最小化、固定版本**的 Linux 内核镜像
+(`bin/<arch>/vmlinux`).本文档定义这份镜像的构建方式、启用/禁用的功能集合,
+以及这些选择对启动、设备、资源控制和 Guest 安全边界的影响.
 
 vmlinux 是平台资产,**不**对外暴露内核版本/配置接口给租户。需要不同 kernel 的
 用户应用通过 `boot.kernel: file://...` 自带 vmlinux,平台保证 cloud-hypervisor
@@ -15,7 +15,7 @@ vmlinux 是平台资产,**不**对外暴露内核版本/配置接口给租户。
 | 目标 | 实现方式 |
 |---|---|
 | 镜像小、启动快 | allnoconfig 起步;仅启用沙箱必需的子系统;HZ=100;TTY 单端口 |
-| 跨实例可去重 | 关闭所有运行时随机化(KASLR、SLAB freelist、页面 shuffle);固定 LOCALVERSION |
+| 版本与 ABI 可检查 | 固定 upstream 版本、LOCALVERSION、config fragments 和平台补丁;发布时校验精确资产 |
 | 单 VM = 单 app 模型 | 关闭 user/net/uts/ipc/time namespace、in-guest userfaultfd(完整 nested 容器运行时非目标,§3.2) |
 | host 控制 guest 内存 | 启用 virtio-balloon(host-driven inflate via vm.resize)+ virtio-mem |
 | 单一 rootfs 路径 | virtio-pmem + DAX + EROFS(只读) + ext4(可写) + overlayfs |
@@ -169,18 +169,23 @@ CGROUP_PIDS=y                   pids.max
 # NET_PRIO not set —— 未用
 ```
 
-### 3.2 关键禁用项(收敛闭口)
+### 3.2 当前最小配置的禁用项
 
-去重 / 确定性敏感(任一启用都会让跨实例 RAM 内容差异化):
+当前平台 preset 没有启用以下随机化或 hardening 选项.这是发布内核的配置事实和
+显式安全取舍,不是模板父层共享或快照恢复成立的前提:
 
 ```
-# RANDOMIZE_BASE not set         KASLR(放置内核 + 模块虚地址)
-# RANDOMIZE_MEMORY not set       (x86_64) 内核物理映射随机偏移
-# SLAB_FREELIST_RANDOM not set   slab freelist 随机顺序
-# SLAB_FREELIST_HARDENED not set 同上 + 安全混淆
-# SHUFFLE_PAGE_ALLOCATOR not set 内存初始化时 buddy 列表 shuffle
-# SLUB_CPU_PARTIAL not set       per-cpu partial slab(随访问历史变化)
+# RANDOMIZE_BASE not set         当前 preset 未启用 KASLR
+# RANDOMIZE_MEMORY not set       当前 x86_64 preset 未启用内核物理映射随机偏移
+# SLAB_FREELIST_RANDOM not set   当前 preset 未启用 freelist 随机化
+# SLAB_FREELIST_HARDENED not set 当前 preset 未启用 freelist hardening
+# SHUFFLE_PAGE_ALLOCATOR not set 当前 preset 未启用 page allocator shuffle
+# SLUB_CPU_PARTIAL not set       当前 preset 未启用 per-CPU partial slab
 ```
+
+这些能力可以增加 Guest kernel 的纵深防御.生产部署必须按威胁模型评估该 preset;
+需要不同 hardening、审计或 Guest 功能时,通过 `boot.kernel: file://...` 使用经过验证的
+自带内核.快照复用依赖显式父层关系,不以关闭这些机制换取跨虚机内存去重.
 
 不需要的子系统(直接砍 + 减小镜像):
 
@@ -199,8 +204,8 @@ CGROUP_PIDS=y                   pids.max
 # IP_PNP                          网络由 sandbox-init netlink 配置,
                                   非 cmdline ip=...(节省 ~26ms initcall +
                                   ~10 KiB dhcp/bootp 客户端)
-# BPF_JIT not set                 BPF_SYSCALL=y 但 JIT 关(JIT 输出与
-                                  地址相关,跨实例 page cache 差异化)
+# BPF_JIT not set                 BPF_SYSCALL=y 但当前 Guest workload 不要求 JIT;
+                                  需要 JIT 的应用使用自带 kernel
 ```
 
 平台 ABI 边界(关闭 = guest app 看不到这些功能):
@@ -220,9 +225,7 @@ NUMA not set                      沙箱永远单 zone 单 node
 # PROFILING / DEBUG_OBJECTS / DEBUG_KMEMLEAK / PROVE_LOCKING
 # RUNTIME_TESTING_MENU / KGDB
 DEBUG_INFO_NONE=y                 显式无 debug-info(默认即此,固化避免回归)
-LOG_BUF_SHIFT=14                  16 KiB printk ring(默认 17=128 KiB,
-                                  默认值 ~50% 的内核启动期 RSS 会变成
-                                  跨实例不同的 printk 内容)
+LOG_BUF_SHIFT=14                  16 KiB printk ring,控制最小 Guest 的固定内存预算
 ```
 
 例外是一组轻量诊断探测器,当前启用,在 config 中显式标注为临时诊断项
@@ -237,15 +240,14 @@ PSI=y                             内存 / IO 压力量化
 MAGIC_SYSRQ=y                     按需 sysrq-t/-w/-m
 ```
 
-安全 / 强化(单 VM = 单 app 模型不需要 host kernel 级强化):
+当前未启用的审计 / 安全框架:
 
 ```
-# AUDIT not set                   audit 子系统 ~MiB 镜像 + 跨实例不可去重
-                                  的事件流
+# AUDIT not set                   当前发布内核不提供 Guest audit 子系统
 # SECURITY not set                LSM 框架(SELinux / AppArmor 等)
 # INTEGRITY not set               IMA / EVM
-# HARDENED_USERCOPY not set       userspace 拷贝边界检查
-# FORTIFY_SOURCE not set          libc 强化(guest userspace 不依赖)
+# HARDENED_USERCOPY not set       未启用 userspace 拷贝边界 hardening
+# FORTIFY_SOURCE not set          未启用内核 fortify checks
 ```
 
 ## 4. 架构差异
@@ -318,9 +320,8 @@ x86_64 页大小固定 4 KiB,无此问题。
 ### 5.1 为什么默认关 USERFAULTFD
 
 `userfaultfd` 是平台 host 端的能力——sandbox-ctl 在 host 上对 backing memfd
-的 chVA 注册 uffd,接管所有 guest RAM 缺页。**guest 内**调用 `userfaultfd()`
-对沙箱模型没有作用,反而增加内核 ~10 KiB 代码 + 几个跨实例非确定性的内部状态
-(per-uffd ctx hash 等)。
+的 chVA 注册 uffd,接管 guest RAM 缺页.当前平台 workload 不需要在 **Guest 内**
+调用 `userfaultfd()`,因此最小 preset 不暴露该 API.
 
 需要在 guest 内做用户态 uffd 的应用(罕见——多是数据库自己管 page cache 的
 场景)走"自带 vmlinux"路径。
@@ -368,7 +369,7 @@ sandbox-init,sandbox-init 用 raw netlink 配置。`ip_auto_config` initcall
 平台 fixed-spec 把 capacity.cpu 限到 1/2/4 三档(详见 `sandboxer/docs/sandbox.md`
 §4 资源模型)。
 NR_CPUS=4 让 guest 内核数据结构(per-cpu / cpumask)按 4 核维度分配——
-NR_CPUS=8/16 多余的 per-cpu 字段会让跨实例 RAM 多出一些低利用率脏页。
+更大的 NR_CPUS 会增加最小 Guest 不使用的 per-CPU 数据结构和固定内存预算.
 
 ### 5.5 为什么不启用 free_page_reporting,以及 VIRTIO_MEM 的角色
 
@@ -434,16 +435,16 @@ file bin/aarch64/vmlinux
 # /proc/config.gz 不存在(IKCONFIG 关闭)
 ```
 
-跨实例 RAM 去重率(`kuasar-sandbox/docs/kuasar-sandbox.md` §4.6):同 vmlinux + 同 sandbox-runtime + 同应用,
-冷启动到 settled 的 RAM 内容跨实例 hash 相同区段应 > 90%。低于 50% 通常
-是新启用的随机化(KASLR / SLAB 等)漏网,通过比对 `make olddefconfig`
-diff 排查。
+验证还必须运行 vmlinux 组件 E2E 和聚合真实 MicroVM E2E,确认启动协议、必需设备、
+文件系统、网络、Balloon、Cgroup 和 snapshot/restore 路径.配置 review 使用
+`make olddefconfig` diff 检查 silent Kconfig 变化;不要以跨实例 RAM 字节相同比例
+作为发布门禁.
 
 ## 7. 维护
 
-- 升级 kernel 主版本(6.1 → 6.x):review `sandbox-common.config` 是否有
-  新引入的随机化/调试选项需要禁用;运行 `make olddefconfig` 看 silent
-  regression;并把 `deps/linux-patches/*.patch` 在新源码树上 rebase
+- 升级 kernel 主版本(6.1 → 6.x):review `sandbox-common.config` 的功能、安全和
+  调试选项,运行 `make olddefconfig` 看 silent regression;并把
+  `deps/linux-patches/*.patch` 在新源码树上 rebase
   (`make linux-fetch` 重打 base → 在 `build/src/linux/` `git rebase` /
   重打补丁 → `make linux-patches-format` 回写),解决 virtio_balloon
   收敛补丁(§5.6)与新版驱动的冲突
@@ -463,5 +464,4 @@ diff 排查。
   沙箱配置如何引用 vmlinux,以及自带 kernel 的接入方式
 - `guest-runtime/native-deps/docs/build.md` —— `make vmlinux` 工作流、patch 开发循环、
   交叉编译
-- `kuasar-sandbox/docs/kuasar-sandbox.md` §4.6(Guest 确定性配置)—— 跨实例 RAM
-  去重率目标的来源
+- `kuasar-sandbox/docs/kuasar-sandbox.md` §4 —— 模板父层与暂停/恢复的系统语义
