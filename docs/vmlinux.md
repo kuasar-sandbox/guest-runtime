@@ -180,12 +180,19 @@ CGROUP_PIDS=y                   pids.max
 # SLAB_FREELIST_RANDOM not set   当前 preset 未启用 freelist 随机化
 # SLAB_FREELIST_HARDENED not set 当前 preset 未启用 freelist hardening
 # SHUFFLE_PAGE_ALLOCATOR not set 当前 preset 未启用 page allocator shuffle
-# SLUB_CPU_PARTIAL not set       当前 preset 未启用 per-CPU partial slab
 ```
 
-这些能力可以增加 Guest kernel 的纵深防御.生产部署必须按威胁模型评估该 preset;
+这些随机化和 hardening 能力可以增加 Guest kernel 的纵深防御.生产部署必须按威胁模型评估该 preset;
 需要不同 hardening、审计或 Guest 功能时,通过 `boot.kernel: file://...` 使用经过验证的
 自带内核.快照复用依赖显式父层关系,不以关闭这些机制换取跨虚机内存去重.
+
+仓库的 `scripts/guest-inspect.py` 当前固定使用未随机化的 `KERNEL_IMAGE_BASE` 和
+`PAGE_OFFSET`,因此只兼容同时关闭 `CONFIG_RANDOMIZE_BASE` 与
+`CONFIG_RANDOMIZE_MEMORY` 的内核.启用这些选项的自带内核不能继续使用该脚本,
+除非先让脚本能够发现运行时重定位.这是调试工具约束,不是快照恢复约束.
+
+当前 preset 还关闭 `CONFIG_SLUB_CPU_PARTIAL`.该选项控制 per-CPU partial slab,
+属于分配性能与内存占用的权衡,不作为安全 hardening 能力描述.
 
 不需要的子系统(直接砍 + 减小镜像):
 
