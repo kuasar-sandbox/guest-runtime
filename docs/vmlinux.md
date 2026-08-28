@@ -435,10 +435,14 @@ file bin/aarch64/vmlinux
 # /proc/config.gz 不存在(IKCONFIG 关闭)
 ```
 
-验证还必须运行 vmlinux 组件 E2E 和聚合真实 MicroVM E2E,确认启动协议、必需设备、
-文件系统、网络、Balloon、Cgroup 和 snapshot/restore 路径.配置 review 使用
-`make olddefconfig` diff 检查 silent Kconfig 变化;不要以跨实例 RAM 字节相同比例
-作为发布门禁.
+`release-vmlinux.yml` 当前验证精确 `main` 源码的构建、native dependency 脚本和
+发布包,但该工作流本身不启动 vmlinux.因此组件 Release 成功不能单独作为 Guest
+行为验证.进入聚合版本前还需要保留对应精确源码组合的 platform BMS 结果;
+Stable 聚合版本还需要使用已发布资产运行完整真实 MicroVM E2E,覆盖启动协议、
+必需设备、文件系统、网络、Balloon、Cgroup 和 snapshot/restore 路径.
+
+配置 review 使用 `make olddefconfig` diff 检查 silent Kconfig 变化;不要以跨实例
+RAM 字节相同比例作为发布门禁.
 
 ## 7. 维护
 
