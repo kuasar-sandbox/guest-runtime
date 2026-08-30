@@ -11,6 +11,32 @@ fail() {
   exit 1
 }
 
+mkdir -p "$TMP/source-bin"
+cat > "$TMP/source-bin/gh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+[ "${1:-}" = api ] || exit 2
+printf '%s\n' "${FAKE_SOURCE_SHA:?}"
+EOF
+chmod +x "$TMP/source-bin/gh"
+for request in \
+  'runtime runtime-v1.2.3 release/v1.2.x' \
+  'vmlinux vmlinux-v2.3.4 release/v2.3.x'
+do
+  read -r unit tag source_ref <<< "$request"
+  PATH="$TMP/source-bin:$PATH" GITHUB_REPOSITORY=kuasar-sandbox/guest-runtime \
+    FAKE_SOURCE_SHA=1111111111111111111111111111111111111111 \
+    bash "$ROOT/scripts/validate-release-source.sh" "$source_ref" \
+      1111111111111111111111111111111111111111 "$tag" "$unit" >/dev/null
+done
+if PATH="$TMP/source-bin:$PATH" GITHUB_REPOSITORY=kuasar-sandbox/guest-runtime \
+  FAKE_SOURCE_SHA=1111111111111111111111111111111111111111 \
+  bash "$ROOT/scripts/validate-release-source.sh" release/v1.2.x \
+    1111111111111111111111111111111111111111 runtime-v1.3.0 runtime >/dev/null 2>&1; then
+  fail "release source validator accepted a tag from another version line"
+fi
+bash -n "$ROOT/scripts/delete-preview.sh" "$ROOT/scripts/validate-release-source.sh"
+
 WORKFLOW="$ROOT/.github/workflows/release-runtime.yml"
 for input in accelerator_version connector_version sandboxer_version; do
   grep -Fq "      $input:" "$WORKFLOW" \
@@ -50,11 +76,15 @@ env "${common_env[@]}" "$ROOT/scripts/release.sh" package \
 RELEASE_KIND=runtime bash "$ROOT/scripts/test-publisher.sh" \
   "$ROOT/scripts/publish-release.sh" "$TMP/runtime-bundle" \
   kuasar-sandbox/guest-runtime runtime-v1.2.3-preview.20260804 \
-  1111111111111111111111111111111111111111
+  1111111111111111111111111111111111111111 main
 RELEASE_KIND=vmlinux bash "$ROOT/scripts/test-publisher.sh" \
   "$ROOT/scripts/publish-release.sh" "$TMP/vmlinux-bundle" \
   kuasar-sandbox/guest-runtime vmlinux-v2.3.4 \
-  2222222222222222222222222222222222222222
+  2222222222222222222222222222222222222222 main
+RELEASE_KIND=vmlinux bash "$ROOT/scripts/test-publisher.sh" \
+  "$ROOT/scripts/publish-release.sh" "$TMP/vmlinux-bundle" \
+  kuasar-sandbox/guest-runtime vmlinux-v2.3.4 \
+  2222222222222222222222222222222222222222 release/v2.3.x
 
 runtime_archive="$TMP/runtime-bundle/assets/sandbox-runtime-x86_64-v1.2.3-preview.20260804.tar.gz"
 for path in ./bin/sandbox-runtime.bundle ./bin/flatten-ctl ./bin/mkfs.erofs; do

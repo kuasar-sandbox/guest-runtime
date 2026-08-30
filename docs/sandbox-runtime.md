@@ -163,7 +163,9 @@ cloud-hypervisor。guest kernel 挂载该 pmem 后执行 `/sbin/init`,即
 
 ## 5. 发布件
 
-runtime 镜像由本仓的 `Runtime Release` workflow 独立发布:
+runtime 镜像由本仓 `main` 上受信任的 `Runtime Release` workflow 从调度器钉住的
+源码分支和精确 SHA 独立发布。组件 `main` 用于主线,`release/vX.Y.x` 用于 runtime
+维护线;其版本与平台聚合版本、vmlinux 版本均独立:
 
 | 包 | 内容 | Release |
 |---|---|---|
