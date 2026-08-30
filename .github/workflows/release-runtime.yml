@@ -339,7 +339,7 @@ jobs:
       - build
     runs-on: [self-hosted, Linux, X64, kuasar-control]
     concurrency:
-      group: runtime-publish-${{ github.repository }}-${{ inputs.version }}
+      group: component-publish-${{ github.repository }}-${{ (!contains(inputs.version, '-preview.') && inputs.source_ref == 'main') && 'stable-main' || inputs.version }}
       cancel-in-progress: false
     permissions:
       actions: read
