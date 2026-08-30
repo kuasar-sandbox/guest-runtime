@@ -62,15 +62,13 @@ for input in accelerator_version connector_version sandboxer_version; do
 done
 grep -Fq "repos/kuasar-sandbox/\$repository/releases/tags/\$version" "$WORKFLOW" \
   || fail "runtime release workflow does not verify dependency releases"
-grep -Fq "&& 'stable-main' || inputs.version" \
-  "$ROOT/.github/workflows/release-runtime.yml" \
-  || fail "runtime main Stable publication does not serialize Latest updates"
-grep -Fq "&& 'stable-main' || inputs.version" \
-  "$ROOT/.github/workflows/release-vmlinux.yml" \
-  || fail "vmlinux main Stable publication does not serialize Latest updates"
-grep -Fq 'group: component-delete-${{ github.repository }}-${{ inputs.version }}' \
-  "$ROOT/.github/workflows/delete-preview.yml" \
-  || fail "Preview cleanup does not use its version-scoped mutation group"
+for workflow in release-runtime.yml release-vmlinux.yml delete-preview.yml; do
+  grep -Fq 'group: component-mutation-${{ github.repository }}-${{ inputs.version }}' \
+    "$ROOT/.github/workflows/$workflow" \
+    || fail "$workflow does not use the shared exact-version mutation group"
+done
+grep -Fq 'make_latest: "false"' "$ROOT/scripts/publish-release.sh" \
+  || fail "component publisher attempts to own the project Latest marker"
 if grep -R -Fq 'queue: max' "$ROOT/.github/workflows"; then
   fail "workflows use the unsupported concurrency queue key"
 fi
