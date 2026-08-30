@@ -38,7 +38,8 @@ bin/aarch64/vmlinux       PE 格式 Image,EFI stub + ACPI 启动,~14 MiB
 文件名两 arch 都叫 `vmlinux`,内部格式按 arch 不同。cloud-hypervisor 自动检测
 格式选择启动协议——sandbox-ctl 上层路径无 arch 分支。
 
-本仓通过 `Vmlinux Release` workflow 独立发布 `vmlinux-vX.Y.Z`,制品名为
+本仓通过 `main` 上受信任的 `Vmlinux Release` workflow 从调度器钉住的源码分支
+和精确 SHA 独立发布 `vmlinux-vX.Y.Z`,制品名为
 `vmlinux-x86_64-vX.Y.Z.tar.gz`。该版本线与 `runtime-vX.Y.Z` 独立,
 两者版本号不要求一致;平台聚合版本显式选择各自版本。
 
