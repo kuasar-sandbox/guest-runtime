@@ -44,6 +44,15 @@ fi
 bash -n "$ROOT/scripts/delete-preview.sh" "$ROOT/scripts/validate-release-source.sh"
 
 WORKFLOW="$ROOT/.github/workflows/release-runtime.yml"
+grep -Fqx 'run-name: Release ${{ inputs.version }} @${{ inputs.source_sha }} [accelerator=${{ inputs.accelerator_version }},connector=${{ inputs.connector_version }},sandboxer=${{ inputs.sandboxer_version }}]' \
+  "$WORKFLOW" || fail "runtime release identity does not pin source and dependencies"
+grep -Fqx 'run-name: Release ${{ inputs.version }} @${{ inputs.source_sha }}' \
+  "$ROOT/.github/workflows/release-vmlinux.yml" \
+  || fail "vmlinux release identity does not pin source_sha"
+grep -Fq 'RELEASE_DEPENDENCIES: accelerator=${{ needs.preflight.outputs.accelerator_version }},connector=${{ needs.preflight.outputs.connector_version }},sandboxer=${{ needs.preflight.outputs.sandboxer_version }}' \
+  "$WORKFLOW" || fail "runtime Preview does not receive dependency binding"
+grep -Fq 'kuasar-preview-binding' "$ROOT/scripts/publish-release.sh" \
+  || fail "Preview publisher does not record its build binding"
 for input in accelerator_version connector_version sandboxer_version; do
   grep -Fq "      $input:" "$WORKFLOW" \
     || fail "runtime release workflow is missing required $input input"
