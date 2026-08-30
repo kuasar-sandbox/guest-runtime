@@ -19,6 +19,7 @@ cat > "$TMP/source-bin/gh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 [ "${1:-}" = api ] || exit 2
+[ "${2:-}" = "repos/$GITHUB_REPOSITORY/git/ref/heads/${FAKE_SOURCE_REF:?}" ] || exit 2
 printf '%s\n' "${FAKE_SOURCE_SHA:?}"
 EOF
 chmod +x "$TMP/source-bin/gh"
@@ -28,11 +29,13 @@ for request in \
 do
   read -r unit tag source_ref <<< "$request"
   PATH="$TMP/source-bin:$PATH" GITHUB_REPOSITORY=kuasar-sandbox/guest-runtime \
+    FAKE_SOURCE_REF="$source_ref" \
     FAKE_SOURCE_SHA=1111111111111111111111111111111111111111 \
     bash "$ROOT/scripts/validate-release-source.sh" "$source_ref" \
       1111111111111111111111111111111111111111 "$tag" "$unit" >/dev/null
 done
 if PATH="$TMP/source-bin:$PATH" GITHUB_REPOSITORY=kuasar-sandbox/guest-runtime \
+  FAKE_SOURCE_REF=release/v1.2.x \
   FAKE_SOURCE_SHA=1111111111111111111111111111111111111111 \
   bash "$ROOT/scripts/validate-release-source.sh" release/v1.2.x \
     1111111111111111111111111111111111111111 runtime-v1.3.0 runtime >/dev/null 2>&1; then
