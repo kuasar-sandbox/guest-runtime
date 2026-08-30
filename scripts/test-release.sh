@@ -62,6 +62,18 @@ for input in accelerator_version connector_version sandboxer_version; do
 done
 grep -Fq "repos/kuasar-sandbox/\$repository/releases/tags/\$version" "$WORKFLOW" \
   || fail "runtime release workflow does not verify dependency releases"
+grep -Fq 'group: runtime-publish-${{ github.repository }}-${{ inputs.version }}' \
+  "$ROOT/.github/workflows/release-runtime.yml" \
+  || fail "runtime publication is not serialized by exact version"
+grep -Fq 'group: vmlinux-publish-${{ github.repository }}-${{ inputs.version }}' \
+  "$ROOT/.github/workflows/release-vmlinux.yml" \
+  || fail "vmlinux publication is not serialized by exact version"
+grep -Fq 'group: ${{ inputs.unit }}-publish-${{ github.repository }}-${{ inputs.version }}' \
+  "$ROOT/.github/workflows/delete-preview.yml" \
+  || fail "Preview cleanup is not serialized by unit and exact version"
+if grep -R -Fq 'queue: max' "$ROOT/.github/workflows"; then
+  fail "workflows use the unsupported concurrency queue key"
+fi
 
 [ "$(git -C "$ROOT" ls-files -s -- test/e2e/run_all.sh | awk '{print $1}')" = 100755 ] \
   || fail "test/e2e/run_all.sh is not executable in the Git index"

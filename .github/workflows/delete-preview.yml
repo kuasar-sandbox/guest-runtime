@@ -31,9 +31,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: ${{ inputs.unit }}-publish-${{ github.repository }}
+  group: ${{ inputs.unit }}-publish-${{ github.repository }}-${{ inputs.version }}
   cancel-in-progress: false
-  queue: max
 
 jobs:
   delete:
