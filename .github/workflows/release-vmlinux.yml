@@ -16,6 +16,10 @@ on:
         description: Exact source commit selected from source_ref
         required: true
         type: string
+      aggregate_version:
+        description: Owning aggregate Preview; required when version is a Preview
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -55,6 +59,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           SOURCE_REF: ${{ inputs.source_ref }}
           SOURCE_SHA: ${{ inputs.source_sha }}
+          AGGREGATE_VERSION: ${{ inputs.aggregate_version }}
           VERSION: ${{ inputs.version }}
           TARGET_ARCH: x86_64
           RELEASE_KIND: vmlinux
@@ -64,6 +69,7 @@ jobs:
             || { echo "version must match vmlinux-vX.Y.Z or vmlinux-vX.Y.Z-preview.YYYYMMDD" >&2; exit 1; }
           bash scripts/validate-release-source.sh \
             "$SOURCE_REF" "$SOURCE_SHA" "$VERSION" vmlinux
+          bash scripts/validate-preview-line.sh "$VERSION" "$AGGREGATE_VERSION"
           bash scripts/publish-release.sh check "$VERSION" "$TARGET_ARCH"
           {
             echo "source_ref=$SOURCE_REF"
