@@ -62,8 +62,9 @@ BMS 验证的 Linux x86_64 目标。`envd` 只随 runtime 镜像内置;
 `fsck.erofs` 只作为源码树诊断/测试辅助产物。
 项目主仓的每日协调器按上海日期分别触发 `runtime-vX.Y.Z-preview.YYYYMMDD` 和
 `vmlinux-vX.Y.Z-preview.YYYYMMDD`;Preview 和维护分支 Stable 不更新 GitHub
-Latest。两个单元的主线 Stable 独立构建发布,并按 `main` 源码提交先后协调本仓
-Latest,同一提交才比较 SemVer;平台聚合仍按两个精确 Tag 选择,不依赖 Latest。
+Latest。两个单元的主线 Stable 独立构建发布;独立的幂等 Reconcile Latest 工作流按
+`main` 源码提交先后协调本仓 Latest,同一提交才比较 SemVer。平台聚合仍按两个精确
+Tag 选择,不依赖 Latest。
 
 ## 文档
 
