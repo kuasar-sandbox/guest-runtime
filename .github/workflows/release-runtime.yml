@@ -341,6 +341,7 @@ jobs:
     concurrency:
       group: runtime-publish-${{ github.repository }}
       cancel-in-progress: false
+      queue: max
     permissions:
       actions: read
       contents: write
