@@ -49,8 +49,9 @@ grep -Fqx 'run-name: Release ${{ inputs.version }} @${{ inputs.source_sha }} [ac
 grep -Fqx 'run-name: Release ${{ inputs.version }} @${{ inputs.source_sha }}' \
   "$ROOT/.github/workflows/release-vmlinux.yml" \
   || fail "vmlinux release identity does not pin source_sha"
-grep -Fq 'RELEASE_DEPENDENCIES: accelerator=${{ needs.preflight.outputs.accelerator_version }},connector=${{ needs.preflight.outputs.connector_version }},sandboxer=${{ needs.preflight.outputs.sandboxer_version }}' \
-  "$WORKFLOW" || fail "runtime Preview does not receive dependency binding"
+sed -n '/- name: Publish runtime release/,/run: |/p' "$WORKFLOW" \
+  | grep -Fq 'RELEASE_DEPENDENCIES: accelerator=${{ needs.preflight.outputs.accelerator_version }},connector=${{ needs.preflight.outputs.connector_version }},sandboxer=${{ needs.preflight.outputs.sandboxer_version }}' \
+  || fail "runtime Preview publish step does not receive dependency binding"
 grep -Fq 'kuasar-preview-binding' "$ROOT/scripts/publish-release.sh" \
   || fail "Preview publisher does not record its build binding"
 for input in accelerator_version connector_version sandboxer_version; do
