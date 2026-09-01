@@ -58,7 +58,7 @@ func TestBuild(t *testing.T) {
 	}
 	prefixSize := len(b1) - len(placeholder)
 	sum := sha256.Sum256(b1[:prefixSize])
-	want := fmt.Sprintf("sha256:%x", sum[:])
+	want := fmt.Sprintf("digest:%x", sum[:])
 	if digest != want {
 		t.Fatalf("digest = %q, want %q", digest, want)
 	}
@@ -71,7 +71,7 @@ func TestBuild(t *testing.T) {
 		t.Fatalf("ZIP entries = %d, want 1", len(zr.File))
 	}
 	zf := zr.File[0]
-	if zf.Name != tarstream.SHA256MarkerPrefix+strings.TrimPrefix(digest, "sha256:") || zf.UncompressedSize64 != 0 {
+	if zf.Name != tarstream.DigestMarkerPrefix+strings.TrimPrefix(digest, "digest:") || zf.UncompressedSize64 != 0 {
 		t.Fatalf("marker = %q/%d", zf.Name, zf.UncompressedSize64)
 	}
 	r, err := zf.Open()
