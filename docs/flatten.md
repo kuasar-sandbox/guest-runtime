@@ -406,8 +406,8 @@ stdin 报错引导)。`..` 成员跳过告警,穿 symlink 写出是硬错误;条
 取该用户主组,纯数字 `1000` 镜像为 `1000:1000`。node-ctl 的 COPY step 即以
 `extract --dense --chown` 把上下文 tar 摊进 guest rootfs(见 node.md §12)。
 
-**stream** 把**一个文件**封装为 tarstream(一个稀疏 payload + 一个空的
-`.kuasar.sha256.<hex>` marker,`accelerator/pkg/tarstream`)。writer 在写 payload
+**stream** 把**一个文件**封装为 tarstream(一个稀疏 payload +
+`.kuasar.digest.<hex>` marker metadata,`accelerator/pkg/tarstream`)。writer 在写 payload
 时同步生成摘要,不二次读取。文件源的洞图来自文件系统元数据
 (SEEK_HOLE),稀疏保真;stdin 源**必须给 `--size N`**(tar 头先含 size,这是
 格式下界),全程直通、**零落盘**,按致密封装(一次性流没有权威洞元数据,

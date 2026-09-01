@@ -96,11 +96,11 @@ raw EROFS | zero padding | trailing ZIP
 raw EROFS 保持从 offset 0 开始。尾部 ZIP 只包含一个 size=0 的 marker:
 
 ```text
-.kuasar.sha256.<64-lowercase-hex>
+.kuasar.digest.<64-lowercase-hex>
 ```
 
-摘要覆盖 ZIP 之前的全部字节,即 EROFS 和对齐 padding。构建器复制 EROFS 的
-同时计算 SHA256,再写 marker;运行和恢复只从 EOF 读取 marker,不重新扫描
+`digest:` identity覆盖 ZIP 之前的全部字节,即 EROFS 和对齐 padding。构建器复制 EROFS 的
+同时计算carrier identity,再写 marker;运行和恢复只从 EOF 读取 marker,不重新扫描
 EROFS。bundle 最终大小保持 2 MiB 对齐,因此 Cloud Hypervisor 无需 offset
 能力即可继续直接映射,EROFS 依据自身 superblock 忽略尾部 padding 和 ZIP。
 

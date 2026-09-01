@@ -299,8 +299,8 @@ No rules takes everything. --chown/--chmod override ownership and
 permissions on every extracted entry. --no-chown skips ownership
 restoration when uid/gid metadata is irrelevant to the extraction.
 
-stream packages exactly one payload as a tarstream (sparse payload + empty
-digest marker; see accelerator/pkg/tarstream). A file source's holes
+stream packages exactly one payload as a tarstream (sparse payload + digest
+marker metadata; see accelerator/pkg/tarstream). A file source's holes
 come from the filesystem (SEEK_HOLE) — never from scanning content. A
 stdin source requires --size N (the tar header carries the size up
 front), streams straight through with nothing spooled, and is packaged

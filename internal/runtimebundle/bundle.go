@@ -72,7 +72,7 @@ func Build(inputPath, outputPath string) (string, error) {
 		return "", fmt.Errorf("pad runtime bundle: %w", err)
 	}
 	hexDigest := fmt.Sprintf("%x", h.Sum(nil))
-	digest := "sha256:" + hexDigest
+	digest := "digest:" + hexDigest
 	footer, err := markerZIP(hexDigest)
 	if err != nil {
 		return "", err
@@ -115,7 +115,7 @@ func markerZIP(hexDigest string) ([]byte, error) {
 	var buf bytes.Buffer
 	zw := zip.NewWriter(&buf)
 	hdr := &zip.FileHeader{
-		Name:     tarstream.SHA256MarkerPrefix + hexDigest,
+		Name:     tarstream.DigestMarkerPrefix + hexDigest,
 		Method:   zip.Store,
 		Modified: zipEpoch,
 	}
