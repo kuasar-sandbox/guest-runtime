@@ -30,24 +30,50 @@ The repository is one component repository even though it publishes two release-
 
 The runtime image places its initial guest tools under `/opt/sandbox-runtime/bin/`. VMLinux and the Cloud Hypervisor binary are not embedded in the runtime bundle: VMLinux is published as its own release unit, and Cloud Hypervisor is built and published by `sandboxer`.
 
+## Source workspace
+
+The source build uses sibling repositories. `go.mod` resolves `accelerator` through `../accelerator`, and the Runtime image consumes or builds `sandbox-init` through `../sandboxer`:
+
+```text
+<workspace>/
+├── guest-runtime/
+├── accelerator/
+└── sandboxer/
+```
+
+For coordinated development, use compatible `main` revisions from the three repositories. To reproduce a released composition, use the exact component tags selected by the corresponding [project aggregate release](https://github.com/kuasar-sandbox/kuasar-sandbox/releases) rather than independently choosing GitHub Latest tags. The complete six-repository workspace is documented in the [project README](https://github.com/kuasar-sandbox/kuasar-sandbox).
+
+## Build prerequisites
+
+Building `sandbox-runtime.bundle` requires a **host-architecture** `mkfs.erofs` executable. Install `erofs-utils` on the build host or set:
+
+```bash
+BUILD_MKFS_EROFS=/path/to/host/mkfs.erofs make sandbox-runtime
+```
+
+The host packer is separate from `native-deps/bin/<target-arch>/mkfs.erofs`, which is the target-architecture static binary copied into the guest Runtime image. This distinction is required for cross-builds: an aarch64 guest binary cannot package an image on an x86_64 host.
+
+Other prerequisites and native-source locations are documented in [`native-deps/docs/build.md`](native-deps/docs/build.md).
+
 ## Build
 
 ```bash
-make native-deps                 # VMLinux, EROFS tools, Envd, and native inputs
+make native-deps                 # VMLinux, target EROFS tools, Envd, and native inputs
 make flatten-ctl                 # OCI/directory -> deterministic EROFS builder
 make build                       # assemble sandbox-runtime.bundle
 make sandbox-runtime             # build the runtime image, building sandbox-init if needed
-make build TARGET_ARCH=aarch64   # cross-build where the documented dependencies support it
+make build TARGET_ARCH=aarch64   # cross-build where documented dependencies support it
 ```
 
 `make sandbox-runtime` consumes:
 
 - `../sandboxer/bin/<arch>/sandbox-init`;
 - `native-deps/bin/<arch>/envd`;
-- `native-deps/bin/<arch>/mkfs.erofs`;
-- `bin/<arch>/flatten-ctl`.
+- `native-deps/bin/<arch>/mkfs.erofs` as the guest payload;
+- `bin/<arch>/flatten-ctl`;
+- `BUILD_MKFS_EROFS` as the host image packer.
 
-When a required input is missing, the Makefile invokes the corresponding build target rather than silently substituting an internal binary. A clean public build must use the documented public source and download locations and must not depend on a developer's private package mirror or cache.
+When `sandbox-init`, Envd, `flatten-ctl`, or the target-architecture guest `mkfs.erofs` is absent, the Makefile invokes its corresponding build target. The host `mkfs.erofs` is different: it must already be available on `PATH`, at a documented native-deps host path, or through `BUILD_MKFS_EROFS`; otherwise the Runtime build fails explicitly. A clean public build must use documented public source and download locations and must not depend on a developer's private package mirror or cache.
 
 ## Outputs
 
@@ -68,7 +94,7 @@ This repository does not publish a generic `guest-runtime-vX.Y.Z` release. It ma
 
 The two version numbers may advance independently. The project aggregate release selects an exact Runtime tag and an exact VMLinux tag; it does not assume that their version numbers match.
 
-Current GitHub release assets are published for Linux x86_64 after the full build and BMS validation. Source Makefiles may support another `TARGET_ARCH`, but source-build support does not by itself mean a prebuilt artifact is published for that architecture.
+Current GitHub component assets are published for Linux x86_64 from protected source refs and exact commits after their component build and packaging checks. The project aggregate release later selects exact Runtime, VMLinux, and other component tags and performs cross-component BMS plus released-asset MicroVM validation for that composition. Source Makefiles may support another `TARGET_ARCH`, but source-build support does not by itself mean a prebuilt artifact is published for that architecture.
 
 ## Kernel source and licensing
 
@@ -87,7 +113,7 @@ The repository-wide license boundaries are described in [`LICENSE_SCOPE.md`](LIC
 
 ## Release model
 
-Runtime and VMLinux releases are built from protected source refs and exact commits. Preview releases are GitHub prereleases for development and evaluation; mainline Stable releases are coordinated independently for each release unit. The project aggregate release always selects exact tags and does not rely on GitHub Latest.
+Runtime and VMLinux component releases are built from protected source refs and exact commits. Preview releases are GitHub prereleases for development and evaluation; mainline Stable releases are coordinated independently for each release unit. The project aggregate release always selects exact tags and does not rely on GitHub Latest, then validates the selected composition through project-level BMS and released-asset testing.
 
 See the [project release documentation](https://github.com/kuasar-sandbox/kuasar-sandbox/blob/main/docs/release.md) and the [latest Stable aggregate release](https://github.com/kuasar-sandbox/kuasar-sandbox/releases/latest).
 
@@ -104,7 +130,7 @@ The English README contains the complete public component entry path. Translatin
 
 ## Contributing and security
 
-Read the [organization contribution guide](https://github.com/kuasar-sandbox/.github/blob/main/CONTRIBUTING.md). Changes to the guest ABI, runtime contents, kernel configuration, source provenance, or release artifacts require the corresponding validation and any necessary companion pull requests.
+Read the repository-specific [contribution guide](CONTRIBUTING.md) and the [organization contribution guide](https://github.com/kuasar-sandbox/.github/blob/main/CONTRIBUTING.md). Changes to the guest ABI, runtime contents, kernel configuration, source provenance, or release artifacts require the corresponding validation and any necessary companion pull requests.
 
 Do not report vulnerabilities or disclose private package sources, credentials, signing material, or customer data in public issues. Use the [Kuasar Sandbox Security Policy](https://github.com/kuasar-sandbox/kuasar-sandbox/security/policy) and GitHub private vulnerability reporting.
 
