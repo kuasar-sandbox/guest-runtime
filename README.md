@@ -1,82 +1,139 @@
+[English](README.md) | [简体中文](README_zh.md)
+
 # guest-runtime
 
-Guest 运行时镜像与构建工具仓:负责构建 `sandbox-runtime.bundle`、`flatten-ctl`
-以及 guest 侧 native 产物。host 生命周期、快照、恢复和 `sandbox-init` 源码属于
-`sandboxer`;内容寻址、manifest/cache/store 与展平公共库属于 `accelerator`。
-系统集成、跨仓验证和聚合发布由
-[Kuasar Sandbox 项目主仓](https://github.com/kuasar-sandbox/kuasar-sandbox)维护。
+`guest-runtime` builds the **guest kernel, runtime image, and image-building tools** used by [Kuasar Sandbox](https://github.com/kuasar-sandbox/kuasar-sandbox).
 
-## 组成
+The repository owns the guest environment and its build inputs, provenance, and release artifacts. Host-side MicroVM lifecycle, snapshot, restore, and `sandbox-init` source belong to [`sandboxer`](https://github.com/kuasar-sandbox/sandboxer). Shared Manifest, cache/store, OCI retrieval, and image-flattening libraries belong to [`accelerator`](https://github.com/kuasar-sandbox/accelerator).
 
-| 路径 | 角色 |
-|---|---|
-| `cmd/flatten-ctl` | OCI/目录 → EROFS deterministic image builder;复用 `accelerator/pkg/{flatten,image,remote,tar}` |
-| `docs/sandbox-runtime.md` | runtime 镜像布局、guest payload、构建和发布契约 |
-| `docs/vmlinux.md` | guest kernel 镜像契约和配置理由 |
-| `docs/flatten.md` | `flatten-ctl` CLI、远程拉取缓存、OCI Referrers 行为 |
-| `native-deps/` | 构建 `vmlinux`、`mkfs.erofs`、`fsck.erofs`、`envd` |
-| `scripts/guest-inspect.py` | 检查 guest/runtime 镜像的辅助脚本 |
+## Responsibilities
 
-`guest-runtime` 把 `../sandboxer/bin/<arch>/sandbox-init` 和 guest payload 打进
-同一份 DAX-shared EROFS 镜像。镜像内 `/opt/sandbox-runtime/bin/` 首版包含
-`envd`、`flatten-ctl`、`mkfs.erofs`;`vmlinux` 和 `cloud-hypervisor` 不进入
-runtime 镜像,分别由本仓的独立 `vmlinux-vX.Y.Z` 版本和 `sandboxer` 发布。
+- build the guest VMLinux image from a documented kernel source, configuration, and patch set;
+- build native guest dependencies such as EROFS tools and Envd;
+- build `flatten-ctl`, the OCI/directory-to-EROFS image builder;
+- assemble `sandbox-runtime.bundle`, including `sandbox-init` from `sandboxer` and the guest payloads maintained here;
+- validate the produced guest/runtime filesystem structure;
+- publish and document two independently versioned release units: Runtime and VMLinux.
 
-## 构建
+The repository is one component repository even though it publishes two release-unit version lines.
 
-```bash
-make native-deps                 # vmlinux / erofs tools / envd
-make flatten-ctl                 # OCI/dir -> deterministic EROFS builder
-make build                       # sandbox-runtime.bundle with envd/flatten-ctl/mkfs.erofs
-make sandbox-runtime             # same image target, builds ../sandboxer sandbox-init if needed
-make build TARGET_ARCH=aarch64
+## Repository layout
+
+| Path | Purpose |
+| --- | --- |
+| `cmd/flatten-ctl` | OCI or directory to deterministic EROFS image builder, using shared `accelerator` packages |
+| `native-deps/` | VMLinux, EROFS tools, Envd, and other native guest build inputs |
+| `docs/sandbox-runtime.md` | Runtime image layout, guest payload, build, and release contract |
+| `docs/vmlinux.md` | Guest kernel source/configuration contract and platform ABI |
+| `docs/flatten.md` | `flatten-ctl`, remote image retrieval, cache, and OCI Referrers behavior |
+| `scripts/guest-inspect.py` | Inspect and validate guest/runtime images |
+
+The runtime image places its initial guest tools under `/opt/sandbox-runtime/bin/`. VMLinux and the Cloud Hypervisor binary are not embedded in the runtime bundle: VMLinux is published as its own release unit, and Cloud Hypervisor is built and published by `sandboxer`.
+
+## Source workspace
+
+The source build uses sibling repositories. `go.mod` resolves `accelerator` through `../accelerator`, and the Runtime image consumes or builds `sandbox-init` through `../sandboxer`:
+
+```text
+<workspace>/
+├── guest-runtime/
+├── accelerator/
+└── sandboxer/
 ```
 
-`make sandbox-runtime` 需要 `mkfs.erofs`;查找顺序为 `PATH`、`bin/<arch>/`、
-`native-deps/bin/<arch>/`。它还会消费 `native-deps/bin/<arch>/envd` 和本仓
-`bin/<arch>/flatten-ctl`;缺失时按需触发对应构建目标。
+For coordinated development, use compatible `main` revisions from the three repositories. To reproduce a released composition, use the exact component tags selected by the corresponding [project aggregate release](https://github.com/kuasar-sandbox/kuasar-sandbox/releases) rather than independently choosing GitHub Latest tags. The complete six-repository workspace is documented in the [project README](https://github.com/kuasar-sandbox/kuasar-sandbox).
 
-## 产物
+## Build prerequisites
 
-| 产物 | 生成入口 |
-|---|---|
+Building `sandbox-runtime.bundle` requires a **host-architecture** `mkfs.erofs` executable. Install `erofs-utils` on the build host or set:
+
+```bash
+BUILD_MKFS_EROFS=/path/to/host/mkfs.erofs make sandbox-runtime
+```
+
+The host packer is separate from `native-deps/bin/<target-arch>/mkfs.erofs`, which is the target-architecture static binary copied into the guest Runtime image. This distinction is required for cross-builds: an aarch64 guest binary cannot package an image on an x86_64 host.
+
+Other prerequisites and native-source locations are documented in [`native-deps/docs/build.md`](native-deps/docs/build.md).
+
+## Build
+
+```bash
+make native-deps                 # VMLinux, target EROFS tools, Envd, and native inputs
+make flatten-ctl                 # OCI/directory -> deterministic EROFS builder
+make build                       # assemble sandbox-runtime.bundle
+make sandbox-runtime             # build the runtime image, building sandbox-init if needed
+make build TARGET_ARCH=aarch64   # cross-build where documented dependencies support it
+```
+
+`make sandbox-runtime` consumes:
+
+- `../sandboxer/bin/<arch>/sandbox-init`;
+- `native-deps/bin/<arch>/envd`;
+- `native-deps/bin/<arch>/mkfs.erofs` as the guest payload;
+- `bin/<arch>/flatten-ctl`;
+- `BUILD_MKFS_EROFS` as the host image packer.
+
+When `sandbox-init`, Envd, `flatten-ctl`, or the target-architecture guest `mkfs.erofs` is absent, the Makefile invokes its corresponding build target. The host `mkfs.erofs` is different: it must already be available on `PATH`, at a documented native-deps host path, or through `BUILD_MKFS_EROFS`; otherwise the Runtime build fails explicitly. A clean public build must use documented public source and download locations and must not depend on a developer's private package mirror or cache.
+
+## Outputs
+
+| Output | Build target |
+| --- | --- |
 | `bin/<arch>/flatten-ctl` | `make flatten-ctl` |
 | `bin/<arch>/sandbox-runtime.bundle` | `make sandbox-runtime` |
 | `native-deps/bin/<arch>/vmlinux` | `make native-deps` |
 | `native-deps/bin/<arch>/mkfs.erofs` / `fsck.erofs` | `make native-deps` |
 | `native-deps/bin/<arch>/envd` | `make native-deps` |
 
-本仓没有通用的 `guest-runtime-vX.Y.Z` 版本或同名归档,而是维护两条独立版本线:
+## Two release units
 
-- `runtime-vX.Y.Z`:发布 `sandbox-runtime-x86_64-vX.Y.Z.tar.gz`,包含
-  runtime bundle、`flatten-ctl` 和 `mkfs.erofs`。
-- `vmlinux-vX.Y.Z`:发布 `vmlinux-x86_64-vX.Y.Z.tar.gz`,包含稳定入口
-  `bin/vmlinux`。
+This repository does not publish a generic `guest-runtime-vX.Y.Z` release. It maintains two independent version lines:
 
-本仓文档与 `test/e2e/` 不进入上述组件包。项目主仓的 platform 聚合版本从所选 runtime tag
-收集 runtime 文档与 flatten E2E,从所选 vmlinux tag 收集 kernel 文档,统一放入
-platform 包。
+- **`runtime-vX.Y.Z`** — publishes `sandbox-runtime-x86_64-vX.Y.Z.tar.gz`, containing the runtime bundle, `flatten-ctl`, and the EROFS creation tool selected by the release contract;
+- **`vmlinux-vX.Y.Z`** — publishes `vmlinux-x86_64-vX.Y.Z.tar.gz`, containing the guest kernel at the stable `bin/vmlinux` path.
 
-两条版本线独立演进,版本号不要求相同。当前 Release 只发布已完成全量构建与
-BMS 验证的 Linux x86_64 目标。`envd` 只随 runtime 镜像内置;
-`fsck.erofs` 只作为源码树诊断/测试辅助产物。
-项目主仓的每日协调器按上海日期分别触发 `runtime-vX.Y.Z-preview.YYYYMMDD` 和
-`vmlinux-vX.Y.Z-preview.YYYYMMDD`;Preview 和维护分支 Stable 不更新 GitHub
-Latest。两个单元的主线 Stable 独立构建发布;独立的幂等 Reconcile Latest 工作流按
-`main` 源码提交先后协调本仓 Latest,同一提交才比较 SemVer。平台聚合仍按两个精确
-Tag 选择,不依赖 Latest。
-同版本发布与删除共用完整 workflow mutation group;若 GitHub 合并 pending 请求,项目主仓
-协调器会把 cancelled 状态作为未完成操作自动重跑,不会把它当作发布或 GC 已完成。
+The two version numbers may advance independently. The project aggregate release selects an exact Runtime tag and an exact VMLinux tag; it does not assume that their version numbers match.
 
-## 文档
+Current GitHub component assets are published for Linux x86_64 from protected source refs and exact commits after their component build and packaging checks. The project aggregate release later selects exact Runtime, VMLinux, and other component tags and performs cross-component BMS plus released-asset MicroVM validation for that composition. Source Makefiles may support another `TARGET_ARCH`, but source-build support does not by itself mean a prebuilt artifact is published for that architecture.
 
-- [docs/sandbox-runtime.md](docs/sandbox-runtime.md) — runtime 镜像打包、发布和消费契约。
-- [docs/vmlinux.md](docs/vmlinux.md) — guest kernel 配置、构建和平台 ABI。
-- [docs/flatten.md](docs/flatten.md) — `flatten-ctl` 命令和确定性展平。
-- [native-deps/docs/build.md](native-deps/docs/build.md) — native-deps 构建工作流。
+## Kernel source and licensing
+
+A VMLinux release must be traceable to its public kernel source version, configuration, project patch set, toolchain, and source commit. Kernel patches and copied kernel material retain their upstream copyright and GPL obligations. Project-original build scripts do not relicense the Linux kernel.
+
+The Runtime bundle may contain software under multiple licenses. Its package and native-dependency inputs, notices, source availability, and redistribution obligations must be reviewed as part of the release contract. Never add an internal-only package, private CA, SSH host key, machine identity, production credential, or untraceable prebuilt binary to the guest image.
+
+The repository-wide license boundaries are described in [`LICENSE_SCOPE.md`](LICENSE_SCOPE.md). Native build details and source locations are documented in [`native-deps/docs/build.md`](native-deps/docs/build.md).
+
+## Integration boundaries
+
+- `sandboxer` owns `sandbox-init` source and the host lifecycle; this repository packages the built guest binary into the Runtime image;
+- `accelerator` owns the shared EROFS/OCI flattening libraries; this repository publishes the `flatten-ctl` binary in the Runtime release unit;
+- `orchestrator` consumes the produced Runtime and VMLinux artifacts through the complete platform;
+- `kuasar-sandbox/kuasar-sandbox` selects exact release units, runs cross-component validation, and publishes aggregate releases.
+
+## Release model
+
+Runtime and VMLinux component releases are built from protected source refs and exact commits. Preview releases are GitHub prereleases for development and evaluation; mainline Stable releases are coordinated independently for each release unit. The project aggregate release always selects exact tags and does not rely on GitHub Latest, then validates the selected composition through project-level BMS and released-asset testing.
+
+See the [project release documentation](https://github.com/kuasar-sandbox/kuasar-sandbox/blob/main/docs/release.md) and the [latest Stable aggregate release](https://github.com/kuasar-sandbox/kuasar-sandbox/releases/latest).
+
+## Documentation
+
+Detailed design and reference documents are currently maintained primarily in Chinese:
+
+- [`docs/sandbox-runtime.md`](docs/sandbox-runtime.md) — Runtime image layout, guest payload, build, release, and consumption contract;
+- [`docs/vmlinux.md`](docs/vmlinux.md) — guest kernel configuration, build, platform ABI, and source relationship;
+- [`docs/flatten.md`](docs/flatten.md) — `flatten-ctl`, deterministic flattening, remote retrieval, caching, and OCI Referrers;
+- [`native-deps/docs/build.md`](native-deps/docs/build.md) — native-dependency source and build workflow.
+
+The English README contains the complete public component entry path. Translating every detailed design document is not required to build or contribute to the component.
+
+## Contributing and security
+
+Read the repository-specific [contribution guide](CONTRIBUTING.md) and the [organization contribution guide](https://github.com/kuasar-sandbox/.github/blob/main/CONTRIBUTING.md). Changes to the guest ABI, runtime contents, kernel configuration, source provenance, or release artifacts require the corresponding validation and any necessary companion pull requests.
+
+Do not report vulnerabilities or disclose private package sources, credentials, signing material, or customer data in public issues. Use the [Kuasar Sandbox Security Policy](https://github.com/kuasar-sandbox/kuasar-sandbox/security/policy) and GitHub private vulnerability reporting.
 
 ## License
 
-本仓库的项目原创内容采用 [Apache License 2.0](LICENSE).Linux 内核 patch 的
-GPL-2.0-only 边界见 [LICENSE_SCOPE.md](LICENSE_SCOPE.md).
-贡献授权说明见 [CONTRIBUTING.md](CONTRIBUTING.md).
+Original project content is licensed under the [Apache License 2.0](LICENSE). Linux kernel patches retain the GPL-2.0-only boundary documented in [`LICENSE_SCOPE.md`](LICENSE_SCOPE.md). Runtime packages, EROFS tools, Envd, Buildroot/distribution inputs, and other third-party materials retain their own licenses, notices, source, and redistribution obligations.
