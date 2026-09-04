@@ -1,3 +1,5 @@
+[English](README.md) | [简体中文](README_zh.md)
+
 # guest-runtime
 
 Guest 运行时镜像与构建工具仓:负责构建 `sandbox-runtime.bundle`、`flatten-ctl`
