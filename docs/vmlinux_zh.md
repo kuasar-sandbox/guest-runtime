@@ -310,7 +310,7 @@ PVH 让 x86_64 跳过 BIOS/PXE 阶段;arm64 fragment 启用 EFI stub/ACPI。启�
 sandbox-ctl 选择 journald 或文件等控制台目的地,Guest hvc0 接口不变。x86_64 内核
 不编任何 UART 驱动;aarch64 编入 PL011(CH 在 arm64 暴露 PL011 设备,留作启动早期
 与调试控制台)。应用的 stdin/stdout/stderr 不走任何 console 设备(走 vsock,见
-[sandboxer Guest ABI 文档](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/sandbox-init.md) §3.5 / §4.5)。
+[sandboxer Guest ABI 文档](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/sandbox-init_zh.md) §3.5 / §4.5)。
 
 ### 4.4 RTC
 
@@ -357,7 +357,7 @@ x86_64 页大小固定 4 KiB,无此问题。
 **freezer(核心,无独立 Kconfig)**:快照 quiesce 前,sandbox-init 必须冻结完整应用子树并确认
 `cgroup.events:frozen 1`;restore 的墙钟等环境初始化完成后再解冻。否则 `/vm.resume`
 可能先于 Guest 处理 `restore` 而解冻 vCPU,使应用在旧墙钟或尚未重连的 MUX 上抢跑。
-机制见 [sandboxer Guest ABI 文档](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/sandbox-init.md) §3.4。v2 freezer(`cgroup.freeze`,Linux ≥5.2)
+机制见 [sandboxer Guest ABI 文档](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/sandbox-init_zh.md) §3.4。v2 freezer(`cgroup.freeze`,Linux ≥5.2)
 属于 CONFIG_CGROUPS 核心;CGROUP_FREEZER 是不需要的 v1 旧冻结器。
 
 **资源控制器**:MEMCG、CGROUP_SCHED+FAIR_GROUP_SCHED+CFS_BANDWIDTH、
@@ -405,7 +405,7 @@ CH 进程,balloon 控制 Guest 可用内存。Guest 子 cgroup 的 `memory.max=m
 这是**内核 preset 限制**,不是把 `resources.capacity.cpu` 限定为 1/2/4 三档的平台 API
 规则。当前 sandbox 配置校验 CPU 数量为正,没有这组三值枚举。请求 Capacity 仍须由
 选定内核和 VMM 支持;配置被 parser 接受并不证明随附的 4-CPU 内核能运行它。
-Capacity 与资源语义见 [sandboxer 生命周期文档](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/sandbox.md) §4。
+Capacity 与资源语义见 [sandboxer 生命周期文档](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/sandbox_zh.md) §4。
 
 ### 5.5 为什么不启用 free_page_reporting,以及 VIRTIO_MEM 的角色
 
@@ -427,7 +427,7 @@ fresh report 最多 inflate 64 MiB,并等待 memory_actual_size 收敛后再执�
 CH 对实际有数据的区间执行 `fallocate(PUNCH_HOLE)` + `madvise(DONTNEED)`;平台
 第 4 个 VMM patch 先用 SEEK_DATA 探测 file-backed 区间,已是稀疏空洞时跳过这两项
 操作,避免无意义的 UFFD_EVENT_REMOVE。驻留数据的真实回收保持原路径。详见
-[sandboxer 生命周期文档](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/sandbox.md) §9.3。
+[sandboxer 生命周期文档](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/sandbox_zh.md) §9.3。
 
 当前 Guest `/proc/meminfo` 虽在 CONFIG_VIRTIO_BALLOON=y 下仍不导出 `Balloon:`
 字段。该字段不是 Guest ABI 或 Budget 控制的可选来源;current 始终来自 CH
@@ -503,8 +503,8 @@ RAM 字节相同比例作为发布门禁.
 - [sandboxer VMM 文档](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/cloud-hypervisor_zh.md) —— 平台 VMM 的启动协议、设备
   模型、patch 范围
 - [sandbox-runtime_zh.md](sandbox-runtime_zh.md) —— 内核之上的 runtime 镜像打包与布局;
-  [sandboxer Guest ABI 文档](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/sandbox-init.md) 负责 rootfs 组装、应用拉起与 Guest ABI
-- [sandboxer 生命周期文档](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/sandbox.md) §3.1(`boot.kernel`)/ §14.2(平台 ABI 边界)——
+  [sandboxer Guest ABI 文档](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/sandbox-init_zh.md) 负责 rootfs 组装、应用拉起与 Guest ABI
+- [sandboxer 生命周期文档](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/sandbox_zh.md) §3.1(`boot.kernel`)/ §14.2(平台 ABI 边界)——
   沙箱配置如何引用 vmlinux,以及自带 kernel 的接入方式
 - [Native 构建指南](../native-deps/docs/build_zh.md) —— `make vmlinux` 工作流、patch 开发循环、
   交叉编译

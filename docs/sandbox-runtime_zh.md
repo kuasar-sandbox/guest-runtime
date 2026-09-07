@@ -9,7 +9,7 @@ guest 内需要的辅助工具,由本仓打包、发布,再由 `sandboxer/sandbo
 
 本文只定义镜像打包、文件布局、版本发布和消费契约。`sandbox-init` 的启动期
 rootfs 组装、vsock 控制面、stdio MUX、exec/attach/quiesce 等 ABI 由
-[sandboxer Guest ABI 文档](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/sandbox-init.md)维护。
+[sandboxer Guest ABI 文档](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/sandbox-init_zh.md)维护。
 
 ## 1. 概述
 
@@ -139,7 +139,7 @@ make build TARGET_ARCH=aarch64
    追加空 marker ZIP,原子发布为 `bin/<arch>/sandbox-runtime.bundle`。
 
 `mkfs.erofs` 和 `envd` 构建流程见[Native Build 文档](../native-deps/docs/build_zh.md)。
-`sandbox-init` 实现与 ABI 见[sandboxer Guest ABI](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/sandbox-init.md)。
+`sandbox-init` 实现与 ABI 见[sandboxer Guest ABI](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/sandbox-init_zh.md)。
 
 ### 3.1 架构
 
@@ -237,8 +237,8 @@ runtime workflow 显式选择已发布 sandboxer tag 构建镜像;runtime 与 vm
 
 ## 8. See Also
 
-- [sandbox-init](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/sandbox-init.md) - guest PID 1 ABI 和 host/guest 控制协议。
-- [sandbox](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/sandbox.md) - runtime 镜像消费、启动与恢复。
+- [sandbox-init](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/sandbox-init_zh.md) - guest PID 1 ABI 和 host/guest 控制协议。
+- [sandbox](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/sandbox_zh.md) - runtime 镜像消费、启动与恢复。
 - [Native Build](../native-deps/docs/build_zh.md) - mkfs.erofs、vmlinux、envd 构建。
 - [vmlinux](vmlinux_zh.md) - guest kernel 与 runtime 镜像的配合关系。
 - [flatten](flatten_zh.md) - build sandbox 中的 flatten-ctl 执行模型。
