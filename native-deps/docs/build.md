@@ -1,212 +1,184 @@
-# build — 原生依赖构建工作流
+[English](build.md) | [简体中文](build_zh.md)
 
-native-deps 目录的构建工作流:从上游源码构建 kuasar-sandbox 平台运行期消费、但各 Go 仓
-不链接的三类原生产物——`mkfs.erofs`/`fsck.erofs`(erofs-utils)、`vmlinux`(guest 内核)、
-`envd`(e2b guest agent)。工具链(autotools/kbuild/Go)与 Go 仓不同、冷构建以分钟计、上游发布节奏独立,因此内聚在
-`guest-runtime/native-deps` 目录下独立构建。
+# build — native dependency build workflow
 
-所有产物走同一条流水线:按 URL pin 的上游 tarball(可选 SHA256 校验)→ 共享缓存与
-解压 → 本地补丁(仅 vmlinux,`git am`)→ 构建 → `bin/<arch>/`。
-本文覆盖构建目标、patch 开发循环、交叉编译与缓存/清理约定;产物本身的设计契约不在
-本文:内核配置体系见 [`../../docs/vmlinux.md`](../../docs/vmlinux.md)。patched
-`cloud-hypervisor` 是 `sandbox-ctl` 的 VMM 运行件,构建与 patch 契约见
-`sandboxer/docs/cloud-hypervisor.md`。
+The native-deps directory builds upstream sources into three default artifact families consumed at runtime, not linked by the Go repositories: `mkfs.erofs`/`fsck.erofs` (erofs-utils), `vmlinux` (guest kernel) and `envd` (E2B guest agent). Their autotools/Kbuild/Go toolchains and independent upstream schedules are kept together in `guest-runtime/native-deps`. An additional `versitygw` gateway target is opt-in and not part of the default build.
 
-平台级聚合由 `platform` 编排:
-`make -C kuasar-sandbox build` 首先驱动本目录 `make build`,再把
-产物按 `kuasar-sandbox/release/bin-inputs.manifest` 收集进
-`kuasar-sandbox/bin/<arch>/`,供 e2e、demo 与本地集成
-复用。
+The common pipeline is: pinned upstream tarball URL with optional SHA256 verification → shared cache and extraction → local patches (vmlinux, using `git am`) → build → `bin/<arch>/`.
 
-## 1. 概述
+This document covers targets, patch development, cross-compilation and cache/cleanup rules. Artifact-specific design belongs elsewhere: see [the kernel specification](../../docs/vmlinux.md) for kernel configuration, and `sandboxer/docs/cloud-hypervisor.md` for the VMM and its patches.
 
-### 1.1 产物与版本 pin
+Project-level aggregation runs `make -C kuasar-sandbox build`, which invokes this directory's `make build`, then collects artifacts according to `kuasar-sandbox/release/bin-inputs.manifest` into `kuasar-sandbox/bin/<arch>/` for E2E, Demo and local integration reuse.
 
-| 产物 | 上游(pin) | 本仓输入 | 消费方 |
-|---|---|---|---|
-| `mkfs.erofs` `fsck.erofs` | erofs-utils v1.9.1 | — | `accelerator`(展平)、`guest-runtime`(打 guest erofs)、源码树诊断 / accelerator 测试 |
-| `vmlinux` | linux 6.1.169(LTS,cdn.kernel.org) | `deps/linux-patches/`(1 个)+ `deps/vmlinux/*.config` | `sandboxer`/`sandbox-ctl`(guest 内核) |
-| `envd` | e2b-dev/infra 2026.22(发布 tarball) | — | `guest-runtime`(注入 `sandbox-runtime.bundle`) |
+<a id="1-概述"></a>
+## 1. Overview
 
-pin 全部落在 Makefile 变量(`EROFS_TARBALL` / `LINUX_TARBALL` / `ENVD_TARBALL`,
-支持 `url#filename` 与本地路径两种形式),配套的 `*_TARBALL_SHA256`
-为空时跳过校验。升级版本 = 改变量 + 重验 patch 应用。
+<a id="11-产物与版本-pin"></a>
+### 1.1 Artifacts and pinned versions
 
-`librocksdb`(`accelerator` 的 CGO 链接依赖)在该仓内构建,不在此处。
+| Artifact | Pinned upstream | Repository inputs | Consumers |
+| --- | --- | --- | --- |
+| `mkfs.erofs` / `fsck.erofs` | erofs-utils v1.9.1 | — | accelerator flattening, guest-runtime image construction, source diagnostics and accelerator tests |
+| `vmlinux` | Linux 6.1.169 (LTS, cdn.kernel.org) | `deps/linux-patches/` and `deps/vmlinux/*.config` | sandboxer / sandbox-ctl guest kernel |
+| `envd` | e2b-dev/infra 2026.22 source tarball | — | Guest agent in `sandbox-runtime.bundle` |
+| `versitygw` (opt-in) | versity/versitygw v1.5.0 | — | Local/single-node S3-compatible file-storage integration where required |
 
-### 1.2 目录布局
+Pins live in Makefile variables (`EROFS_TARBALL`, `LINUX_TARBALL`, `ENVD_TARBALL`, and optional `VERSITYGW_TARBALL`), accepting `url#filename` or a local path. An empty corresponding `*_TARBALL_SHA256` skips verification. The current default EROFS, Linux and Envd inputs have hashes configured; the optional gateway hash must be supplied when required by the deployment's verification policy. Updating a version means updating those variables and revalidating patch application.
 
-```
+`librocksdb`, accelerator's CGO link dependency, is built in that repository, not here.
+
+<a id="12-目录布局"></a>
+### 1.2 Directory layout
+
+```text
 bin/
-├── x86_64/                  x86_64 产物: mkfs.erofs fsck.erofs vmlinux
-│                            envd
-├── aarch64/                 aarch64 产物(同上)
-└── <name>                   软链 → <host-arch>/<name>,仅原生构建时生成/更新
+├── x86_64/                  x86_64 artifacts: mkfs.erofs, fsck.erofs, vmlinux, envd
+├── aarch64/                 aarch64 artifacts (same names)
+└── <name>                   Symlink → <host-arch>/<name>, created/updated only for native builds
 
 build/
-├── tarball/                 上游 tarball 缓存(跨架构共享)
+├── tarball/                 Upstream tarballs, shared across architectures
 ├── src/
-│   ├── linux/               内核源树(跨架构共享;git 仓,patch 开发 WIP 所在)
-│   └── e2b-infra/           envd 源树(跨架构共享,Go 以 GOARCH 选目标)
+│   ├── linux/               Shared kernel source/git tree; patch-development work lives here
+│   ├── e2b-infra/           Shared Envd sources; Go selects the target via GOARCH
+│   └── versitygw/           Shared sources for the optional gateway
 ├── x86_64/
-│   ├── linux/               kbuild O= 输出
-│   └── src/erofs-utils/     erofs-utils 源树(autotools 仅支持 in-tree,per-arch)
-└── aarch64/                 (同上)
+│   ├── linux/               Kbuild O= output
+│   └── src/erofs-utils/     Per-architecture autotools in-tree source/build tree
+└── aarch64/                 Corresponding target output
 ```
 
-软链接策略:host = target 的原生构建在 `bin/` 下生成 `bin/<name> → <arch>/<name>`,
-以 `bin/` 为入口的消费方始终拿到当前架构可执行的二进制;交叉构建不更新软链
-(避免把入口指向 host 上不可执行的产物)。
+Native builds (host = target) create `bin/<name> → <arch>/<name>` for their public binary entries. Cross-builds do not update host entry symlinks, avoiding a link to a binary the host cannot execute. Optional gateway output appears only when that target is built.
 
-### 1.3 幂等与缓存
+<a id="13-幂等与缓存"></a>
+### 1.3 Idempotency and caching
 
-- **产物级跳过**:`bin/<arch>/` 下产物已存在时,erofs / vmlinux / envd 脚本直接退出
-  (删除产物以强制重建)。
-- **tarball 缓存**:`build/tarball/` 按文件名缓存,命中即不再下载;解压以
-  `.extracted` marker 幂等。
-- **`make clean`**:删除 `bin/` 与当前 `TARGET_ARCH` 的中间产物,**保留** tarball
-  缓存与 `build/src/*` 源树——后者可能携带未 format 回 `deps/` 的 patch 开发
-  WIP(git 仓)。
+- **Artifact reuse:** EROFS and Envd outputs are reused when their target files already exist; remove outputs to force those builds. Kernel output is also governed by tracked inputs: changes to its build script, common/architecture config fragments or patches trigger configuration reevaluation and incremental Kbuild rather than unconditional existence-only skipping.
+- **Tarball cache:** `build/tarball/` caches by filename; hits avoid downloading. Extraction uses an `.extracted` marker for idempotency.
+- **`make clean`:** removes `bin/` and target build output while **retaining** tarball caches and architecture-neutral `build/src/*` source trees. Kernel source trees may contain unexported patch-development work and must not be silently discarded.
 
-## 2. 构建目标
+<a id="2-构建目标"></a>
+## 2. Build targets
 
 ```bash
-make build               # =all: vmlinux + erofs + envd
-make erofs               # mkfs.erofs + fsck.erofs(最快,热缓存亚分钟)
-make vmlinux             # guest 内核(冷 ~5-10 min)
-make envd                # e2b guest agent(亚分钟)
-make clean               # 见 §1.3
-make help                # 列举目标
+make build      # =all: vmlinux + erofs + envd
+make erofs      # mkfs.erofs + fsck.erofs
+make vmlinux    # Guest kernel
+make envd       # E2B guest agent
+make versitygw  # Optional gateway; not part of build
+make clean      # See section 1.3
+make help       # List targets
 ```
 
-### 2.1 erofs(`make erofs`)
+Build duration depends on the host, toolchain and cache state; these commands do not carry a fixed timing guarantee.
 
-`deps/build-erofs.sh`:解压 erofs-utils 到 `build/<arch>/src/erofs-utils/`(autotools
-不支持 out-of-source 构建,per-arch 各一棵)→ `autoreconf` + `configure`(关闭全部
-压缩 / fuse / 网络特性)→ 只编 `lib` + `mkfs` + `fsck` 三个子目录 → 产出
-`bin/<arch>/{mkfs.erofs,fsck.erofs}`。
+<a id="21-erofsmake-erofs"></a>
+### 2.1 EROFS (`make erofs`)
 
-- 跳过 `mount`/`dump`/`fuse` 子目录:v1.9.1 的 mount.erofs 在
-  `--disable-multithreading` 下有 pthread 链接 bug,且平台不消费这些工具。
-- configure 期硬依赖 libuuid(无 `--without-uuid` 出口);交叉编译需 multi-arch 的
-  `uuid-dev:<arch>`,脚本前置探测并打印 apt 安装指引(§4.2)。
-- host 构建依赖:`autoconf automake libtool pkg-config make gcc g++`。
+`deps/build-erofs.sh` extracts erofs-utils into `build/<arch>/src/erofs-utils/`, keeping one tree per architecture because this autotools path does not support out-of-source builds. It runs `autoreconf` and `configure` with compression/FUSE/network features disabled, builds only the `lib`, `mkfs` and `fsck` subdirectories, and writes `bin/<arch>/{mkfs.erofs,fsck.erofs}`.
 
-### 2.2 vmlinux(`make vmlinux`)
+- The `mount`/`dump`/`fuse` subdirectories are skipped. The project does not consume those tools; the source workflow also avoids the v1.9.1 mount.erofs pthread-linking issue under `--disable-multithreading`.
+- Configure requires libuuid and has no `--without-uuid` path. Cross-compilation requires multiarch `uuid-dev:<arch>`; the script checks it first and prints apt guidance (section 4.2).
+- Host build tools: `autoconf automake libtool pkg-config make gcc g++`.
 
-= `linux-patches-apply` + `linux-build`,二者都进 `deps/build-vmlinux.sh`(STAGE
-分阶段,§3):应用 `deps/linux-patches/*.patch` 后,把
-`deps/vmlinux/sandbox-common.config` 与 `sandbox-<arch>.config` 拼接成
-`arch/<kbuild_arch>/configs/sandbox_defconfig`,`make sandbox_defconfig` +
-`make olddefconfig`(解析依赖闭包、暴露 silent regression)→
-`make -j$(nproc) <target>` → 拷出 `bin/<arch>/vmlinux`。
+<a id="22-vmlinuxmake-vmlinux"></a>
+### 2.2 vmlinux (`make vmlinux`)
 
-- `olddefconfig` 后校验 DAX 必需项及 arch 专属关键项；Kconfig 静默丢弃请求项时
-  构建立刻失败。
-- `vmlinux` 的 Make 依赖包含构建脚本、common/arch 配置片段与 tracked kernel
-  patches；任一输入变化都会重新求值配置并使用 Kbuild 增量重建。
-- 产物格式:x86_64 为 ELF(kbuild target `vmlinux`),aarch64 为 PE Image
-  (target `Image`,取 `arch/arm64/boot/Image`);文件名统一 `vmlinux`。
-- 源树 `build/src/linux/` 跨架构共享(kbuild 以 `ARCH=` 选目标,输出进 per-arch
-  `O=` 目录)。
-- host 构建依赖:`bc bison flex make tar pkg-config gcc` + libelf 头(libelf-dev /
-  elfutils-libelf-devel)+ libssl 头(libssl-dev / openssl-devel);后两者是 host 侧
-  kbuild 工具(fixdep、sign-file 等)的依赖,不链入 vmlinux。
-- 配置体系语义(两段拼接的契约、关键启用/禁用项)见
-  [`../../docs/vmlinux.md`](../../docs/vmlinux.md) §2-§3。
+The target invokes the fetch, patch-application and build stages of `deps/build-vmlinux.sh` when its output needs rebuilding (section 3). After applying `deps/linux-patches/*.patch`, it combines `deps/vmlinux/sandbox-common.config` with `sandbox-<arch>.config` into `arch/<kbuild_arch>/configs/sandbox_defconfig`, runs `make sandbox_defconfig` and `make olddefconfig` to resolve Kconfig dependencies, then `make -j$(nproc) <target>`, and copies out `bin/<arch>/vmlinux`.
 
-### 2.3 envd(`make envd`)
+- After `olddefconfig`, required DAX and architecture-specific options are checked. A requested critical option silently discarded by Kconfig fails the build.
+- Make dependencies include build scripts, common/architecture configuration and tracked kernel patches. Changing these inputs reevaluates configuration and uses incremental Kbuild.
+- x86_64 output is ELF (Kbuild target `vmlinux`); aarch64 output is the PE Image from `arch/arm64/boot/Image` (target `Image`). Both installed filenames are `vmlinux`.
+- `build/src/linux/` is shared across architectures. Kbuild selects with `ARCH=` and writes to an architecture-specific `O=` directory.
+- Host requirements: `bc bison flex make tar pkg-config gcc`, libelf headers (`libelf-dev` / `elfutils-libelf-devel`) and libssl headers (`libssl-dev` / `openssl-devel`). The headers support host Kbuild tools such as fixdep/sign-file; they are not linked into vmlinux.
+- The two-fragment configuration contract and important enabled/disabled options are documented in [vmlinux.md](../../docs/vmlinux.md), sections 2–3.
 
-`deps/build-envd.sh`:e2b-dev/infra 发布 tarball 解压到跨架构共享的
-`build/src/e2b-infra/`,对 `packages/envd` 执行 `go build`(`GOWORK=off GOOS=linux
-CGO_ENABLED=0 -trimpath -ldflags "-s -w"`)→ `bin/<arch>/envd`。GOARCH 即选目标
-架构,交叉无需 C 工具链。
+<a id="23-envdmake-envd"></a>
+### 2.3 Envd (`make envd`)
 
-- 产物由 `guest-runtime` 的 `make sandbox-runtime` 注入
-  `sandbox-runtime.bundle` 的 `/opt/sandbox-runtime/bin/envd`,作为 e2b profile
-  guest 内的数据面 agent(端口 49983)。
-- 工具链注意:envd 的 `go.mod` pin 较新的 Go(如 `go 1.26.3`),`GOTOOLCHAIN=auto`
-  按需下载;该下载要求 GOSUMDB 开启——Go 拒绝在 `GOSUMDB=off` 下下载并运行工具链。
-- 换 tag:覆盖 `ENVD_TARBALL`(`url#filename` 形式,filename 决定缓存名)。
+`deps/build-envd.sh` extracts the e2b-dev/infra source tarball into architecture-neutral `build/src/e2b-infra/` and builds `packages/envd` with `GOWORK=off GOOS=linux CGO_ENABLED=0 -trimpath -ldflags "-s -w"`, producing `bin/<arch>/envd`. GOARCH selects the target without a cross C toolchain.
 
-## 3. patch 开发循环(vmlinux)
+- `make sandbox-runtime` includes it as `/opt/sandbox-runtime/bin/envd`, the E2B-profile guest data-plane agent on port 49983.
+- Envd's `go.mod` may require a newer Go toolchain, such as `go 1.26.3`. `GOTOOLCHAIN=auto` downloads it when necessary; toolchain downloading requires GOSUMDB to be enabled and is rejected with `GOSUMDB=off`.
+- Override `ENVD_TARBALL` to change the tag. In `url#filename` form, filename determines the cache name.
 
-vmlinux 通过 `deps/build-vmlinux.sh` 的 STAGE 多阶段 dispatcher 维护补丁,
-Makefile 暴露 `linux-*` 目标:
+### 2.4 Optional gateway (`make versitygw`)
 
-| STAGE | make 目标 | 行为 |
-|---|---|---|
-| `fetch` | `linux-fetch` | 解压 tarball → `git init` + 全量 import commit + 打 base tag(`linux-patches-base`);已有 base tag 则跳过;存在无 tag 的外来 git 树则拒绝(不覆盖 WIP) |
-| `patches-apply` | `linux-patches-apply` | `git am deps/linux-patches/*.patch`;幂等与 sanity 语义见下 |
-| `patches-format` | `linux-patches-format` | `git format-patch <base>..HEAD` 回写 `deps/linux-patches/`(先清旧 `*.patch`) |
-| `build` | `linux-build` | 仅构建,不动 patch |
+`deps/build-versitygw.sh` builds the configured gateway source for the selected Go architecture. This target is not in `build`. It is available for local/single-node `builder.files_storage` deployments that need an S3-compatible gateway rather than a cloud object store. Its source, hash and source-directory variables are `VERSITYGW_TARBALL`, `VERSITYGW_TARBALL_SHA256` and `VERSITYGW_SRC`.
 
-`linux-patches` 是 `linux-patches-apply` 的别名。开发流:
+<a id="3-patch-开发循环vmlinux"></a>
+## 3. Kernel patch development
+
+The STAGE dispatcher in `deps/build-vmlinux.sh` manages vmlinux patches through these Make targets:
+
+| STAGE | Make target | Behavior |
+| --- | --- | --- |
+| `fetch` | `linux-fetch` | Extract tarball, initialize Git, import the source and create `linux-patches-base`. Skip an existing base tag; reject an unrelated Git tree without that tag rather than overwrite work. |
+| `patches-apply` | `linux-patches-apply` | Apply `deps/linux-patches/*.patch` using `git am`; idempotency and sanity rules below. |
+| `patches-format` | `linux-patches-format` | Export `git format-patch <base>..HEAD` to `deps/linux-patches/`, clearing old `*.patch` files first. |
+| `build` | `linux-build` | Build only, without changing patches. |
+
+`linux-patches` aliases `linux-patches-apply`. Run from `guest-runtime/native-deps/`:
 
 ```bash
-make linux-fetch                 # 一次性: 拉源码 + git tag linux-patches-base
-cd build/src/linux               # 改源码 + git commit(每个 patch 一个 commit)
-make linux-patches-format        # 提取 base..HEAD 回 deps/linux-patches/*.patch
-make vmlinux                     # 重新 apply + build,验证可重复
+make linux-fetch       # Fetch once and create linux-patches-base.
+cd build/src/linux
+# Edit sources and git commit; use one commit per patch.
+cd ../../..            # Return to native-deps before invoking its Make targets.
+make linux-patches-format
+make vmlinux           # Reapply/build to verify reproducibility.
 ```
 
-`patches-apply` 的 sanity 检查,核心目标是**绝不静默覆盖开发中的改动**:
+The patch-application sanity checks must **never silently overwrite work in progress**:
 
-- 源树必须有 base tag,否则报错(指引先跑 `make {linux,ch}-fetch`);
-- `HEAD == base`:`git am` 应用全部 patch;
-- `HEAD = base + N` 且 N 等于 patch 数、commit subject 与 patch 文件逐一匹配:
-  视为已应用,幂等跳过;
-- 其他任何状态:报错并指引"先 `make linux-patches-format` 保存 WIP,再
-  `git reset --hard <base-tag>`,后重跑"。
+- The source tree must have the base tag; otherwise the command reports an error and points to `make {linux,ch}-fetch`.
+- `HEAD == base`: apply all patches with `git am`.
+- `HEAD = base + N`, where N equals patch count and commit subjects match patch files one by one: treat patches as already applied and skip idempotently.
+- Any other state: stop and instruct the developer to save work with `make linux-patches-format`, then reset to the base tag only after preserving that work, and rerun.
 
-补丁本身 arch-neutral:`deps/linux-patches/` 仅触
-`drivers/virtio/virtio_balloon.c`,两架构共用同一组、各自 defconfig 编译。
+The current kernel patch set is architecture-neutral and touches `drivers/virtio/virtio_balloon.c`; both architectures use the same patches and their own defconfig.
 
-## 4. 交叉编译
+<a id="4-交叉编译"></a>
+## 4. Cross-compilation
 
 ### 4.1 TARGET_ARCH
 
-| 取值 | 别名 | GOARCH | KERNEL_ARCH |
-|---|---|---|---|
+| Value | Alias | GOARCH | KERNEL_ARCH |
+| --- | --- | --- | --- |
 | `x86_64` | `amd64` | `amd64` | `x86_64` |
 | `aarch64` | `arm64` | `arm64` | `arm64` |
 
-默认取 `uname -m`;`HOST_ARCH != TARGET_ARCH` 时自动启用交叉编译,`CROSS_PREFIX`
-自动推导为 `<target>-linux-gnu-`(可显式覆盖)。产物落 `bin/<target>/`,`bin/` 软链
-不更新;交叉产物在 host 上不可执行,运行验证需 native host。
+The default is `uname -m`. When `HOST_ARCH != TARGET_ARCH`, cross-compilation is enabled and `CROSS_PREFIX` is derived as `<target>-linux-gnu-` (explicit overrides are supported). Outputs go to `bin/<target>/`; host `bin/` symlinks are not updated. Running target binaries requires a suitable native host.
 
 ```bash
-make TARGET_ARCH=aarch64 build              # vmlinux + erofs + envd
+make TARGET_ARCH=aarch64 build
 ```
 
-### 4.2 工具链准备(x86_64 host → aarch64 为例,反向对称)
+<a id="42-工具链准备x86_64-host--aarch64-为例反向对称"></a>
+### 4.2 Toolchain preparation (x86_64 host to aarch64)
+
+The reverse direction follows the same model.
 
 ```bash
-# C 工具链(erofs-utils configure/链接 + kbuild CROSS_COMPILE)
+# C toolchain for erofs-utils configure/linking and Kbuild CROSS_COMPILE.
 apt install gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
 
-# erofs-utils 的 multi-arch libuuid(configure 期硬依赖)
+# Multiarch libuuid required by erofs-utils configure.
 sudo dpkg --add-architecture arm64
 sudo apt update
 sudo apt install libuuid1:arm64 uuid-dev:arm64
 ```
 
-envd 是 `CGO_ENABLED=0` 的纯 Go 构建,GOARCH 即完成交叉,无须以上任何一项。各脚本对
-缺失的工具链做前置探测(`${CROSS_PREFIX}gcc`、`uuid-dev:<arch>`),
-报错并给出安装指引,而不是在构建中途吐一墙链接错误。
+Envd is pure Go with `CGO_ENABLED=0`; GOARCH cross-compiles it without these C packages. Scripts check missing toolchains (`${CROSS_PREFIX}gcc`, `uuid-dev:<arch>`) up front and print installation guidance instead of failing later with a large linker error.
 
-## 5. WSL2 注意
+<a id="5-wsl2-注意"></a>
+## 5. WSL2 notes
 
-WSL2 的 `/mnt/<drive>/`(DrvFs)上每个小文件有 5-10 倍 I/O 开销,而内核源树 ~85K
-文件,放在 DrvFs 上冷构建慢一个量级:
+A kernel source tree performs many small-file operations. WSL2 builds on `/mnt/<drive>/` (DrvFs) may incur extra filesystem overhead; no fixed slowdown factor is implied.
 
-- **vmlinux**:Makefile 自动探测 WSL2 + DrvFs(内核版本带 microsoft 标记且 cwd 在
-  `/mnt/` 下);此时若存在 `$HOME/linux-build/src` 目录,自动把 `LINUX_BUILD_SRC` /
-  `LINUX_BUILD_OUT` 重定向到 `$HOME/linux-build/` 下(Linux-native 文件系统)。
-## 6. See Also
+For **vmlinux**, the Makefile detects a kernel release containing `microsoft` together with a working directory under `/mnt/`. If `$HOME/linux-build/src` exists, it defaults `LINUX_BUILD_SRC` and `LINUX_BUILD_OUT` under `$HOME/linux-build/`, allowing the build to use a Linux-native filesystem.
 
-- [`../../docs/vmlinux.md`](../../docs/vmlinux.md) —— guest 内核配置体系、架构差异与关键
-  决策(随发布包)。
-- `kuasar-sandbox/docs/release.md`
-  —— runtime、vmlinux 独立版本与平台聚合发布;本目录的运行期必需产物经
-  `kuasar-sandbox/release/bin-inputs.manifest` 收集进共享 `bin/`。
+## 6. See also
+
+- [vmlinux.md](../../docs/vmlinux.md): kernel configuration, architecture differences and design decisions.
+- `kuasar-sandbox/docs/release.md`: independent runtime/vmlinux versions and aggregate releases. Runtime-required artifacts from this directory are collected through `kuasar-sandbox/release/bin-inputs.manifest` into shared `bin/`.
