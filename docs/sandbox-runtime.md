@@ -1,32 +1,30 @@
-# sandbox-runtime — guest runtime 镜像
+[English](sandbox-runtime.md) | [简体中文](sandbox-runtime_zh.md)
 
-`sandbox-runtime.bundle` 是平台随每个 microVM 挂入的一份只读 Guest runtime
-镜像。它包含 `sandboxer` 构建出的 guest PID 1(`sandbox-init`)和平台在
-guest 内需要的辅助工具,由本仓打包、发布,再由 `sandboxer/sandbox-ctl` 在
-启动沙箱时作为 virtio-pmem 设备提供给 guest。
+# sandbox-runtime — guest runtime image
 
-本文只定义镜像打包、文件布局、版本发布和消费契约。`sandbox-init` 的启动期
-rootfs 组装、vsock 控制面、stdio MUX、exec/attach/quiesce 等 ABI 由
-`sandboxer/docs/sandbox-init.md` 维护。
+`sandbox-runtime.bundle` is the read-only Guest runtime image attached to each MicroVM. It contains the guest PID 1 (`sandbox-init`) built by `sandboxer` and the platform's guest-side helper tools. This repository packages and releases it; `sandboxer/sandbox-ctl` supplies it to the guest as a virtio-pmem device when starting a sandbox.
 
-## 1. 概述
+This document defines image packaging, filesystem layout, versioning and consumption. The startup rootfs assembly, vsock control plane, stdio MUX and exec/attach/quiesce ABI of `sandbox-init` are maintained in [the sandboxer guest ABI specification](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/sandbox-init.md).
 
-### 1.1 职责边界
+<a id="1-概述"></a>
+## 1. Overview
 
-| 组件 | 职责 |
-|---|---|
-| `sandboxer` | 构建 `sandbox-init`;`sandbox-ctl` 启动 CH,把 runtime 镜像作为 virtio-pmem 挂入 guest |
-| `guest-runtime` | 打包 `sandbox-init`、`envd`、`flatten-ctl`、`mkfs.erofs` 为单一 EROFS 镜像 |
-| `guest-runtime/native-deps` | 构建 `mkfs.erofs`、`fsck.erofs`、`vmlinux`、`envd` |
-| `accelerator` | 提供 `flatten-ctl` 复用的 `pkg/{flatten,image,remote,tar}` 和 manifest/cache/store 能力 |
+<a id="11-职责边界"></a>
+### 1.1 Ownership boundaries
 
-`sandbox-runtime.bundle` 不包含用户 rootfs、用户依赖、guest kernel 或
-cloud-hypervisor。用户 rootfs 来自 `boot.root.base`/`boot.disks[]`;guest
-kernel 由 `vmlinux` 包发布;VMM 由 `sandboxer` 发布。
+| Component | Responsibility |
+| --- | --- |
+| `sandboxer` | Build `sandbox-init`; `sandbox-ctl` starts CH and attaches the runtime image as guest virtio-pmem. |
+| `guest-runtime` | Package `sandbox-init`, `envd`, `flatten-ctl` and `mkfs.erofs` into one EROFS image. |
+| `guest-runtime/native-deps` | Build `mkfs.erofs`, `fsck.erofs`, `vmlinux` and `envd`; the optional gateway is a separate opt-in target, not runtime payload. |
+| `accelerator` | Supply the reusable `pkg/{flatten,image,remote,tar}` packages used by `flatten-ctl`, and Manifest/Cache/Store capabilities. |
 
-### 1.2 系统位置
+`sandbox-runtime.bundle` does not contain the user rootfs, user dependencies, guest kernel or Cloud Hypervisor. The user rootfs comes from `boot.root.base`/`boot.disks[]`. The kernel is published in the vmlinux package; the VMM is published by sandboxer.
 
-```
+<a id="12-系统位置"></a>
+### 1.2 Place in the system
+
+```text
                  build time                                      run time
 
   sandboxer/bin/<arch>/sandbox-init ─┐
@@ -37,202 +35,183 @@ kernel 由 `vmlinux` 包发布;VMM 由 `sandboxer` 发布。
                                            runtime release          guest /sbin/init
 ```
 
-这份镜像是节点级共享资产。同一节点上相同版本的 sandbox 通过 virtio-pmem +
-DAX 映射同一份 host 文件,避免每个 sandbox 独立复制 runtime 文件页。
+The image is a node-shared artifact. Sandboxes using the same version on a node map the same host file through virtio-pmem and DAX instead of copying runtime file pages independently.
 
-### 1.3 设计目标
+<a id="13-设计目标"></a>
+### 1.3 Design goals
 
-- **单一镜像**:e2b 运行时和 builder 运行时合并为同一个 runtime 镜像。
-- **只读且版本固定**:镜像由发布流程产生,运行期不修改。
-- **跨实例共享**:通过 virtio-pmem + DAX 共享 host page cache。
-- **边界清晰**:PID1 协议在 `sandboxer`,镜像打包和 guest payload 在
-  `guest-runtime`。
-- **可独立发布**:runtime bundle 可随 `guest-runtime` 的专用 release 单独上传
-  和回滚。
+- **One image:** the E2B and builder runtimes share one runtime image.
+- **Read-only and versioned:** the release process produces the image; runtime execution does not modify it.
+- **Cross-instance sharing:** virtio-pmem and DAX share the host page cache.
+- **Clear ownership:** sandboxer owns the PID 1 protocol; guest-runtime owns image packaging and guest payload.
+- **Independent releases:** the runtime bundle can be published through the repository's dedicated release line and selected independently for rollback.
 
-## 2. 镜像布局
+<a id="2-镜像布局"></a>
+## 2. Image layout
 
-镜像根目录固定为:
+The image root contains:
 
-```
+```text
 /sbin/init                         sandbox-init
-/proc/                             空挂载点
-/sys/                              空挂载点
-/dev/                              空挂载点
-/overlay/lower/                    用户 base rootfs 挂载点
-/overlay/upper/                    可写 ext4 / overlay upper 挂载点
-/sysroot/                          switch-root 目标
-/opt/sandbox-runtime/bin/envd      e2b guest agent
+/proc/                             Empty mountpoint
+/sys/                              Empty mountpoint
+/dev/                              Empty mountpoint
+/overlay/lower/                    User base-rootfs mountpoint
+/overlay/upper/                    Writable ext4 / overlay-upper mountpoint
+/sysroot/                          switch-root target
+/sysdisks/disk-{0..7}/              Data-disk mountpoints
+/sysdisks/disk-{0..7}-lower/        Data-disk lower mountpoints
+/sysdisks/disk-{0..7}-upper/        Data-disk upper mountpoints
+/opt/sandbox-runtime/bin/envd       E2B guest agent
 /opt/sandbox-runtime/bin/flatten-ctl
 /opt/sandbox-runtime/bin/mkfs.erofs
 ```
 
-除这些平台路径外,镜像不提供 `/etc`、`/usr`、共享库或通用发行版环境。
-`sandbox-init` 通过 Go syscall 完成早期挂载和 switch-root;用户应用真正看到
-的 rootfs 来自用户镜像。`/opt/sandbox-runtime` 在 switch-root 前 bind 到
-用户 rootfs 同名路径,应用可以只读访问平台工具,但不应把自己的文件放在这个
-保留路径下。
+The `/sysdisks/` mountpoints are precreated by the current Makefile for data-disk ordinals 0–7. Apart from these platform paths, the image supplies no `/etc`, `/usr`, shared libraries or general distribution environment.
 
-### 2.1 guest payload
+`sandbox-init` performs early mounting and switch-root through Go syscalls. The rootfs actually seen by the user application comes from its image. Before switch-root, `/opt/sandbox-runtime` is bind-mounted at the same path in the user rootfs. Applications can read the platform tools but should not place their own files under that reserved path.
 
-| 文件 | 来源 | 用途 |
-|---|---|---|
-| `/sbin/init` | `../sandboxer/bin/<arch>/sandbox-init` | guest PID 1,负责挂载、握手、应用监督 |
-| `/opt/sandbox-runtime/bin/envd` | `native-deps/bin/<arch>/envd` | e2b 数据面 agent |
-| `/opt/sandbox-runtime/bin/flatten-ctl` | `bin/<arch>/flatten-ctl` | build sandbox 内拉取/展平 OCI 镜像 |
-| `/opt/sandbox-runtime/bin/mkfs.erofs` | `native-deps/bin/<arch>/mkfs.erofs` | build sandbox 内生成 EROFS base 镜像 |
+### 2.1 Guest payload
 
-`fsck.erofs` 是诊断/测试工具,不进入 runtime 镜像。`vmlinux` 不是 runtime
-镜像内容,由 `vmlinux-x86_64-vX.Y.Z.tar.gz` 独立发布。
+| File | Source | Purpose |
+| --- | --- | --- |
+| `/sbin/init` | `../sandboxer/bin/<arch>/sandbox-init` | Guest PID 1: mounts, handshakes and application supervision. |
+| `/opt/sandbox-runtime/bin/envd` | `native-deps/bin/<arch>/envd` | E2B data-plane agent. |
+| `/opt/sandbox-runtime/bin/flatten-ctl` | `bin/<arch>/flatten-ctl` | Pull/flatten OCI images inside the build sandbox. |
+| `/opt/sandbox-runtime/bin/mkfs.erofs` | `native-deps/bin/<arch>/mkfs.erofs` | Generate EROFS base images inside the build sandbox. |
 
-### 2.2 host bundle
+`fsck.erofs` is a diagnostic/test tool and is not included in the runtime image. `vmlinux` is not runtime-image content; it is released independently as `vmlinux-x86_64-vX.Y.Z.tar.gz`.
 
-发布文件不是裸 EROFS,而是可直接作为 virtio-pmem backing 的 bundle:
+### 2.2 Host bundle
+
+The delivered file is not bare EROFS, but a bundle directly usable as virtio-pmem backing:
 
 ```text
 raw EROFS | zero padding | trailing ZIP
 ```
 
-raw EROFS 保持从 offset 0 开始。尾部 ZIP 只包含一个 size=0 的 marker:
+Raw EROFS starts at offset 0. The trailing ZIP contains only one zero-size marker:
 
 ```text
 .kuasar.digest.<64-lowercase-hex>
 ```
 
-`digest:` identity覆盖 ZIP 之前的全部字节,即 EROFS 和对齐 padding。构建器复制 EROFS 的
-同时计算carrier identity,再写 marker;运行和恢复只从 EOF 读取 marker,不重新扫描
-EROFS。bundle 最终大小保持 2 MiB 对齐,因此 Cloud Hypervisor 无需 offset
-能力即可继续直接映射,EROFS 依据自身 superblock 忽略尾部 padding 和 ZIP。
+The `digest:` identity covers every byte before the ZIP, including EROFS and alignment padding. The builder computes carrier identity while copying EROFS, then writes the marker. Run/restore reads the marker at EOF without rescanning EROFS. Final bundle size is aligned to 2 MiB, so Cloud Hypervisor can map it directly without offset support; EROFS uses its own superblock to ignore trailing padding and ZIP.
 
-## 3. 构建
+<a id="3-构建"></a>
+## 3. Build
 
-常用入口:
+Common entry points:
 
 ```bash
-make flatten-ctl                 # 构建 guest 内 flatten-ctl
-make native-deps                 # 构建 mkfs.erofs / fsck.erofs / vmlinux / envd
-make sandbox-runtime             # 生成 bin/<arch>/sandbox-runtime.bundle
-make build                       # 构建 flatten-ctl + sandbox-runtime
+make flatten-ctl                 # Build the target-architecture guest tool.
+make native-deps                 # Build mkfs.erofs / fsck.erofs / vmlinux / envd.
+make sandbox-runtime             # Produce bin/<arch>/sandbox-runtime.bundle.
+make build                       # Build flatten-ctl + sandbox-runtime.
 make build TARGET_ARCH=aarch64
 ```
 
-`make sandbox-runtime` 的输入解析顺序:
+A **host-executable `mkfs.erofs` must already be available** before `make sandbox-runtime`. Install erofs-utils, build a host copy with `make -C native-deps erofs TARGET_ARCH=$(uname -m)`, or set `BUILD_MKFS_EROFS` to an existing host executable. This is distinct from `GUEST_MKFS_EROFS`, the target-architecture binary embedded in the image; cross-builds must not execute the guest binary on the host.
 
-1. 若 `../sandboxer/bin/<arch>/sandbox-init` 不存在,触发
-   `make -C ../sandboxer sandbox-init`。
-2. 使用 `native-deps/bin/<arch>/mkfs.erofs`;缺失时触发 native-deps 的 erofs
-   构建。
-3. 使用 `native-deps/bin/<arch>/envd`;缺失时触发 envd 构建。
-4. 使用本仓 `bin/<arch>/flatten-ctl`;缺失时触发 `make flatten-ctl`。
-5. 组装 staging 目录并调用 `mkfs.erofs` 生成临时 raw EROFS。
-6. host `runtime-bundle` 构建工具复制 EROFS、补齐 PMEM 对齐、同步计算 SHA256,
-   并追加空 marker ZIP,原子发布为 `bin/<arch>/sandbox-runtime.bundle`。
+The target's input and build sequence is:
 
-`mkfs.erofs` 和 `envd` 的构建流程见 `guest-runtime/native-deps/docs/build.md`。
-`sandbox-init` 的实现与 ABI 见 `sandboxer/docs/sandbox-init.md`。
+1. Resolve and check `BUILD_MKFS_EROFS`. Lookup tries host PATH, the native target output when host and target match, then the native-deps host entry. A missing host tool fails before image assembly.
+2. If the selected `SANDBOX_INIT` (default `../sandboxer/bin/<arch>/sandbox-init`) is absent, delegate to `make -C ../sandboxer sandbox-init`.
+3. Resolve target `ENVD` (default `native-deps/bin/<arch>/envd`), building it when missing.
+4. Resolve this repository's target `FLATTEN_CTL` (default `bin/<arch>/flatten-ctl`), building it when missing.
+5. Resolve target `GUEST_MKFS_EROFS` (default `native-deps/bin/<arch>/mkfs.erofs`), building it when missing. Assemble the staging tree and use the separate host `BUILD_MKFS_EROFS` to generate temporary raw EROFS.
+6. The host `runtime-bundle` tool copies EROFS, adds PMEM alignment padding, computes SHA256 and appends the empty-marker ZIP, publishing `bin/<arch>/sandbox-runtime.bundle` atomically.
 
-### 3.1 架构
+See [the native-build workflow](../native-deps/docs/build.md) for mkfs.erofs/Envd builds and the [sandboxer guest ABI](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/sandbox-init.md) for sandbox-init.
 
-runtime 镜像按 target arch 构建。发布文件名在构建目录统一为
-`sandbox-runtime.bundle`,其 EROFS prefix 内的 `/sbin/init`、`envd`、`flatten-ctl`、`mkfs.erofs`
-都必须是同一 target arch 的可执行文件。
+<a id="31-架构"></a>
+### 3.1 Architectures
 
-`TARGET_ARCH=amd64` 会归一化为 `x86_64`;`TARGET_ARCH=arm64` 会归一化为
-`aarch64`。交叉构建时不更新 host 架构软链,避免把通用入口指向 host 上不可
-执行的二进制。
+The runtime image is built for the target architecture. Its build-directory filename is always `sandbox-runtime.bundle`. `/sbin/init`, `envd`, `flatten-ctl` and `mkfs.erofs` inside the EROFS prefix must all be executable files for that same target architecture.
 
-## 4. 运行期消费契约
+`TARGET_ARCH=amd64` normalizes to `x86_64`; `TARGET_ARCH=arm64` normalizes to `aarch64`. Cross-builds do not update host-architecture symlinks, avoiding host entry points to non-runnable binaries. The host packing tool remains separate from this target payload.
 
-`sandbox-ctl` 把 `sandbox-runtime.bundle` 作为只读 virtio-pmem 设备传给
-cloud-hypervisor。guest kernel 挂载该 pmem 后执行 `/sbin/init`,即
-`sandbox-init`。
+<a id="4-运行期消费契约"></a>
+## 4. Runtime consumption contract
 
-运行期关键约束:
+`sandbox-ctl` supplies `sandbox-runtime.bundle` to Cloud Hypervisor as a read-only virtio-pmem device. The guest kernel mounts the pmem image and executes `/sbin/init`, which is sandbox-init.
 
-- runtime 镜像只读,不能承载 per-sandbox 状态。
-- 同一 snapshot restore 必须使用兼容的 runtime 镜像;生产上应按 digest 或
-  发布版本钉住。
-- `sandbox-init` 与 `sandbox-ctl` 的 wire ABI 必须匹配。升级 runtime 前要
-  同步升级 `sandboxer` 或验证向后兼容。
-- `/opt/sandbox-runtime` 是平台保留路径。用户镜像里若已有该路径,运行时会被
-  平台 bind mount 遮蔽。
+Key constraints:
 
-`sandbox-runtime.bundle` 不参与 manifest key、API key 或 access token 派生。
-这些密钥由 orchestrator/placer/provider 和 manifest 配置管理;runtime 镜像只
-携带执行工具。
+- The runtime image is read-only and cannot contain per-sandbox state.
+- Restoring a snapshot requires a compatible runtime image. Production should pin it by digest or release version.
+- The sandbox-init and sandbox-ctl wire ABIs must match. Before upgrading runtime, upgrade sandboxer accordingly or validate backward compatibility.
+- `/opt/sandbox-runtime` is reserved. A preexisting directory at that path in the user image is obscured by the platform bind mount.
 
-## 5. 发布件
+`sandbox-runtime.bundle` does not participate in deriving manifest keys, API keys or access tokens. Those keys are managed by orchestrator/placer/providers and Manifest configuration; the runtime image carries execution tools only.
 
-runtime 镜像由本仓 `main` 上受信任的 `Runtime Release` workflow 从调度器钉住的
-源码分支和精确 SHA 独立发布。组件 `main` 用于主线,`release/vX.Y.x` 用于 runtime
-维护线;其版本与平台聚合版本、vmlinux 版本均独立:
+<a id="5-发布件"></a>
+## 5. Release artifacts
 
-| 包 | 内容 | Release |
-|---|---|---|
-| `sandbox-runtime-x86_64-vX.Y.Z.tar.gz` | runtime 镜像、`flatten-ctl`、`mkfs.erofs` | `guest-runtime` 仓 `runtime-vX.Y.Z` |
+The trusted `Runtime Release` workflow on this repository's main branch independently publishes the runtime image from the source branch and exact SHA pinned by the coordinator. Component `main` is used for the development line; `release/vX.Y.x` is used for runtime maintenance. Runtime, aggregate and vmlinux versions are independent:
 
-runtime 专用包内同时放置:
+| Package | Contents | Release |
+| --- | --- | --- |
+| `sandbox-runtime-x86_64-vX.Y.Z.tar.gz` | Runtime image, `flatten-ctl` and `mkfs.erofs` | `runtime-vX.Y.Z` in guest-runtime |
 
-```
+The runtime package contains:
+
+```text
 bin/sandbox-runtime.bundle
 bin/flatten-ctl
 bin/mkfs.erofs
 ```
 
-`sandbox-runtime.bundle` 是当前脚本、默认配置和外部分发共同使用的稳定入口。
+`sandbox-runtime.bundle` is the stable filename shared by scripts, default configuration and external distribution.
 
-聚合发布由项目主仓的 `release-vX.Y.Z` 承载,同时上传 platform 包、各独立
-版本的原始组件包和聚合 `SHA256SUMS`。platform 包从所选 runtime tag 聚合本仓
-runtime 文档与 `test/e2e/`,从所选 vmlinux tag 取得 `docs/vmlinux.md`;组件包本身
-不重复携带这些内容。用户把需要的包解到同一目录即可得到共享的 `bin/`、`docs/`、
-`test/`、`deploy/` 布局。
+The project repository's `release-vX.Y.Z` aggregate release uploads the platform package, original independently versioned component packages and aggregate `SHA256SUMS`. The platform package takes runtime documentation and `test/e2e/` from the selected runtime tag and `docs/vmlinux.md` from the selected kernel tag; component packages do not duplicate those documents. Extracting the required packages into one directory produces shared `bin/`, `docs/`, `test/` and `deploy/` layouts. Bilingual documentation delivery is validated separately from binary release selection.
 
-`vmlinux` 不属于 runtime 版本,由本仓的 `vmlinux-vX.Y.Z` 独立版本线发布。
-runtime workflow 显式选择已发布的 `sandboxer` tag 构建镜像;runtime 与 vmlinux
-的版本号均独立演进。
+`vmlinux` is not part of the runtime version; it uses this repository's independent `vmlinux-vX.Y.Z` line. The runtime workflow explicitly selects a published sandboxer tag to build the image. Runtime and vmlinux version numbers evolve independently.
 
-`envd` 已内置在 `sandbox-runtime` 镜像中,不作为独立 `bin/envd` 发布;
-`fsck.erofs` 是源码树诊断/测试辅助工具,不进入通用组件包。
+Envd is already embedded in the image and is not published separately as `bin/envd`. `fsck.erofs` is a source-tree diagnostic/test helper, not part of the general component packages.
 
-## 6. 可靠性与升级
+<a id="6-可靠性与升级"></a>
+## 6. Reliability and upgrades
 
-### 6.1 节点升级
+<a id="61-节点升级"></a>
+### 6.1 Node upgrades
 
-节点可同时保留多份 runtime 镜像,例如:
+A node can keep multiple runtime images, for example:
 
-```
+```text
 /opt/sandbox/runtime/v0.1.0/sandbox-runtime.bundle
 /opt/sandbox/runtime/v0.2.0/sandbox-runtime.bundle
 ```
 
-新沙箱使用新版本;运行中的沙箱继续持有启动时的 pmem 文件。删除旧版本前必须
-确认没有运行中 VM 或待恢复 snapshot 依赖它。
+New sandboxes use the new version; running sandboxes retain their original pmem file. Before deleting an old image, ensure no running VM or snapshot awaiting restore depends on it.
 
-### 6.2 整机重启
+<a id="62-整机重启"></a>
+### 6.2 Host reboot
 
-整机重启后沙箱不自动恢复。节点重新启动时只需要 runtime 镜像文件仍在部署
-目录,供后续新沙箱创建使用。
+Sandboxes do not automatically resume after a host reboot. On node startup, the runtime image must still exist in the deployment directory for subsequent sandbox creation.
 
-### 6.3 回滚
+<a id="63-回滚"></a>
+### 6.3 Rollback
 
-回滚 = 配置重新指向旧 runtime 文件 + 重启 `node-ctl` 或让调度层停止向该节点
-放置新沙箱。已运行沙箱不受新配置影响。
+Point configuration back to an old runtime file and restart node-ctl, or have the scheduling layer stop placing new sandboxes on the node. Already running sandboxes are unaffected by the new configuration.
 
-## 7. 排错
+<a id="7-排错"></a>
+## 7. Troubleshooting
 
-| 现象 | 检查项 |
-|---|---|
-| guest 无法启动 `/sbin/init` | 确认 runtime 镜像 arch 与 `vmlinux`/CH 目标 arch 一致 |
-| build sandbox 找不到 `flatten-ctl` | 检查 `/opt/sandbox-runtime/bin/flatten-ctl` 是否进入镜像 |
-| build sandbox 无法生成 EROFS | 检查 `/opt/sandbox-runtime/bin/mkfs.erofs` 和 guest 内权限 |
-| restore 后行为异常 | 检查 snapshot 使用的 runtime digest 与 restore 配置是否匹配 |
-| 发布包解压后脚本找不到 runtime | 确认已解压 `sandbox-runtime-x86_64-vX.Y.Z.tar.gz`,且 `bin/sandbox-runtime.bundle` 存在 |
+| Symptom | Check |
+| --- | --- |
+| Guest cannot start `/sbin/init` | Confirm the runtime-image architecture matches vmlinux/CH. |
+| Build sandbox cannot find `flatten-ctl` | Inspect `/opt/sandbox-runtime/bin/flatten-ctl` in the image. |
+| Build sandbox cannot generate EROFS | Check guest `/opt/sandbox-runtime/bin/mkfs.erofs` and its permissions. |
+| Host cannot pack a cross-architecture image | Check host `BUILD_MKFS_EROFS` separately from target `GUEST_MKFS_EROFS`. |
+| Behavior changes after restore | Compare the snapshot's runtime digest with restore configuration. |
+| Scripts cannot find runtime after package extraction | Confirm the runtime archive was extracted and `bin/sandbox-runtime.bundle` exists. |
 
-## 8. See Also
+## 8. See also
 
-- `sandboxer/docs/sandbox-init.md` - guest PID 1 ABI 和 host/guest 控制协议。
-- `sandboxer/docs/sandbox.md` - `sandbox-ctl` 如何消费 runtime 镜像、启动和恢复沙箱。
-- `guest-runtime/native-deps/docs/build.md` - `mkfs.erofs`、`vmlinux`、`envd` 构建流程。
-- `guest-runtime/docs/vmlinux.md` - guest kernel 镜像与 runtime 镜像的配合关系。
-- `guest-runtime/docs/flatten.md` - `flatten-ctl` 在 build sandbox 中的执行模型。
-- `kuasar-sandbox/test/QUICKSTART.md` - 发布包解压和 e2e 运行入口。
+- [sandbox-init](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/sandbox-init.md): guest PID 1 ABI and host/guest protocol.
+- [sandbox](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/sandbox.md): runtime-image consumption, startup and restore.
+- [Native-build workflow](../native-deps/docs/build.md): mkfs.erofs, vmlinux and Envd builds.
+- [vmlinux](vmlinux.md): guest kernel and runtime-image relationship.
+- [flatten](flatten.md): flatten-ctl execution in a build sandbox.
+- [Aggregate validation](https://github.com/kuasar-sandbox/kuasar-sandbox/blob/main/test/QUICKSTART.md): package extraction and E2E entry points.
