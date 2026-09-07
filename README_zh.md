@@ -84,4 +84,4 @@ Tag 选择,不依赖 Latest。
 
 本仓库的项目原创内容采用 [Apache License 2.0](LICENSE).Linux 内核 patch 的
 GPL-2.0-only 边界见 [LICENSE_SCOPE.md](LICENSE_SCOPE_zh.md).
-贡献授权说明见 [CONTRIBUTING.md](CONTRIBUTING.md).
+贡献授权说明见 [CONTRIBUTING.md（英文）](CONTRIBUTING.md).

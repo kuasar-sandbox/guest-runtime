@@ -46,7 +46,7 @@
 在 mkfs 层归一,不触碰源树。整个工件的复现还须包含权威稀疏图和容器编码条件。
 
 展平本身不签名、不加密、不做内容寻址。可选 `--upload` 调用下一阶段的 manifest
-ingest,完成加密/去重,见[manifest.md](https://github.com/kuasar-sandbox/accelerator/blob/main/docs/manifest.md)。
+ingest,完成加密/去重,见[manifest_zh.md](https://github.com/kuasar-sandbox/accelerator/blob/main/docs/manifest_zh.md)。
 manifest 完整性与加密不能直接当作镜像签名校验流程。
 
 ### 1.3 在系统中的位置
@@ -287,7 +287,7 @@ artifact_type 固定为常量 `application/vnd.kuasar.flatten-manifest.v1`(不�
 **凭据(命名空间环境变量,匿名回落)**:`FLATTEN_REGISTRY_TOKEN`(Bearer,优先)或
 `FLATTEN_REGISTRY_USERNAME` + `FLATTEN_REGISTRY_PASSWORD`(Basic);都不设则匿名拉公有
 镜像。密钥只走 env(不上 argv、不入配置文件),契合 orchestrator 经 exec env 把租户拉取凭据
-下发进构建沙箱的模型([deployment.md](https://github.com/kuasar-sandbox/kuasar-sandbox/blob/main/docs/deployment.md) §5)。
+下发进构建沙箱的模型([deployment_zh.md](https://github.com/kuasar-sandbox/kuasar-sandbox/blob/main/docs/deployment_zh.md) §5)。
 
 **TLS(`tls.*`)**:作用于全部 HTTPS 请求——既包括 registry API,也包括层 blob 的 CDN
 重定向(拦截式代理会用私有 CA 重签这些证书,系统信任库默认拒绝)。`ca_cert` 把额外的
@@ -420,7 +420,7 @@ stdin 报错引导)。`..` 成员跳过告警,穿 symlink 写出是硬错误;条
 取 `uid:gid`:数字直用,**名字**则按解包目标根的 `/etc/passwd`/`/etc/group` 解析
 (Docker `COPY --chown=name` 同款;CGO 关,os/user 直读文件不经 NSS);`user`(无组)
 取该用户主组,纯数字 `1000` 镜像为 `1000:1000`。node-ctl 的 COPY step 即以
-`extract --dense --chown` 把上下文 tar 摊进 guest rootfs(见 [node.md](https://github.com/kuasar-sandbox/orchestrator/blob/main/docs/node.md) §12)。
+`extract --dense --chown` 把上下文 tar 摊进 guest rootfs(见 [node_zh.md](https://github.com/kuasar-sandbox/orchestrator/blob/main/docs/node_zh.md) §12)。
 
 **stream** 把**一个文件**封装为 tarstream(一个稀疏 payload +
 `.kuasar.digest.<hex>` marker metadata,`accelerator/pkg/tarstream`)。writer 在写 payload
@@ -541,7 +541,7 @@ hash 相同**:rootfs 数据/元数据、构建工具/参数,以及工件稀疏�
 LaunchSpec 的 fallback:`sandbox.yaml` `launch.*` 字段优先,`Env` 取镜像在下、
 override 在上的合并,`Volumes` 并入 `mounts`。因此 image config 有 Entrypoint/Cmd
 时 `launch.exec` 即可省略。合并规则的权威定义见
-[sandboxer/docs/sandbox.md](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/sandbox.md) §3.3。
+[sandboxer/docs/sandbox_zh.md](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/sandbox_zh.md) §3.3。
 
 ## 4. 算法
 
@@ -671,7 +671,7 @@ OCI image config 字段繁多,大量与启动无关:`created` / `author` / `hist
   `skopeo copy oci:./dir docker-archive:x.tar` 转换,或用 crane 推到 registry 后拉取。
   直接传普通本地目录会选择 rootfs 导出,不会识别 OCI layout。
 - **展平阶段的镜像签名/加密**:加密与内容寻址由
-  [manifest 阶段](https://github.com/kuasar-sandbox/accelerator/blob/main/docs/manifest.md)
+  [manifest 阶段](https://github.com/kuasar-sandbox/accelerator/blob/main/docs/manifest_zh.md)
   负责;这不构成镜像签名校验流程。
 - **层级保留**:输出把各层合并为一个 EROFS payload。manifest chunk dedup 可复用
   不变内容,但不保留原始层结构。
@@ -692,11 +692,11 @@ chunk 拉取,不能保证普适的亚毫秒延迟。
 
 ## 7. See Also
 
-- [accelerator/docs/manifest.md](https://github.com/kuasar-sandbox/accelerator/blob/main/docs/manifest.md):
+- [accelerator/docs/manifest_zh.md](https://github.com/kuasar-sandbox/accelerator/blob/main/docs/manifest_zh.md):
   将镜像 ingest 进内容寻址存储,chunk dedup 跨镜像共享重复内容。
-- [sandboxer/docs/sandbox.md](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/sandbox.md) §3.3:
+- [sandboxer/docs/sandbox_zh.md](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/sandbox_zh.md) §3.3:
   启动时使用内嵌 OCI runtime config。
-- [sandboxer/docs/sandbox.md](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/sandbox.md) `boot.root.base`:
+- [sandboxer/docs/sandbox_zh.md](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/sandbox_zh.md) `boot.root.base`:
   选择展平镜像作为只读 base。
 - [Native 构建指南](../native-deps/docs/build_zh.md):在仓库根目录用
   `make -C native-deps erofs` 构建 mkfs.erofs,用 `make flatten-ctl` 构建 CLI;
