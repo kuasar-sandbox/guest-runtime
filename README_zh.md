@@ -17,7 +17,7 @@ Guest 运行时镜像与构建工具仓:负责构建 `sandbox-runtime.bundle`、
 | `docs/vmlinux.md` | guest kernel 镜像契约和配置理由 |
 | `docs/flatten.md` | `flatten-ctl` CLI、远程拉取缓存、OCI Referrers 行为 |
 | `native-deps/` | 构建 `vmlinux`、`mkfs.erofs`、`fsck.erofs`、`envd` |
-| `scripts/guest-inspect.py` | 检查 guest/runtime 镜像的辅助脚本 |
+| `scripts/guest-inspect.py` | 从 Host 读取 Guest 内核内存计数器;要求兼容的非随机化 x86_64 布局 |
 
 `guest-runtime` 把 `../sandboxer/bin/<arch>/sandbox-init` 和 guest payload 打进
 同一份 DAX-shared EROFS 镜像。镜像内 `/opt/sandbox-runtime/bin/` 首版包含
@@ -34,9 +34,11 @@ make sandbox-runtime             # same image target, builds ../sandboxer sandbo
 make build TARGET_ARCH=aarch64
 ```
 
-`make sandbox-runtime` 需要 `mkfs.erofs`;查找顺序为 `PATH`、`bin/<arch>/`、
-`native-deps/bin/<arch>/`。它还会消费 `native-deps/bin/<arch>/envd` 和本仓
-`bin/<arch>/flatten-ctl`;缺失时按需触发对应构建目标。
+`make sandbox-runtime` 需要**宿主可执行的 `BUILD_MKFS_EROFS`**:先查 Host PATH,
+再按 Makefile 的 host/target 条件查已有 native 输出,也可显式指定该变量。宿主
+packer 缺失时会明确失败,不能用不能在宿主执行的目标架构工具替代。镜像内的
+`GUEST_MKFS_EROFS` 是另一个目标架构输入;它与 envd、flatten-ctl、sandbox-init
+缺失时会按需触发对应构建目标,详见[构建指南](docs/sandbox-runtime_zh.md)。
 
 ## 产物
 
@@ -59,8 +61,9 @@ make build TARGET_ARCH=aarch64
 收集 runtime 文档与 flatten E2E,从所选 vmlinux tag 收集 kernel 文档,统一放入
 platform 包。
 
-两条版本线独立演进,版本号不要求相同。当前 Release 只发布已完成全量构建与
-BMS 验证的 Linux x86_64 目标。`envd` 只随 runtime 镜像内置;
+两条版本线独立演进,版本号不要求相同。当前组件 Release 在组件构建与打包检查
+后发布 Linux x86_64 资产;平台聚合再选择精确版本组合,执行跨组件 BMS 与实际
+发布资产的 MicroVM 验证。源码支持其他架构不等于已发布对应预构建资产。`envd` 只随 runtime 镜像内置;
 `fsck.erofs` 只作为源码树诊断/测试辅助产物。
 项目主仓的每日协调器按上海日期分别触发 `runtime-vX.Y.Z-preview.YYYYMMDD` 和
 `vmlinux-vX.Y.Z-preview.YYYYMMDD`;Preview 和维护分支 Stable 不更新 GitHub
@@ -72,13 +75,13 @@ Tag 选择,不依赖 Latest。
 
 ## 文档
 
-- [docs/sandbox-runtime.md](docs/sandbox-runtime.md) — runtime 镜像打包、发布和消费契约。
-- [docs/vmlinux.md](docs/vmlinux.md) — guest kernel 配置、构建和平台 ABI。
-- [docs/flatten.md](docs/flatten.md) — `flatten-ctl` 命令和确定性展平。
-- [native-deps/docs/build.md](native-deps/docs/build.md) — native-deps 构建工作流。
+- [docs/sandbox-runtime.md](docs/sandbox-runtime_zh.md) — runtime 镜像打包、发布和消费契约。
+- [docs/vmlinux.md](docs/vmlinux_zh.md) — guest kernel 配置、构建和平台 ABI。
+- [docs/flatten.md](docs/flatten_zh.md) — `flatten-ctl` 命令和确定性展平。
+- [native-deps/docs/build.md](native-deps/docs/build_zh.md) — native-deps 构建工作流。
 
 ## License
 
 本仓库的项目原创内容采用 [Apache License 2.0](LICENSE).Linux 内核 patch 的
-GPL-2.0-only 边界见 [LICENSE_SCOPE.md](LICENSE_SCOPE.md).
+GPL-2.0-only 边界见 [LICENSE_SCOPE.md](LICENSE_SCOPE_zh.md).
 贡献授权说明见 [CONTRIBUTING.md](CONTRIBUTING.md).

@@ -164,7 +164,7 @@ bin/mkfs.erofs
 
 `sandbox-runtime.bundle` is the stable filename shared by scripts, default configuration and external distribution.
 
-The project repository's `release-vX.Y.Z` aggregate release uploads the platform package, original independently versioned component packages and aggregate `SHA256SUMS`. The platform package takes runtime documentation and `test/e2e/` from the selected runtime tag and `docs/vmlinux.md` from the selected kernel tag; component packages do not duplicate those documents. Extracting the required packages into one directory produces shared `bin/`, `docs/`, `test/` and `deploy/` layouts. Bilingual documentation delivery is validated separately from binary release selection.
+The project repository's `release-vX.Y.Z` aggregate release uploads the platform package, original independently versioned component packages and aggregate `SHA256SUMS`. The platform package takes runtime documentation and `test/e2e/` from the selected runtime tag and the kernel documentation pair (`docs/vmlinux.md` and, when present at that selected tag, `docs/vmlinux_zh.md`) from the independently selected kernel tag; component packages do not duplicate those documents. Extracting the required packages into one directory produces shared `bin/`, `docs/`, `test/` and `deploy/` layouts. Bilingual documentation delivery is validated separately from binary release selection.
 
 `vmlinux` is not part of the runtime version; it uses this repository's independent `vmlinux-vX.Y.Z` line. The runtime workflow explicitly selects a published sandboxer tag to build the image. Runtime and vmlinux version numbers evolve independently.
 

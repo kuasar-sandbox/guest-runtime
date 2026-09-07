@@ -50,4 +50,4 @@ make linux-fetch && (cd build/src/linux && <edit+commit>) && make linux-patches-
 
 - [docs/build_zh.md](docs/build_zh.md) —— 构建工作流:目标 / 阶段 / patch 开发循环 /
   交叉编译 / WSL2。
-- [../docs/vmlinux.md](../docs/vmlinux.md) —— guest 内核配置体系与平台 ABI 边界。
+- [../docs/vmlinux.md](../docs/vmlinux_zh.md) —— guest 内核配置体系与平台 ABI 边界。

@@ -12,9 +12,11 @@ Run as root (needs CAP_SYS_PTRACE for /proc/<pid>/mem):
         --log build/test.log \
         --vmlinux bin/vmlinux
 
-The kernel is built with KASLR off so all symbols are at fixed virtual
-addresses (deps/vmlinux/sandbox-common.config: CONFIG_RANDOMIZE_BASE
-not set, CONFIG_RANDOMIZE_MEMORY not set).
+This helper assumes the current nonrandomized x86_64 guest layout. Its fixed
+KERNEL_IMAGE_BASE and PAGE_OFFSET require CONFIG_RANDOMIZE_BASE and
+CONFIG_RANDOMIZE_MEMORY to be disabled (native-deps/deps/vmlinux/ fragments).
+A relocated or different-architecture kernel needs a correspondingly adapted
+inspector; these assumptions are not requirements of snapshot restoration.
 """
 
 import os
