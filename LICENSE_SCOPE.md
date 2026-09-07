@@ -1,9 +1,15 @@
-# 许可证范围
+[English](LICENSE_SCOPE.md) | [简体中文](LICENSE_SCOPE_zh.md)
 
-除下述文件外,本仓库中未另行声明许可证的项目原创内容适用根目录的 Apache License 2.0.
+<a id="许可证范围"></a>
 
-## Linux 内核 patch
+# License scope
 
-`native-deps/deps/linux-patches/0001-virtio_balloon-converge-to-a-sustainable-size-under-.patch` 是针对 Linux 6.1.169 内核源码的修改,在本仓库中按 GPL-2.0-only 标识.相邻的 `.license` 文件提供机器可读映射,许可证全文见 [`LICENSES/GPL-2.0-only.txt`](LICENSES/GPL-2.0-only.txt).
+Unless stated otherwise below or in the affected file, original project material in this repository is covered by the Apache License 2.0 in the repository root.
 
-用于获取和构建内核的项目脚本及项目维护的配置片段适用根目录的 Apache-2.0.构建时下载且未跟踪在本仓库中的 Linux 源码继续适用其上游许可证.
+<a id="linux-内核-patch"></a>
+
+## Linux kernel patch
+
+`native-deps/deps/linux-patches/0001-virtio_balloon-converge-to-a-sustainable-size-under-.patch` modifies Linux 6.1.169 kernel sources and is identified as GPL-2.0-only in this repository. The adjacent `.license` file provides a machine-readable mapping. The full license text is in [LICENSES/GPL-2.0-only.txt](LICENSES/GPL-2.0-only.txt).
+
+Project scripts that fetch and build the kernel, and project-maintained configuration fragments, use the root Apache-2.0 license. Linux sources downloaded during a build and not tracked in this repository retain their upstream licenses.

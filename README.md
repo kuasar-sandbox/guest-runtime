@@ -26,7 +26,7 @@ The repository is one component repository even though it publishes two release-
 | `docs/sandbox-runtime.md` | Runtime image layout, guest payload, build, and release contract |
 | `docs/vmlinux.md` | Guest kernel source/configuration contract and platform ABI |
 | `docs/flatten.md` | `flatten-ctl`, remote image retrieval, cache, and OCI Referrers behavior |
-| `scripts/guest-inspect.py` | Inspect and validate guest/runtime images |
+| `scripts/guest-inspect.py` | Read guest kernel memory counters from the host using a compatible nonrandomized x86_64 layout |
 
 The runtime image places its initial guest tools under `/opt/sandbox-runtime/bin/`. VMLinux and the Cloud Hypervisor binary are not embedded in the runtime bundle: VMLinux is published as its own release unit, and Cloud Hypervisor is built and published by `sandboxer`.
 
@@ -94,7 +94,7 @@ This repository does not publish a generic `guest-runtime-vX.Y.Z` release. It ma
 
 The two version numbers may advance independently. The project aggregate release selects an exact Runtime tag and an exact VMLinux tag; it does not assume that their version numbers match.
 
-Current GitHub component assets are published for Linux x86_64 from protected source refs and exact commits after their component build and packaging checks. The project aggregate release later selects exact Runtime, VMLinux, and other component tags and performs cross-component BMS plus released-asset MicroVM validation for that composition. Source Makefiles may support another `TARGET_ARCH`, but source-build support does not by itself mean a prebuilt artifact is published for that architecture.
+Current GitHub component assets are published for Linux x86_64 from selected source refs and exact commits after their component build and packaging checks. The project aggregate release later selects exact Runtime, VMLinux, and other component tags and performs cross-component BMS plus released-asset MicroVM validation for that composition. Source Makefiles may support another `TARGET_ARCH`, but source-build support does not by itself mean a prebuilt artifact is published for that architecture.
 
 ## Kernel source and licensing
 
@@ -113,20 +113,20 @@ The repository-wide license boundaries are described in [`LICENSE_SCOPE.md`](LIC
 
 ## Release model
 
-Runtime and VMLinux component releases are built from protected source refs and exact commits. Preview releases are GitHub prereleases for development and evaluation; mainline Stable releases are coordinated independently for each release unit. The project aggregate release always selects exact tags and does not rely on GitHub Latest, then validates the selected composition through project-level BMS and released-asset testing.
+Runtime and VMLinux component releases are built from selected source refs and exact commits. Preview releases are GitHub prereleases for development and evaluation; mainline Stable releases are coordinated independently for each release unit. The project aggregate release always selects exact tags and does not rely on GitHub Latest, then validates the selected composition through project-level BMS and released-asset testing.
 
 See the [project release documentation](https://github.com/kuasar-sandbox/kuasar-sandbox/blob/main/docs/release.md) and the [latest Stable aggregate release](https://github.com/kuasar-sandbox/kuasar-sandbox/releases/latest).
 
 ## Documentation
 
-Detailed design and reference documents are currently maintained primarily in Chinese:
+Detailed design and reference documents have complete English/Chinese pairs. English uses the default filename; the language selector opens the full Chinese version:
 
 - [`docs/sandbox-runtime.md`](docs/sandbox-runtime.md) — Runtime image layout, guest payload, build, release, and consumption contract;
 - [`docs/vmlinux.md`](docs/vmlinux.md) — guest kernel configuration, build, platform ABI, and source relationship;
 - [`docs/flatten.md`](docs/flatten.md) — `flatten-ctl`, deterministic flattening, remote retrieval, caching, and OCI Referrers;
 - [`native-deps/docs/build.md`](native-deps/docs/build.md) — native-dependency source and build workflow.
 
-The English README contains the complete public component entry path. Translating every detailed design document is not required to build or contribute to the component.
+Keep maintained pairs synchronized according to the [documentation policy](https://github.com/kuasar-sandbox/kuasar-sandbox/blob/main/docs/documentation-policy.md).
 
 ## Contributing and security
 

@@ -189,7 +189,7 @@ bin/mkfs.erofs
 
 聚合发布由项目主仓的 `release-vX.Y.Z` 承载,同时上传 platform 包、各独立
 版本的原始组件包和聚合 `SHA256SUMS`。platform 包从所选 runtime tag 聚合本仓
-runtime 文档与 `test/e2e/`,从所选 vmlinux tag 取得 `docs/vmlinux.md`;组件包本身
+runtime 文档与 `test/e2e/`,从独立选择的 vmlinux tag 取得内核文档对(`docs/vmlinux.md` 及该 tag 中存在的 `docs/vmlinux_zh.md`);组件包本身
 不重复携带这些内容。用户把需要的包解到同一目录即可得到共享 `bin/`、`docs/`、
 `test/`、`deploy/` 布局。双语文档交付与二进制版本选择分别验收。
 
@@ -240,6 +240,6 @@ runtime workflow 显式选择已发布 sandboxer tag 构建镜像;runtime 与 vm
 - [sandbox-init](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/sandbox-init.md) - guest PID 1 ABI 和 host/guest 控制协议。
 - [sandbox](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/sandbox.md) - runtime 镜像消费、启动与恢复。
 - [Native Build](../native-deps/docs/build_zh.md) - mkfs.erofs、vmlinux、envd 构建。
-- [vmlinux](vmlinux.md) - guest kernel 与 runtime 镜像的配合关系。
-- [flatten](flatten.md) - build sandbox 中的 flatten-ctl 执行模型。
+- [vmlinux](vmlinux_zh.md) - guest kernel 与 runtime 镜像的配合关系。
+- [flatten](flatten_zh.md) - build sandbox 中的 flatten-ctl 执行模型。
 - [聚合验证](https://github.com/kuasar-sandbox/kuasar-sandbox/blob/main/test/QUICKSTART_zh.md) - 发布包解压和 E2E 入口。

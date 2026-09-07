@@ -85,7 +85,7 @@ func printUsage() {
 	fmt.Fprintf(os.Stderr, `Usage: flatten-ctl <command> [flags]
 
 Commands:
-  export   Flatten OCI/docker-archive or a registry image → EROFS (optionally upload).
+  export   Flatten registry/archive/rootfs input → tarstream image artifact (optional upload).
   referer  Lookup or write OCI Referrers records for flattened image manifests.
   info     Print EROFS metadata + OCI runtime config.
   cache    Inspect or garbage-collect the registry blob cache.
@@ -103,7 +103,7 @@ See `+"`flatten-ctl <command> -h`"+` for per-command flags.
 
 func cmdExport(args []string) {
 	fs := flag.NewFlagSet("export", flag.ExitOnError)
-	output := fs.String("output", "", "EROFS output path (- for stdout, empty = required with --upload off)")
+	output := fs.String("output", "", "tarstream image-artifact output path (- for stdout; required without --upload)")
 	configPath := fs.String("config", "", "flatten config YAML (overrides FLATTEN_CONFIG env): tmpdir/platform/cache/referer (registry sources)")
 	platform := fs.String("platform", "", "override the pull platform (os/arch[/variant]) from the config")
 	manifestCfg := fs.String("manifest-config", "", "manifest config YAML (overrides MANIFEST_CONFIG env)")
@@ -117,7 +117,7 @@ func cmdExport(args []string) {
 	skipMounts := fs.Bool("skip-mounts", false, "rootfs-dir source: exclude every mount point under the rootfs")
 	runtimeConfig := fs.String("runtime-config", "", "rootfs-dir source: runtime config JSON to append (OCI image config or a projected config.json)")
 	tmpDir := fs.String("tmpdir", "", "scratch directory (overrides the config tmpdir; created if missing)")
-	insecure := fs.Bool("insecure", false, "registry source: allow plain-HTTP / skip-TLS registries (overrides the config)")
+	insecure := fs.Bool("insecure", false, "registry source: allow plain HTTP (TLS verification is controlled by config tls.*)")
 	fs.Parse(args)
 	input := fs.Arg(0)
 	if input == "" {
@@ -476,7 +476,7 @@ func cmdRefererLookup(args []string) {
 	platform := fs.String("platform", "", "override the pull platform (os/arch[/variant]) from the config")
 	owner := fs.String("owner", "", "precomputed owner annotation value")
 	asJSON := fs.Bool("json", false, "machine-readable JSON output")
-	insecure := fs.Bool("insecure", false, "allow plain-HTTP / skip-TLS registries (overrides the config)")
+	insecure := fs.Bool("insecure", false, "allow plain HTTP (TLS verification is controlled by config tls.*)")
 	fs.Parse(args)
 	ref := fs.Arg(0)
 	if ref == "" || *owner == "" {
@@ -531,7 +531,7 @@ func cmdRefererPut(args []string) {
 	manifestID := fs.String("manifest-id", "", "64-hex manifest id to write into the referrer annotation")
 	validity := fs.String("validity", "", "optional Go duration for referrer expiry")
 	asJSON := fs.Bool("json", false, "machine-readable JSON output")
-	insecure := fs.Bool("insecure", false, "allow plain-HTTP / skip-TLS registries (overrides the config)")
+	insecure := fs.Bool("insecure", false, "allow plain HTTP (TLS verification is controlled by config tls.*)")
 	fs.Parse(args)
 	ref := fs.Arg(0)
 	if ref == "" || *owner == "" || *manifestID == "" {
@@ -579,7 +579,7 @@ func cmdInfo(args []string) {
 	fs.Parse(args)
 	input := fs.Arg(0)
 	if input == "" {
-		fatal("usage: flatten-ctl info <erofs-path|manifest://hex> [--json] [--manifest-config <file>]")
+		fatal("usage: flatten-ctl info [--json] [--manifest-config <file>] <artifact-path|manifest://hex>")
 	}
 
 	if strings.HasPrefix(input, "manifest://") {
