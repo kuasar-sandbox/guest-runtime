@@ -122,7 +122,7 @@ The target's input and build sequence is:
 5. Resolve target `GUEST_MKFS_EROFS` (default `native-deps/bin/<arch>/mkfs.erofs`), building it when missing. Assemble the staging tree and use the separate host `BUILD_MKFS_EROFS` to generate temporary raw EROFS.
 6. The host `runtime-bundle` tool copies EROFS, adds PMEM alignment padding, computes SHA256 and appends the empty-marker ZIP, publishing `bin/<arch>/sandbox-runtime.bundle` atomically.
 
-See [the native-build workflow](../native-deps/docs/build.md) for mkfs.erofs/Envd builds and the [sandboxer guest ABI](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/sandbox-init.md) for sandbox-init.
+See [the native-build workflow](../native-deps/README.md) for mkfs.erofs/Envd builds and the [sandboxer guest ABI](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/sandbox-init.md) for sandbox-init.
 
 <a id="31-架构"></a>
 ### 3.1 Architectures
@@ -211,7 +211,7 @@ Point configuration back to an old runtime file and restart node-ctl, or have th
 
 - [sandbox-init](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/sandbox-init.md): guest PID 1 ABI and host/guest protocol.
 - [sandbox](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/sandbox.md): runtime-image consumption, startup and restore.
-- [Native-build workflow](../native-deps/docs/build.md): mkfs.erofs, vmlinux and Envd builds.
+- [Native-build workflow](../native-deps/README.md): mkfs.erofs, vmlinux and Envd builds.
 - [vmlinux](vmlinux.md): guest kernel and runtime-image relationship.
 - [flatten](flatten.md): flatten-ctl execution in a build sandbox.
 - [Aggregate validation](https://github.com/kuasar-sandbox/kuasar-sandbox/blob/main/test/QUICKSTART.md): package extraction and E2E entry points.
