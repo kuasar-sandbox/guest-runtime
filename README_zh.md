@@ -78,7 +78,7 @@ Tag 选择,不依赖 Latest。
 - [docs/sandbox-runtime.md](docs/sandbox-runtime_zh.md) — runtime 镜像打包、发布和消费契约。
 - [docs/vmlinux.md](docs/vmlinux_zh.md) — guest kernel 配置、构建和平台 ABI。
 - [docs/flatten.md](docs/flatten_zh.md) — `flatten-ctl` 命令和确定性展平。
-- [native-deps/docs/build.md](native-deps/docs/build_zh.md) — native-deps 构建工作流。
+- [native-deps/docs/build.md](native-deps/README_zh.md) — native-deps 构建工作流。
 
 ## License
 

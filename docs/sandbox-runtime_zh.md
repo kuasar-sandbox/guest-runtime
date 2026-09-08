@@ -138,7 +138,7 @@ make build TARGET_ARCH=aarch64
 6. host `runtime-bundle` 工具复制 EROFS、补齐 PMEM 对齐、计算 SHA256,
    追加空 marker ZIP,原子发布为 `bin/<arch>/sandbox-runtime.bundle`。
 
-`mkfs.erofs` 和 `envd` 构建流程见[Native Build 文档](../native-deps/docs/build_zh.md)。
+`mkfs.erofs` 和 `envd` 构建流程见[Native Build 文档](../native-deps/README_zh.md)。
 `sandbox-init` 实现与 ABI 见[sandboxer Guest ABI](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/sandbox-init_zh.md)。
 
 ### 3.1 架构
@@ -239,7 +239,7 @@ runtime workflow 显式选择已发布 sandboxer tag 构建镜像;runtime 与 vm
 
 - [sandbox-init](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/sandbox-init_zh.md) - guest PID 1 ABI 和 host/guest 控制协议。
 - [sandbox](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/sandbox_zh.md) - runtime 镜像消费、启动与恢复。
-- [Native Build](../native-deps/docs/build_zh.md) - mkfs.erofs、vmlinux、envd 构建。
+- [Native Build](../native-deps/README_zh.md) - mkfs.erofs、vmlinux、envd 构建。
 - [vmlinux](vmlinux_zh.md) - guest kernel 与 runtime 镜像的配合关系。
 - [flatten](flatten_zh.md) - build sandbox 中的 flatten-ctl 执行模型。
 - [聚合验证](https://github.com/kuasar-sandbox/kuasar-sandbox/blob/main/test/QUICKSTART_zh.md) - 发布包解压和 E2E 入口。

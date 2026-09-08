@@ -79,7 +79,7 @@ build         把 sandbox-common.config + sandbox-<arch>.config 拼接成
 拉源码并打 `linux-patches-base` tag → 在 `build/src/linux/` 改代码 +
 `git commit` → `make linux-patches-format` 导出回 `deps/linux-patches/*.patch`
 → `make vmlinux` 重新应用 + 构建。幂等与 sanity 语义统一见
-[Native 构建指南](../native-deps/docs/build_zh.md) §3;补丁 arch-neutral,x86_64 /
+[Native 构建指南](../native-deps/README_zh.md) §3;补丁 arch-neutral,x86_64 /
 arm64 共用同一组。必须先保留尚未导出的工作,不能只为让构建继续而重置它。
 
 ### 2.1 host 构建依赖
@@ -367,20 +367,7 @@ BLK_CGROUP+BLK_CGROUP_IOCOST+BLK_DEV_THROTTLING、CGROUP_PIDS 提供 Guest
 控制器不会提供对应接口文件;仅编入也不够,还须在 `cgroup.subtree_control` 中启用,
 后代 cgroup 才能获得接口。
 
-当前拓扑由 `launch.cgroup_control` 选择,实现位于 [sandboxer cgroup 实现](https://github.com/kuasar-sandbox/sandboxer/blob/main/cmd/sandbox-init/cgroup.go)。
-Sandbox-init 留在 Guest 全局 root;真实 `/sys/fs/cgroup/app` 始终同时是应用 cgroup
-namespace 的根和递归快照冻结根:
-
-- `cgroup_control=false`:受管理应用进程直接位于真实 `/app`,看到 `0::/`。
-  不承诺向应用委派子树;Guest root 控制器传播保持 best effort。
-- `cgroup_control=true`:真实 `/app` 保持空,受管理进程位于真实 `/app/init`,
-  看到 `0::/init`。Sandbox-init 在 Guest root 和真实 `/app` 严格启用并读回校验
-  全部 advertised controller。首个 primary 建立作用域收窄的 cgroup namespace/mount,
-  并执行唯一允许的迁移到 `/init`;后续 primary 重启、plugin 和 native exec 原子
-  clone 到固定的最终目标,并加入同一 namespace。
-- 应用建立的 cgroup(包括 envd 的 cgroup)都在真实 `/app` 内,不是冻结域外的同级组。
-  冻结 `/app` 覆盖整个子树。Namespace、初始化或委派失败不会静默弱化 `true` 的
-  契约。完整进程与 FD 生命周期见 sandbox-init.md §3.2.1。
+应用 cgroup namespace、`/app` 冻结域、委派和进程/FD 生命周期完整定义在 [Guest ABI](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/sandbox-init_zh.md#321-应用-cgroup-namespace-与-controller-拓扑)中。内核必须提供所要求的控制器与 namespace；开启 `launch.cgroup_control` 时，ABI 要求严格启用并校验 advertised controller，不能把缺失能力静默视为成功。
 
 Guest 控制器是在 **VM 预算内进一步细分**,不替代 host 权威。Host cgroup v2 限制
 CH 进程,balloon 控制 Guest 可用内存。Guest 子 cgroup 的 `memory.max=max` 表示没有
@@ -417,21 +404,9 @@ balloon 配置**不协商启用 free_page_reporting**;这不是对所有配置�
 
 必须区分编译与运行协商:内核 fragment 实际包含 CONFIG_VIRTIO_BALLOON=y、
 CONFIG_VIRTIO_BALLOON_FREE_PAGE_REPORTING=y、CONFIG_PAGE_REPORTING=y。
-编译了能力不代表 host 在运行时 advertise/启用它。本次文档修正不改变 Kconfig 值。
+编译了能力不代表 host 在运行时 advertise/启用它。
 
-替代控制路径在 cold launch barrier 后立即发送一次 `mem_report`,此后默认每 5 s
-报告 MemAvailable 与诊断字段。Host 从 CH `vm.info` 取得 balloon target 与
-`memory_actual_size`,不从 Guest MemTotal 反推 Capacity,也不要求 Guest 报告 balloon
-current。Sandbox-local Budget 控制器经 `PUT /api/v1/vm.resize` 调整 target;每份
-fresh report 最多 inflate 64 MiB,并等待 memory_actual_size 收敛后再执行下一步。
-CH 对实际有数据的区间执行 `fallocate(PUNCH_HOLE)` + `madvise(DONTNEED)`;平台
-第 4 个 VMM patch 先用 SEEK_DATA 探测 file-backed 区间,已是稀疏空洞时跳过这两项
-操作,避免无意义的 UFFD_EVENT_REMOVE。驻留数据的真实回收保持原路径。详见
-[sandboxer 生命周期文档](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/sandbox_zh.md) §9.3。
-
-当前 Guest `/proc/meminfo` 虽在 CONFIG_VIRTIO_BALLOON=y 下仍不导出 `Balloon:`
-字段。该字段不是 Guest ABI 或 Budget 控制的可选来源;current 始终来自 CH
-memory_actual_size。
+内核提供能力而非节点资源策略。`mem_report` 与 Guest 报告字段由 [Guest ABI](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/sandbox-init_zh.md)定义；target/current、增长收缩、reservation 释放及 fresh-report 条件由 [sandboxer 资源闭环](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/sandbox_zh.md#93-balloon)定义；稀疏范围 release 由 [VMM 补丁](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/cloud-hypervisor_zh.md#34-0004--balloon-release-跳过-user-managed-zone-的空洞-run)定义。`/proc/meminfo` 的 `Balloon:` 不是该 Guest ABI 的来源，当前值取自 CH `memory_actual_size`，不能从 Guest MemTotal 反推 Capacity。
 
 `VIRTIO_MEM=y` 保留为 host 主动请求 Guest 内存块 unplug 的扩展点。其较粗、较少
 的事件可用于另外设计的内存热插拔/NUMA 场景。当前固定 Capacity Budget 模型拒绝
@@ -504,8 +479,8 @@ RAM 字节相同比例作为发布门禁.
   模型、patch 范围
 - [sandbox-runtime_zh.md](sandbox-runtime_zh.md) —— 内核之上的 runtime 镜像打包与布局;
   [sandboxer Guest ABI 文档](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/sandbox-init_zh.md) 负责 rootfs 组装、应用拉起与 Guest ABI
-- [sandboxer 生命周期文档](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/sandbox_zh.md) §3.1(`boot.kernel`)/ §14.2(平台 ABI 边界)——
+- [sandboxer 生命周期文档](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/sandbox_zh.md) §3.1(`boot.kernel`) 与 [工件兼容边界](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/sandbox-artifacts_zh.md#144-incompatibility)——
   沙箱配置如何引用 vmlinux,以及自带 kernel 的接入方式
-- [Native 构建指南](../native-deps/docs/build_zh.md) —— `make vmlinux` 工作流、patch 开发循环、
+- [Native 构建指南](../native-deps/README_zh.md) —— `make vmlinux` 工作流、patch 开发循环、
   交叉编译
 - [系统总览](https://github.com/kuasar-sandbox/kuasar-sandbox/blob/main/docs/kuasar-sandbox_zh.md) §4 —— 模板父层与暂停/恢复的系统语义
