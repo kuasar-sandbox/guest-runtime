@@ -1,6 +1,7 @@
 [English](README.md) | [简体中文](README_zh.md)
 
 <a id="build--native-dependency-build-workflow"></a>
+<a id="native-deps"></a>
 # native-deps — build and maintenance
 
 The native-deps directory builds upstream sources into three default artifact families consumed at runtime, not linked by the Go repositories: `mkfs.erofs`/`fsck.erofs` (erofs-utils), `vmlinux` (guest kernel) and `envd` (E2B guest agent). Their autotools/Kbuild/Go toolchains and independent upstream schedules are kept together in `guest-runtime/native-deps`. An additional `versitygw` gateway target is opt-in and not part of the default build.
@@ -15,6 +16,8 @@ Project-level aggregation runs `make -C kuasar-sandbox build`, which invokes thi
 ## 1. Overview
 
 <a id="11-产物与版本-pin"></a>
+<a id="artifacts-and-consumers"></a>
+<a id="产物与消费方"></a>
 ### 1.1 Artifacts and pinned versions
 
 | Artifact | Pinned upstream | Repository inputs | Consumers |
@@ -74,6 +77,8 @@ Native builds (host = target) create `bin/<name> → <arch>/<name>` for their pu
 - **`make clean`:** removes `bin/` and target build output while **retaining** tarball caches and architecture-neutral `build/src/*` source trees. Kernel source trees may contain unexported patch-development work and must not be silently discarded.
 
 <a id="2-构建目标"></a>
+<a id="build"></a>
+<a id="构建"></a>
 ## 2. Build targets
 
 ```bash
@@ -82,7 +87,7 @@ make erofs      # mkfs.erofs + fsck.erofs
 make vmlinux    # Guest kernel
 make envd       # E2B guest agent
 make versitygw  # Optional gateway; not part of build
-make clean      # See section 1.3
+make clean      # See section 1.4
 make help       # List targets
 ```
 
@@ -194,6 +199,8 @@ A kernel source tree performs many small-file operations. WSL2 builds on `/mnt/<
 
 For **vmlinux**, the Makefile detects a kernel release containing `microsoft` together with a working directory under `/mnt/`. If `$HOME/linux-build/src` exists, it defaults `LINUX_BUILD_SRC` and `LINUX_BUILD_OUT` under `$HOME/linux-build/`, allowing the build to use a Linux-native filesystem.
 
+<a id="documentation"></a>
+<a id="文档"></a>
 ## 6. See also
 
 - [vmlinux.md](../docs/vmlinux.md): kernel configuration, architecture differences and design decisions.

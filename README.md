@@ -53,7 +53,7 @@ BUILD_MKFS_EROFS=/path/to/host/mkfs.erofs make sandbox-runtime
 
 The host packer is separate from `native-deps/bin/<target-arch>/mkfs.erofs`, which is the target-architecture static binary copied into the guest Runtime image. This distinction is required for cross-builds: an aarch64 guest binary cannot package an image on an x86_64 host.
 
-Other prerequisites and native-source locations are documented in [README.md](native-deps/README.md).
+Other prerequisites and native-source locations are documented in [Native build and maintenance](native-deps/README.md).
 
 ## Build
 
@@ -102,7 +102,7 @@ A VMLinux release must be traceable to its public kernel source version, configu
 
 The Runtime bundle may contain software under multiple licenses. Its package and native-dependency inputs, notices, source availability, and redistribution obligations must be reviewed as part of the release contract. Never add an internal-only package, private CA, SSH host key, machine identity, production credential, or untraceable prebuilt binary to the guest image.
 
-The repository-wide license boundaries are described in [`LICENSE_SCOPE.md`](LICENSE_SCOPE.md). Native build details and source locations are documented in [README.md](native-deps/README.md).
+The repository-wide license boundaries are described in [`LICENSE_SCOPE.md`](LICENSE_SCOPE.md). Native build details and source locations are documented in [Native build and maintenance](native-deps/README.md).
 
 ## Integration boundaries
 
@@ -124,7 +124,7 @@ Detailed design and reference documents have complete English/Chinese pairs. Eng
 - [`docs/sandbox-runtime.md`](docs/sandbox-runtime.md) — Runtime image layout, guest payload, build, release, and consumption contract;
 - [`docs/vmlinux.md`](docs/vmlinux.md) — guest kernel configuration, build, platform ABI, and source relationship;
 - [`docs/flatten.md`](docs/flatten.md) — `flatten-ctl`, deterministic flattening, remote retrieval, caching, and OCI Referrers;
-- [README.md](native-deps/README.md) — native-dependency source and build workflow.
+- [Native build and maintenance](native-deps/README.md) — native-dependency source and build workflow.
 
 Keep maintained pairs synchronized according to the [documentation policy](https://github.com/kuasar-sandbox/kuasar-sandbox/blob/main/CONTRIBUTING.md#documentation-contributions).
 

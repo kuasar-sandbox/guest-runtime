@@ -420,7 +420,7 @@ stdin 报错引导)。`..` 成员跳过告警,穿 symlink 写出是硬错误;条
 取 `uid:gid`:数字直用,**名字**则按解包目标根的 `/etc/passwd`/`/etc/group` 解析
 (Docker `COPY --chown=name` 同款;CGO 关,os/user 直读文件不经 NSS);`user`(无组)
 取该用户主组,纯数字 `1000` 镜像为 `1000:1000`。node-ctl 的 COPY step 即以
-`extract --dense --chown` 把上下文 tar 摊进 guest rootfs(见 [node_zh.md](https://github.com/kuasar-sandbox/orchestrator/blob/main/docs/node_zh.md) [模板构建(target-aware、最多三阶段的流水线,构建在沙箱内进行)](https://github.com/kuasar-sandbox/orchestrator/blob/main/docs/node-build_zh.md#12-模板构建target-aware最多三阶段的流水线构建在沙箱内进行))。
+`extract --dense --chown` 把上下文 tar 摊进 guest rootfs(见 [模板构建(target-aware、最多三阶段的流水线,构建在沙箱内进行)](https://github.com/kuasar-sandbox/orchestrator/blob/main/docs/node-build_zh.md#12-模板构建target-aware最多三阶段的流水线构建在沙箱内进行))。
 
 **stream** 把**一个文件**封装为 tarstream(一个稀疏 payload +
 `.kuasar.digest.<hex>` marker metadata,`accelerator/pkg/tarstream`)。writer 在写 payload
@@ -541,7 +541,7 @@ hash 相同**:rootfs 数据/元数据、构建工具/参数,以及工件稀疏�
 LaunchSpec 的 fallback:`sandbox.yaml` `launch.*` 字段优先,`Env` 取镜像在下、
 override 在上的合并,`Volumes` 并入 `mounts`。因此 image config 有 Entrypoint/Cmd
 时 `launch.exec` 即可省略。合并规则的权威定义见
-[sandboxer/docs/sandbox_zh.md](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/sandbox_zh.md) [Strict encoding 与 limits](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/sandbox-artifacts_zh.md#33-strict-encoding-与-limits)。
+[宿主镜像默认配置合并](https://github.com/kuasar-sandbox/sandboxer/blob/main/pkg/sandbox/imageconf.go)。
 
 ## 4. 算法
 
@@ -694,7 +694,7 @@ chunk 拉取,不能保证普适的亚毫秒延迟。
 
 - [accelerator/docs/manifest_zh.md](https://github.com/kuasar-sandbox/accelerator/blob/main/docs/manifest_zh.md):
   将镜像 ingest 进内容寻址存储,chunk dedup 跨镜像共享重复内容。
-- [sandboxer/docs/sandbox_zh.md](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/sandbox_zh.md) [Strict encoding 与 limits](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/sandbox-artifacts_zh.md#33-strict-encoding-与-limits):
+- [宿主镜像默认配置合并](https://github.com/kuasar-sandbox/sandboxer/blob/main/pkg/sandbox/imageconf.go):
   启动时使用内嵌 OCI runtime config。
 - [sandboxer/docs/sandbox_zh.md](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/sandbox_zh.md) `boot.root.base`:
   选择展平镜像作为只读 base。

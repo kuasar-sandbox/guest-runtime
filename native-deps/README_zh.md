@@ -1,6 +1,7 @@
 [English](README.md) | [简体中文](README_zh.md)
 
 <a id="build--原生依赖构建工作流"></a>
+<a id="native-deps"></a>
 # native-deps — 原生依赖构建与维护
 
 native-deps 目录的构建工作流:从上游源码构建 kuasar-sandbox 平台运行期消费、但各 Go 仓
@@ -12,7 +13,7 @@ native-deps 目录的构建工作流:从上游源码构建 kuasar-sandbox 平台
 公共流水线:按 URL pin 的上游 tarball(可选 SHA256 校验)→ 共享缓存与
 解压 → 本地补丁(vmlinux,`git am`)→ 构建 → `bin/<arch>/`。
 本文覆盖构建目标、patch 开发循环、交叉编译与缓存/清理约定;产物本身的设计契约不在
-本文:内核配置体系见 [`../../docs/vmlinux.md`](../docs/vmlinux_zh.md)。patched
+本文:内核配置体系见 [Guest 内核规范](../docs/vmlinux_zh.md)。patched
 `cloud-hypervisor` 是 `sandbox-ctl` 的 VMM 运行件,构建与 patch 契约见
 `sandboxer/docs/cloud-hypervisor.md`。
 
@@ -23,6 +24,7 @@ native-deps 目录的构建工作流:从上游源码构建 kuasar-sandbox 平台
 
 ## 1. 概述
 
+<a id="产物与消费方"></a>
 ### 1.1 产物与版本 pin
 
 | 产物 | 上游(pin) | 本仓输入 | 消费方 |
@@ -88,6 +90,7 @@ build/
   缓存与 `build/src/*` 源树。内核源树可能携带尚未 format 回 `deps/` 的 patch
   开发 WIP,不能静默丢弃。
 
+<a id="构建"></a>
 ## 2. 构建目标
 
 ```bash
@@ -96,7 +99,7 @@ make erofs      # mkfs.erofs + fsck.erofs
 make vmlinux    # guest 内核
 make envd       # e2b guest agent
 make versitygw  # 可选网关,不包含在 build 中
-make clean      # 见 §1.3
+make clean      # 见 §1.4
 make help       # 列举目标
 ```
 
@@ -135,7 +138,7 @@ make help       # 列举目标
   elfutils-libelf-devel)+ libssl 头(libssl-dev / openssl-devel);后两者是 host 侧
   kbuild 工具(fixdep、sign-file 等)的依赖,不链入 vmlinux。
 - 配置体系语义(两段拼接的契约、关键启用/禁用项)见
-  [`../../docs/vmlinux.md`](../docs/vmlinux_zh.md) [构建工作流](../docs/vmlinux_zh.md#2-构建工作流)-[配置体系](../docs/vmlinux_zh.md#3-配置体系)。
+  [Guest 内核规范](../docs/vmlinux_zh.md) [构建工作流](../docs/vmlinux_zh.md#2-构建工作流)-[配置体系](../docs/vmlinux_zh.md#3-配置体系)。
 
 ### 2.3 envd(`make envd`)
 
@@ -235,8 +238,9 @@ envd 是 `CGO_ENABLED=0` 的纯 Go 构建,GOARCH 即完成交叉,无须以上 C 
   此时若存在 `$HOME/linux-build/src` 目录,默认把 `LINUX_BUILD_SRC` /
   `LINUX_BUILD_OUT` 放到 `$HOME/linux-build/` 下,以便使用 Linux-native 文件系统。
 
+<a id="文档"></a>
 ## 6. See Also
 
-- [`../../docs/vmlinux.md`](../docs/vmlinux_zh.md) —— guest 内核配置体系、架构差异与关键决策。
+- [Guest 内核规范](../docs/vmlinux_zh.md) —— guest 内核配置体系、架构差异与关键决策。
 - `kuasar-sandbox/docs/release.md` —— runtime、vmlinux 独立版本与平台聚合发布;
   本目录运行期必需产物经 `kuasar-sandbox/release/bin-inputs.manifest` 收集进共享 `bin/`。

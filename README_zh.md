@@ -75,13 +75,13 @@ Tag 选择,不依赖 Latest。
 
 ## 文档
 
-- [docs/sandbox-runtime.md](docs/sandbox-runtime_zh.md) — runtime 镜像打包、发布和消费契约。
-- [docs/vmlinux.md](docs/vmlinux_zh.md) — guest kernel 配置、构建和平台 ABI。
-- [docs/flatten.md](docs/flatten_zh.md) — `flatten-ctl` 命令和确定性展平。
-- [native-deps/docs/build.md](native-deps/README_zh.md) — native-deps 构建工作流。
+- [docs/sandbox-runtime_zh.md](docs/sandbox-runtime_zh.md) — runtime 镜像打包、发布和消费契约。
+- [docs/vmlinux_zh.md](docs/vmlinux_zh.md) — guest kernel 配置、构建和平台 ABI。
+- [docs/flatten_zh.md](docs/flatten_zh.md) — `flatten-ctl` 命令和确定性展平。
+- [Native 构建与维护](native-deps/README_zh.md) — native-deps 构建工作流。
 
 ## License
 
 本仓库的项目原创内容采用 [Apache License 2.0](LICENSE).Linux 内核 patch 的
-GPL-2.0-only 边界见 [LICENSE_SCOPE.md](LICENSE_SCOPE_zh.md).
+GPL-2.0-only 边界见 [LICENSE_SCOPE_zh.md](LICENSE_SCOPE_zh.md).
 贡献授权说明见 [CONTRIBUTING.md（英文）](CONTRIBUTING.md).
