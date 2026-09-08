@@ -13,7 +13,7 @@ The complete build, source, cache, patch, cross-compilation and cleanup contract
 - [Open the consolidated section: 1.1 Artifacts and pinned versions](../README.md#11-artifacts-and-pinned-versions)
 <a id="12-目录布局"></a>
 <a id="12-directory-layout"></a>
-- [Open the consolidated section: 1.2 Directory layout](../README.md#12-directory-layout)
+- [Open the consolidated section: 1.3 Directory layout](../README.md#13-directory-layout)
 <a id="13-幂等与缓存"></a>
 <a id="13-idempotency-and-caching"></a>
 - [Open the consolidated section: 1.4 Idempotency and caching](../README.md#13-idempotency-and-caching)
