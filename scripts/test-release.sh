@@ -15,6 +15,7 @@ fail() {
 source "$ROOT/scripts/release-materials.sh"
 
 bash "$ROOT/scripts/test-release-materials.sh"
+bash "$ROOT/native-deps/deps/test-common.sh"
 bash "$ROOT/scripts/test-release-native-materials.sh"
 
 init_fixture_repo() {
