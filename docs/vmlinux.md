@@ -416,7 +416,7 @@ file bin/aarch64/vmlinux
 # /proc/config.gz should be absent because IKCONFIG is disabled
 ```
 
-The trusted `release-vmlinux.yml` workflow builds and validates the **exact selected source-branch SHA**, which can belong to main or a supported maintenance branch. It exercises native-dependency tooling and package validation, but does not boot vmlinux itself. A successful component Release therefore is not sufficient evidence of guest behavior. Before aggregation, retain platform BMS results for the matching exact source combination. Published aggregate assets additionally require complete real-MicroVM E2E covering boot protocol, required devices, filesystems, networking, balloon, cgroup and snapshot/restore paths. Stable and Preview aggregates both use the exact-asset BMS gate.
+The trusted `release-vmlinux.yml` workflow builds and validates the **exact selected source-branch SHA**, which can belong to main or a supported maintenance branch. It exercises native-dependency tooling and package validation, but does not boot vmlinux itself. A successful component Release therefore is not sufficient evidence of guest behavior. Before aggregation, retain platform integration-test results for the matching exact source combination. Published aggregate assets additionally require complete real-MicroVM E2E covering boot protocol, required devices, filesystems, networking, balloon, cgroup and snapshot/restore paths. Stable and Preview aggregates both use the exact-asset integration-test gate.
 
 For configuration review, inspect the resolved olddefconfig diff for silent Kconfig changes. Do not use the proportion of identical RAM bytes across instances as a release gate.
 

@@ -2,86 +2,141 @@
 
 # guest-runtime
 
-Guest 运行时镜像与构建工具仓:负责构建 `sandbox-runtime.bundle`、`flatten-ctl`
-以及 guest 侧 native 产物。host 生命周期、快照、恢复和 `sandbox-init` 源码属于
-`sandboxer`;内容寻址、manifest/cache/store 与展平公共库属于 `accelerator`。
-系统集成、跨仓验证和聚合发布由
-[Kuasar Sandbox 项目主仓](https://github.com/kuasar-sandbox/kuasar-sandbox)维护。
+`guest-runtime` 构建 [Kuasar Sandbox](https://github.com/kuasar-sandbox/kuasar-sandbox) 使用的 **guest kernel、Runtime image 和 image build tool**。
 
-## 组成
+本仓负责 guest 环境及其构建输入、provenance 与 Release artifact。Host 侧 MicroVM 生命周期、snapshot、restore 和 `sandbox-init` 源码属于 [`sandboxer`](https://github.com/kuasar-sandbox/sandboxer)。共享 Manifest、cache/store、OCI retrieval 和 image-flattening library 属于 [`accelerator`](https://github.com/kuasar-sandbox/accelerator)。
 
-| 路径 | 角色 |
-|---|---|
-| `cmd/flatten-ctl` | OCI/目录 → EROFS deterministic image builder;复用 `accelerator/pkg/{flatten,image,remote,tar}` |
-| `docs/sandbox-runtime.md` | runtime 镜像布局、guest payload、构建和发布契约 |
-| `docs/vmlinux.md` | guest kernel 镜像契约和配置理由 |
-| `docs/flatten.md` | `flatten-ctl` CLI、远程拉取缓存、OCI Referrers 行为 |
-| `native-deps/` | 构建 `vmlinux`、`mkfs.erofs`、`fsck.erofs`、`envd` |
-| `scripts/guest-inspect.py` | 从 Host 读取 Guest 内核内存计数器;要求兼容的非随机化 x86_64 布局 |
+## 职责
 
-`guest-runtime` 把 `../sandboxer/bin/<arch>/sandbox-init` 和 guest payload 打进
-同一份 DAX-shared EROFS 镜像。镜像内 `/opt/sandbox-runtime/bin/` 首版包含
-`envd`、`flatten-ctl`、`mkfs.erofs`;`vmlinux` 和 `cloud-hypervisor` 不进入
-runtime 镜像,分别由本仓的独立 `vmlinux-vX.Y.Z` 版本和 `sandboxer` 发布。
+- 从有文档记录的 kernel source、config 和 patch set 构建 guest VMLinux image;
+- 构建 EROFS tool 和 Envd 等 Native guest 依赖;
+- 构建 OCI/directory 到 EROFS 的 image builder `flatten-ctl`;
+- 组装 `sandbox-runtime.bundle`,其中包括 `sandboxer` 提供的 `sandbox-init` 和本仓维护的 guest payload;
+- 验证生成的 guest/Runtime 文件系统结构;
+- 发布并记录两种独立版本的发行单元:Runtime 和 VMLinux。
+
+本仓只对应一个组件,但发布两条发行单元版本线。
+
+## 仓库布局
+
+| 路径 | 用途 |
+| --- | --- |
+| `cmd/flatten-ctl` | 使用共享 `accelerator` package 将 OCI 或目录构建为 deterministic EROFS image |
+| `native-deps/` | VMLinux、EROFS tool、Envd 和其他 Native guest 构建输入 |
+| `docs/sandbox-runtime.md` | Runtime image 布局、guest payload、build 和 Release contract |
+| `docs/vmlinux.md` | Guest kernel source/config contract 与 platform ABI |
+| `docs/flatten.md` | `flatten-ctl`、remote image retrieval、cache 和 OCI Referrers 行为 |
+| `scripts/guest-inspect.py` | 在兼容的 nonrandomized x86_64 布局中从 Host 读取 guest kernel memory counter |
+
+Runtime image 将初始 guest tool 放在 `/opt/sandbox-runtime/bin/`。VMLinux 与 Cloud Hypervisor binary 不嵌入 Runtime bundle:VMLinux 作为独立发行单元发布,Cloud Hypervisor 由 `sandboxer` 构建和发布。
+
+## 源码工作区
+
+源码构建使用兄弟仓。`go.mod` 通过 `../accelerator` 解析 `accelerator`,Runtime image 通过 `../sandboxer` 使用或构建 `sandbox-init`:
+
+```text
+<workspace>/
+├── guest-runtime/
+├── accelerator/
+├── connector/
+└── sandboxer/
+```
+
+协调开发使用这些兄弟仓相互兼容的 `main` revision。复现已发布组合时,使用对应[项目聚合 Release](https://github.com/kuasar-sandbox/kuasar-sandbox/releases)精确选择的组件 Tag,不要分别选择各仓 GitHub Latest。完整六仓工作区见[项目 README](https://github.com/kuasar-sandbox/kuasar-sandbox)。
+
+Go-only `flatten-ctl` 构建需要兄弟 `accelerator`。从源码构建 Runtime 还需要 `sandboxer` 提供 `sandbox-init`、其兄弟依赖 `connector`,以及下述 host/target Native tool。独立 Kernel target 使用自己的 Native 构建输入,不要求启动平台。内部 `require` 版本标识目标正式组件 Release,Daily Preview 后缀已去除。这些 Tag 可以尚不存在:即使设置 `GOWORK=off`,本地 `replace` 仍选择兄弟仓源码。报告 build/test 结果时记录实际 SHA。
+
+## 构建前置
+
+构建 `sandbox-runtime.bundle` 需要**宿主架构**的 `mkfs.erofs` executable。在构建 Host 安装 `erofs-utils`,或设置:
+
+```bash
+BUILD_MKFS_EROFS=/path/to/host/mkfs.erofs make sandbox-runtime
+```
+
+Host packer 与作为目标架构 static binary 复制进 guest Runtime image 的 `native-deps/bin/<target-arch>/mkfs.erofs` 不同。Cross-build 必须保持这一区分:aarch64 guest binary 不能在 x86_64 Host 上打包 image。
+
+其他前置和 Native source 位置见 [Native 构建与维护](native-deps/README_zh.md)。
 
 ## 构建
 
 ```bash
-make native-deps                 # vmlinux / erofs tools / envd
-make flatten-ctl                 # OCI/dir -> deterministic EROFS builder
-make build                       # sandbox-runtime.bundle with envd/flatten-ctl/mkfs.erofs
-make sandbox-runtime             # same image target, builds ../sandboxer sandbox-init if needed
-make build TARGET_ARCH=aarch64
+make native-deps                 # VMLinux, target EROFS tools, Envd, and native inputs
+make flatten-ctl                 # OCI/directory -> deterministic EROFS builder
+make build                       # assemble sandbox-runtime.bundle
+make sandbox-runtime             # build the runtime image, building sandbox-init if needed
+make build TARGET_ARCH=aarch64   # cross-build where documented dependencies support it
 ```
 
-`make sandbox-runtime` 需要**宿主可执行的 `BUILD_MKFS_EROFS`**:先查 Host PATH,
-再按 Makefile 的 host/target 条件查已有 native 输出,也可显式指定该变量。宿主
-packer 缺失时会明确失败,不能用不能在宿主执行的目标架构工具替代。镜像内的
-`GUEST_MKFS_EROFS` 是另一个目标架构输入;它与 envd、flatten-ctl、sandbox-init
-缺失时会按需触发对应构建目标,详见[构建指南](docs/sandbox-runtime_zh.md)。
+`make sandbox-runtime` 使用:
 
-## 产物
+- `../sandboxer/bin/<arch>/sandbox-init`;
+- `native-deps/bin/<arch>/envd`;
+- 作为 guest payload 的 `native-deps/bin/<arch>/mkfs.erofs`;
+- `bin/<arch>/flatten-ctl`;
+- 作为 Host image packer 的 `BUILD_MKFS_EROFS`。
 
-| 产物 | 生成入口 |
-|---|---|
+缺少 `sandbox-init`、Envd、`flatten-ctl` 或目标架构 guest `mkfs.erofs` 时,Makefile 会调用对应构建 target。Host `mkfs.erofs` 不同:它必须已在 `PATH`、有文档记录的 native-deps Host 路径中,或由 `BUILD_MKFS_EROFS` 指定;否则 Runtime 构建明确失败。干净的公开构建必须使用有文档记录的公开 source/download location,不得依赖开发者私有 package mirror 或 cache。
+
+## 输出
+
+| 输出 | Build target |
+| --- | --- |
 | `bin/<arch>/flatten-ctl` | `make flatten-ctl` |
 | `bin/<arch>/sandbox-runtime.bundle` | `make sandbox-runtime` |
 | `native-deps/bin/<arch>/vmlinux` | `make native-deps` |
 | `native-deps/bin/<arch>/mkfs.erofs` / `fsck.erofs` | `make native-deps` |
 | `native-deps/bin/<arch>/envd` | `make native-deps` |
 
-本仓没有通用的 `guest-runtime-vX.Y.Z` 版本或同名归档,而是维护两条独立版本线:
+## 两个发行单元
 
-- `runtime-vX.Y.Z`:发布 `sandbox-runtime-x86_64-vX.Y.Z.tar.gz`,包含
-  runtime bundle、`flatten-ctl` 和 `mkfs.erofs`。
-- `vmlinux-vX.Y.Z`:发布 `vmlinux-x86_64-vX.Y.Z.tar.gz`,包含稳定入口
-  `bin/vmlinux`。
+本仓不发布通用的 `guest-runtime-vX.Y.Z` Release,而是维护两条独立版本线:
 
-本仓文档与 `test/e2e/` 不进入上述组件包。项目主仓的 platform 聚合版本从所选 runtime tag
-收集 runtime 文档与 flatten E2E,从所选 vmlinux tag 收集 kernel 文档,统一放入
-platform 包。
+- **`runtime-vX.Y.Z`** - 发布 `sandbox-runtime-x86_64-vX.Y.Z.tar.gz`,包含 Runtime bundle、`flatten-ctl` 和 Release contract 选定的 EROFS creation tool;
+- **`vmlinux-vX.Y.Z`** - 发布 `vmlinux-x86_64-vX.Y.Z.tar.gz`,在稳定路径 `bin/vmlinux` 包含 guest kernel。
 
-两条版本线独立演进,版本号不要求相同。当前组件 Release 在组件构建与打包检查
-后发布 Linux x86_64 资产;平台聚合再选择精确版本组合,执行跨组件 BMS 与实际
-发布资产的 MicroVM 验证。源码支持其他架构不等于已发布对应预构建资产。`envd` 只随 runtime 镜像内置;
-`fsck.erofs` 只作为源码树诊断/测试辅助产物。
-项目主仓的每日协调器按上海日期分别触发 `runtime-vX.Y.Z-preview.YYYYMMDD` 和
-`vmlinux-vX.Y.Z-preview.YYYYMMDD`;Preview 和维护分支 Stable 不更新 GitHub
-Latest。两个单元的主线 Stable 独立构建发布;独立的幂等 Reconcile Latest 工作流按
-`main` 源码提交先后协调本仓 Latest,同一提交才比较 SemVer。平台聚合仍按两个精确
-Tag 选择,不依赖 Latest。
-同版本发布与删除共用完整 workflow mutation group;若 GitHub 合并 pending 请求,项目主仓
-协调器会把 cancelled 状态作为未完成操作自动重跑,不会把它当作发布或 GC 已完成。
+两者版本号可以独立演进。项目聚合 Release 精确选择一个 Runtime Tag 和一个 VMLinux Tag,不假定版本号相同。
+
+当前 GitHub 组件资产在组件 build/package 检查后从所选 source ref 和精确 commit 发布 Linux x86_64。项目聚合 Release 随后选择精确 Runtime、VMLinux 和其他组件 Tag,并对该组合执行跨组件集成测试及已发布资产的 MicroVM 验证。Source Makefile 支持其他 `TARGET_ARCH` 不等于已为该架构发布预构建 artifact。
+
+## Kernel source 与许可证
+
+VMLinux Release 必须可追溯到公开 kernel source version、config、项目 patch set、toolchain 和 source commit。Kernel patch 与复制的 kernel material 保留上游 copyright 和 GPL 义务。项目原创 build script 不会重许可 Linux kernel。
+
+Runtime bundle 可包含采用多种许可证的软件。Package/Native dependency input、notice、source availability 和 redistribution obligation 必须作为 Release contract 的一部分检视。不得向 guest image 添加 internal-only package、private CA、SSH host key、machine identity、production credential 或来源不可追溯的预构建 binary。
+
+仓库级许可证边界见 [`LICENSE_SCOPE_zh.md`](LICENSE_SCOPE_zh.md)。Native build 细节和 source location 见 [Native 构建与维护](native-deps/README_zh.md)。
+
+## 集成边界
+
+- `sandboxer` 负责 `sandbox-init` 源码和 Host 生命周期;本仓将构建后的 guest binary 打进 Runtime image;
+- `accelerator` 负责共享 EROFS/OCI flattening library;本仓在 Runtime 发行单元发布 `flatten-ctl` binary;
+- `orchestrator` 通过完整平台使用生成的 Runtime 和 VMLinux artifact;
+- `kuasar-sandbox/kuasar-sandbox` 选择精确发行单元,运行跨组件验证并发布聚合 Release。
+
+## Release 模型
+
+Runtime 与 VMLinux 组件 Release 从所选 source ref 和精确 commit 构建。Preview Release 是供开发和评估使用的 GitHub prerelease;mainline Stable 分别对每个发行单元协调。项目聚合 Release 始终选择精确 Tag,不依赖 GitHub Latest,随后通过项目级集成测试和已发布资产测试验证所选组合。
+
+版本关系见[项目 Release 文档](https://github.com/kuasar-sandbox/kuasar-sandbox/blob/main/docs/release_zh.md),可用的 Stable 聚合版本由 [GitHub Latest Release](https://github.com/kuasar-sandbox/kuasar-sandbox/releases/latest) 渠道解析。
 
 ## 文档
 
-- [docs/sandbox-runtime_zh.md](docs/sandbox-runtime_zh.md) — runtime 镜像打包、发布和消费契约。
-- [docs/vmlinux_zh.md](docs/vmlinux_zh.md) — guest kernel 配置、构建和平台 ABI。
-- [docs/flatten_zh.md](docs/flatten_zh.md) — `flatten-ctl` 命令和确定性展平。
-- [Native 构建与维护](native-deps/README_zh.md) — native-deps 构建工作流。
+详细设计与参考文档均有完整英中配对。英文使用默认文件名,语言选择器打开完整中文版本:
+
+- [`docs/sandbox-runtime_zh.md`](docs/sandbox-runtime_zh.md) - Runtime image 布局、guest payload、build、Release 和 consumption contract;
+- [`docs/vmlinux_zh.md`](docs/vmlinux_zh.md) - guest kernel config、build、platform ABI 和 source relationship;
+- [`docs/flatten_zh.md`](docs/flatten_zh.md) - `flatten-ctl`、deterministic flattening、remote retrieval、cache 和 OCI Referrers;
+- [Native 构建与维护](native-deps/README_zh.md) - Native dependency source 与 build workflow。
+
+按[文档策略](https://github.com/kuasar-sandbox/kuasar-sandbox/blob/main/CONTRIBUTING_zh.md#文档贡献)同步维护成对文档。
+
+## 贡献与安全
+
+阅读[仓库贡献指南](CONTRIBUTING.md)和[组织贡献指南](https://github.com/kuasar-sandbox/.github/blob/main/CONTRIBUTING.md)。Guest ABI、Runtime content、kernel config、source provenance 或 Release artifact 的修改必须完成相应验证和必要的 companion PR。
+
+不要在公开 Issue 报告漏洞,也不要公开 private package source、credential、signing material 或 customer data。按 [Kuasar Sandbox 安全策略](https://github.com/kuasar-sandbox/kuasar-sandbox/security/policy)使用 GitHub private vulnerability reporting。
 
 ## License
 
-本仓库的项目原创内容采用 [Apache License 2.0](LICENSE).Linux 内核 patch 的
-GPL-2.0-only 边界见 [LICENSE_SCOPE_zh.md](LICENSE_SCOPE_zh.md).
-贡献授权说明见 [CONTRIBUTING.md（英文）](CONTRIBUTING.md).
+项目原创内容采用 [Apache License 2.0](LICENSE)。Linux kernel patch 保留 [`LICENSE_SCOPE_zh.md`](LICENSE_SCOPE_zh.md)记录的 GPL-2.0-only 边界。Runtime package、EROFS tool、Envd、Buildroot/distribution input 和其他第三方 material 保留各自 license、notice、source 与 redistribution obligation。

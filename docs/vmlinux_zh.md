@@ -451,10 +451,10 @@ file bin/aarch64/vmlinux
 
 `release-vmlinux.yml` 的可信入口验证**精确选定的源码分支 SHA** 的构建、native dependency
 工具和发布包;该 SHA 可来自 main 或受支持的维护分支。该工作流本身不启动 vmlinux.因此组件 Release 成功不能单独作为 Guest
-行为验证.进入聚合版本前还需要保留对应精确源码组合的 platform BMS 结果;
+行为验证.进入聚合版本前还需要保留对应精确源码组合的 平台集成测试结果;
 聚合版本还需要使用已发布资产运行完整真实 MicroVM E2E,覆盖启动协议、
 必需设备、文件系统、网络、Balloon、Cgroup 和 snapshot/restore 路径。
-Stable 与 Preview 聚合均使用 exact-asset BMS 门禁。
+Stable 与 Preview 聚合均使用 exact-asset 集成测试门禁。
 
 配置 review 使用 `make olddefconfig` diff 检查 silent Kconfig 变化;不要以跨实例
 RAM 字节相同比例作为发布门禁.
