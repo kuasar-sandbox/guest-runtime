@@ -14,6 +14,8 @@ fail() {
 # shellcheck source=scripts/release-materials.sh
 source "$ROOT/scripts/release-materials.sh"
 
+bash "$ROOT/scripts/test-release-materials.sh"
+
 init_fixture_repo() {
   local directory="$1"
   shift
