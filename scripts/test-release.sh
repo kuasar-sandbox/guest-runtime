@@ -529,7 +529,7 @@ for kind in runtime vmlinux; do
     names=(linux)
   fi
   archive_name="$("$fixture_root/scripts/release.sh" archive-name "$kind" "$version" x86_64)"
-  for mutation in owner source integrity; do
+  for mutation in owner source integrity setuid setgid writable-directory writable-payload; do
     for name in "${names[@]}"; do
       candidate="$TMP/$kind-$mutation-$name"
       cp -a "$TMP/$kind-bundle" "$candidate"
@@ -538,6 +538,15 @@ for kind in runtime vmlinux; do
       owner=0
       if [ "$mutation" = owner ]; then
         owner=1234
+      elif [[ "$mutation" == setuid || "$mutation" == setgid || "$mutation" == writable-* ]]; then
+        payload=bin/vmlinux
+        [ "$kind" != runtime ] || payload=bin/flatten-ctl
+        case "$mutation" in
+          setuid) chmod 4755 "$candidate/root/$payload" ;;
+          setgid) chmod 2755 "$candidate/root/$payload" ;;
+          writable-directory) chmod 0777 "$candidate/root/bin" ;;
+          writable-payload) chmod 0777 "$candidate/root/$payload" ;;
+        esac
       else
         column=4
         [ "$mutation" != integrity ] || column=5

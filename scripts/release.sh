@@ -179,8 +179,16 @@ validate_archive_paths() {
     { path=$0; sub(/^\.\//, "", path) }
     path != "" && path !~ /\/$/ && path !~ /^bin\// && path !~ ("^share/(licenses|sources)/" unit "/") { exit 1 }
   ' "$listing" || fail "$archive contains a file outside the $kind release layout"
-  tar --numeric-owner -tvzf "$archive" | awk '$1 !~ /^[-d]/ || $2 != "0/0" { exit 1 }' \
-    || fail "$archive contains a non-regular entry or non-root ownership"
+  tar --numeric-owner -tvzf "$archive" | awk '
+    $2 != "0/0" { exit 1 }
+    $1 ~ /^d/ { if ($1 != "drwxr-xr-x") exit 1; next }
+    $1 !~ /^-/ { exit 1 }
+    {
+      path=$6; sub(/^\.\//, "", path)
+      expected=(path ~ /^bin\/(flatten-ctl|mkfs[.]erofs)$/ ? "-rwxr-xr-x" : "-rw-r--r--")
+      if ($1 != expected) exit 1
+    }
+  ' || fail "$archive contains an unsafe type, mode or ownership"
 }
 
 requested_dependency_version() {
