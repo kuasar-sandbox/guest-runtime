@@ -75,6 +75,88 @@ check_go_binary() {
   go version -m "$1" >/dev/null 2>&1 || fail "Go build info is missing from $1"
 }
 
+native_make_default() {
+  local name="$1" value
+  value="$(awk -v name="$name" '$1 == name && $2 == "?=" { print $3; exit }' \
+    "$ROOT/native-deps/Makefile")"
+  [ -n "$value" ] || fail "native dependency pin is missing from native-deps/Makefile: $name"
+  printf '%s\n' "$value"
+}
+
+require_native_pin() {
+  if [ "$#" -lt 3 ] || [ "$#" -gt 4 ]; then
+    fail "require_native_pin requires name, repository value, selected value and optional mirror"
+  fi
+  local name="$1" repository_value="$2" selected_value="$3" mirror="${4:-}"
+  local actual selected
+  actual="$(native_make_default "$name")"
+  [ "$actual" = "$repository_value" ] \
+    || fail "$name no longer matches the source record used by release packaging"
+  if [[ -v $name ]]; then
+    selected="${!name}"
+    if [ "$selected" != "$selected_value" ] \
+      && { [ -z "$mirror" ] || [ "$selected" != "$mirror" ]; }; then
+      fail "$name override is not supported by the pinned release material contract"
+    fi
+  fi
+}
+
+reject_release_path_overrides() {
+  local name
+  for name in "$@"; do
+    if [[ -v $name ]]; then
+      fail "$name override is not supported by the pinned release material contract"
+    fi
+  done
+}
+
+require_selected_value() {
+  local name="$1" expected="$2" selected
+  if [[ -v $name ]]; then
+    selected="${!name}"
+    [ "$selected" = "$expected" ] \
+      || fail "$name override is not supported by the pinned release material contract"
+  fi
+}
+
+validate_native_release_inputs() {
+  local kind="$1" arch="$2"
+  case "$kind" in
+    runtime)
+      reject_release_path_overrides RELEASE_BIN_DIR RELEASE_NATIVE_BIN_DIR \
+        RELEASE_ENVD_SOURCE_DIR RELEASE_EROFS_SOURCE_DIR \
+        RELEASE_SANDBOX_INIT_BIN RELEASE_ENVD_BIN
+      require_selected_value SANDBOXER_DIR ../sandboxer
+      require_selected_value SANDBOX_INIT "../sandboxer/bin/$arch/sandbox-init"
+      require_selected_value ENVD "native-deps/bin/$arch/envd"
+      require_selected_value FLATTEN_CTL "bin/$arch/flatten-ctl"
+      require_selected_value GUEST_MKFS_EROFS "native-deps/bin/$arch/mkfs.erofs"
+      require_native_pin EROFS_TARBALL \
+        'https://codeload.github.com/erofs/erofs-utils/tar.gz/refs/tags/v1.9.1\#erofs-utils-v1.9.1.tar.gz' \
+        'https://codeload.github.com/erofs/erofs-utils/tar.gz/refs/tags/v1.9.1#erofs-utils-v1.9.1.tar.gz'
+      require_native_pin EROFS_TARBALL_SHA256 \
+        a9ef5ab67c4b8d2d3e9ed71f39cd008bda653142a720d8a395a36f1110d0c432 \
+        a9ef5ab67c4b8d2d3e9ed71f39cd008bda653142a720d8a395a36f1110d0c432
+      require_native_pin ENVD_TARBALL \
+        'https://codeload.github.com/e2b-dev/infra/tar.gz/refs/tags/2026.22\#e2b-infra-2026.22.tar.gz' \
+        'https://codeload.github.com/e2b-dev/infra/tar.gz/refs/tags/2026.22#e2b-infra-2026.22.tar.gz'
+      require_native_pin ENVD_TARBALL_SHA256 \
+        9e1e81f2963fda1805466c337cd0a33638182a15a66295fd19bba6b9c454d92c \
+        9e1e81f2963fda1805466c337cd0a33638182a15a66295fd19bba6b9c454d92c
+      ;;
+    vmlinux)
+      reject_release_path_overrides RELEASE_NATIVE_BIN_DIR RELEASE_LINUX_SOURCE_DIR
+      require_native_pin LINUX_TARBALL \
+        'https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.1.169.tar.gz' \
+        'https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.1.169.tar.gz' \
+        'https://mirrors.tuna.tsinghua.edu.cn/kernel/v6.x/linux-6.1.169.tar.gz'
+      require_native_pin LINUX_TARBALL_SHA256 \
+        ab28b4ca2a2eca38b3da9aa33b231288168c3560bbc866359045f1c8f4d48d94 \
+        ab28b4ca2a2eca38b3da9aa33b231288168c3560bbc866359045f1c8f4d48d94
+      ;;
+  esac
+}
+
 validate_archive_paths() {
   local archive="$1" kind="$2" listing="$WORK/listing"
   tar -tzf "$archive" > "$listing"
@@ -149,12 +231,13 @@ package_release() {
   [ ! -e "$output" ] || fail "output already exists: $output"
   epoch="${SOURCE_DATE_EPOCH:-0}"
   [[ "$epoch" =~ ^[0-9]+$ ]] || fail "SOURCE_DATE_EPOCH must be an integer"
+  validate_native_release_inputs "$kind" "$arch"
 
   STAGE="$WORK/stage"
   rm -rf "$STAGE"
   mkdir -p "$STAGE"
-  bin_dir="${RELEASE_BIN_DIR:-$ROOT/bin/$arch}"
-  native_bin_dir="${RELEASE_NATIVE_BIN_DIR:-$ROOT/native-deps/bin/$arch}"
+  bin_dir="$ROOT/bin/$arch"
+  native_bin_dir="$ROOT/native-deps/bin/$arch"
   project_sha="$(release_materials_resolve_git_source "$ROOT" "" guest-runtime)"
   release_materials_init "$STAGE" "$WORK/materials" "$kind"
   release_materials_copy_licenses "$ROOT" project
@@ -169,10 +252,10 @@ package_release() {
       check_go_binary "$STAGE/bin/flatten-ctl"
       sandboxer_source="${RELEASE_SANDBOXER_SOURCE_DIR:-$ROOT/../sandboxer}"
       accelerator_source="${RELEASE_ACCELERATOR_SOURCE_DIR:-$ROOT/../accelerator}"
-      envd_source="${RELEASE_ENVD_SOURCE_DIR:-$ROOT/native-deps/build/src/e2b-infra}"
-      erofs_source="${RELEASE_EROFS_SOURCE_DIR:-$ROOT/native-deps/build/$arch/src/erofs-utils}"
-      sandbox_init_bin="${RELEASE_SANDBOX_INIT_BIN:-$sandboxer_source/bin/$arch/sandbox-init}"
-      envd_bin="${RELEASE_ENVD_BIN:-$native_bin_dir/envd}"
+      envd_source="$ROOT/native-deps/build/src/e2b-infra"
+      erofs_source="$ROOT/native-deps/build/$arch/src/erofs-utils"
+      sandbox_init_bin="$sandboxer_source/bin/$arch/sandbox-init"
+      envd_bin="$native_bin_dir/envd"
       sandboxer_version="${RELEASE_SANDBOXER_VERSION:-${SANDBOXER_VERSION:-}}"
       accelerator_version="${RELEASE_ACCELERATOR_VERSION:-${ACCELERATOR_VERSION:-}}"
       for value in "$sandboxer_version" "$accelerator_version"; do
@@ -209,7 +292,7 @@ package_release() {
     vmlinux)
       local linux_source linux_license_sha
       copy_external_file "$native_bin_dir/vmlinux" bin/vmlinux
-      linux_source="${RELEASE_LINUX_SOURCE_DIR:-$ROOT/native-deps/build/src/linux}"
+      linux_source="$ROOT/native-deps/build/src/linux"
       release_materials_copy_licenses "$linux_source" linux
       linux_license_sha="$(sha256sum "$linux_source/COPYING" | awk '{print $1}')"
       release_materials_record_source bin/vmlinux linux 6.1.169 \

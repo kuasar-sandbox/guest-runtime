@@ -136,7 +136,8 @@ sandbox-runtime:
 
 test:
 	$(MAKE) -C native-deps test
-	python3 -m py_compile scripts/guest-inspect.py
+	PYTHONPYCACHEPREFIX="$(abspath $(BUILD_DIR)/python-cache)" \
+		python3 -m py_compile scripts/guest-inspect.py
 	CGO_ENABLED=0 $(GO) test ./...
 
 vet:

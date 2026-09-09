@@ -51,6 +51,71 @@ if grep -Fq 'share/sources/hash-test/MATERIALS.sha256' "$TMP/material-hash-actua
   fail "generated material inventory included itself"
 fi
 
+material_root="$TMP/material-validation"
+material_unit=validation
+mkdir -p "$material_root/share/licenses/$material_unit/project" \
+  "$material_root/share/sources/$material_unit" "$TMP/material-validation-work"
+printf 'fixture license\n' > "$material_root/share/licenses/$material_unit/project/LICENSE"
+{
+  printf 'payload\tname\tversion\tsource\tintegrity\tlicense_directory\n'
+  printf 'bin/tool\tfixture\tv1.0.0\thttps://example.invalid/source.tar.gz\tsha256:fixture\tshare/licenses/%s/project\n' \
+    "$material_unit"
+} > "$material_root/share/sources/$material_unit/SOURCES.tsv"
+printf 'payload\trecord\tname\tversion_or_value\tchecksum\n' \
+  > "$material_root/share/sources/$material_unit/GO-BUILD-INFO.tsv"
+printf 'module\tversion\tchecksum\n' \
+  > "$material_root/share/sources/$material_unit/GO-MODULES.tsv"
+release_materials_hash_tree "$material_root" "$material_unit" \
+  "$material_root/share/sources/$material_unit/MATERIALS.sha256"
+find "$material_root/share" -type d -exec chmod 0755 {} +
+find "$material_root/share" -type f -exec chmod 0644 {} +
+(
+  WORK="$TMP/material-validation-work"
+  release_materials_validate "$material_root" "$material_unit"
+)
+
+cp -a "$material_root" "$TMP/material-unsafe-license-path"
+{
+  printf 'payload\tname\tversion\tsource\tintegrity\tlicense_directory\n'
+  printf 'bin/tool\tfixture\tv1.0.0\thttps://example.invalid/source.tar.gz\tsha256:fixture\t../../../etc\n'
+} > "$TMP/material-unsafe-license-path/share/sources/$material_unit/SOURCES.tsv"
+release_materials_hash_tree "$TMP/material-unsafe-license-path" "$material_unit" \
+  "$TMP/material-unsafe-license-path/share/sources/$material_unit/MATERIALS.sha256"
+chmod 0644 "$TMP/material-unsafe-license-path/share/sources/$material_unit/MATERIALS.sha256"
+if (
+  WORK="$TMP/material-validation-work"
+  release_materials_validate "$TMP/material-unsafe-license-path" "$material_unit" \
+    >/dev/null 2>&1
+); then
+  fail "release material validator accepted a license directory outside its unit"
+fi
+
+cp -a "$material_root" "$TMP/material-invalid-record"
+{
+  printf 'payload\tname\tversion\tsource\tintegrity\tlicense_directory\n'
+  printf 'bin/tool\tfixture\tv1.0.0\thttps://example.invalid/source.tar.gz\tsha256:fixture\n'
+} > "$TMP/material-invalid-record/share/sources/$material_unit/SOURCES.tsv"
+release_materials_hash_tree "$TMP/material-invalid-record" "$material_unit" \
+  "$TMP/material-invalid-record/share/sources/$material_unit/MATERIALS.sha256"
+chmod 0644 "$TMP/material-invalid-record/share/sources/$material_unit/MATERIALS.sha256"
+if (
+  WORK="$TMP/material-validation-work"
+  release_materials_validate "$TMP/material-invalid-record" "$material_unit" \
+    >/dev/null 2>&1
+); then
+  fail "release material validator accepted a SOURCES.tsv row with fewer than six fields"
+fi
+
+cp -a "$material_root" "$TMP/material-unsafe-parent-mode"
+chmod 0777 "$TMP/material-unsafe-parent-mode/share"
+if (
+  WORK="$TMP/material-validation-work"
+  release_materials_validate "$TMP/material-unsafe-parent-mode" "$material_unit" \
+    >/dev/null 2>&1
+); then
+  fail "release material validator accepted an unsafe parent directory mode"
+fi
+
 bash "$ROOT/scripts/test-preview-line.sh"
 bash "$ROOT/scripts/test-delete-preview.sh"
 
@@ -131,55 +196,76 @@ grep -Fq 'publish-release.sh reconcile' "$RECONCILE_WORKFLOW" \
 if grep -R -Fq 'queue: max' "$ROOT/.github/workflows"; then
   fail "workflows use the unsupported concurrency queue key"
 fi
+grep -Fq 'PYTHONPYCACHEPREFIX="$(abspath $(BUILD_DIR)/python-cache)"' \
+  "$ROOT/Makefile" \
+  || fail "make test writes Python bytecode outside the ignored build tree"
 
 [ "$(git -C "$ROOT" ls-files -s -- test/e2e/run_all.sh | awk '{print $1}')" = 100755 ] \
   || fail "test/e2e/run_all.sh is not executable in the Git index"
 
-mkdir -p "$TMP/bin" "$TMP/native-bin" "$TMP/src" \
-  "$TMP/sandboxer" "$TMP/accelerator" "$TMP/envd" \
-  "$TMP/erofs" "$TMP/linux/LICENSES/preferred"
+fixture_root="$TMP/guest-runtime"
+mkdir -p "$TMP/src" "$TMP/sandboxer/bin/x86_64" "$TMP/accelerator" \
+  "$fixture_root/scripts" "$fixture_root/bin/x86_64" \
+  "$fixture_root/native-deps/bin/x86_64" \
+  "$fixture_root/native-deps/build/src/e2b-infra" \
+  "$fixture_root/native-deps/build/x86_64/src/erofs-utils" \
+  "$fixture_root/native-deps/build/src/linux/LICENSES/preferred"
+install -m 0644 "$ROOT/LICENSE" "$fixture_root/LICENSE"
+install -m 0644 "$ROOT/.gitignore" "$fixture_root/.gitignore"
+install -m 0644 "$ROOT/native-deps/.gitignore" "$fixture_root/native-deps/.gitignore"
+install -m 0644 "$ROOT/native-deps/Makefile" "$fixture_root/native-deps/Makefile"
+install -m 0755 "$ROOT/scripts/release.sh" "$fixture_root/scripts/release.sh"
+install -m 0755 "$ROOT/scripts/release-materials.sh" \
+  "$fixture_root/scripts/release-materials.sh"
+printf '/bin/\n/build/\n' > "$TMP/sandboxer/.gitignore"
+printf '/bin/\n/build/\n' > "$TMP/accelerator/.gitignore"
 printf 'package main\nfunc main() {}\n' > "$TMP/src/main.go"
-GO111MODULE=off go build -o "$TMP/bin/flatten-ctl" "$TMP/src/main.go"
-install -m 0755 "$TMP/bin/flatten-ctl" "$TMP/sandbox-init"
-install -m 0755 "$TMP/bin/flatten-ctl" "$TMP/envd-bin"
-printf 'runtime bundle\n' > "$TMP/bin/sandbox-runtime.bundle"
-printf '#!/bin/sh\nexit 0\n' > "$TMP/native-bin/mkfs.erofs"
-printf 'kernel\n' > "$TMP/native-bin/vmlinux"
-chmod +x "$TMP/native-bin/mkfs.erofs"
+GO111MODULE=off go build -o "$TMP/tool" "$TMP/src/main.go"
+install -m 0755 "$TMP/tool" "$fixture_root/bin/x86_64/flatten-ctl"
+install -m 0755 "$TMP/tool" "$TMP/sandboxer/bin/x86_64/sandbox-init"
+install -m 0755 "$TMP/tool" "$fixture_root/native-deps/bin/x86_64/envd"
+printf 'runtime bundle\n' > "$fixture_root/bin/x86_64/sandbox-runtime.bundle"
+printf '#!/bin/sh\nexit 0\n' > "$fixture_root/native-deps/bin/x86_64/mkfs.erofs"
+printf 'kernel\n' > "$fixture_root/native-deps/bin/x86_64/vmlinux"
+chmod +x "$fixture_root/native-deps/bin/x86_64/mkfs.erofs"
 printf 'fixture sandboxer license\n' > "$TMP/sandboxer/LICENSE"
 printf 'fixture accelerator license\n' > "$TMP/accelerator/LICENSE"
-printf 'fixture envd license\n' > "$TMP/envd/LICENSE"
-printf 'fixture erofs authors\n' > "$TMP/erofs/AUTHORS"
-printf 'fixture erofs license\n' > "$TMP/erofs/COPYING"
-printf 'fixture Linux license\n' > "$TMP/linux/COPYING"
-printf 'fixture GPL-2.0 text\n' > "$TMP/linux/LICENSES/preferred/GPL-2.0"
-sandboxer_sha="$(init_fixture_repo "$TMP/sandboxer" LICENSE)"
-accelerator_sha="$(init_fixture_repo "$TMP/accelerator" LICENSE)"
+printf 'fixture envd license\n' \
+  > "$fixture_root/native-deps/build/src/e2b-infra/LICENSE"
+printf 'fixture erofs authors\n' \
+  > "$fixture_root/native-deps/build/x86_64/src/erofs-utils/AUTHORS"
+printf 'fixture erofs license\n' \
+  > "$fixture_root/native-deps/build/x86_64/src/erofs-utils/COPYING"
+printf 'fixture Linux license\n' \
+  > "$fixture_root/native-deps/build/src/linux/COPYING"
+printf 'fixture GPL-2.0 text\n' \
+  > "$fixture_root/native-deps/build/src/linux/LICENSES/preferred/GPL-2.0"
+sandboxer_sha="$(init_fixture_repo "$TMP/sandboxer" LICENSE .gitignore)"
+accelerator_sha="$(init_fixture_repo "$TMP/accelerator" LICENSE .gitignore)"
+init_fixture_repo "$fixture_root" LICENSE .gitignore native-deps/.gitignore \
+  native-deps/Makefile scripts/release.sh scripts/release-materials.sh >/dev/null
 
 common_env=(
-  RELEASE_BIN_DIR="$TMP/bin"
-  RELEASE_NATIVE_BIN_DIR="$TMP/native-bin"
-  RELEASE_SANDBOXER_SOURCE_DIR="$TMP/sandboxer"
   RELEASE_SANDBOXER_SOURCE_SHA="$sandboxer_sha"
   RELEASE_SANDBOXER_VERSION=v0.1.3
-  RELEASE_ACCELERATOR_SOURCE_DIR="$TMP/accelerator"
   RELEASE_ACCELERATOR_SOURCE_SHA="$accelerator_sha"
   RELEASE_ACCELERATOR_VERSION=v0.1.3
-  RELEASE_ENVD_SOURCE_DIR="$TMP/envd"
-  RELEASE_EROFS_SOURCE_DIR="$TMP/erofs"
-  RELEASE_LINUX_SOURCE_DIR="$TMP/linux"
-  RELEASE_SANDBOX_INIT_BIN="$TMP/sandbox-init"
-  RELEASE_ENVD_BIN="$TMP/envd-bin"
+  EROFS_TARBALL=https://codeload.github.com/erofs/erofs-utils/tar.gz/refs/tags/v1.9.1#erofs-utils-v1.9.1.tar.gz
+  EROFS_TARBALL_SHA256=a9ef5ab67c4b8d2d3e9ed71f39cd008bda653142a720d8a395a36f1110d0c432
+  ENVD_TARBALL=https://codeload.github.com/e2b-dev/infra/tar.gz/refs/tags/2026.22#e2b-infra-2026.22.tar.gz
+  ENVD_TARBALL_SHA256=9e1e81f2963fda1805466c337cd0a33638182a15a66295fd19bba6b9c454d92c
+  LINUX_TARBALL=https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.1.169.tar.gz
+  LINUX_TARBALL_SHA256=ab28b4ca2a2eca38b3da9aa33b231288168c3560bbc866359045f1c8f4d48d94
   SOURCE_DATE_EPOCH=1700000000
 )
 
-env "${common_env[@]}" "$ROOT/scripts/release.sh" package \
+env "${common_env[@]}" "$fixture_root/scripts/release.sh" package \
   runtime runtime-v1.2.3-preview.20260804 x86_64 "$TMP/runtime-bundle"
-env "${common_env[@]}" "$ROOT/scripts/release.sh" package \
+env "${common_env[@]}" "$fixture_root/scripts/release.sh" package \
   vmlinux vmlinux-v2.3.4 x86_64 "$TMP/vmlinux-bundle"
-"$ROOT/scripts/release.sh" validate \
+"$fixture_root/scripts/release.sh" validate \
   runtime runtime-v1.2.3-preview.20260804 x86_64 "$TMP/runtime-bundle"
-"$ROOT/scripts/release.sh" validate \
+"$fixture_root/scripts/release.sh" validate \
   vmlinux vmlinux-v2.3.4 x86_64 "$TMP/vmlinux-bundle"
 
 RELEASE_KIND=runtime bash "$ROOT/scripts/test-publisher.sh" \
@@ -237,9 +323,9 @@ if tar -tzf "$vmlinux_archive" | grep -E 'vmlinux-x86_64-|(^|/)release/' >/dev/n
   fail "vmlinux archive contains a duplicate versioned payload or release metadata"
 fi
 
-env "${common_env[@]}" "$ROOT/scripts/release.sh" package \
+env "${common_env[@]}" "$fixture_root/scripts/release.sh" package \
   runtime runtime-v1.2.3-preview.20260804 x86_64 "$TMP/runtime-reproducible"
-env "${common_env[@]}" "$ROOT/scripts/release.sh" package \
+env "${common_env[@]}" "$fixture_root/scripts/release.sh" package \
   vmlinux vmlinux-v2.3.4 x86_64 "$TMP/vmlinux-reproducible"
 cmp -s "$runtime_archive" \
   "$TMP/runtime-reproducible/assets/sandbox-runtime-x86_64-v1.2.3-preview.20260804.tar.gz" \
@@ -251,23 +337,35 @@ cmp -s "$vmlinux_archive" \
 cp -a "$TMP/runtime-bundle" "$TMP/tampered"
 printf 'tampered\n' >> \
   "$TMP/tampered/assets/sandbox-runtime-x86_64-v1.2.3-preview.20260804.tar.gz"
-if "$ROOT/scripts/release.sh" validate runtime runtime-v1.2.3-preview.20260804 \
+if "$fixture_root/scripts/release.sh" validate runtime runtime-v1.2.3-preview.20260804 \
   x86_64 "$TMP/tampered" >/dev/null 2>&1; then
   fail "validator accepted a tampered runtime archive"
 fi
 cp -a "$TMP/vmlinux-bundle" "$TMP/extra"
 touch "$TMP/extra/assets/release.json"
-if "$ROOT/scripts/release.sh" validate vmlinux vmlinux-v2.3.4 \
+if "$fixture_root/scripts/release.sh" validate vmlinux vmlinux-v2.3.4 \
   x86_64 "$TMP/extra" >/dev/null 2>&1; then
   fail "validator accepted an extra asset"
 fi
-if env "${common_env[@]}" "$ROOT/scripts/release.sh" package \
+if env "${common_env[@]}" "$fixture_root/scripts/release.sh" package \
   runtime v1.2.3 x86_64 "$TMP/invalid-version" >/dev/null 2>&1; then
   fail "packager accepted a runtime version without the runtime prefix"
 fi
-if env "${common_env[@]}" "$ROOT/scripts/release.sh" package \
+if env "${common_env[@]}" "$fixture_root/scripts/release.sh" package \
   vmlinux vmlinux-v1.2.3 aarch64 "$TMP/invalid-arch" >/dev/null 2>&1; then
   fail "packager accepted an unvalidated release architecture"
+fi
+if env "${common_env[@]}" \
+  ENVD_TARBALL=https://example.invalid/envd.tar.gz \
+  "$fixture_root/scripts/release.sh" package runtime \
+    runtime-v1.2.3 x86_64 "$TMP/nondefault-envd" >/dev/null 2>&1; then
+  fail "packager accepted a non-default Envd source input"
+fi
+if env "${common_env[@]}" \
+  RELEASE_ENVD_SOURCE_DIR="$fixture_root/native-deps/build/src/e2b-infra" \
+  "$fixture_root/scripts/release.sh" package runtime \
+    runtime-v1.2.3 x86_64 "$TMP/overridden-envd-source" >/dev/null 2>&1; then
+  fail "packager accepted an unbound Envd source directory override"
 fi
 
 echo "test-release: PASS"

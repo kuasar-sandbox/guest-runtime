@@ -39,6 +39,11 @@ pin 落在 Makefile 变量(`EROFS_TARBALL` / `LINUX_TARBALL` / `ENVD_TARBALL` �
 `*_TARBALL_SHA256` 为空时跳过校验。当前 EROFS、Linux、Envd 默认输入配置了 hash;
 可选网关的 hash 按部署验证策略补充。升级版本 = 改变量 + 重验 patch 应用。
 
+这些覆盖项用于开发构建。Runtime 与 vmlinux 发行打包器只接受仓库 pin 且带已配置
+摘要的 EROFS、Linux 和 Envd 输入(发行工作流可以从精确的公共镜像取得相同 Linux
+字节)。发布其他原生输入时,必须同时更新仓库 pin、摘要与发行来源记录;否则打包会
+失败,不会为不同输入生成错误的来源记录。
+
 `librocksdb`(`accelerator` 的 CGO 链接依赖)在该仓内构建,不在此处。
 
 <a id="组成"></a>

@@ -29,6 +29,13 @@ Project-level aggregation runs `make -C kuasar-sandbox build`, which invokes thi
 
 Pins live in Makefile variables (`EROFS_TARBALL`, `LINUX_TARBALL`, `ENVD_TARBALL`, and optional `VERSITYGW_TARBALL`), accepting `url#filename` or a local path. An empty corresponding `*_TARBALL_SHA256` skips verification. The current default EROFS, Linux and Envd inputs have hashes configured; the optional gateway hash must be supplied when required by the deployment's verification policy. Updating a version means updating those variables and revalidating patch application.
 
+Those overrides are development-build inputs. The Runtime and vmlinux release
+packagers accept only the repository-pinned EROFS, Linux and Envd inputs with
+their configured digests (the release workflow may fetch the same Linux bytes
+from its exact public mirror). To publish another native input, update its
+repository pin, digest and release source record together; packaging fails
+instead of emitting provenance for a different input.
+
 `librocksdb`, accelerator's CGO link dependency, is built in that repository, not here.
 
 <a id="组成"></a>
