@@ -157,6 +157,12 @@ validate_native_release_inputs() {
   esac
 }
 
+stage_release_source() {
+  local source="$1" sha="$2" destination="$3"
+  mkdir -p "$destination"
+  git -C "$source" archive "$sha" | tar -xf - -C "$destination"
+}
+
 validate_archive_paths() {
   local archive="$1" kind="$2" listing="$WORK/listing"
   tar -tzf "$archive" > "$listing"
@@ -208,6 +214,14 @@ validate_bundle() {
   release_materials_validate "$extract" "$kind"
   case "$kind" in
     runtime)
+      release_materials_require_source "$extract" "$kind" 'bin/sandbox-runtime.bundle,bin/flatten-ctl' 'guest-runtime' "$version"
+      release_materials_require_source "$extract" "$kind" 'bin/sandbox-runtime.bundle:/sbin/init' 'sandboxer' ""
+      release_materials_require_source "$extract" "$kind" 'bin/sandbox-runtime.bundle,bin/flatten-ctl' 'accelerator' ""
+      release_materials_require_source "$extract" "$kind" 'bin/sandbox-runtime.bundle:/opt/sandbox-runtime/bin/envd' 'envd' "2026.22"
+      release_materials_require_source "$extract" "$kind" 'bin/mkfs.erofs,bin/sandbox-runtime.bundle:/opt/sandbox-runtime/bin/mkfs.erofs' 'erofs-utils' "v1.9.1"
+      release_materials_require_go "$extract" "$kind" 'bin/flatten-ctl'
+      release_materials_require_go "$extract" "$kind" 'bin/sandbox-runtime.bundle:/sbin/init'
+      release_materials_require_go "$extract" "$kind" 'bin/sandbox-runtime.bundle:/opt/sandbox-runtime/bin/envd'
       [ -f "$extract/bin/sandbox-runtime.bundle" ] \
         || fail "$archive is missing bin/sandbox-runtime.bundle"
       [ -x "$extract/bin/flatten-ctl" ] || fail "$archive is missing bin/flatten-ctl"
@@ -216,6 +230,8 @@ validate_bundle() {
       ;;
     vmlinux)
       [ -f "$extract/bin/vmlinux" ] || fail "$archive is missing bin/vmlinux"
+      release_materials_require_source "$extract" "$kind" 'bin/vmlinux' 'linux' "6.1.169"
+      release_materials_require_source "$extract" "$kind" 'bin/vmlinux' 'guest-runtime-kernel-inputs' "$version"
       ;;
   esac
 }
@@ -223,6 +239,7 @@ validate_bundle() {
 package_release() {
   [ "$#" -eq 4 ] || fail "usage: release.sh package <runtime|vmlinux> <version> <arch> <output-dir>"
   local kind="$1" version="$2" arch archive output="$4" epoch bin_dir native_bin_dir project_sha value
+  local build_workspace="$WORK/build" build_root tarball_dir
   arch="$(normalize_arch "$3")"
   archive="$(archive_name "$kind" "$version" "$arch")"
   if [ -z "$output" ] || [ "$output" = / ] || [ "$output" = . ]; then
@@ -236,9 +253,12 @@ package_release() {
   STAGE="$WORK/stage"
   rm -rf "$STAGE"
   mkdir -p "$STAGE"
-  bin_dir="$ROOT/bin/$arch"
-  native_bin_dir="$ROOT/native-deps/bin/$arch"
   project_sha="$(release_materials_resolve_git_source "$ROOT" "" guest-runtime)"
+  build_root="$build_workspace/guest-runtime"
+  stage_release_source "$ROOT" "$project_sha" "$build_root"
+  bin_dir="$build_root/bin/$arch"
+  native_bin_dir="$build_root/native-deps/bin/$arch"
+  tarball_dir="$ROOT/native-deps/build/tarball"
   release_materials_init "$STAGE" "$WORK/materials" "$kind"
   release_materials_copy_licenses "$ROOT" project
   case "$kind" in
@@ -246,15 +266,11 @@ package_release() {
       local sandboxer_source accelerator_source envd_source erofs_source
       local sandbox_init_bin envd_bin sandboxer_version accelerator_version
       local sandboxer_sha accelerator_sha
-      copy_external_file "$bin_dir/sandbox-runtime.bundle" bin/sandbox-runtime.bundle
-      copy_executable "$bin_dir/flatten-ctl" bin/flatten-ctl
-      copy_executable "$native_bin_dir/mkfs.erofs" bin/mkfs.erofs
-      check_go_binary "$STAGE/bin/flatten-ctl"
       sandboxer_source="${RELEASE_SANDBOXER_SOURCE_DIR:-$ROOT/../sandboxer}"
       accelerator_source="${RELEASE_ACCELERATOR_SOURCE_DIR:-$ROOT/../accelerator}"
-      envd_source="$ROOT/native-deps/build/src/e2b-infra"
-      erofs_source="$ROOT/native-deps/build/$arch/src/erofs-utils"
-      sandbox_init_bin="$sandboxer_source/bin/$arch/sandbox-init"
+      envd_source="$build_root/native-deps/build/src/e2b-infra"
+      erofs_source="$build_root/native-deps/build/$arch/src/erofs-utils"
+      sandbox_init_bin="$build_workspace/sandboxer/bin/$arch/sandbox-init"
       envd_bin="$native_bin_dir/envd"
       sandboxer_version="${RELEASE_SANDBOXER_VERSION:-${SANDBOXER_VERSION:-}}"
       accelerator_version="${RELEASE_ACCELERATOR_VERSION:-${ACCELERATOR_VERSION:-}}"
@@ -266,6 +282,24 @@ package_release() {
         "${RELEASE_SANDBOXER_SOURCE_SHA:-}" sandboxer)"
       accelerator_sha="$(release_materials_resolve_git_source "$accelerator_source" \
         "${RELEASE_ACCELERATOR_SOURCE_SHA:-}" accelerator)"
+      stage_release_source "$sandboxer_source" "$sandboxer_sha" "$build_workspace/sandboxer"
+      stage_release_source "$accelerator_source" "$accelerator_sha" "$build_workspace/accelerator"
+      # Fresh source/build roots prevent local output and extraction caches from
+      # changing the payload while the material record still names pinned inputs.
+      env -u MAKEFLAGS -u MFLAGS -u MAKEOVERRIDES GOWORK=off \
+        make --no-print-directory -C "$build_root/native-deps" \
+        TARGET_ARCH="$arch" TARBALL_DIR="$tarball_dir" \
+        ENVD_SRC="$envd_source" erofs envd
+      env -u MAKEFLAGS -u MFLAGS -u MAKEOVERRIDES GOWORK=off \
+        make --no-print-directory -C "$build_root" \
+        TARGET_ARCH="$arch" BUILD_MKFS_EROFS="$native_bin_dir/mkfs.erofs" \
+        flatten-ctl sandbox-init sandbox-runtime
+      copy_external_file "$bin_dir/sandbox-runtime.bundle" bin/sandbox-runtime.bundle
+      copy_executable "$bin_dir/flatten-ctl" bin/flatten-ctl
+      copy_executable "$native_bin_dir/mkfs.erofs" bin/mkfs.erofs
+      check_go_binary "$STAGE/bin/flatten-ctl"
+      accelerator_version="$(release_materials_git_version "$accelerator_source" "$accelerator_version" "$accelerator_sha")"
+      sandboxer_version="$(release_materials_git_version "$sandboxer_source" "$sandboxer_version" "$sandboxer_sha")"
       release_materials_copy_licenses "$sandboxer_source" sandboxer
       release_materials_copy_licenses "$accelerator_source" accelerator
       release_materials_copy_licenses "$envd_source" envd
@@ -291,8 +325,13 @@ package_release() {
       ;;
     vmlinux)
       local linux_source linux_license_sha
+      env -u MAKEFLAGS -u MFLAGS -u MAKEOVERRIDES GOWORK=off \
+        make --no-print-directory -C "$build_root/native-deps" \
+        TARGET_ARCH="$arch" TARBALL_DIR="$tarball_dir" \
+        LINUX_BUILD_SRC="$build_root/native-deps/build/src/linux" \
+        LINUX_BUILD_OUT="$build_root/native-deps/build/$arch/linux" vmlinux
       copy_external_file "$native_bin_dir/vmlinux" bin/vmlinux
-      linux_source="$ROOT/native-deps/build/src/linux"
+      linux_source="$build_root/native-deps/build/src/linux"
       release_materials_copy_licenses "$linux_source" linux
       linux_license_sha="$(sha256sum "$linux_source/COPYING" | awk '{print $1}')"
       release_materials_record_source bin/vmlinux linux 6.1.169 \

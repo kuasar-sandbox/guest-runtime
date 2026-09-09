@@ -44,6 +44,13 @@ pin 落在 Makefile 变量(`EROFS_TARBALL` / `LINUX_TARBALL` / `ENVD_TARBALL` �
 字节)。发布其他原生输入时,必须同时更新仓库 pin、摘要与发行来源记录;否则打包会
 失败,不会为不同输入生成错误的来源记录。
 
+发行打包从所选 Git commit 的干净快照出发,在本次临时兄弟工作区中调用现有组件
+Makefile。Runtime 打包重建其最小 accelerator/sandboxer 依赖闭包、Envd、EROFS
+工具和 Runtime image;Kernel 打包独立重建采用所选 patch 与 config 的 Linux。
+仅复用通过 checksum 验证的下载 tarball。已有二进制、解压源码树和开发中的工作
+保持不变。内部依赖记录只有在本地 Git Tag 指向所选 commit 时才保留该发行版本;
+否则记录 `git:<commit>`,目标正式 Tag 尚不存在时也适用。
+
 `librocksdb`(`accelerator` 的 CGO 链接依赖)在该仓内构建,不在此处。
 
 <a id="组成"></a>

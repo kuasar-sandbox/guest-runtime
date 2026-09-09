@@ -36,6 +36,16 @@ from its exact public mirror). To publish another native input, update its
 repository pin, digest and release source record together; packaging fails
 instead of emitting provenance for a different input.
 
+Release packaging builds from clean snapshots of the selected Git commits in a
+temporary sibling workspace, using the existing component Makefiles. Runtime
+packaging rebuilds its minimal accelerator/sandboxer closure, Envd, EROFS tools,
+and the image; kernel packaging independently rebuilds Linux with the selected
+patches and configuration. Only checksum-verified download tarballs are reused.
+Existing binary outputs, extracted source trees and development work remain
+untouched. Internal dependency records retain a release version only when its
+local Git tag identifies the selected commit; otherwise they record
+`git:<commit>`, including when a target formal tag does not exist yet.
+
 `librocksdb`, accelerator's CGO link dependency, is built in that repository, not here.
 
 <a id="组成"></a>
