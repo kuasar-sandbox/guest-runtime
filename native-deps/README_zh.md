@@ -51,6 +51,12 @@ Makefile。Runtime 打包重建其最小 accelerator/sandboxer 依赖闭包、En
 保持不变。内部依赖记录只有在本地 Git Tag 指向所选 commit 时才保留该发行版本;
 否则记录 `git:<commit>`,目标正式 Tag 尚不存在时也适用。
 
+验证器拒绝非 root 的归档数字属主,并核对 Envd、EROFS 和 Linux 的精确来源 URL
+与摘要。发布时把选定的 `SOURCE_SHA` 传入验证器;Runtime 发布还必须提供精确的
+accelerator/sandboxer `RELEASE_DEPENDENCIES` 绑定。重新生成校验和不能让不同的
+项目 commit、依赖版本或原生来源通过该发布请求。本地源码打包仍可使用尚无 Tag
+的依赖 commit,但不会把这些记录声称为已存在的发行版本。
+
 Runtime 打包还读取本次新构建的 `mkfs.erofs` 链接映射。对实际链入的系统静态库
 或启动对象,记录文件摘要和已安装的 Debian 源包或 RPM 源包身份,并收集对应的
 版权、许可和 NOTICE 文件,包括其引用的公共许可正文。这既覆盖 erofs-utils,

@@ -24,7 +24,7 @@ AGGREGATE_VERSION=
 AGGREGATE_SHA=1111111111111111111111111111111111111111
 FAKE_PLATFORM_MANIFEST=
 UNIT="${REPOSITORY##*/}"
-RELEASE_DEPENDENCIES=
+RELEASE_DEPENDENCIES="${RELEASE_DEPENDENCIES:-}"
 if [ "$UNIT" = guest-runtime ]; then
   case "$TAG" in runtime-*) UNIT=runtime ;; vmlinux-*) UNIT=vmlinux ;; esac
 fi
@@ -38,12 +38,12 @@ if [ "$EXPECTED_LATEST" = true ]; then
 fi
 if [ "$EXPECTED_PRERELEASE" = true ]; then
   preview_date="${TAG##*-preview.}"
-  case "$UNIT" in
+  if [ -z "$RELEASE_DEPENDENCIES" ]; then case "$UNIT" in
     sandboxer) RELEASE_DEPENDENCIES='accelerator=v1.0.0,connector=v1.0.0' ;;
     orchestrator|runtime)
       RELEASE_DEPENDENCIES='accelerator=v1.0.0,connector=v1.0.0,sandboxer=v1.0.0'
       ;;
-  esac
+  esac; fi
   AGGREGATE_VERSION="release-v9.8.7-preview.$preview_date"
   FAKE_PLATFORM_MANIFEST="$(printf '%s\n' \
     'version: release-v9.8.7' "preview_version: preview.$preview_date" \

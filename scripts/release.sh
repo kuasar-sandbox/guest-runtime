@@ -179,8 +179,28 @@ validate_archive_paths() {
     { path=$0; sub(/^\.\//, "", path) }
     path != "" && path !~ /\/$/ && path !~ /^bin\// && path !~ ("^share/(licenses|sources)/" unit "/") { exit 1 }
   ' "$listing" || fail "$archive contains a file outside the $kind release layout"
-  tar -tvzf "$archive" | awk '$1 !~ /^[-d]/ { exit 1 }' \
-    || fail "$archive contains a non-regular, non-directory entry"
+  tar --numeric-owner -tvzf "$archive" | awk '$1 !~ /^[-d]/ || $2 != "0/0" { exit 1 }' \
+    || fail "$archive contains a non-regular entry or non-root ownership"
+}
+
+requested_dependency_version() {
+  local name="$1" binding="${RELEASE_DEPENDENCIES:-}" entry value result=""
+  local -a entries
+  [ -n "$binding" ] || return 0 # Standalone source packaging can use untagged commits.
+  IFS=, read -r -a entries <<< "$binding"
+  [ "${#entries[@]}" -eq 2 ] || fail "Runtime release must bind accelerator and sandboxer"
+  for entry in "${entries[@]}"; do
+    case "${entry%%=*}" in accelerator|sandboxer) ;; *) fail "unexpected Runtime dependency" ;; esac
+    value="${entry#*=}"
+    [[ "$value" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-preview\.[0-9]{8})?$ ]] \
+      || fail "invalid Runtime dependency version"
+    if [ "${entry%%=*}" = "$name" ]; then
+      [ -z "$result" ] || fail "duplicate Runtime dependency: $name"
+      result="$value"
+    fi
+  done
+  [ -n "$result" ] || fail "missing Runtime dependency: $name"
+  printf '%s\n' "$result"
 }
 
 validate_bundle() {
@@ -214,14 +234,29 @@ validate_bundle() {
   mkdir -p "$extract"
   tar -xzf "$bundle/assets/$archive" -C "$extract"
   release_materials_validate "$extract" "$kind"
+  local selected_sha="${SOURCE_SHA:-}" selected_url="" selected_integrity=""
+  if [ -n "$selected_sha" ]; then
+    [[ "$selected_sha" =~ ^[0-9a-f]{40}$ ]] || fail "SOURCE_SHA must be a full lowercase commit"
+    selected_url="https://github.com/kuasar-sandbox/guest-runtime/commit/$selected_sha"
+    selected_integrity="git:$selected_sha"
+  fi
   case "$kind" in
     runtime)
-      release_materials_require_source "$extract" "$kind" 'bin/sandbox-runtime.bundle,bin/flatten-ctl' 'guest-runtime' "$version"
-      release_materials_require_source "$extract" "$kind" 'bin/sandbox-runtime.bundle:/sbin/init' 'sandboxer' ""
-      release_materials_require_source "$extract" "$kind" 'bin/sandbox-runtime.bundle,bin/flatten-ctl' 'accelerator' ""
-      release_materials_require_source "$extract" "$kind" 'bin/sandbox-runtime.bundle:/opt/sandbox-runtime/bin/envd' 'envd' "2026.22"
-      release_materials_require_source "$extract" "$kind" 'bin/sandbox-runtime.bundle:/opt/sandbox-runtime/bin/envd' 'github.com/e2b-dev/infra/packages/shared' "2026.22"
-      release_materials_require_source "$extract" "$kind" 'bin/mkfs.erofs,bin/sandbox-runtime.bundle:/opt/sandbox-runtime/bin/mkfs.erofs' 'erofs-utils' "v1.9.1"
+      local expected_sandboxer expected_accelerator
+      expected_sandboxer="$(requested_dependency_version sandboxer)" || fail "invalid sandboxer release binding"
+      expected_accelerator="$(requested_dependency_version accelerator)" || fail "invalid accelerator release binding"
+      release_materials_require_source "$extract" "$kind" 'bin/sandbox-runtime.bundle,bin/flatten-ctl' 'guest-runtime' "$version" "$selected_url" "$selected_integrity"
+      release_materials_require_source "$extract" "$kind" 'bin/sandbox-runtime.bundle:/sbin/init' 'sandboxer' "$expected_sandboxer"
+      release_materials_require_source "$extract" "$kind" 'bin/sandbox-runtime.bundle,bin/flatten-ctl' 'accelerator' "$expected_accelerator"
+      release_materials_require_source "$extract" "$kind" 'bin/sandbox-runtime.bundle:/opt/sandbox-runtime/bin/envd' 'envd' "2026.22" \
+        'https://github.com/e2b-dev/infra/archive/refs/tags/2026.22.tar.gz' \
+        'sha256:9e1e81f2963fda1805466c337cd0a33638182a15a66295fd19bba6b9c454d92c'
+      release_materials_require_source "$extract" "$kind" 'bin/sandbox-runtime.bundle:/opt/sandbox-runtime/bin/envd' 'github.com/e2b-dev/infra/packages/shared' "2026.22" \
+        'https://github.com/e2b-dev/infra/archive/refs/tags/2026.22.tar.gz' \
+        'sha256:9e1e81f2963fda1805466c337cd0a33638182a15a66295fd19bba6b9c454d92c'
+      release_materials_require_source "$extract" "$kind" 'bin/mkfs.erofs,bin/sandbox-runtime.bundle:/opt/sandbox-runtime/bin/mkfs.erofs' 'erofs-utils' "v1.9.1" \
+        'https://github.com/erofs/erofs-utils/archive/refs/tags/v1.9.1.tar.gz' \
+        'sha256:a9ef5ab67c4b8d2d3e9ed71f39cd008bda653142a720d8a395a36f1110d0c432'
       release_materials_require_go "$extract" "$kind" 'bin/flatten-ctl'
       release_materials_require_source "$extract" "$kind" \
         'bin/mkfs.erofs,bin/sandbox-runtime.bundle:/opt/sandbox-runtime/bin/mkfs.erofs' 'system:libc.a' ""
@@ -237,8 +272,14 @@ validate_bundle() {
       ;;
     vmlinux)
       [ -f "$extract/bin/vmlinux" ] || fail "$archive is missing bin/vmlinux"
-      release_materials_require_source "$extract" "$kind" 'bin/vmlinux' 'linux' "6.1.169"
-      release_materials_require_source "$extract" "$kind" 'bin/vmlinux' 'guest-runtime-kernel-inputs' "$version"
+      release_materials_require_source "$extract" "$kind" 'bin/vmlinux' 'linux' "6.1.169" \
+        'https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.1.169.tar.gz' \
+        'sha256:ab28b4ca2a2eca38b3da9aa33b231288168c3560bbc866359045f1c8f4d48d94'
+      if [ -n "$selected_sha" ]; then
+        selected_url="https://github.com/kuasar-sandbox/guest-runtime/tree/$selected_sha/native-deps/deps"
+        selected_integrity="git:$selected_sha;linux-copying-sha256:$(sha256sum "$extract/share/licenses/vmlinux/linux/COPYING" | awk '{print $1}')"
+      fi
+      release_materials_require_source "$extract" "$kind" 'bin/vmlinux' 'guest-runtime-kernel-inputs' "$version" "$selected_url" "$selected_integrity"
       ;;
   esac
 }
@@ -260,7 +301,7 @@ package_release() {
   STAGE="$WORK/stage"
   rm -rf "$STAGE"
   mkdir -p "$STAGE"
-  project_sha="$(release_materials_resolve_git_source "$ROOT" "" guest-runtime)"
+  project_sha="$(release_materials_resolve_git_source "$ROOT" "${SOURCE_SHA:-}" guest-runtime)"
   build_root="$build_workspace/guest-runtime"
   stage_release_source "$ROOT" "$project_sha" "$build_root"
   bin_dir="$build_root/bin/$arch"
@@ -369,7 +410,7 @@ $kind $version for Linux $arch.
 
 Extract the archive into a Kuasar Sandbox deployment root and verify it with \`SHA256SUMS\`. Documentation and E2E suites from this exact tag are collected by the aggregate platform release.
 EOF
-  validate_bundle "$kind" "$version" "$arch" "$output"
+  SOURCE_SHA="$project_sha" validate_bundle "$kind" "$version" "$arch" "$output"
   echo "==> prepared $output for $version"
 }
 

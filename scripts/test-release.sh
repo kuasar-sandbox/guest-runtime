@@ -303,9 +303,12 @@ printf 'fixture GPL-2.0 text\n' \
   > "$fixture_root/native-deps/build/src/linux/LICENSES/preferred/GPL-2.0"
 sandboxer_sha="$(init_fixture_repo "$TMP/sandboxer" LICENSE .gitignore)"
 accelerator_sha="$(init_fixture_repo "$TMP/accelerator" LICENSE .gitignore)"
+git -C "$TMP/accelerator" tag v0.1.3 "$accelerator_sha"
+git -C "$TMP/sandboxer" tag v0.1.3 "$sandboxer_sha"
 init_fixture_repo "$fixture_root" LICENSE .gitignore native-deps/.gitignore \
   native-deps/Makefile scripts/release.sh scripts/release-materials.sh \
   scripts/release-native-materials.sh >/dev/null
+project_sha="$(git -C "$fixture_root" rev-parse HEAD)"
 
 mkdir "$TMP/release-build-bin" "$TMP/system-inputs"
 printf 'fixture libc archive\n' > "$TMP/system-inputs/libc.a"
@@ -401,18 +404,18 @@ grep -Fxq kernel "$fixture_root/native-deps/bin/x86_64/vmlinux" \
 "$fixture_root/scripts/release.sh" validate \
   vmlinux vmlinux-v2.3.4 x86_64 "$TMP/vmlinux-bundle"
 
-RELEASE_KIND=runtime bash "$ROOT/scripts/test-publisher.sh" \
+RELEASE_KIND=runtime RELEASE_DEPENDENCIES=accelerator=v0.1.3,sandboxer=v0.1.3 bash "$ROOT/scripts/test-publisher.sh" \
   "$ROOT/scripts/publish-release.sh" "$TMP/runtime-bundle" \
   kuasar-sandbox/guest-runtime runtime-v1.2.3-preview.20260804 \
-  1111111111111111111111111111111111111111 main
+  "$project_sha" main
 RELEASE_KIND=vmlinux bash "$ROOT/scripts/test-publisher.sh" \
   "$ROOT/scripts/publish-release.sh" "$TMP/vmlinux-bundle" \
   kuasar-sandbox/guest-runtime vmlinux-v2.3.4 \
-  2222222222222222222222222222222222222222 main
+  "$project_sha" main
 RELEASE_KIND=vmlinux bash "$ROOT/scripts/test-publisher.sh" \
   "$ROOT/scripts/publish-release.sh" "$TMP/vmlinux-bundle" \
   kuasar-sandbox/guest-runtime vmlinux-v2.3.4 \
-  2222222222222222222222222222222222222222 release/v2.3.x
+  "$project_sha" release/v2.3.x
 
 runtime_archive="$TMP/runtime-bundle/assets/sandbox-runtime-x86_64-v1.2.3-preview.20260804.tar.gz"
 go_toolchain="$(go version | awk '{print $3}')"
@@ -500,5 +503,60 @@ if env "${common_env[@]}" \
     runtime-v1.2.3 x86_64 "$TMP/overridden-envd-source" >/dev/null 2>&1; then
   fail "packager accepted an unbound Envd source directory override"
 fi
+
+for kind in runtime vmlinux; do
+  if [ "$kind" = runtime ]; then version=runtime-v1.2.3-preview.20260804; else version=vmlinux-v2.3.4; fi
+  if SOURCE_SHA=0000000000000000000000000000000000000000 \
+    "$fixture_root/scripts/release.sh" validate "$kind" "$version" x86_64 "$TMP/$kind-bundle" >/dev/null 2>&1; then
+    fail "validator accepted $kind from another selected source commit"
+  fi
+  SOURCE_SHA="$project_sha" "$fixture_root/scripts/release.sh" validate "$kind" "$version" x86_64 "$TMP/$kind-bundle"
+done
+for binding in accelerator=v9.0.0,sandboxer=v0.1.3 accelerator=v0.1.3,sandboxer=v9.0.0 \
+  accelerator=v0.1.3,accelerator=v0.1.3; do
+  if RELEASE_DEPENDENCIES="$binding" "$fixture_root/scripts/release.sh" validate runtime \
+    runtime-v1.2.3-preview.20260804 x86_64 "$TMP/runtime-bundle" >/dev/null 2>&1; then
+    fail "validator accepted a different or incomplete dependency release request"
+  fi
+done
+
+for kind in runtime vmlinux; do
+  if [ "$kind" = runtime ]; then
+    version=runtime-v1.2.3-preview.20260804
+    names=(envd erofs-utils)
+  else
+    version=vmlinux-v2.3.4
+    names=(linux)
+  fi
+  archive_name="$("$fixture_root/scripts/release.sh" archive-name "$kind" "$version" x86_64)"
+  for mutation in owner source integrity; do
+    for name in "${names[@]}"; do
+      candidate="$TMP/$kind-$mutation-$name"
+      cp -a "$TMP/$kind-bundle" "$candidate"
+      mkdir "$candidate/root"
+      tar -xzf "$candidate/assets/$archive_name" -C "$candidate/root"
+      owner=0
+      if [ "$mutation" = owner ]; then
+        owner=1234
+      else
+        column=4
+        [ "$mutation" != integrity ] || column=5
+        inventory="$candidate/root/share/sources/$kind/SOURCES.tsv"
+        awk -F '\t' -v OFS='\t' -v name="$name" -v column="$column" \
+          '$2 == name {$column="https://example.invalid/not-the-selected-source"} {print}' \
+          "$inventory" > "$candidate/changed.tsv"
+        mv "$candidate/changed.tsv" "$inventory"
+        release_materials_hash_tree "$candidate/root" "$kind" \
+          "$candidate/root/share/sources/$kind/MATERIALS.sha256"
+      fi
+      tar --sort=name --owner="$owner" --group=0 --numeric-owner --mtime=@1700000000 \
+        -czf "$candidate/assets/$archive_name" -C "$candidate/root" .
+      (cd "$candidate/assets" && sha256sum "$archive_name" > SHA256SUMS)
+      if "$fixture_root/scripts/release.sh" validate "$kind" "$version" x86_64 "$candidate" >/dev/null 2>&1; then
+        fail "validator accepted $kind $name with changed $mutation and regenerated checksums"
+      fi
+    done
+  done
+done
 
 echo "test-release: PASS"

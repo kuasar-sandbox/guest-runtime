@@ -46,6 +46,14 @@ untouched. Internal dependency records retain a release version only when its
 local Git tag identifies the selected commit; otherwise they record
 `git:<commit>`, including when a target formal tag does not exist yet.
 
+Validation rejects non-root numeric archive ownership and checks the exact
+Envd, EROFS and Linux source URLs and digests. Publication passes its selected
+`SOURCE_SHA` into validation; Runtime publication also requires the exact
+accelerator/sandboxer `RELEASE_DEPENDENCIES` binding. Regenerating checksums does
+not permit a different project commit, dependency version or native source to
+be published under that request. Local source packaging can still use untagged
+dependency commits; those records are not claimed to be existing releases.
+
 Runtime packaging also reads the fresh `mkfs.erofs` linker map. For each
 linked system archive or startup object it records the actual file digest and
 the installed Debian source package or RPM source-package identity, and copies
