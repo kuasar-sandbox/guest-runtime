@@ -1,5 +1,5 @@
 name: Runtime Release
-run-name: Release ${{ inputs.version }} @${{ inputs.source_sha }} [accelerator=${{ inputs.accelerator_version }},connector=${{ inputs.connector_version }},sandboxer=${{ inputs.sandboxer_version }}]
+run-name: Release ${{ inputs.version }} @${{ inputs.source_sha }} [accelerator=${{ inputs.accelerator_version }},sandboxer=${{ inputs.sandboxer_version }}]
 
 on:
   workflow_dispatch:
@@ -14,10 +14,6 @@ on:
         type: string
       accelerator_version:
         description: Published accelerator version used to build flatten-ctl
-        required: true
-        type: string
-      connector_version:
-        description: Published connector version used by the runtime source workspace
         required: true
         type: string
       source_ref:
@@ -52,7 +48,6 @@ jobs:
       contents: read
     outputs:
       accelerator_version: ${{ steps.request.outputs.accelerator_version }}
-      connector_version: ${{ steps.request.outputs.connector_version }}
       sandboxer_version: ${{ steps.request.outputs.sandboxer_version }}
       source_ref: ${{ steps.request.outputs.source_ref }}
       source_sha: ${{ steps.request.outputs.source_sha }}
@@ -77,7 +72,6 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           ACCELERATOR_VERSION: ${{ inputs.accelerator_version }}
-          CONNECTOR_VERSION: ${{ inputs.connector_version }}
           SOURCE_REF: ${{ inputs.source_ref }}
           SOURCE_SHA: ${{ inputs.source_sha }}
           AGGREGATE_VERSION: ${{ inputs.aggregate_version }}
@@ -94,8 +88,6 @@ jobs:
             || { echo "sandboxer_version must match vX.Y.Z or vX.Y.Z-preview.YYYYMMDD" >&2; exit 1; }
           [[ "$ACCELERATOR_VERSION" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-preview\.[0-9]{8})?$ ]] \
             || { echo "accelerator_version must match vX.Y.Z or vX.Y.Z-preview.YYYYMMDD" >&2; exit 1; }
-          [[ "$CONNECTOR_VERSION" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-preview\.[0-9]{8})?$ ]] \
-            || { echo "connector_version must match vX.Y.Z or vX.Y.Z-preview.YYYYMMDD" >&2; exit 1; }
           bash scripts/validate-release-source.sh \
             "$SOURCE_REF" "$SOURCE_SHA" "$VERSION" runtime
           bash scripts/validate-preview-line.sh \
@@ -103,7 +95,6 @@ jobs:
           bash scripts/publish-release.sh check "$VERSION" "$TARGET_ARCH"
           {
             echo "accelerator_version=$ACCELERATOR_VERSION"
-            echo "connector_version=$CONNECTOR_VERSION"
             echo "version=$VERSION"
             echo "sandboxer_version=$SANDBOXER_VERSION"
             echo "source_ref=$SOURCE_REF"
@@ -126,7 +117,6 @@ jobs:
       GOSUMDB: sum.golang.google.cn
       GOTOOLCHAIN: local
       ACCELERATOR_VERSION: ${{ needs.preflight.outputs.accelerator_version }}
-      CONNECTOR_VERSION: ${{ needs.preflight.outputs.connector_version }}
       SANDBOXER_VERSION: ${{ needs.preflight.outputs.sandboxer_version }}
     steps:
       - name: Create read-only source token
@@ -136,7 +126,7 @@ jobs:
           client-id: ${{ vars.KUASAR_CI_APP_CLIENT_ID }}
           private-key: ${{ secrets.KUASAR_CI_APP_PRIVATE_KEY }}
           owner: kuasar-sandbox
-          repositories: accelerator,connector,guest-runtime,kuasar-sandbox,sandboxer
+          repositories: accelerator,guest-runtime,kuasar-sandbox,sandboxer
           permission-contents: read
           skip-token-revoke: true
 
@@ -147,7 +137,6 @@ jobs:
           set -euo pipefail
           for dependency in \
             "accelerator $ACCELERATOR_VERSION" \
-            "connector $CONNECTOR_VERSION" \
             "sandboxer $SANDBOXER_VERSION"
           do
             read -r repository version <<< "$dependency"
@@ -207,27 +196,6 @@ jobs:
           token: ${{ steps.source-token.outputs.token }}
           persist-credentials: false
 
-      - name: Check out connector dependency
-        id: checkout-connector
-        continue-on-error: true
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: kuasar-sandbox/connector
-          ref: ${{ needs.preflight.outputs.connector_version }}
-          path: src/connector
-          token: ${{ steps.source-token.outputs.token }}
-          persist-credentials: false
-
-      - name: Retry connector dependency checkout
-        if: steps.checkout-connector.outcome == 'failure'
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: kuasar-sandbox/connector
-          ref: ${{ needs.preflight.outputs.connector_version }}
-          path: src/connector
-          token: ${{ steps.source-token.outputs.token }}
-          persist-credentials: false
-
       - name: Check out versioned sandboxer dependency
         id: checkout-sandboxer
         continue-on-error: true
@@ -255,7 +223,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: kuasar-sandbox/kuasar-sandbox
-          ref: caf322e48fc11c96a5e4984b91d6ee7cba68a991
+          ref: 90f2e9e2c6394908737ce3fc3d193e411069426d
           path: src/platform
           token: ${{ steps.source-token.outputs.token }}
           persist-credentials: false
@@ -265,7 +233,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: kuasar-sandbox/kuasar-sandbox
-          ref: caf322e48fc11c96a5e4984b91d6ee7cba68a991
+          ref: 90f2e9e2c6394908737ce3fc3d193e411069426d
           path: src/platform
           token: ${{ steps.source-token.outputs.token }}
           persist-credentials: false
@@ -294,7 +262,7 @@ jobs:
         run: |
           set -euo pipefail
           rm -f go.work go.work.sum
-          go work init ./src/accelerator ./src/connector ./src/guest-runtime ./src/sandboxer
+          go work init ./src/accelerator ./src/guest-runtime ./src/sandboxer
           install -d -m 0755 /var/cache/kuasar/tarballs
           mkdir -p src/guest-runtime/native-deps/build src/sandboxer/native-deps/build
           ln -sfn /var/cache/kuasar/tarballs src/guest-runtime/native-deps/build/tarball
@@ -366,7 +334,7 @@ jobs:
           SOURCE_SHA: ${{ needs.preflight.outputs.source_sha }}
           AGGREGATE_VERSION: ${{ inputs.aggregate_version }}
           AGGREGATE_SHA: ${{ inputs.aggregate_sha }}
-          RELEASE_DEPENDENCIES: accelerator=${{ needs.preflight.outputs.accelerator_version }},connector=${{ needs.preflight.outputs.connector_version }},sandboxer=${{ needs.preflight.outputs.sandboxer_version }}
+          RELEASE_DEPENDENCIES: accelerator=${{ needs.preflight.outputs.accelerator_version }},sandboxer=${{ needs.preflight.outputs.sandboxer_version }}
         run: |
           set -euo pipefail
           bash scripts/validate-preview-line.sh \

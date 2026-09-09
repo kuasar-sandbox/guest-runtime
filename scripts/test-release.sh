@@ -44,22 +44,29 @@ fi
 bash -n "$ROOT/scripts/delete-preview.sh" "$ROOT/scripts/validate-release-source.sh"
 
 WORKFLOW="$ROOT/.github/workflows/release-runtime.yml"
-grep -Fqx 'run-name: Release ${{ inputs.version }} @${{ inputs.source_sha }} [accelerator=${{ inputs.accelerator_version }},connector=${{ inputs.connector_version }},sandboxer=${{ inputs.sandboxer_version }}]' \
+grep -Fqx 'run-name: Release ${{ inputs.version }} @${{ inputs.source_sha }} [accelerator=${{ inputs.accelerator_version }},sandboxer=${{ inputs.sandboxer_version }}]' \
   "$WORKFLOW" || fail "runtime release identity does not pin source and dependencies"
 grep -Fqx 'run-name: Release ${{ inputs.version }} @${{ inputs.source_sha }}' \
   "$ROOT/.github/workflows/release-vmlinux.yml" \
   || fail "vmlinux release identity does not pin source_sha"
 sed -n '/- name: Publish runtime release/,/run: |/p' "$WORKFLOW" \
-  | grep -Fq 'RELEASE_DEPENDENCIES: accelerator=${{ needs.preflight.outputs.accelerator_version }},connector=${{ needs.preflight.outputs.connector_version }},sandboxer=${{ needs.preflight.outputs.sandboxer_version }}' \
+  | grep -Fq 'RELEASE_DEPENDENCIES: accelerator=${{ needs.preflight.outputs.accelerator_version }},sandboxer=${{ needs.preflight.outputs.sandboxer_version }}' \
   || fail "runtime Preview publish step does not receive dependency binding"
 grep -Fq 'kuasar-preview-binding' "$ROOT/scripts/publish-release.sh" \
   || fail "Preview publisher does not record its build binding"
-for input in accelerator_version connector_version sandboxer_version; do
+for input in accelerator_version sandboxer_version; do
   grep -Fq "      $input:" "$WORKFLOW" \
     || fail "runtime release workflow is missing required $input input"
   [ "$(grep -Fc "ref: \${{ needs.preflight.outputs.$input }}" "$WORKFLOW")" -eq 2 ] \
     || fail "runtime release workflow does not pin both $input checkouts"
 done
+if grep -Fq 'connector_version' "$WORKFLOW" \
+  || grep -Fq 'src/connector' "$WORKFLOW"; then
+  fail "runtime release workflow retains connector outside its payload/build closure"
+fi
+grep -Fq 'repositories: accelerator,guest-runtime,kuasar-sandbox,sandboxer' \
+  "$WORKFLOW" \
+  || fail "runtime source token repository set does not match the minimal closure"
 grep -Fq "repos/kuasar-sandbox/\$repository/releases/tags/\$version" "$WORKFLOW" \
   || fail "runtime release workflow does not verify dependency releases"
 for workflow in release-runtime.yml release-vmlinux.yml delete-preview.yml; do
@@ -88,17 +95,39 @@ fi
 [ "$(git -C "$ROOT" ls-files -s -- test/e2e/run_all.sh | awk '{print $1}')" = 100755 ] \
   || fail "test/e2e/run_all.sh is not executable in the Git index"
 
-mkdir -p "$TMP/bin" "$TMP/native-bin" "$TMP/src"
+mkdir -p "$TMP/bin" "$TMP/native-bin" "$TMP/src" \
+  "$TMP/sandboxer" "$TMP/accelerator" "$TMP/envd" \
+  "$TMP/erofs" "$TMP/linux/LICENSES/preferred"
 printf 'package main\nfunc main() {}\n' > "$TMP/src/main.go"
 GO111MODULE=off go build -o "$TMP/bin/flatten-ctl" "$TMP/src/main.go"
+install -m 0755 "$TMP/bin/flatten-ctl" "$TMP/sandbox-init"
+install -m 0755 "$TMP/bin/flatten-ctl" "$TMP/envd-bin"
 printf 'runtime bundle\n' > "$TMP/bin/sandbox-runtime.bundle"
 printf '#!/bin/sh\nexit 0\n' > "$TMP/native-bin/mkfs.erofs"
 printf 'kernel\n' > "$TMP/native-bin/vmlinux"
 chmod +x "$TMP/native-bin/mkfs.erofs"
+printf 'fixture sandboxer license\n' > "$TMP/sandboxer/LICENSE"
+printf 'fixture accelerator license\n' > "$TMP/accelerator/LICENSE"
+printf 'fixture envd license\n' > "$TMP/envd/LICENSE"
+printf 'fixture erofs authors\n' > "$TMP/erofs/AUTHORS"
+printf 'fixture erofs license\n' > "$TMP/erofs/COPYING"
+printf 'fixture Linux license\n' > "$TMP/linux/COPYING"
+printf 'fixture GPL-2.0 text\n' > "$TMP/linux/LICENSES/preferred/GPL-2.0"
 
 common_env=(
   RELEASE_BIN_DIR="$TMP/bin"
   RELEASE_NATIVE_BIN_DIR="$TMP/native-bin"
+  RELEASE_SANDBOXER_SOURCE_DIR="$TMP/sandboxer"
+  RELEASE_SANDBOXER_SOURCE_SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  RELEASE_SANDBOXER_VERSION=v0.1.3
+  RELEASE_ACCELERATOR_SOURCE_DIR="$TMP/accelerator"
+  RELEASE_ACCELERATOR_SOURCE_SHA=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  RELEASE_ACCELERATOR_VERSION=v0.1.3
+  RELEASE_ENVD_SOURCE_DIR="$TMP/envd"
+  RELEASE_EROFS_SOURCE_DIR="$TMP/erofs"
+  RELEASE_LINUX_SOURCE_DIR="$TMP/linux"
+  RELEASE_SANDBOX_INIT_BIN="$TMP/sandbox-init"
+  RELEASE_ENVD_BIN="$TMP/envd-bin"
   SOURCE_DATE_EPOCH=1700000000
 )
 
@@ -125,12 +154,28 @@ RELEASE_KIND=vmlinux bash "$ROOT/scripts/test-publisher.sh" \
   2222222222222222222222222222222222222222 release/v2.3.x
 
 runtime_archive="$TMP/runtime-bundle/assets/sandbox-runtime-x86_64-v1.2.3-preview.20260804.tar.gz"
-for path in ./bin/sandbox-runtime.bundle ./bin/flatten-ctl ./bin/mkfs.erofs; do
+for path in ./bin/sandbox-runtime.bundle ./bin/flatten-ctl ./bin/mkfs.erofs \
+  ./share/licenses/runtime/project/LICENSE \
+  ./share/licenses/runtime/sandboxer/LICENSE \
+  ./share/licenses/runtime/accelerator/LICENSE \
+  ./share/licenses/runtime/envd/LICENSE \
+  ./share/licenses/runtime/erofs-utils/COPYING \
+  ./share/sources/runtime/SOURCES.tsv \
+  ./share/sources/runtime/GO-BUILD-INFO.tsv \
+  ./share/sources/runtime/GO-MODULES.tsv \
+  ./share/sources/runtime/MATERIALS.sha256; do
   tar -tzf "$runtime_archive" | grep -Fx "$path" >/dev/null \
     || fail "runtime archive is missing $path"
 done
 vmlinux_archive="$TMP/vmlinux-bundle/assets/vmlinux-x86_64-v2.3.4.tar.gz"
-for path in ./bin/vmlinux; do
+for path in ./bin/vmlinux \
+  ./share/licenses/vmlinux/project/LICENSE \
+  ./share/licenses/vmlinux/linux/COPYING \
+  ./share/licenses/vmlinux/linux/LICENSES/preferred/GPL-2.0 \
+  ./share/sources/vmlinux/SOURCES.tsv \
+  ./share/sources/vmlinux/GO-BUILD-INFO.tsv \
+  ./share/sources/vmlinux/GO-MODULES.tsv \
+  ./share/sources/vmlinux/MATERIALS.sha256; do
   tar -tzf "$vmlinux_archive" | grep -Fx "$path" >/dev/null \
     || fail "vmlinux archive is missing $path"
 done
