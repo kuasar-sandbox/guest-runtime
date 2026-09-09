@@ -390,7 +390,11 @@ package_release() {
       ;;
     vmlinux)
       local linux_source linux_license_sha
+      # Release metadata must not disclose the build account/host or depend on
+      # the wall clock. Development builds retain the normal Kbuild defaults.
       env -u MAKEFLAGS -u MFLAGS -u MAKEOVERRIDES GOWORK=off \
+        KBUILD_BUILD_USER=kuasar KBUILD_BUILD_HOST=release KBUILD_BUILD_VERSION=1 \
+        KBUILD_BUILD_TIMESTAMP="$(LC_ALL=C date -u -d "@$epoch" '+%a %b %e %T UTC %Y')" \
         make --no-print-directory -C "$build_root/native-deps" \
         TARGET_ARCH="$arch" TARBALL_DIR="$tarball_dir" \
         LINUX_BUILD_SRC="$build_root/native-deps/build/src/linux" \

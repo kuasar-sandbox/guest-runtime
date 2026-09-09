@@ -51,6 +51,12 @@ Makefile。Runtime 打包重建其最小 accelerator/sandboxer 依赖闭包、En
 保持不变。内部依赖记录只有在本地 Git Tag 指向所选 commit 时才保留该发行版本;
 否则记录 `git:<commit>`,目标正式 Tag 尚不存在时也适用。
 
+Kernel 发行构建固定 `KBUILD_BUILD_USER=kuasar`、`KBUILD_BUILD_HOST=release`
+和 `KBUILD_BUILD_VERSION=1`,并根据 `SOURCE_DATE_EPOCH` 生成 UTC 格式的
+`KBUILD_BUILD_TIMESTAMP`。epoch 默认值为 `0`,也用于归档时间戳。这样内核版本
+元数据不会包含构建账号、主机名或构建时的时钟值。开发构建的 Kbuild 默认行为
+不变;完整二进制一致仍要求相同的源码、配置和编译器输入。
+
 验证器拒绝非 root 的归档数字属主,并核对 Envd、EROFS 和 Linux 的精确来源 URL
 与摘要。发布时把选定的 `SOURCE_SHA` 传入验证器;Runtime 发布还必须提供精确的
 accelerator/sandboxer `RELEASE_DEPENDENCIES` 绑定。重新生成校验和不能让不同的

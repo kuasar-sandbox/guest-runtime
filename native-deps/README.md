@@ -46,6 +46,13 @@ untouched. Internal dependency records retain a release version only when its
 local Git tag identifies the selected commit; otherwise they record
 `git:<commit>`, including when a target formal tag does not exist yet.
 
+Kernel release builds set `KBUILD_BUILD_USER=kuasar`, `KBUILD_BUILD_HOST=release`
+and `KBUILD_BUILD_VERSION=1`, and derive `KBUILD_BUILD_TIMESTAMP` in UTC from
+`SOURCE_DATE_EPOCH` (default `0`, also used for archive timestamps). This keeps
+the build account, host name and wall clock out of the kernel version metadata.
+Development Kbuild defaults are unchanged; identical complete binaries still
+require identical source, configuration and compiler inputs.
+
 Validation rejects non-root numeric archive ownership and checks the exact
 Envd, EROFS and Linux source URLs and digests. Publication passes its selected
 `SOURCE_SHA` into validation; Runtime publication also requires the exact

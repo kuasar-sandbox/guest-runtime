@@ -347,6 +347,12 @@ root="$2"
 case "$root" in
   */build/guest-runtime/native-deps)
     [ ! -e "$root/bin/x86_64/envd" ]
+    if [ "${!#}" = vmlinux ]; then
+      [ "${KBUILD_BUILD_USER:-}" = kuasar ]
+      [ "${KBUILD_BUILD_HOST:-}" = release ]
+      [ "${KBUILD_BUILD_VERSION:-}" = 1 ]
+      [ "${KBUILD_BUILD_TIMESTAMP:-}" = 'Tue Nov 14 22:13:20 UTC 2023' ]
+    fi
     mkdir -p "$root/bin/x86_64" "$root/build/src/e2b-infra" \
       "$root/build/x86_64/src/erofs-utils" "$root/build/src/linux/LICENSES/preferred"
     install -m 0755 "$RELEASE_TEST_TOOL" "$root/bin/x86_64/envd"
@@ -389,6 +395,10 @@ common_env=(
   LINUX_TARBALL=https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.1.169.tar.gz
   LINUX_TARBALL_SHA256=ab28b4ca2a2eca38b3da9aa33b231288168c3560bbc866359045f1c8f4d48d94
   SOURCE_DATE_EPOCH=1700000000
+  KBUILD_BUILD_USER=fixture-private-account
+  KBUILD_BUILD_HOST=fixture-private-host
+  KBUILD_BUILD_VERSION=999
+  KBUILD_BUILD_TIMESTAMP=fixture-wall-clock
 )
 
 env "${common_env[@]}" "$fixture_root/scripts/release.sh" package \
