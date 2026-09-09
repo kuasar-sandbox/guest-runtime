@@ -11,6 +11,46 @@ fail() {
   exit 1
 }
 
+# shellcheck source=scripts/release-materials.sh
+source "$ROOT/scripts/release-materials.sh"
+
+init_fixture_repo() {
+  local directory="$1"
+  shift
+  git -C "$directory" init -q
+  git -C "$directory" config --local user.name "Chen Xiaohui"
+  git -C "$directory" config --local user.email "graych@gmail.com"
+  git -C "$directory" add -- "$@"
+  git -C "$directory" commit -q -m "test: create release source fixture"
+  git -C "$directory" rev-parse HEAD
+}
+
+mkdir -p "$TMP/git-source" \
+  "$TMP/material-hash/share/licenses/hash-test/LICENSES" \
+  "$TMP/material-hash/share/sources/hash-test"
+printf 'fixture license\n' > "$TMP/git-source/LICENSE"
+fixture_git_sha="$(init_fixture_repo "$TMP/git-source" LICENSE)"
+[ "$(release_materials_resolve_git_source "$TMP/git-source" "$fixture_git_sha" fixture)" = "$fixture_git_sha" ] \
+  || fail "clean source worktree did not resolve to its selected commit"
+if (release_materials_resolve_git_source "$TMP/git-source" \
+  0000000000000000000000000000000000000000 fixture >/dev/null 2>&1); then
+  fail "source resolver accepted a commit that differs from the selected commit"
+fi
+printf 'untracked source\n' > "$TMP/git-source/untracked.go"
+if (release_materials_resolve_git_source "$TMP/git-source" "" fixture >/dev/null 2>&1); then
+  fail "source resolver accepted a dirty source worktree"
+fi
+printf 'nested license manifest\n' \
+  > "$TMP/material-hash/share/licenses/hash-test/LICENSES/MATERIALS.sha256"
+printf 'generated inventory\n' \
+  > "$TMP/material-hash/share/sources/hash-test/MATERIALS.sha256"
+release_materials_hash_tree "$TMP/material-hash" hash-test "$TMP/material-hash-actual"
+grep -Fq 'share/licenses/hash-test/LICENSES/MATERIALS.sha256' "$TMP/material-hash-actual" \
+  || fail "license file named MATERIALS.sha256 was omitted from the material inventory"
+if grep -Fq 'share/sources/hash-test/MATERIALS.sha256' "$TMP/material-hash-actual"; then
+  fail "generated material inventory included itself"
+fi
+
 bash "$ROOT/scripts/test-preview-line.sh"
 bash "$ROOT/scripts/test-delete-preview.sh"
 
@@ -113,15 +153,17 @@ printf 'fixture erofs authors\n' > "$TMP/erofs/AUTHORS"
 printf 'fixture erofs license\n' > "$TMP/erofs/COPYING"
 printf 'fixture Linux license\n' > "$TMP/linux/COPYING"
 printf 'fixture GPL-2.0 text\n' > "$TMP/linux/LICENSES/preferred/GPL-2.0"
+sandboxer_sha="$(init_fixture_repo "$TMP/sandboxer" LICENSE)"
+accelerator_sha="$(init_fixture_repo "$TMP/accelerator" LICENSE)"
 
 common_env=(
   RELEASE_BIN_DIR="$TMP/bin"
   RELEASE_NATIVE_BIN_DIR="$TMP/native-bin"
   RELEASE_SANDBOXER_SOURCE_DIR="$TMP/sandboxer"
-  RELEASE_SANDBOXER_SOURCE_SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  RELEASE_SANDBOXER_SOURCE_SHA="$sandboxer_sha"
   RELEASE_SANDBOXER_VERSION=v0.1.3
   RELEASE_ACCELERATOR_SOURCE_DIR="$TMP/accelerator"
-  RELEASE_ACCELERATOR_SOURCE_SHA=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  RELEASE_ACCELERATOR_SOURCE_SHA="$accelerator_sha"
   RELEASE_ACCELERATOR_VERSION=v0.1.3
   RELEASE_ENVD_SOURCE_DIR="$TMP/envd"
   RELEASE_EROFS_SOURCE_DIR="$TMP/erofs"
@@ -154,12 +196,14 @@ RELEASE_KIND=vmlinux bash "$ROOT/scripts/test-publisher.sh" \
   2222222222222222222222222222222222222222 release/v2.3.x
 
 runtime_archive="$TMP/runtime-bundle/assets/sandbox-runtime-x86_64-v1.2.3-preview.20260804.tar.gz"
+go_toolchain="$(go version | awk '{print $3}')"
 for path in ./bin/sandbox-runtime.bundle ./bin/flatten-ctl ./bin/mkfs.erofs \
   ./share/licenses/runtime/project/LICENSE \
   ./share/licenses/runtime/sandboxer/LICENSE \
   ./share/licenses/runtime/accelerator/LICENSE \
   ./share/licenses/runtime/envd/LICENSE \
   ./share/licenses/runtime/erofs-utils/COPYING \
+  ./share/licenses/runtime/go-toolchain/"$go_toolchain"/LICENSE \
   ./share/sources/runtime/SOURCES.tsv \
   ./share/sources/runtime/GO-BUILD-INFO.tsv \
   ./share/sources/runtime/GO-MODULES.tsv \
@@ -167,6 +211,9 @@ for path in ./bin/sandbox-runtime.bundle ./bin/flatten-ctl ./bin/mkfs.erofs \
   tar -tzf "$runtime_archive" | grep -Fx "$path" >/dev/null \
     || fail "runtime archive is missing $path"
 done
+tar -xOf "$runtime_archive" ./share/sources/runtime/SOURCES.tsv \
+  | grep -Fq $'\tGo toolchain\t'"$go_toolchain"$'\t' \
+  || fail "runtime archive does not associate its Go toolchain with license material"
 vmlinux_archive="$TMP/vmlinux-bundle/assets/vmlinux-x86_64-v2.3.4.tar.gz"
 for path in ./bin/vmlinux \
   ./share/licenses/vmlinux/project/LICENSE \

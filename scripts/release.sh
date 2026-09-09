@@ -155,8 +155,7 @@ package_release() {
   mkdir -p "$STAGE"
   bin_dir="${RELEASE_BIN_DIR:-$ROOT/bin/$arch}"
   native_bin_dir="${RELEASE_NATIVE_BIN_DIR:-$ROOT/native-deps/bin/$arch}"
-  project_sha="$(git -C "$ROOT" rev-parse HEAD)"
-  [[ "$project_sha" =~ ^[0-9a-f]{40}$ ]] || fail "cannot resolve the guest-runtime source commit"
+  project_sha="$(release_materials_resolve_git_source "$ROOT" "" guest-runtime)"
   release_materials_init "$STAGE" "$WORK/materials" "$kind"
   release_materials_copy_licenses "$ROOT" project
   case "$kind" in
@@ -180,11 +179,10 @@ package_release() {
         [[ "$value" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-preview\.[0-9]{8})?$ ]] \
           || fail "runtime internal dependency versions must identify selected component releases"
       done
-      sandboxer_sha="${RELEASE_SANDBOXER_SOURCE_SHA:-$(git -C "$sandboxer_source" rev-parse HEAD 2>/dev/null || true)}"
-      accelerator_sha="${RELEASE_ACCELERATOR_SOURCE_SHA:-$(git -C "$accelerator_source" rev-parse HEAD 2>/dev/null || true)}"
-      for value in "$sandboxer_sha" "$accelerator_sha"; do
-        [[ "$value" =~ ^[0-9a-f]{40}$ ]] || fail "cannot resolve an internal runtime source commit"
-      done
+      sandboxer_sha="$(release_materials_resolve_git_source "$sandboxer_source" \
+        "${RELEASE_SANDBOXER_SOURCE_SHA:-}" sandboxer)"
+      accelerator_sha="$(release_materials_resolve_git_source "$accelerator_source" \
+        "${RELEASE_ACCELERATOR_SOURCE_SHA:-}" accelerator)"
       release_materials_copy_licenses "$sandboxer_source" sandboxer
       release_materials_copy_licenses "$accelerator_source" accelerator
       release_materials_copy_licenses "$envd_source" envd
