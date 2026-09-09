@@ -116,6 +116,7 @@ jobs:
       GOPROXY: https://goproxy.cn,direct
       GOSUMDB: sum.golang.google.cn
       GOTOOLCHAIN: local
+      GOWORK: "off"
       ACCELERATOR_VERSION: ${{ needs.preflight.outputs.accelerator_version }}
       SANDBOXER_VERSION: ${{ needs.preflight.outputs.sandboxer_version }}
     steps:
@@ -258,11 +259,9 @@ jobs:
             *) echo "failed to revoke source token: HTTP $status" >&2; exit 1 ;;
           esac
 
-      - name: Assemble source workspace and caches
+      - name: Prepare native source caches
         run: |
           set -euo pipefail
-          rm -f go.work go.work.sum
-          go work init ./src/accelerator ./src/guest-runtime ./src/sandboxer
           install -d -m 0755 /var/cache/kuasar/tarballs
           mkdir -p src/guest-runtime/native-deps/build src/sandboxer/native-deps/build
           ln -sfn /var/cache/kuasar/tarballs src/guest-runtime/native-deps/build/tarball
