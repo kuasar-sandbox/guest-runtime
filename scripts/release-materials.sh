@@ -202,6 +202,15 @@ release_materials_finish() {
     case "$module" in
       github.com/kuasar-sandbox/*) continue ;;
     esac
+    if awk -F '\t' -v module="$module" \
+      '$2 == "replacement" && $3 == module && $4 == "local-source" { found=1 }
+       END { exit !found }' "$RELEASE_MATERIALS_WORK/go-build-info"; then
+      directory="$RELEASE_MATERIALS_STAGE/share/licenses/$RELEASE_MATERIALS_UNIT/go/$module@$version"
+      if [ ! -d "$directory" ] || [ -z "$(find "$directory" -type f -print -quit)" ]; then
+        fail "local Go replacement requires license material from its selected source: $module"
+      fi
+      continue
+    fi
     json="$(GOWORK=off go mod download -json "$module@$version")" \
       || fail "cannot resolve Go module source for $module@$version"
     directory="$(jq -er '.Dir' <<< "$json")" \

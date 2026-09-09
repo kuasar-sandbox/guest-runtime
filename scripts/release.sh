@@ -218,6 +218,7 @@ validate_bundle() {
       release_materials_require_source "$extract" "$kind" 'bin/sandbox-runtime.bundle:/sbin/init' 'sandboxer' ""
       release_materials_require_source "$extract" "$kind" 'bin/sandbox-runtime.bundle,bin/flatten-ctl' 'accelerator' ""
       release_materials_require_source "$extract" "$kind" 'bin/sandbox-runtime.bundle:/opt/sandbox-runtime/bin/envd' 'envd' "2026.22"
+      release_materials_require_source "$extract" "$kind" 'bin/sandbox-runtime.bundle:/opt/sandbox-runtime/bin/envd' 'github.com/e2b-dev/infra/packages/shared' "2026.22"
       release_materials_require_source "$extract" "$kind" 'bin/mkfs.erofs,bin/sandbox-runtime.bundle:/opt/sandbox-runtime/bin/mkfs.erofs' 'erofs-utils' "v1.9.1"
       release_materials_require_go "$extract" "$kind" 'bin/flatten-ctl'
       release_materials_require_go "$extract" "$kind" 'bin/sandbox-runtime.bundle:/sbin/init'
@@ -303,6 +304,8 @@ package_release() {
       release_materials_copy_licenses "$sandboxer_source" sandboxer
       release_materials_copy_licenses "$accelerator_source" accelerator
       release_materials_copy_licenses "$envd_source" envd
+      release_materials_copy_licenses "$envd_source" \
+        go/github.com/e2b-dev/infra/packages/shared@v0.0.0
       release_materials_copy_licenses "$erofs_source" erofs-utils
       release_materials_record_source 'bin/sandbox-runtime.bundle,bin/flatten-ctl' guest-runtime "$version" \
         "https://github.com/kuasar-sandbox/guest-runtime/commit/$project_sha" \
@@ -316,6 +319,11 @@ package_release() {
       release_materials_record_source 'bin/sandbox-runtime.bundle:/opt/sandbox-runtime/bin/envd' envd 2026.22 \
         'https://github.com/e2b-dev/infra/archive/refs/tags/2026.22.tar.gz' \
         'sha256:9e1e81f2963fda1805466c337cd0a33638182a15a66295fd19bba6b9c454d92c' envd
+      release_materials_record_source 'bin/sandbox-runtime.bundle:/opt/sandbox-runtime/bin/envd' \
+        github.com/e2b-dev/infra/packages/shared 2026.22 \
+        'https://github.com/e2b-dev/infra/archive/refs/tags/2026.22.tar.gz' \
+        'sha256:9e1e81f2963fda1805466c337cd0a33638182a15a66295fd19bba6b9c454d92c' \
+        go/github.com/e2b-dev/infra/packages/shared@v0.0.0
       release_materials_record_source 'bin/mkfs.erofs,bin/sandbox-runtime.bundle:/opt/sandbox-runtime/bin/mkfs.erofs' erofs-utils v1.9.1 \
         'https://github.com/erofs/erofs-utils/archive/refs/tags/v1.9.1.tar.gz' \
         'sha256:a9ef5ab67c4b8d2d3e9ed71f39cd008bda653142a720d8a395a36f1110d0c432' erofs-utils

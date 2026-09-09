@@ -268,8 +268,14 @@ install -m 0755 "$ROOT/scripts/release-materials.sh" \
   "$fixture_root/scripts/release-materials.sh"
 printf '/bin/\n/build/\n' > "$TMP/sandboxer/.gitignore"
 printf '/bin/\n/build/\n' > "$TMP/accelerator/.gitignore"
-printf 'package main\nfunc main() {}\n' > "$TMP/src/main.go"
-GO111MODULE=off go build -o "$TMP/tool" "$TMP/src/main.go"
+mkdir "$TMP/shared"
+printf 'module github.com/e2b-dev/infra/packages/shared\n\ngo 1.24\n' > "$TMP/shared/go.mod"
+printf 'package shared\nfunc Fixture() {}\n' > "$TMP/shared/shared.go"
+printf 'module fixture\n\ngo 1.24\nrequire github.com/e2b-dev/infra/packages/shared v0.0.0\nreplace github.com/e2b-dev/infra/packages/shared => ../shared\n' \
+  > "$TMP/src/go.mod"
+printf 'package main\nimport "github.com/e2b-dev/infra/packages/shared"\nfunc main() { shared.Fixture() }\n' \
+  > "$TMP/src/main.go"
+(cd "$TMP/src" && GOWORK=off go build -o "$TMP/tool" .)
 install -m 0755 "$TMP/tool" "$fixture_root/bin/x86_64/flatten-ctl"
 install -m 0755 "$TMP/tool" "$TMP/sandboxer/bin/x86_64/sandbox-init"
 install -m 0755 "$TMP/tool" "$fixture_root/native-deps/bin/x86_64/envd"
