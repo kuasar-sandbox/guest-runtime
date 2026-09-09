@@ -323,7 +323,13 @@ cat > "$TMP/release-build-bin/rpm" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 case "$1" in
-  -qf) printf 'fixture-system\t1.0-1\tfixture-system-1.0-1.src.rpm\n' ;;
+  -qf)
+    if [ "$2" = --dump ]; then
+      printf '%s 1 0 %s 0100644 root root 0 0 0 X\n' "$3" "$(sha256sum "$3" | awk '{print $1}')"
+    else
+      printf 'fixture-system\t1.0-1\tfixture-system-1.0-1.src.rpm\n'
+    fi
+    ;;
   -qa) printf 'fixture-system.x86_64\tfixture-system-1.0-1.src.rpm\n' ;;
   -ql) printf '%s/LICENSE\n' "$RELEASE_TEST_SYSTEM_INPUTS" ;;
   *) exit 1 ;;

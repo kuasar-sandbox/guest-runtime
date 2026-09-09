@@ -61,6 +61,10 @@ the corresponding copyright, license and notice files, including referenced
 common license texts. This covers libc, libuuid and compiler runtime/startup
 inputs as well as erofs-utils itself; a package name or SPDX label alone does
 not replace those files.
+Before collection, each installed input must match its file digest in the
+trusted build host's Debian or RPM database. Missing, ambiguous or changed
+file records fail packaging; package ownership alone is insufficient. This
+checks installed file integrity, not a compromised host or package database.
 
 The project CI template builds static libuuid from its pinned, checksum-verified
 util-linux source. Its provisioner retains a per-build `SOURCES.tsv`,

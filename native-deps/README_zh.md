@@ -61,6 +61,9 @@ Runtime 打包还读取本次新构建的 `mkfs.erofs` 链接映射。对实际�
 或启动对象,记录文件摘要和已安装的 Debian 源包或 RPM 源包身份,并收集对应的
 版权、许可和 NOTICE 文件,包括其引用的公共许可正文。这既覆盖 erofs-utils,
 也覆盖 libc、libuuid、编译器运行库及启动对象;仅列包名或 SPDX 标识不能替代正文。
+采集前,每个已安装输入都必须匹配可信构建主机 Debian 或 RPM 数据库中的文件
+摘要。文件记录缺失、歧义或内容变更都会导致打包失败,仅有包归属不足以证明来源。
+这检查已安装文件的完整性,不证明已失陷主机或包数据库可信。
 
 项目 CI 模板从 pin 且通过 checksum 验证的 util-linux 源码构建静态 libuuid。
 provisioner 按构建身份保留 `SOURCES.tsv`、`MATERIALS.sha256` 和许可目录,
