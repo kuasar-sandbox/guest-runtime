@@ -38,10 +38,20 @@ The source build uses sibling repositories. `go.mod` resolves `accelerator` thro
 <workspace>/
 ├── guest-runtime/
 ├── accelerator/
+├── connector/
 └── sandboxer/
 ```
 
-For coordinated development, use compatible `main` revisions from the three repositories. To reproduce a released composition, use the exact component tags selected by the corresponding [project aggregate release](https://github.com/kuasar-sandbox/kuasar-sandbox/releases) rather than independently choosing GitHub Latest tags. The complete six-repository workspace is documented in the [project README](https://github.com/kuasar-sandbox/kuasar-sandbox).
+For coordinated development, use compatible `main` revisions from these sibling repositories. To reproduce a released composition, use the exact component tags selected by the corresponding [project aggregate release](https://github.com/kuasar-sandbox/kuasar-sandbox/releases) rather than independently choosing GitHub Latest tags. The complete six-repository workspace is documented in the [project README](https://github.com/kuasar-sandbox/kuasar-sandbox).
+
+Go-only `flatten-ctl` builds require a sibling `accelerator` checkout. Building the
+Runtime from source also requires `sandboxer` for `sandbox-init` and its sibling
+`connector` dependency, plus the host/target native tools below. The standalone
+Kernel target uses its own Native build inputs; it does not require starting the
+platform. Internal `require` versions identify target formal component releases,
+with Daily Preview suffixes removed. Those tags may not exist yet: local `replace`
+directives select the sibling sources, including when `GOWORK=off`. Record their
+actual SHAs when reporting a build or test result.
 
 ## Build prerequisites
 
@@ -94,7 +104,7 @@ This repository does not publish a generic `guest-runtime-vX.Y.Z` release. It ma
 
 The two version numbers may advance independently. The project aggregate release selects an exact Runtime tag and an exact VMLinux tag; it does not assume that their version numbers match.
 
-Current GitHub component assets are published for Linux x86_64 from selected source refs and exact commits after their component build and packaging checks. The project aggregate release later selects exact Runtime, VMLinux, and other component tags and performs cross-component BMS plus released-asset MicroVM validation for that composition. Source Makefiles may support another `TARGET_ARCH`, but source-build support does not by itself mean a prebuilt artifact is published for that architecture.
+Current GitHub component assets are published for Linux x86_64 from selected source refs and exact commits after their component build and packaging checks. The project aggregate release later selects exact Runtime, VMLinux, and other component tags and performs cross-component integration tests plus released-asset MicroVM validation for that composition. Source Makefiles may support another `TARGET_ARCH`, but source-build support does not by itself mean a prebuilt artifact is published for that architecture.
 
 ## Kernel source and licensing
 
@@ -113,7 +123,7 @@ The repository-wide license boundaries are described in [`LICENSE_SCOPE.md`](LIC
 
 ## Release model
 
-Runtime and VMLinux component releases are built from selected source refs and exact commits. Preview releases are GitHub prereleases for development and evaluation; mainline Stable releases are coordinated independently for each release unit. The project aggregate release always selects exact tags and does not rely on GitHub Latest, then validates the selected composition through project-level BMS and released-asset testing.
+Runtime and VMLinux component releases are built from selected source refs and exact commits. Preview releases are GitHub prereleases for development and evaluation; mainline Stable releases are coordinated independently for each release unit. The project aggregate release always selects exact tags and does not rely on GitHub Latest, then validates the selected composition through project-level integration tests and released-asset testing.
 
 See the [project release documentation](https://github.com/kuasar-sandbox/kuasar-sandbox/blob/main/docs/release.md) and the [latest Stable aggregate release](https://github.com/kuasar-sandbox/kuasar-sandbox/releases/latest).
 

@@ -13,7 +13,7 @@ in-memory ggcr registry that only does the tag-schema referrers fallback.)
 
 The runner uses the assembled platform `BIN` (default `../kuasar-sandbox/bin/<arch>`),
 which provides `flatten-ctl`, `store-ctl`, and `mkfs.erofs`, and runs
-`test/e2e/e2e_flatten.sh` against `ZOT_BIN`. In platform BMS, `make e2e-tools`
+`test/e2e/e2e_flatten.sh` against `ZOT_BIN`. In platform integration tests, `make e2e-tools`
 provides zot and passes its path; release packages do not ship zot. Under
 `make test-e2e`, missing requirements fail via
 `REQUIRE_GUEST_RUNTIME=1`; direct ad-hoc script runs may still skip soft
