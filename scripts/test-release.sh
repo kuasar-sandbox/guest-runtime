@@ -15,6 +15,7 @@ fail() {
 source "$ROOT/scripts/release-materials.sh"
 
 bash "$ROOT/scripts/test-release-materials.sh"
+bash "$ROOT/scripts/test-release-native-materials.sh"
 
 init_fixture_repo() {
   local directory="$1"
@@ -268,6 +269,8 @@ install -m 0644 "$ROOT/native-deps/Makefile" "$fixture_root/native-deps/Makefile
 install -m 0755 "$ROOT/scripts/release.sh" "$fixture_root/scripts/release.sh"
 install -m 0755 "$ROOT/scripts/release-materials.sh" \
   "$fixture_root/scripts/release-materials.sh"
+install -m 0755 "$ROOT/scripts/release-native-materials.sh" \
+  "$fixture_root/scripts/release-native-materials.sh"
 printf '/bin/\n/build/\n' > "$TMP/sandboxer/.gitignore"
 printf '/bin/\n/build/\n' > "$TMP/accelerator/.gitignore"
 mkdir "$TMP/shared"
@@ -300,9 +303,29 @@ printf 'fixture GPL-2.0 text\n' \
 sandboxer_sha="$(init_fixture_repo "$TMP/sandboxer" LICENSE .gitignore)"
 accelerator_sha="$(init_fixture_repo "$TMP/accelerator" LICENSE .gitignore)"
 init_fixture_repo "$fixture_root" LICENSE .gitignore native-deps/.gitignore \
-  native-deps/Makefile scripts/release.sh scripts/release-materials.sh >/dev/null
+  native-deps/Makefile scripts/release.sh scripts/release-materials.sh \
+  scripts/release-native-materials.sh >/dev/null
 
-mkdir "$TMP/release-build-bin"
+mkdir "$TMP/release-build-bin" "$TMP/system-inputs"
+printf 'fixture libc archive\n' > "$TMP/system-inputs/libc.a"
+printf 'fixture libuuid archive\n' > "$TMP/system-inputs/libuuid.a"
+printf 'fixture native system license\n' > "$TMP/system-inputs/LICENSE"
+cat > "$TMP/release-build-bin/dpkg-query" <<'EOF'
+#!/bin/sh
+# These synthetic files are deliberately outside the real package database.
+exit 1
+EOF
+cat > "$TMP/release-build-bin/rpm" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+case "$1" in
+  -qf) printf 'fixture-system\t1.0-1\tfixture-system-1.0-1.src.rpm\n' ;;
+  -qa) printf 'fixture-system.x86_64\tfixture-system-1.0-1.src.rpm\n' ;;
+  -ql) printf '%s/LICENSE\n' "$RELEASE_TEST_SYSTEM_INPUTS" ;;
+  *) exit 1 ;;
+esac
+EOF
+chmod 0755 "$TMP/release-build-bin/dpkg-query" "$TMP/release-build-bin/rpm"
 cat > "$TMP/release-build-bin/make" <<'EOF'
 #!/usr/bin/env bash
 # Synthetic payloads test the packaging contract; real native builds are
@@ -323,6 +346,10 @@ case "$root" in
     printf 'fixture envd license\n' > "$root/build/src/e2b-infra/LICENSE"
     printf 'fixture erofs authors\n' > "$root/build/x86_64/src/erofs-utils/AUTHORS"
     printf 'fixture erofs license\n' > "$root/build/x86_64/src/erofs-utils/COPYING"
+    mkdir -p "$root/build/x86_64/src/erofs-utils/mkfs"
+    printf 'LOAD %s/libc.a\nLOAD %s/libuuid.a\n' \
+      "$RELEASE_TEST_SYSTEM_INPUTS" "$RELEASE_TEST_SYSTEM_INPUTS" \
+      > "$root/build/x86_64/src/erofs-utils/mkfs/mkfs.erofs.map"
     printf 'fixture Linux license\n' > "$root/build/src/linux/COPYING"
     printf 'fixture GPL-2.0 text\n' > "$root/build/src/linux/LICENSES/preferred/GPL-2.0"
     ;;
@@ -340,6 +367,7 @@ chmod 0755 "$TMP/release-build-bin/make"
 common_env=(
   PATH="$TMP/release-build-bin:$PATH"
   RELEASE_TEST_TOOL="$TMP/tool"
+  RELEASE_TEST_SYSTEM_INPUTS="$TMP/system-inputs"
   RELEASE_SANDBOXER_SOURCE_SHA="$sandboxer_sha"
   RELEASE_SANDBOXER_VERSION=v0.1.3
   RELEASE_ACCELERATOR_SOURCE_SHA="$accelerator_sha"

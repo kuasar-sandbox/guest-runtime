@@ -46,6 +46,23 @@ untouched. Internal dependency records retain a release version only when its
 local Git tag identifies the selected commit; otherwise they record
 `git:<commit>`, including when a target formal tag does not exist yet.
 
+Runtime packaging also reads the fresh `mkfs.erofs` linker map. For each
+linked system archive or startup object it records the actual file digest and
+the installed Debian source package or RPM source-package identity, and copies
+the corresponding copyright, license and notice files, including referenced
+common license texts. This covers libc, libuuid and compiler runtime/startup
+inputs as well as erofs-utils itself; a package name or SPDX label alone does
+not replace those files.
+
+The project CI template builds static libuuid from its pinned, checksum-verified
+util-linux source. Its provisioner retains a per-build `SOURCES.tsv`,
+`MATERIALS.sha256` and license directory beside the template inputs and copies
+them with the library into every prepared slot. Packaging verifies both the
+inventory and the actual library digest. Missing, altered or unowned native
+inputs are rejected; update the trusted template instead of fabricating source
+records. The resulting materials support release review, not a legal
+certification. Kernel source selection remains independent of Runtime.
+
 `librocksdb`, accelerator's CGO link dependency, is built in that repository, not here.
 
 <a id="组成"></a>

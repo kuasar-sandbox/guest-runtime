@@ -51,6 +51,17 @@ Makefile。Runtime 打包重建其最小 accelerator/sandboxer 依赖闭包、En
 保持不变。内部依赖记录只有在本地 Git Tag 指向所选 commit 时才保留该发行版本;
 否则记录 `git:<commit>`,目标正式 Tag 尚不存在时也适用。
 
+Runtime 打包还读取本次新构建的 `mkfs.erofs` 链接映射。对实际链入的系统静态库
+或启动对象,记录文件摘要和已安装的 Debian 源包或 RPM 源包身份,并收集对应的
+版权、许可和 NOTICE 文件,包括其引用的公共许可正文。这既覆盖 erofs-utils,
+也覆盖 libc、libuuid、编译器运行库及启动对象;仅列包名或 SPDX 标识不能替代正文。
+
+项目 CI 模板从 pin 且通过 checksum 验证的 util-linux 源码构建静态 libuuid。
+provisioner 按构建身份保留 `SOURCES.tsv`、`MATERIALS.sha256` 和许可目录,
+并随库文件复制到每个准备的 slot。打包同时验证材料清单与实际库摘要。
+来源缺失、材料被改动或无法归属的原生输入会被拒绝;应更新可信模板,不能编造
+来源记录。这些材料服务于发行检视,不构成法律认证。Kernel 源码选择仍独立于 Runtime。
+
 `librocksdb`(`accelerator` 的 CGO 链接依赖)在该仓内构建,不在此处。
 
 <a id="组成"></a>

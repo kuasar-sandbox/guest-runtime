@@ -8,6 +8,8 @@ WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 # shellcheck source=scripts/release-materials.sh
 source "$ROOT/scripts/release-materials.sh"
+# shellcheck source=scripts/release-native-materials.sh
+source "$ROOT/scripts/release-native-materials.sh"
 
 fail() {
   echo "release: $*" >&2
@@ -221,6 +223,10 @@ validate_bundle() {
       release_materials_require_source "$extract" "$kind" 'bin/sandbox-runtime.bundle:/opt/sandbox-runtime/bin/envd' 'github.com/e2b-dev/infra/packages/shared' "2026.22"
       release_materials_require_source "$extract" "$kind" 'bin/mkfs.erofs,bin/sandbox-runtime.bundle:/opt/sandbox-runtime/bin/mkfs.erofs' 'erofs-utils' "v1.9.1"
       release_materials_require_go "$extract" "$kind" 'bin/flatten-ctl'
+      release_materials_require_source "$extract" "$kind" \
+        'bin/mkfs.erofs,bin/sandbox-runtime.bundle:/opt/sandbox-runtime/bin/mkfs.erofs' 'system:libc.a' ""
+      release_materials_require_source "$extract" "$kind" \
+        'bin/mkfs.erofs,bin/sandbox-runtime.bundle:/opt/sandbox-runtime/bin/mkfs.erofs' 'system:libuuid.a' ""
       release_materials_require_go "$extract" "$kind" 'bin/sandbox-runtime.bundle:/sbin/init'
       release_materials_require_go "$extract" "$kind" 'bin/sandbox-runtime.bundle:/opt/sandbox-runtime/bin/envd'
       [ -f "$extract/bin/sandbox-runtime.bundle" ] \
@@ -307,6 +313,8 @@ package_release() {
       release_materials_copy_licenses "$envd_source" \
         go/github.com/e2b-dev/infra/packages/shared@v0.0.0
       release_materials_copy_licenses "$erofs_source" erofs-utils
+      release_native_erofs_inputs "$erofs_source/mkfs/mkfs.erofs.map" "$erofs_source" \
+        'bin/mkfs.erofs,bin/sandbox-runtime.bundle:/opt/sandbox-runtime/bin/mkfs.erofs'
       release_materials_record_source 'bin/sandbox-runtime.bundle,bin/flatten-ctl' guest-runtime "$version" \
         "https://github.com/kuasar-sandbox/guest-runtime/commit/$project_sha" \
         "git:$project_sha" project

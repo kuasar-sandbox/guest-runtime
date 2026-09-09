@@ -138,7 +138,8 @@ log "make mkfs.erofs + fsck.erofs (mkfs + fsck subdirs; skips mount/dump/fuse)"
 # -static is consumed by libtool itself (= "prefer .a of libtool libs") and
 # never reaches the compiler driver.
 make -C "$src_dir/lib"  -j"$(nproc)"
-make -C "$src_dir/mkfs" -j"$(nproc)" LDFLAGS="-all-static"
+make -C "$src_dir/mkfs" -j"$(nproc)" \
+    LDFLAGS="-all-static -Wl,-Map,$src_dir/mkfs/mkfs.erofs.map"
 make -C "$src_dir/fsck" -j"$(nproc)" LDFLAGS="-all-static"
 
 mkdir -p "$BINDIR"
