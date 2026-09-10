@@ -180,6 +180,86 @@ stage_release_source() {
   "${git_env[@]}" git -C "$destination" -c advice.detachedHead=false checkout --quiet --detach "$sha"
 }
 
+prepare_release_build_environment() {
+  local proxy="${GOPROXY:-https://proxy.golang.org,direct}" route variable value
+  local sumdb="${GOSUMDB:-sum.golang.org}" sumdb_identity sumdb_url sumdb_extra
+  local toolchain="${GOTOOLCHAIN:-local}"
+  local -a routes
+  IFS=',|' read -r -a routes <<< "$proxy"
+  for route in "${routes[@]}"; do
+    case "$route" in direct|off) continue ;; esac
+    [[ "$route" == https://?* && "$route" != *[@?#[:space:]]* ]] \
+      || fail "release Go proxy routing must use credential-free HTTPS"
+  done
+  [[ "$sumdb" != *$'\n'* && "$sumdb" != *$'\r'* ]] \
+    || fail "release checksum database routing must be a single line"
+  read -r sumdb_identity sumdb_url sumdb_extra <<< "$sumdb"
+  [[ "$sumdb_identity" =~ ^[A-Za-z0-9._+/:=-]+$ && -z "$sumdb_extra" ]] \
+    || fail "invalid release checksum database identity"
+  if [ -n "$sumdb_url" ]; then
+    [[ "$sumdb_url" == https://?* && "$sumdb_url" != *[@?#[:space:]]* ]] \
+      || fail "release checksum database routing must use credential-free HTTPS"
+  fi
+  [[ "$toolchain" =~ ^(local|auto|path|go[0-9]+\.[0-9]+(\.[0-9]+|beta[0-9]+|rc[0-9]+)?(\+(auto|path))?)$ ]] \
+    || fail "invalid release Go toolchain selection"
+  mkdir -p "$WORK/go-home" "$WORK/go-cache" "$WORK/go-mod"
+  chmod 0700 "$WORK/go-home" "$WORK/go-cache" "$WORK/go-mod"
+  RELEASE_BUILD_ENV=(env -i PATH="$PATH" HOME="$WORK/go-home" LANG=C
+    GOWORK=off GOENV=off GOFLAGS=-mod=readonly GOPROXY="$proxy" GOSUMDB="$sumdb" GOTOOLCHAIN="$toolchain"
+    GOCACHE="$WORK/go-cache" GOMODCACHE="$WORK/go-mod"
+    GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null)
+  for variable in HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY http_proxy https_proxy all_proxy no_proxy \
+    SSL_CERT_FILE SSL_CERT_DIR; do
+    value="${!variable:-}"
+    [ -n "$value" ] || continue
+    case "$variable" in
+      HTTP_PROXY|HTTPS_PROXY|ALL_PROXY|http_proxy|https_proxy|all_proxy)
+        [[ "$value" != *[@?#[:space:]]* ]] || fail "release build cannot pass an authenticated proxy"
+        ;;
+    esac
+    RELEASE_BUILD_ENV+=("$variable=$value")
+  done
+  for variable in EROFS_TARBALL EROFS_TARBALL_SHA256 ENVD_TARBALL ENVD_TARBALL_SHA256 LINUX_TARBALL LINUX_TARBALL_SHA256; do
+    if [[ -v $variable ]]; then RELEASE_BUILD_ENV+=("$variable=${!variable}"); fi
+  done
+}
+
+verify_release_go_contexts() {
+  local build_root="$1" sandboxer_root="$2" envd_root="$3" context directory info
+  for context in runtime sandboxer envd; do
+    case "$context" in
+      runtime) directory="$build_root" ;;
+      sandboxer) directory="$sandboxer_root" ;;
+      envd) directory="$envd_root/packages/envd" ;;
+    esac
+    info="$WORK/go-context-$context.json"
+    "${RELEASE_BUILD_ENV[@]}" go -C "$directory" env -json GOROOT GOVERSION GOHOSTOS GOHOSTARCH > "$info"
+    RELEASE_MATERIALS_WORK="$WORK/go-before-$context" GOMODCACHE="$WORK/go-mod" \
+      release_materials_verify_build_go "$info"
+  done
+  RELEASE_MATERIALS_GO_ENV="$WORK/go-build-toolchains.json"
+  jq -s . "$WORK/go-context-runtime.json" "$WORK/go-context-sandboxer.json" "$WORK/go-context-envd.json" \
+    > "$RELEASE_MATERIALS_GO_ENV"
+}
+
+stage_release_envd_source() {
+  local build_root="$1" destination="$2" tarball_dir="$3" spec checksum
+  spec="${ENVD_TARBALL:-$(native_make_default ENVD_TARBALL)}"
+  spec="${spec//\\#/\#}"
+  checksum="${ENVD_TARBALL_SHA256:-$(native_make_default ENVD_TARBALL_SHA256)}"
+  # Reuse the recipe's authenticated tarball/extraction path in this fresh tree.
+  # Resolve envd's module before selecting its compiler, not in the parent module.
+  "${RELEASE_BUILD_ENV[@]}" bash -s -- "$build_root/native-deps/deps/common.sh" \
+    "$destination" "$tarball_dir" "$spec" "$checksum" <<'ENVD_SOURCE'
+set -euo pipefail
+# shellcheck source=native-deps/deps/common.sh
+source "$1"
+TARBALL_CACHE="$3"
+tarball="$(resolve_tarball "$4" "$5")"
+extract_tarball "$tarball" "$2"
+ENVD_SOURCE
+}
+
 validate_archive_paths() {
   local archive="$1" kind="$2" listing="$WORK/listing"
   tar -tzf "$archive" > "$listing"
@@ -329,6 +409,7 @@ package_release() {
   epoch="${SOURCE_DATE_EPOCH:-0}"
   [[ "$epoch" =~ ^[0-9]+$ ]] || fail "SOURCE_DATE_EPOCH must be an integer"
   validate_native_release_inputs "$kind" "$arch"
+  prepare_release_build_environment
 
   STAGE="$WORK/stage"
   rm -rf "$STAGE"
@@ -364,13 +445,15 @@ package_release() {
         "${RELEASE_ACCELERATOR_SOURCE_SHA:-}" accelerator)"
       stage_release_source "$sandboxer_source" "$sandboxer_sha" "$build_workspace/sandboxer"
       stage_release_source "$accelerator_source" "$accelerator_sha" "$build_workspace/accelerator"
+      stage_release_envd_source "$build_root" "$envd_source" "$tarball_dir"
+      verify_release_go_contexts "$build_root" "$build_workspace/sandboxer" "$envd_source"
       # Fresh source/build roots prevent local output and extraction caches from
       # changing the payload while the material record still names pinned inputs.
-      env -u MAKEFLAGS -u MFLAGS -u MAKEOVERRIDES GOWORK=off \
+      "${RELEASE_BUILD_ENV[@]}" \
         make --no-print-directory -C "$build_root/native-deps" \
         TARGET_ARCH="$arch" TARBALL_DIR="$tarball_dir" \
         ENVD_SRC="$envd_source" erofs envd
-      env -u MAKEFLAGS -u MFLAGS -u MAKEOVERRIDES GOWORK=off \
+      "${RELEASE_BUILD_ENV[@]}" \
         make --no-print-directory -C "$build_root" \
         TARGET_ARCH="$arch" BUILD_MKFS_EROFS="$native_bin_dir/mkfs.erofs" \
         flatten-ctl sandbox-init sandbox-runtime
@@ -417,7 +500,7 @@ package_release() {
       local linux_source linux_license_sha
       # Release metadata must not disclose the build account/host or depend on
       # the wall clock. Development builds retain the normal Kbuild defaults.
-      env -u MAKEFLAGS -u MFLAGS -u MAKEOVERRIDES GOWORK=off \
+      "${RELEASE_BUILD_ENV[@]}" env \
         KBUILD_BUILD_USER=kuasar KBUILD_BUILD_HOST=release KBUILD_BUILD_VERSION=1 \
         KBUILD_BUILD_TIMESTAMP="$(LC_ALL=C date -u -d "@$epoch" '+%a %b %e %T UTC %Y')" \
         make --no-print-directory -C "$build_root/native-deps" \
@@ -436,7 +519,7 @@ package_release() {
         "git:$project_sha;linux-copying-sha256:$linux_license_sha" project
       ;;
   esac
-  release_materials_finish
+  GOMODCACHE="$WORK/go-mod" release_materials_finish
 
   mkdir -p "$output/assets"
   tar --sort=name --owner=0 --group=0 --numeric-owner --mtime="@$epoch" \

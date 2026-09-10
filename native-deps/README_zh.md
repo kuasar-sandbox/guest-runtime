@@ -60,6 +60,25 @@ Runtime 验证 `flatten-ctl` 必须为本 module 的 Linux/amd64
 `github.com/kuasar-sandbox/guest-runtime/cmd/flatten-ctl` 主入口,且 Go VCS 元数据
 为干净状态并匹配所选项目 commit。该发行构建不使用缺少 Git 元数据的源码归档。
 
+Runtime 与 Kernel 构建命令使用私有 home/缓存,不继承调用者的云/发布凭据或构建
+flag 覆盖。可以保留无凭据的 HTTPS module/network 路由及配置的 checksum mirror。
+`GOSUMDB`、`GOTOOLCHAIN` 仍为显式输入,默认分别是 `sum.golang.org`、`local`;
+Runtime 验证要求启用 checksum database。Kernel 打包不获取 Go 分发材料。
+Runtime 先解析现有的 checksum-pin Envd 源码,再分别在 guest-runtime、sandboxer、
+Envd 的 module 目录记录编译器选择。如果显式自动选择产生不同的编译器版本,则
+分别验证每个实际分发;不会把父目录的 Go 上下文当成所有 guest 二进制的证据。
+
+发行打包记录全新构建上下文实际选定的 Go 编译器,在构建前后将其分发输入与匹配的
+`golang.org/toolchain` 归档逐项比较;归档由配置的 checksum database 认证。这覆盖
+编译器、标准库源码及该分发中的其他文件。完整 Go 安装中额外的非构建 `api`、
+`doc`、`misc`、`test` 文件不在认证范围,也不作为发行许可来源;核对时处理标准的
+`go.mod`/`_go.mod` 安装转换。Go 许可/NOTICE 正文来自已验证归档,包括编译器和
+标准库内嵌依赖的材料,保留各自相对路径。独立验证还会
+重新核对其字节、来源 URL 和 module h1。版本字符串或重算 bundle 校验和不能替代
+来源核对。验证要求启用 checksum database 并取得匹配的归档/缓存;即使采用
+`GOTOOLCHAIN=local`,也可能获取核验材料,但不切换构建编译器或静默启用工具链
+自动选择。这些检查以可信构建主机为前提,不证明已失陷主机可信。
+
 Kernel 发行构建固定 `KBUILD_BUILD_USER=kuasar`、`KBUILD_BUILD_HOST=release`
 和 `KBUILD_BUILD_VERSION=1`,并根据 `SOURCE_DATE_EPOCH` 生成 UTC 格式的
 `KBUILD_BUILD_TIMESTAMP`。epoch 默认值为 `0`,也用于归档时间戳。这样内核版本

@@ -14,7 +14,11 @@ fail() {
 # shellcheck source=scripts/release-materials.sh
 source "$ROOT/scripts/release-materials.sh"
 
+export FIXTURE_GO_DISTRIBUTION_CACHE
+FIXTURE_GO_DISTRIBUTION_CACHE="$(go env GOMODCACHE)"
 bash "$ROOT/scripts/test-release-materials.sh"
+GOWORK=off go test -race "$ROOT/scripts/release-go-toolchain.go" "$ROOT/scripts/release-go-toolchain_test.go"
+bash "$ROOT/scripts/test-release-go-contexts.sh"
 bash "$ROOT/native-deps/deps/test-common.sh"
 bash "$ROOT/scripts/test-release-native-materials.sh"
 
@@ -210,6 +214,17 @@ grep -Fqx 'run-name: Release ${{ inputs.version }} @${{ inputs.source_sha }}' \
 sed -n '/- name: Publish runtime release/,/run: |/p' "$WORKFLOW" \
   | grep -Fq 'RELEASE_DEPENDENCIES: accelerator=${{ needs.preflight.outputs.accelerator_version }},sandboxer=${{ needs.preflight.outputs.sandboxer_version }}' \
   || fail "runtime Preview publish step does not receive dependency binding"
+for job in build publish; do
+  for routing in 'GOPROXY: https://goproxy.cn,direct' 'GOSUMDB: sum.golang.google.cn' 'GOTOOLCHAIN: local'; do
+    awk -v job="$job" '
+      $0 == "  " job ":" { inside=1; next }
+      inside && /^  [A-Za-z0-9_-]+:/ { exit }
+      inside && /^    steps:/ { exit }
+      inside { print }
+    ' "$WORKFLOW" | grep -Fx "      $routing" >/dev/null \
+      || fail "runtime $job is missing the verified Go routing policy: $routing"
+  done
+done
 for workflow in release-runtime.yml release-vmlinux.yml; do
   [ "$(grep -Fc 'archive_sha256: ${{ steps.release-archive-digest.outputs.archive_sha256 }}' \
     "$ROOT/.github/workflows/$workflow")" -eq 1 ] \
@@ -278,6 +293,28 @@ install -m 0644 "$ROOT/native-deps/Makefile" "$fixture_root/native-deps/Makefile
 install -m 0755 "$ROOT/scripts/release.sh" "$fixture_root/scripts/release.sh"
 install -m 0755 "$ROOT/scripts/release-materials.sh" \
   "$fixture_root/scripts/release-materials.sh"
+install -m 0644 "$ROOT/scripts/release-go-toolchain.go" "$fixture_root/scripts/release-go-toolchain.go"
+cat >> "$fixture_root/scripts/release-materials.sh" <<'EOF'
+release_materials_download_go_toolchain() {
+  GOMODCACHE="${FIXTURE_GO_DISTRIBUTION_CACHE:?}" _release_materials_download_go_toolchain "$@"
+}
+EOF
+mkdir -p "$fixture_root/native-deps/deps"
+cat > "$fixture_root/native-deps/deps/common.sh" <<'EOF'
+# Synthetic envd source fixture, not a native source-authentication result.
+resolve_tarball() {
+  [ "$1" = 'https://codeload.github.com/e2b-dev/infra/tar.gz/refs/tags/2026.22#e2b-infra-2026.22.tar.gz' ]
+  [ "$2" = 9e1e81f2963fda1805466c337cd0a33638182a15a66295fd19bba6b9c454d92c ]
+  printf 'fixture-envd-source\n'
+}
+extract_tarball() {
+  [ "$1" = fixture-envd-source ]
+  [ ! -e "$2" ]
+  mkdir -p "$2/packages/envd"
+  printf 'module fixture.invalid/envd\n\ngo 1.24\n' > "$2/packages/envd/go.mod"
+  printf 'fixture envd license\n' > "$2/LICENSE"
+}
+EOF
 install -m 0755 "$ROOT/scripts/release-native-materials.sh" \
   "$fixture_root/scripts/release-native-materials.sh"
 mkdir -p "$fixture_root/cmd/flatten-ctl" "$fixture_root/cmd/other-tool"
@@ -318,8 +355,8 @@ accelerator_sha="$(init_fixture_repo "$TMP/accelerator" LICENSE .gitignore)"
 git -C "$TMP/accelerator" tag v0.1.3 "$accelerator_sha"
 git -C "$TMP/sandboxer" tag v0.1.3 "$sandboxer_sha"
 init_fixture_repo "$fixture_root" LICENSE .gitignore native-deps/.gitignore \
-  native-deps/Makefile scripts/release.sh scripts/release-materials.sh \
-  scripts/release-native-materials.sh go.mod cmd >/dev/null
+  native-deps/Makefile native-deps/deps/common.sh scripts/release.sh scripts/release-materials.sh \
+  scripts/release-native-materials.sh scripts/release-go-toolchain.go go.mod cmd >/dev/null
 project_sha="$(git -C "$fixture_root" rev-parse HEAD)"
 printf 'cmd/flatten-ctl/ignored-release-input.go\n' >> "$fixture_root/.git/info/exclude"
 printf 'ignored invalid Go source must not enter a release build\n' \
@@ -358,6 +395,13 @@ cat > "$TMP/release-build-bin/make" <<'EOF'
 # Synthetic payloads test the packaging contract; real native builds are
 # separately exercised by the official release assembly validation.
 set -euo pipefail
+fixture_inputs="$(cd "$(dirname "$0")/.." && pwd)"
+RELEASE_TEST_TOOL="$fixture_inputs/tool"
+RELEASE_TEST_PROJECT_SHA="$(git -C "$fixture_inputs/guest-runtime" rev-parse HEAD)"
+RELEASE_TEST_SYSTEM_INPUTS="$fixture_inputs/system-inputs"
+[ "$GOWORK" = off ] && [ "$GOFLAGS" = -mod=readonly ]
+[ "$GOTOOLCHAIN" = local ] && [ "$GOENV" = off ]
+[ -z "${GH_TOKEN:-}" ] && [ -z "${AWS_SECRET_ACCESS_KEY:-}" ]
 while [ "$#" -gt 0 ] && [ "$1" != -C ]; do shift; done
 [ "${1:-}" = -C ] && [ "$#" -ge 2 ]
 root="$2"
@@ -402,6 +446,8 @@ EOF
 chmod 0755 "$TMP/release-build-bin/make"
 common_env=(
   PATH="$TMP/release-build-bin:$PATH"
+  GH_TOKEN=fixture-authentication-must-not-reach-build
+  AWS_SECRET_ACCESS_KEY=fixture-authentication-must-not-reach-build
   RELEASE_TEST_TOOL="$TMP/tool"
   RELEASE_TEST_PROJECT_SHA="$project_sha"
   RELEASE_TEST_SYSTEM_INPUTS="$TMP/system-inputs"

@@ -59,6 +59,35 @@ Runtime validates `flatten-ctl` as the Linux/amd64
 module, with clean Go VCS metadata matching the selected project commit. A
 source archive without Git metadata is not used for that release build.
 
+Runtime and Kernel build commands use a private home and caches, without the
+caller's cloud/release credentials or build-flag overrides. Credential-free HTTPS
+module/network routing and a configured checksum mirror may be retained.
+`GOSUMDB` and `GOTOOLCHAIN` remain explicit inputs, defaulting to
+`sum.golang.org` and `local`; Runtime verification requires an enabled checksum
+database. Kernel packaging does not fetch a Go distribution.
+Runtime resolves the existing checksum-pinned Envd source first, then records
+compiler selection separately in the guest-runtime, sandboxer and Envd module
+directories. If explicit automatic selection chooses different compiler
+versions, each actual distribution is verified; the parent's Go context is not
+used as evidence for all guest binaries.
+
+Release packaging records the Go compiler selected in the fresh build context,
+then compares its distribution inputs before and after building with the matching
+`golang.org/toolchain` archive authenticated by the configured checksum database.
+This covers the compiler, standard-library sources and other files in that
+distribution; extra non-build `api`, `doc`, `misc` and `test` files in a full Go
+installation are not authenticated or used as release license sources. The
+standard `go.mod`/`_go.mod` installation transformation is accounted for.
+Go license/notice bytes, including nested compiler and standard-library dependency
+materials, come from the verified archive with their relative paths retained.
+Standalone validation
+rechecks their bytes, source URL and module h1. A version string or recomputed
+bundle checksum cannot substitute for that source check. Verification requires
+an enabled checksum database and its matching archive/cache; it may fetch
+verification material with `GOTOOLCHAIN=local` but does not switch the build
+compiler or silently enable automatic toolchain selection. These checks assume
+the trusted build host and do not attest a compromised host.
+
 Kernel release builds set `KBUILD_BUILD_USER=kuasar`, `KBUILD_BUILD_HOST=release`
 and `KBUILD_BUILD_VERSION=1`, and derive `KBUILD_BUILD_TIMESTAMP` in UTC from
 `SOURCE_DATE_EPOCH` (default `0`, also used for archive timestamps). This keeps
