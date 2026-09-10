@@ -298,6 +298,8 @@ install -m 0644 "$ROOT/native-deps/Makefile" "$fixture_root/native-deps/Makefile
 install -m 0755 "$ROOT/scripts/release.sh" "$fixture_root/scripts/release.sh"
 install -m 0755 "$ROOT/scripts/publish-release.sh" "$fixture_root/scripts/publish-release.sh"
 install -m 0755 "$ROOT/scripts/validate-preview-line.sh" "$fixture_root/scripts/validate-preview-line.sh"
+mkdir "$fixture_root/scripts/testdata"
+install -m 0644 "$ROOT/scripts/testdata/linux-COPYING" "$fixture_root/scripts/testdata/linux-COPYING"
 install -m 0755 "$ROOT/scripts/release-materials.sh" \
   "$fixture_root/scripts/release-materials.sh"
 install -m 0644 "$ROOT/scripts/release-go-toolchain.go" "$fixture_root/scripts/release-go-toolchain.go"
@@ -364,7 +366,7 @@ git -C "$TMP/sandboxer" tag v0.1.3 "$sandboxer_sha"
 init_fixture_repo "$fixture_root" LICENSE LICENSES NOTICE .gitignore native-deps/.gitignore \
   native-deps/Makefile native-deps/deps/common.sh scripts/release.sh scripts/release-materials.sh \
   scripts/release-native-materials.sh scripts/release-go-toolchain.go scripts/publish-release.sh \
-  scripts/validate-preview-line.sh go.mod cmd >/dev/null
+  scripts/validate-preview-line.sh scripts/testdata/linux-COPYING go.mod cmd >/dev/null
 project_sha="$(git -C "$fixture_root" rev-parse HEAD)"
 printf 'cmd/flatten-ctl/ignored-release-input.go\n' >> "$fixture_root/.git/info/exclude"
 printf 'ignored invalid Go source must not enter a release build\n' \
@@ -439,7 +441,7 @@ case "$root" in
     printf 'LOAD %s/libc.a\nLOAD %s/libuuid.a\n' \
       "$RELEASE_TEST_SYSTEM_INPUTS" "$RELEASE_TEST_SYSTEM_INPUTS" \
       > "$root/build/x86_64/src/erofs-utils/mkfs/mkfs.erofs.map"
-    printf 'fixture Linux license\n' > "$root/build/src/linux/COPYING"
+    install -m 0644 "$root/../scripts/testdata/linux-COPYING" "$root/build/src/linux/COPYING"
     printf 'fixture GPL-2.0 text\n' > "$root/build/src/linux/LICENSES/preferred/GPL-2.0"
     ;;
   */build/guest-runtime)
@@ -542,6 +544,33 @@ for path in ./bin/vmlinux \
   ./share/sources/vmlinux/MATERIALS.sha256; do
   tar -tzf "$vmlinux_archive" | grep -Fx "$path" >/dev/null \
     || fail "vmlinux archive is missing $path"
+done
+for mutation in bytes bytes-and-source; do
+  candidate="$TMP/linux-copying-$mutation"
+  cp -a "$TMP/vmlinux-bundle" "$candidate"
+  mkdir "$candidate/root"
+  tar -xzf "$vmlinux_archive" -C "$candidate/root"
+  copying="$candidate/root/share/licenses/vmlinux/linux/COPYING"
+  printf 'unselected notice bytes\n' >> "$copying"
+  if [ "$mutation" = bytes-and-source ]; then
+    altered_sha="$(sha256sum "$copying" | awk '{print $1}')"
+    source_table="$candidate/root/share/sources/vmlinux/SOURCES.tsv"
+    awk -F '\t' -v OFS='\t' -v sha="$altered_sha" '
+      $2 == "guest-runtime-kernel-inputs" {sub(/linux-copying-sha256:[0-9a-f]+/, "linux-copying-sha256:" sha, $5)}
+      { print }
+    ' "$source_table" > "$candidate/sources.changed"
+    install -m 0644 "$candidate/sources.changed" "$source_table"
+  fi
+  release_materials_hash_tree "$candidate/root" vmlinux \
+    "$candidate/root/share/sources/vmlinux/MATERIALS.sha256"
+  tar --sort=name --owner=0 --group=0 --numeric-owner --mtime=@1700000000 \
+    -czf "$candidate/assets/$(basename "$vmlinux_archive")" -C "$candidate/root" .
+  (cd "$candidate/assets" && sha256sum "$(basename "$vmlinux_archive")" > SHA256SUMS)
+  if "$fixture_root/scripts/release.sh" validate vmlinux vmlinux-v2.3.4 x86_64 "$candidate" > "$candidate/result.log" 2>&1; then
+    fail "validator accepted changed Linux COPYING ($mutation) with regenerated checksums"
+  fi
+  grep -Fq 'Linux COPYING differs from the pinned source' "$candidate/result.log" \
+    || fail "Linux COPYING mutation failed for an unrelated reason"
 done
 if tar -tzf "$runtime_archive" | grep -E '^\./(docs|test/e2e)(/|$)' >/dev/null \
   || tar -tzf "$vmlinux_archive" | grep -E '^\./(docs|test/e2e)(/|$)' >/dev/null; then

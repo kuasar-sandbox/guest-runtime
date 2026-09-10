@@ -98,6 +98,10 @@ Runtime 与 Kernel 验证还将完整项目许可/NOTICE 树(含嵌套 `LICENSES
 commit 的 Git blob 比较。本地必须具备该 commit;可信发布端获取源码历史用于
 只读检查,不执行候选文件。重算校验和不能授权内容变化、缺失或额外的项目声明。
 Kernel 检视仍独立于 Runtime 二进制和 Go 分发下载。
+Kernel 验证还将 Linux `COPYING` 与从 checksum-pin 的上游 tarball 得出的摘要
+比较,不从上传的许可字节重新计算一个值来证明自身。项目 Kernel 输入来源行也
+绑定同一固定值。小型测试 fixture 完整保留该上游声明,不替代归档交付的完整
+Linux `LICENSES` 材料。
 许可证收集拒绝不可读子目录和不完整遍历。不同原生链接输入不能以相同材料
 名称相互覆盖声明。Runtime 和 Kernel 打包在成功或失败退出时只清理本次所属
 临时工作区,包括只读 Go module 缓存。现有 Envd shared module 本地替换和

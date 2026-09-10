@@ -114,6 +114,11 @@ must be available locally; trusted publication fetches source history for these
 reads without executing candidate files. Recomputed checksums cannot authorize
 changed, missing or extra project notices. Kernel inspection remains independent
 of Runtime binaries and Go distribution downloads.
+Kernel validation additionally compares Linux `COPYING` with the digest derived
+from the checksum-pinned upstream tarball, not a digest recomputed from uploaded
+license bytes. The same fixed value binds the project kernel-input source row.
+The small test fixture preserves that upstream notice verbatim; it is not a
+replacement for the complete Linux `LICENSES` material shipped in the archive.
 License collection refuses unreadable subtrees and incomplete traversals.
 Distinct native link inputs cannot overwrite notices under a shared material
 name. Runtime and Kernel packaging clean only their own temporary workspaces,

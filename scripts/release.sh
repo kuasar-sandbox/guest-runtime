@@ -228,6 +228,12 @@ release_runtime_native_cflags() {
   printf '%s\n' "-O2 -g -ffile-prefix-map=$1=/usr/src/kuasar"
 }
 
+release_linux_copying_sha() {
+  # COPYING from the checksum-pinned Linux 6.1.169 source, independently of
+  # downloaded release metadata. Update and verify together with the native pin.
+  printf '%s\n' fb5a425bd3b3cd6071a3a9aff9909a859e7c1158d54d32e07658398cd67eb6a0
+}
+
 verify_release_go_contexts() {
   local build_root="$1" sandboxer_root="$2" envd_root="$3" context directory info
   for context in runtime sandboxer envd; do
@@ -393,12 +399,14 @@ validate_bundle() {
       ;;
     vmlinux)
       [ -f "$extract/bin/vmlinux" ] || fail "$archive is missing bin/vmlinux"
+      [ "$(sha256sum "$extract/share/licenses/vmlinux/linux/COPYING" | awk '{print $1}')" = "$(release_linux_copying_sha)" ] \
+        || fail "Linux COPYING differs from the pinned source"
       release_materials_require_source "$extract" "$kind" 'bin/vmlinux' 'linux' "6.1.169" \
         'https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.1.169.tar.gz' \
         'sha256:ab28b4ca2a2eca38b3da9aa33b231288168c3560bbc866359045f1c8f4d48d94'
       if [ -n "$selected_sha" ]; then
         selected_url="https://github.com/kuasar-sandbox/guest-runtime/tree/$selected_sha/native-deps/deps"
-        selected_integrity="git:$selected_sha;linux-copying-sha256:$(sha256sum "$extract/share/licenses/vmlinux/linux/COPYING" | awk '{print $1}')"
+        selected_integrity="git:$selected_sha;linux-copying-sha256:$(release_linux_copying_sha)"
       fi
       release_materials_require_source "$extract" "$kind" 'bin/vmlinux' 'guest-runtime-kernel-inputs' "$version" "$selected_url" "$selected_integrity"
       ;;
@@ -521,6 +529,8 @@ package_release() {
       linux_source="$build_root/native-deps/build/src/linux"
       release_materials_copy_licenses "$linux_source" linux
       linux_license_sha="$(sha256sum "$linux_source/COPYING" | awk '{print $1}')"
+      [ "$linux_license_sha" = "$(release_linux_copying_sha)" ] \
+        || fail "Linux COPYING differs from the pinned source"
       release_materials_record_source bin/vmlinux linux 6.1.169 \
         'https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.1.169.tar.gz' \
         'sha256:ab28b4ca2a2eca38b3da9aa33b231288168c3560bbc866359045f1c8f4d48d94' linux
