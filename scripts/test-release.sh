@@ -507,6 +507,7 @@ case "$root" in
     install -m 0755 "$root/../sandboxer/bin/x86_64/sandbox-init" "$tree/sbin/init"
     install -m 0755 "$root/native-deps/bin/x86_64/envd" "$tree/opt/sandbox-runtime/bin/envd"
     install -m 0755 "$root/native-deps/bin/x86_64/mkfs.erofs" "$tree/opt/sandbox-runtime/bin/mkfs.erofs"
+    install -m 0755 "$root/bin/x86_64/flatten-ctl" "$tree/opt/sandbox-runtime/bin/flatten-ctl"
     "$fixture_inputs/runtime-readers/runtime-verifier/bin/mkfs.erofs" --all-root -T0 \
       -U 00000000-0000-0000-0000-000000000000 \
       "$root/build/runtime.erofs" "$tree" >/dev/null
@@ -659,6 +660,26 @@ for input in libc.a libuuid.a libgcc.a crtbeginT.o; do
   fi
   grep -Fq 'EROFS source records omit or alter collected linker inputs' "$candidate/result.log" \
     || fail "omitted native input failed for an unrelated reason"
+done
+for input in libgcc.a crtbeginT.o; do
+  candidate="$TMP/redirected-native-$input"
+  cp -a "$TMP/runtime-bundle" "$candidate"
+  mkdir "$candidate/root"
+  tar -xzf "$runtime_archive" -C "$candidate/root"
+  table="$candidate/root/share/sources/runtime/SOURCES.tsv"
+  awk -F '\t' -v OFS='\t' -v name="system:$input" \
+    '$2 == name {$6="share/licenses/runtime/system/libc.a"} {print}' "$table" > "$candidate/changed-sources"
+  install -m 0644 "$candidate/changed-sources" "$table"
+  mv "$candidate/root/share/licenses/runtime/system/$input" "$candidate/removed-notices"
+  release_materials_hash_tree "$candidate/root" runtime "$candidate/root/share/sources/runtime/MATERIALS.sha256"
+  tar --sort=name --owner=0 --group=0 --numeric-owner --mtime=@1700000000 \
+    -czf "$candidate/assets/$(basename "$runtime_archive")" -C "$candidate/root" .
+  (cd "$candidate/assets" && sha256sum "$(basename "$runtime_archive")" > SHA256SUMS)
+  if "$fixture_root/scripts/release.sh" validate runtime runtime-v1.2.3-preview.20260804 x86_64 "$candidate" > "$candidate/result.log" 2>&1; then
+    fail "validator accepted another input's notices for $input"
+  fi
+  grep -Fq 'invalid EROFS source input identity' "$candidate/result.log" \
+    || fail "redirected native notices failed for an unrelated reason"
 done
 if tar -tzf "$runtime_archive" | grep -E '^\./(docs|test/e2e)(/|$)' >/dev/null \
   || tar -tzf "$vmlinux_archive" | grep -E '^\./(docs|test/e2e)(/|$)' >/dev/null; then
@@ -889,7 +910,11 @@ for kind in runtime vmlinux; do
       > "$candidate/result.log" 2>&1; then
       fail "validator accepted $name bound to another license directory"
     fi
-    grep -Fq "missing or inconsistent source record for $name" "$candidate/result.log" \
+    expected="missing or inconsistent source record for $name"
+    if [ "$kind" = runtime ] && [[ "$name" == system:* ]]; then
+      expected="invalid EROFS source input identity"
+    fi
+    grep -Fq "$expected" "$candidate/result.log" \
       || fail "$name license binding failed for an unrelated reason"
   done
 done

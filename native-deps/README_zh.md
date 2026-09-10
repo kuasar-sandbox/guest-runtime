@@ -54,6 +54,9 @@ Go 依赖及工具链下载使用全新的私有 module/VCS 状态、已启用�
 和 `GOAUTH=off`。它们清除持久化 Go 设置、私有 module 绕过规则、Git 配置与调用者凭据,仅保留已验证的
 无凭据路由。下载来源或工具链之前,上传的 Go 记录键必须匹配官方载荷的精确名称;
 路径别名会被拒绝。这些发行检查不改变普通开发中的 module 认证方式。
+只有 Runtime 载荷闭包中精确的 Accelerator 和 Sandboxer module
+使用单独认证的内部源码声明。组织内的其他 module 与外部依赖一样,必须通过
+module 校验和与许可材料验证。
 来源清单在逐行处理前拒绝重复或过量记录;每份元数据表上限为 16 MiB,
 来源清单上限为 16,384 行。
 RPM 声明收集核对已安装包列表及每个同源兄弟包文件列表的真实退出状态。
@@ -129,9 +132,10 @@ Kernel 检视仍独立于 Runtime 二进制和 Go 分发下载。
 不能替换独立选择的 Kernel,归档目录也不能改变无关安装根目录的权限。
 Runtime 验证从 checksum-pin 的 EROFS 源码在全新私有目录构建主机读取器,
 因此需要原生 C/autotools 构建前置。它核对 bundle 对齐和前缀摘要,不展开镜像
-目录树地检查完整 EROFS 文件系统,再把必需的 init、Envd 和 mkfs 读入固定私有
+目录树地检查完整 EROFS 文件系统,再把必需的 init、Envd、mkfs 和 flatten-ctl 读入固定私有
 文件。镜像内属主/权限、实际 Go main 身份/目标与构建记录必须匹配;init 还须
-绑定所选 Sandboxer commit,内嵌 mkfs 必须与外部 mkfs 字节相同。
+绑定所选 Sandboxer commit。内嵌 mkfs 和 flatten-ctl 必须分别与通过验证的外部
+对应载荷字节相同。
 验证不运行任何上传的可执行文件。Kernel 验证不构建这些读取器。
 Kernel 验证还将 Linux `COPYING` 与从 checksum-pin 的上游 tarball 得出的摘要
 比较,不从上传的许可字节重新计算一个值来证明自身。项目 Kernel 输入来源行也
@@ -145,7 +149,9 @@ Kernel 独立选择不变。
 `EROFS-INPUTS.tsv` 保留从本次链接映射选出的全部外部静态库/启动对象名称及
 摘要。验证要求原生来源记录集与该完整清单精确一致,不只检查 libc、libuuid;
 即使重算 bundle 校验和,删除 GCC/CRT 行及声明仍会被拒绝。该清单属于独立的
-已完成构建归档绑定内容,不证明不可信构建者或主机可信。
+已完成构建归档绑定内容。每个输入必须指向自身的 `system/<input>` 许可目录;
+把 GCC/CRT 记录改指向另一个输入的有效声明也会被拒绝。该清单
+不证明不可信构建者或主机可信。
 
 Runtime 打包还读取本次新构建的 `mkfs.erofs` 链接映射。对实际链入的系统静态库
 或启动对象,记录文件摘要和已安装的 Debian 源包或 RPM 源包身份,并收集对应的

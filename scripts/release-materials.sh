@@ -177,6 +177,17 @@ release_materials_add_go_binary() {
   raw="$RELEASE_MATERIALS_WORK/go-version-$(( $(find "$RELEASE_MATERIALS_WORK" -maxdepth 1 -name 'go-version-*' | wc -l) + 1 ))"
   go version -m "$binary" > "$raw" 2>/dev/null \
     || fail "Go build info is missing from $binary"
+  # Only the Runtime's selected component closure and Envd shared module have
+  # dedicated local-source authentication elsewhere in this package contract.
+  awk -F '\t' '
+    $2 == "dep" { module=$3 }
+    $2 == "=>" && ($3 ~ /^\// || $3 ~ /^\.\.?\// || $4 == "(devel)" || $4 == "") {
+      if (module != "github.com/kuasar-sandbox/accelerator" &&
+          module != "github.com/kuasar-sandbox/sandboxer" &&
+          module != "github.com/e2b-dev/infra/packages/shared") unsupported=1
+    }
+    END { exit unsupported }
+  ' "$raw" || fail "third-party local Go replacements are not supported in release materials; select a versioned module replacement"
   toolchain_full="$(awk 'NR == 1 { sub(/^.*: /, ""); print; exit }' "$raw")"
   toolchain="${toolchain_full%% *}"
   toolchain="${toolchain%%-X:*}"
@@ -308,6 +319,8 @@ release_materials_go_payload_allowed() {
 
 release_materials_verified_go_source() {
   local module="$1" version="$2" checksum="$3" verify_root json directory
+  [[ "$checksum" =~ ^h1:[A-Za-z0-9+/]{43}=$ ]] \
+    || fail "third-party Go source requires an authenticated module checksum: $module@$version"
   verify_root="$(mktemp -d "$RELEASE_MATERIALS_WORK/verify-go.XXXXXX")"
   # Use a temporary module so packaging cannot change the caller's go.mod/sum.
   # Verify the extracted cache as well as the download sum; download alone does
@@ -463,12 +476,17 @@ release_materials_finish() {
   fi
   while IFS=$'\t' read -r module version checksum; do
     [ -n "$module" ] || continue
+    # Only exact components authenticated by this package's source contract
+    # have their notices collected separately. Organization membership is not
+    # a license-material exemption.
     case "$module" in
-      github.com/kuasar-sandbox/*) continue ;;
+      github.com/kuasar-sandbox/accelerator|github.com/kuasar-sandbox/sandboxer) continue ;;
     esac
     if awk -F '\t' -v module="$module" \
       '$2 == "replacement" && $3 == module && $4 == "local-source" { found=1 }
        END { exit !found }' "$RELEASE_MATERIALS_WORK/go-build-info"; then
+      [ "$module" = github.com/e2b-dev/infra/packages/shared ] \
+        || fail "unsupported local Go replacement in module inventory"
       directory="$RELEASE_MATERIALS_STAGE/share/licenses/$RELEASE_MATERIALS_UNIT/go/$module@$version"
       if [ ! -d "$directory" ] || [ -z "$(find "$directory" -type f -print -quit)" ]; then
         fail "local Go replacement requires license material from its selected source: $module"
@@ -707,7 +725,14 @@ release_materials_validate() {
     release_materials_require_go "$root" "$unit" "$payload" || return 1
   done < <(awk -F '\t' 'NR > 1 { print $1 }' "$source_root/GO-BUILD-INFO.tsv" | LC_ALL=C sort -u)
   while IFS=$'\t' read -r module version checksum || [ -n "$module" ]; do
-    case "$module" in github.com/kuasar-sandbox/*) continue ;; esac
+    case "$module" in github.com/kuasar-sandbox/accelerator|github.com/kuasar-sandbox/sandboxer) continue ;; esac
+    if [ "$checksum" = - ]; then
+      [ "$module" = github.com/e2b-dev/infra/packages/shared ] \
+        || fail "unsupported local Go replacement in module inventory"
+    else
+      [[ "$checksum" =~ ^h1:[A-Za-z0-9+/]{43}=$ ]] \
+        || fail "third-party Go source requires an authenticated module checksum: $module@$version"
+    fi
     directory="share/licenses/$unit/go/$module@$version"
     release_materials_safe_relative "$directory" || fail "unsafe Go module license path"
     if [ ! -d "$root/$directory" ] || [ -z "$(find "$root/$directory" -type f -print -quit)" ]; then

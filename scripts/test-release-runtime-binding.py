@@ -37,6 +37,8 @@ def run(source, original, readers):
             ("swapped-init", "Go payload must be built from the clean selected commit"),
             ("non-go-envd", "embedded"),
             ("different-mkfs", "embedded mkfs.erofs differs"),
+            ("missing-flatten", "Runtime embedded payload verification failed"),
+            ("different-flatten", "embedded flatten-ctl differs"),
             ("forged-envd-record", "Go build records differ from embedded Runtime payloads"),
             ("corrupt-erofs", "Runtime embedded payload verification failed"),
         )
@@ -66,6 +68,7 @@ def run(source, original, readers):
                     target.chmod(0o755)
                 init = guest / "sbin/init"
                 envd = guest / "opt/sandbox-runtime/bin/envd"
+                flatten = guest / "opt/sandbox-runtime/bin/flatten-ctl"
                 if mutation == "missing-init":
                     init.unlink()
                 elif mutation == "linked-init":
@@ -75,6 +78,10 @@ def run(source, original, readers):
                     init.chmod(0o644)
                 elif mutation == "swapped-init":
                     shutil.copyfile(envd, init)
+                elif mutation == "missing-flatten":
+                    flatten.unlink()
+                elif mutation == "different-flatten":
+                    flatten.write_text("#!/bin/sh\ntouch " + str(marker) + "\n")
                 elif mutation in ("non-go-envd", "different-mkfs"):
                     target = envd if mutation == "non-go-envd" else guest / "opt/sandbox-runtime/bin/mkfs.erofs"
                     target.write_text("#!/bin/sh\ntouch " + str(marker) + "\n")
@@ -107,7 +114,7 @@ def run(source, original, readers):
             if marker.exists():
                 raise AssertionError("an embedded fixture executable was run")
             print("test-runtime-binding: rejected " + mutation, flush=True)
-        print("test-runtime-binding: 10 rechecksummed EROFS/payload mutations rejected; no payload execution")
+        print("test-runtime-binding: 12 rechecksummed EROFS/payload mutations rejected; no payload execution")
 
 
 if __name__ == "__main__":

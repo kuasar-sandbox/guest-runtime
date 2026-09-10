@@ -15,6 +15,7 @@ PAYLOADS = {
     "init": "/sbin/init",
     "envd": "/opt/sandbox-runtime/bin/envd",
     "mkfs.erofs": "/opt/sandbox-runtime/bin/mkfs.erofs",
+    "flatten-ctl": "/opt/sandbox-runtime/bin/flatten-ctl",
 }
 MAX_IMAGE = 1024 * 1024 * 1024
 MAX_PAYLOAD = 256 * 1024 * 1024

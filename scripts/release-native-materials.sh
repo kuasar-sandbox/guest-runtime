@@ -266,6 +266,7 @@ release_native_validate_erofs_inventory() {
     $2 ~ /^system:/ {
       if ($1 != "bin/mkfs.erofs,bin/sandbox-runtime.bundle:/opt/sandbox-runtime/bin/mkfs.erofs") exit 1
       name=$2; sub(/^system:/, "", name)
+      if ($6 != "share/licenses/runtime/system/" name) exit 1
       split($5, fields, ";"); digest=fields[1]; sub(/^sha256:/, "", digest)
       if (fields[1] !~ /^sha256:/ || length(digest) != 64 || digest ~ /[^0-9a-f]/) exit 1
       print name FS digest

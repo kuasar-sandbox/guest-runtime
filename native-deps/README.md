@@ -51,6 +51,10 @@ bypasses, Git configuration and caller credentials while retaining validated,
 credential-free routing. Uploaded Go record keys must match the exact official
 payload names before any source or toolchain download; path aliases are rejected.
 These release checks do not change ordinary development module authentication.
+Only the exact Accelerator and Sandboxer modules use separately
+authenticated internal-source notices for the Runtime payload closure. Any other
+organization-owned module must pass the same module checksum and notice
+verification as an external dependency.
 Source inventories reject duplicate or excessive records before per-row work;
 each metadata table is capped at 16 MiB and the source inventory at 16,384 rows.
 RPM notice collection checks both the installed-package listing and every
@@ -133,10 +137,11 @@ Kernel, and archive directories cannot change unrelated deployment-root modes.
 Runtime validation builds its host readers from the checksum-pinned EROFS source
 in a fresh private directory (the native C/autotools prerequisites are required).
 It verifies the bundle alignment and prefix digest, checks the complete EROFS
-filesystem without extracting its tree, then reads only the required init, Envd
-and mkfs payloads into fixed private files. Their in-image ownership/modes, actual
+filesystem without extracting its tree, then reads only the required init, Envd,
+mkfs and flatten-ctl payloads into fixed private files. Their in-image ownership/modes, actual
 Go main identities/targets and build records must match; init must also bind the
-selected Sandboxer commit, and embedded mkfs must equal the outer mkfs bytes.
+selected Sandboxer commit. Embedded mkfs and flatten-ctl must each equal their
+verified outer payload bytes.
 No uploaded executable is run. Kernel validation does not build these readers.
 Validation rejects non-root numeric archive ownership and checks the exact
 Envd, EROFS and Linux source URLs and digests. Publication passes its selected
@@ -177,7 +182,9 @@ shared-module local replacements and independent Kernel selection are unchanged.
 digest selected from that fresh link map. Validation requires exactly the same
 complete native source-record set, not just libc and libuuid; removing GCC/CRT
 rows and notices is rejected even with regenerated bundle checksums. The
-inventory is part of the independent completed-build archive binding; it is not
+license directory of every input must be its own `system/<input>` directory;
+redirecting GCC/CRT records to another input's valid notices is rejected.
+The inventory is part of the independent completed-build archive binding; it is not
 an attestation of an untrusted producer or host.
 
 Runtime packaging also reads the fresh `mkfs.erofs` linker map. For each

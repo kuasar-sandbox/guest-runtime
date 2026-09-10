@@ -387,6 +387,8 @@ validate_runtime_payloads() {
     || fail "Runtime embedded payload verification failed"
   cmp -s "$payloads/mkfs.erofs" "$extract/bin/mkfs.erofs" \
     || fail "embedded mkfs.erofs differs from the shipped host payload"
+  cmp -s "$payloads/flatten-ctl" "$extract/bin/flatten-ctl" \
+    || fail "embedded flatten-ctl differs from the verified outer payload"
   sandboxer_sha="$(awk -F '\t' '$2 == "sandboxer" { sub(/^git:/, "", $5); print $5 }' \
     "$extract/share/sources/runtime/SOURCES.tsv")"
   release_materials_require_go_revision "$payloads/init" "$sandboxer_sha"
