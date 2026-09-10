@@ -44,12 +44,15 @@ pin 落在 Makefile 变量(`EROFS_TARBALL` / `LINUX_TARBALL` / `ENVD_TARBALL` �
 字节)。发布其他原生输入时,必须同时更新仓库 pin、摘要与发行来源记录;否则打包会
 失败,不会为不同输入生成错误的来源记录。
 
-发行打包从所选 Git commit 的干净快照出发,在本次临时兄弟工作区中调用现有组件
+发行打包从所选 Git commit 的全新 checkout 出发,在本次临时兄弟工作区中调用现有组件
 Makefile。Runtime 打包重建其最小 accelerator/sandboxer 依赖闭包、Envd、EROFS
 工具和 Runtime image;Kernel 打包独立重建采用所选 patch 与 config 的 Linux。
 仅复用通过 checksum 验证的下载 tarball。已有二进制、解压源码树和开发中的工作
 保持不变。内部依赖记录只有在本地 Git Tag 指向所选 commit 时才保留该发行版本;
 否则记录 `git:<commit>`,目标正式 Tag 尚不存在时也适用。
+Runtime 验证 `flatten-ctl` 必须为本 module 的 Linux/amd64
+`github.com/kuasar-sandbox/guest-runtime/cmd/flatten-ctl` 主入口,且 Go VCS 元数据
+为干净状态并匹配所选项目 commit。该发行构建不使用缺少 Git 元数据的源码归档。
 
 Kernel 发行构建固定 `KBUILD_BUILD_USER=kuasar`、`KBUILD_BUILD_HOST=release`
 和 `KBUILD_BUILD_VERSION=1`,并根据 `SOURCE_DATE_EPOCH` 生成 UTC 格式的
@@ -62,6 +65,8 @@ Kernel 发行构建固定 `KBUILD_BUILD_USER=kuasar`、`KBUILD_BUILD_HOST=releas
 accelerator/sandboxer `RELEASE_DEPENDENCIES` 绑定。重新生成校验和不能让不同的
 项目 commit、依赖版本或原生来源通过该发布请求。本地源码打包仍可使用尚无 Tag
 的依赖 commit,但不会把这些记录声称为已存在的发行版本。
+项目、Envd、EROFS、Linux 和 Envd shared module 的必需来源记录还必须指向各自
+的许可目录;即使另一个目录的材料有效,也不能用它替代当前来源的材料。
 
 Runtime 打包还读取本次新构建的 `mkfs.erofs` 链接映射。对实际链入的系统静态库
 或启动对象,记录文件摘要和已安装的 Debian 源包或 RPM 源包身份,并收集对应的

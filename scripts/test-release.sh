@@ -272,6 +272,10 @@ install -m 0755 "$ROOT/scripts/release-materials.sh" \
   "$fixture_root/scripts/release-materials.sh"
 install -m 0755 "$ROOT/scripts/release-native-materials.sh" \
   "$fixture_root/scripts/release-native-materials.sh"
+mkdir -p "$fixture_root/cmd/flatten-ctl" "$fixture_root/cmd/other-tool"
+printf 'module github.com/kuasar-sandbox/guest-runtime\n\ngo 1.24\n' > "$fixture_root/go.mod"
+printf 'package main\nfunc main() {}\n' > "$fixture_root/cmd/flatten-ctl/main.go"
+printf 'package main\nfunc main() {}\n' > "$fixture_root/cmd/other-tool/main.go"
 printf '/bin/\n/build/\n' > "$TMP/sandboxer/.gitignore"
 printf '/bin/\n/build/\n' > "$TMP/accelerator/.gitignore"
 mkdir "$TMP/shared"
@@ -307,8 +311,11 @@ git -C "$TMP/accelerator" tag v0.1.3 "$accelerator_sha"
 git -C "$TMP/sandboxer" tag v0.1.3 "$sandboxer_sha"
 init_fixture_repo "$fixture_root" LICENSE .gitignore native-deps/.gitignore \
   native-deps/Makefile scripts/release.sh scripts/release-materials.sh \
-  scripts/release-native-materials.sh >/dev/null
+  scripts/release-native-materials.sh go.mod cmd >/dev/null
 project_sha="$(git -C "$fixture_root" rev-parse HEAD)"
+printf 'cmd/flatten-ctl/ignored-release-input.go\n' >> "$fixture_root/.git/info/exclude"
+printf 'ignored invalid Go source must not enter a release build\n' \
+  > "$fixture_root/cmd/flatten-ctl/ignored-release-input.go"
 
 mkdir "$TMP/release-build-bin" "$TMP/system-inputs"
 printf 'fixture libc archive\n' > "$TMP/system-inputs/libc.a"
@@ -371,8 +378,11 @@ case "$root" in
     ;;
   */build/guest-runtime)
     [ ! -e "$root/bin/x86_64/sandbox-runtime.bundle" ]
+    [ "$(git -C "$root" rev-parse HEAD)" = "$RELEASE_TEST_PROJECT_SHA" ]
+    [ ! -e "$root/cmd/flatten-ctl/ignored-release-input.go" ]
     mkdir -p "$root/bin/x86_64" "$root/../sandboxer/bin/x86_64"
-    install -m 0755 "$RELEASE_TEST_TOOL" "$root/bin/x86_64/flatten-ctl"
+    (cd "$root" && GOWORK=off CGO_ENABLED=0 go build -trimpath -buildvcs=true \
+      -o bin/x86_64/flatten-ctl ./cmd/flatten-ctl)
     install -m 0755 "$RELEASE_TEST_TOOL" "$root/../sandboxer/bin/x86_64/sandbox-init"
     printf 'fresh runtime bundle\n' > "$root/bin/x86_64/sandbox-runtime.bundle"
     ;;
@@ -383,6 +393,7 @@ chmod 0755 "$TMP/release-build-bin/make"
 common_env=(
   PATH="$TMP/release-build-bin:$PATH"
   RELEASE_TEST_TOOL="$TMP/tool"
+  RELEASE_TEST_PROJECT_SHA="$project_sha"
   RELEASE_TEST_SYSTEM_INPUTS="$TMP/system-inputs"
   RELEASE_SANDBOXER_SOURCE_SHA="$sandboxer_sha"
   RELEASE_SANDBOXER_VERSION=v0.1.3
@@ -534,6 +545,83 @@ for binding in accelerator=v9.0.0,sandboxer=v0.1.3 accelerator=v0.1.3,sandboxer=
     runtime-v1.2.3-preview.20260804 x86_64 "$TMP/runtime-bundle" >/dev/null 2>&1; then
     fail "validator accepted a different or incomplete dependency release request"
   fi
+done
+
+git clone --quiet --no-local "$fixture_root" "$TMP/target-source"
+for target in darwin/amd64 linux/arm64; do
+  (cd "$TMP/target-source" && GOWORK=off CGO_ENABLED=0 GOOS="${target%/*}" GOARCH="${target#*/}" \
+    go build -buildvcs=true -o "$TMP/target-${target//\//-}" ./cmd/flatten-ctl)
+done
+(cd "$TMP/target-source" && GOWORK=off CGO_ENABLED=0 \
+  go build -buildvcs=true -o "$TMP/other-main" ./cmd/other-tool)
+(cd "$TMP/target-source" && GOWORK=off CGO_ENABLED=0 \
+  go build -buildvcs=false -o "$TMP/unstamped" ./cmd/flatten-ctl)
+printf '// fixture dirty source\n' >> "$TMP/target-source/cmd/flatten-ctl/main.go"
+(cd "$TMP/target-source" && GOWORK=off CGO_ENABLED=0 \
+  go build -buildvcs=true -o "$TMP/dirty-source" ./cmd/flatten-ctl)
+for mutation in wrong-os wrong-arch other-main other-module unstamped dirty-source; do
+  candidate="$TMP/flatten-$mutation"
+  cp -a "$TMP/runtime-bundle" "$candidate"
+  mkdir "$candidate/root"
+  tar -xzf "$runtime_archive" -C "$candidate/root"
+  payload="$TMP/$mutation"
+  case "$mutation" in
+    wrong-os) payload="$TMP/target-darwin-amd64" ;;
+    wrong-arch) payload="$TMP/target-linux-arm64" ;;
+    other-module) payload="$TMP/tool" ;;
+  esac
+  install -m 0755 "$payload" "$candidate/root/bin/flatten-ctl"
+  tar --sort=name --owner=0 --group=0 --numeric-owner --mtime=@1700000000 \
+    -czf "$candidate/assets/$(basename "$runtime_archive")" -C "$candidate/root" .
+  (cd "$candidate/assets" && sha256sum "$(basename "$runtime_archive")" > SHA256SUMS)
+  if "$fixture_root/scripts/release.sh" validate runtime runtime-v1.2.3-preview.20260804 \
+    x86_64 "$candidate" > "$candidate/result.log" 2>&1; then
+    fail "validator accepted $mutation flatten-ctl with regenerated checksums"
+  fi
+  case "$mutation" in
+    wrong-*) expected='must target linux/amd64' ;;
+    other-*) expected='must use the selected guest-runtime module and main package' ;;
+    unstamped) expected='must bind its full selected source commit' ;;
+    dirty-source) expected='must be built from the clean selected commit' ;;
+  esac
+  grep -Fq "$expected" "$candidate/result.log" || fail "$mutation failed for an unrelated reason"
+done
+
+for kind in runtime vmlinux; do
+  if [ "$kind" = runtime ]; then
+    version=runtime-v1.2.3-preview.20260804
+    names=(guest-runtime sandboxer accelerator envd erofs-utils github.com/e2b-dev/infra/packages/shared)
+  else
+    version=vmlinux-v2.3.4
+    names=(guest-runtime-kernel-inputs linux)
+  fi
+  archive_name="$("$fixture_root/scripts/release.sh" archive-name "$kind" "$version" x86_64)"
+  for name in "${names[@]}"; do
+    candidate="$TMP/$kind-license-${name//\//-}"
+    cp -a "$TMP/$kind-bundle" "$candidate"
+    mkdir "$candidate/root"
+    tar -xzf "$candidate/assets/$archive_name" -C "$candidate/root"
+    inventory="$candidate/root/share/sources/$kind/SOURCES.tsv"
+    label="share/licenses/$kind/project"
+    case "$name" in
+      guest-runtime) label="share/licenses/runtime/envd" ;;
+      guest-runtime-kernel-inputs) label="share/licenses/vmlinux/linux" ;;
+    esac
+    awk -F '\t' -v OFS='\t' -v name="$name" -v label="$label" \
+      '$2 == name {$6=label} {print}' "$inventory" > "$candidate/changed.tsv"
+    mv "$candidate/changed.tsv" "$inventory"
+    release_materials_hash_tree "$candidate/root" "$kind" \
+      "$candidate/root/share/sources/$kind/MATERIALS.sha256"
+    tar --sort=name --owner=0 --group=0 --numeric-owner --mtime=@1700000000 \
+      -czf "$candidate/assets/$archive_name" -C "$candidate/root" .
+    (cd "$candidate/assets" && sha256sum "$archive_name" > SHA256SUMS)
+    if "$fixture_root/scripts/release.sh" validate "$kind" "$version" x86_64 "$candidate" \
+      > "$candidate/result.log" 2>&1; then
+      fail "validator accepted $name bound to another license directory"
+    fi
+    grep -Fq "missing or inconsistent source record for $name" "$candidate/result.log" \
+      || fail "$name license binding failed for an unrelated reason"
+  done
 done
 
 for kind in runtime vmlinux; do

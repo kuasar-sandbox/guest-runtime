@@ -36,7 +36,7 @@ from its exact public mirror). To publish another native input, update its
 repository pin, digest and release source record together; packaging fails
 instead of emitting provenance for a different input.
 
-Release packaging builds from clean snapshots of the selected Git commits in a
+Release packaging builds from fresh checkouts of the selected Git commits in a
 temporary sibling workspace, using the existing component Makefiles. Runtime
 packaging rebuilds its minimal accelerator/sandboxer closure, Envd, EROFS tools,
 and the image; kernel packaging independently rebuilds Linux with the selected
@@ -45,6 +45,10 @@ Existing binary outputs, extracted source trees and development work remain
 untouched. Internal dependency records retain a release version only when its
 local Git tag identifies the selected commit; otherwise they record
 `git:<commit>`, including when a target formal tag does not exist yet.
+Runtime validates `flatten-ctl` as the Linux/amd64
+`github.com/kuasar-sandbox/guest-runtime/cmd/flatten-ctl` main package in this
+module, with clean Go VCS metadata matching the selected project commit. A
+source archive without Git metadata is not used for that release build.
 
 Kernel release builds set `KBUILD_BUILD_USER=kuasar`, `KBUILD_BUILD_HOST=release`
 and `KBUILD_BUILD_VERSION=1`, and derive `KBUILD_BUILD_TIMESTAMP` in UTC from
@@ -60,6 +64,9 @@ accelerator/sandboxer `RELEASE_DEPENDENCIES` binding. Regenerating checksums doe
 not permit a different project commit, dependency version or native source to
 be published under that request. Local source packaging can still use untagged
 dependency commits; those records are not claimed to be existing releases.
+Required project, Envd, EROFS, Linux and Envd shared-module records must also
+name their own license directories; redirecting them to unrelated, otherwise
+valid materials is rejected.
 
 Runtime packaging also reads the fresh `mkfs.erofs` linker map. For each
 linked system archive or startup object it records the actual file digest and

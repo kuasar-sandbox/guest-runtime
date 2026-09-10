@@ -74,7 +74,18 @@ copy_root_script() {
 }
 
 check_go_binary() {
-  go version -m "$1" >/dev/null 2>&1 || fail "Go build info is missing from $1"
+  local file="$1" info
+  info="$(go version -m "$file" 2>/dev/null)" || fail "Go build info is missing from $file"
+  awk -F '\t' '
+    $2 == "build" && $3 ~ /^GOOS=/ { os++; if ($3 != "GOOS=linux") bad=1 }
+    $2 == "build" && $3 ~ /^GOARCH=/ { arch++; if ($3 != "GOARCH=amd64") bad=1 }
+    END { exit bad || os != 1 || arch != 1 }
+  ' <<< "$info" || fail "Go release payload must target linux/amd64: $file"
+  awk -F '\t' '
+    $2 == "path" { paths++; if ($3 != "github.com/kuasar-sandbox/guest-runtime/cmd/flatten-ctl") bad=1 }
+    $2 == "mod" { modules++; if ($3 != "github.com/kuasar-sandbox/guest-runtime") bad=1 }
+    END { exit bad || paths != 1 || modules != 1 }
+  ' <<< "$info" || fail "flatten-ctl must use the selected guest-runtime module and main package"
 }
 
 native_make_default() {
@@ -161,8 +172,12 @@ validate_native_release_inputs() {
 
 stage_release_source() {
   local source="$1" sha="$2" destination="$3"
+  [ ! -e "$destination" ] || fail "fresh release checkout already exists"
   mkdir -p "$destination"
-  git -C "$source" archive "$sha" | tar -xf - -C "$destination"
+  local -a git_env=(env -i PATH="$PATH" GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null)
+  "${git_env[@]}" git -C "$destination" init --quiet --template=
+  "${git_env[@]}" git -C "$destination" fetch --quiet --depth=1 "$source" "$sha"
+  "${git_env[@]}" git -C "$destination" -c advice.detachedHead=false checkout --quiet --detach "$sha"
 }
 
 validate_archive_paths() {
@@ -241,8 +256,17 @@ validate_bundle() {
   rm -rf "$extract"
   mkdir -p "$extract"
   tar -xzf "$bundle/assets/$archive" -C "$extract"
-  release_materials_validate "$extract" "$kind"
   local selected_sha="${SOURCE_SHA:-}" selected_url="" selected_integrity=""
+  if [ "$kind" = runtime ]; then
+    check_go_binary "$extract/bin/flatten-ctl"
+    if [ -z "$selected_sha" ]; then
+      selected_sha="$(go version -m "$extract/bin/flatten-ctl" | \
+        awk -F '\t' '$2 == "build" && $3 ~ /^vcs.revision=/ {print substr($3, 14)}')"
+    fi
+    [[ "$selected_sha" =~ ^[0-9a-f]{40}$ ]] || fail "flatten-ctl must bind its full selected source commit"
+    release_materials_require_go_revision "$extract/bin/flatten-ctl" "$selected_sha"
+  fi
+  release_materials_validate "$extract" "$kind"
   if [ -n "$selected_sha" ]; then
     [[ "$selected_sha" =~ ^[0-9a-f]{40}$ ]] || fail "SOURCE_SHA must be a full lowercase commit"
     selected_url="https://github.com/kuasar-sandbox/guest-runtime/commit/$selected_sha"
@@ -354,6 +378,7 @@ package_release() {
       copy_executable "$bin_dir/flatten-ctl" bin/flatten-ctl
       copy_executable "$native_bin_dir/mkfs.erofs" bin/mkfs.erofs
       check_go_binary "$STAGE/bin/flatten-ctl"
+      release_materials_require_go_revision "$STAGE/bin/flatten-ctl" "$project_sha"
       accelerator_version="$(release_materials_git_version "$accelerator_source" "$accelerator_version" "$accelerator_sha")"
       sandboxer_version="$(release_materials_git_version "$sandboxer_source" "$sandboxer_version" "$sandboxer_sha")"
       release_materials_copy_licenses "$sandboxer_source" sandboxer
