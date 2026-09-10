@@ -108,6 +108,12 @@ dependency commits; those records are not claimed to be existing releases.
 Required project, Envd, EROFS, Linux, system-library and Envd shared-module records must also
 name their own license directories; redirecting them to unrelated, otherwise
 valid materials is rejected.
+Runtime and Kernel validation compare the complete project license/notice tree,
+including nested `LICENSES`, with the selected commit's Git blobs. That commit
+must be available locally; trusted publication fetches source history for these
+reads without executing candidate files. Recomputed checksums cannot authorize
+changed, missing or extra project notices. Kernel inspection remains independent
+of Runtime binaries and Go distribution downloads.
 License collection refuses unreadable subtrees and incomplete traversals.
 Distinct native link inputs cannot overwrite notices under a shared material
 name. Runtime and Kernel packaging clean only their own temporary workspaces,

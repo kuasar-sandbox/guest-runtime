@@ -289,10 +289,15 @@ mkdir -p "$TMP/src" "$TMP/sandboxer/bin/x86_64" "$TMP/accelerator" \
   "$fixture_root/native-deps/build/x86_64/src/erofs-utils" \
   "$fixture_root/native-deps/build/src/linux/LICENSES/preferred"
 install -m 0644 "$ROOT/LICENSE" "$fixture_root/LICENSE"
+mkdir "$fixture_root/LICENSES"
+printf 'fixture nested project notice\n' > "$fixture_root/LICENSES/NOTICE.txt"
+printf 'fixture project attribution\n' > "$fixture_root/NOTICE"
 install -m 0644 "$ROOT/.gitignore" "$fixture_root/.gitignore"
 install -m 0644 "$ROOT/native-deps/.gitignore" "$fixture_root/native-deps/.gitignore"
 install -m 0644 "$ROOT/native-deps/Makefile" "$fixture_root/native-deps/Makefile"
 install -m 0755 "$ROOT/scripts/release.sh" "$fixture_root/scripts/release.sh"
+install -m 0755 "$ROOT/scripts/publish-release.sh" "$fixture_root/scripts/publish-release.sh"
+install -m 0755 "$ROOT/scripts/validate-preview-line.sh" "$fixture_root/scripts/validate-preview-line.sh"
 install -m 0755 "$ROOT/scripts/release-materials.sh" \
   "$fixture_root/scripts/release-materials.sh"
 install -m 0644 "$ROOT/scripts/release-go-toolchain.go" "$fixture_root/scripts/release-go-toolchain.go"
@@ -356,9 +361,10 @@ sandboxer_sha="$(init_fixture_repo "$TMP/sandboxer" LICENSE .gitignore)"
 accelerator_sha="$(init_fixture_repo "$TMP/accelerator" LICENSE .gitignore)"
 git -C "$TMP/accelerator" tag v0.1.3 "$accelerator_sha"
 git -C "$TMP/sandboxer" tag v0.1.3 "$sandboxer_sha"
-init_fixture_repo "$fixture_root" LICENSE .gitignore native-deps/.gitignore \
+init_fixture_repo "$fixture_root" LICENSE LICENSES NOTICE .gitignore native-deps/.gitignore \
   native-deps/Makefile native-deps/deps/common.sh scripts/release.sh scripts/release-materials.sh \
-  scripts/release-native-materials.sh scripts/release-go-toolchain.go go.mod cmd >/dev/null
+  scripts/release-native-materials.sh scripts/release-go-toolchain.go scripts/publish-release.sh \
+  scripts/validate-preview-line.sh go.mod cmd >/dev/null
 project_sha="$(git -C "$fixture_root" rev-parse HEAD)"
 printf 'cmd/flatten-ctl/ignored-release-input.go\n' >> "$fixture_root/.git/info/exclude"
 printf 'ignored invalid Go source must not enter a release build\n' \
@@ -494,15 +500,15 @@ grep -Fxq kernel "$fixture_root/native-deps/bin/x86_64/vmlinux" \
   vmlinux vmlinux-v2.3.4 x86_64 "$TMP/vmlinux-bundle"
 
 RELEASE_KIND=runtime RELEASE_DEPENDENCIES=accelerator=v0.1.3,sandboxer=v0.1.3 bash "$ROOT/scripts/test-publisher.sh" \
-  "$ROOT/scripts/publish-release.sh" "$TMP/runtime-bundle" \
+  "$fixture_root/scripts/publish-release.sh" "$TMP/runtime-bundle" \
   kuasar-sandbox/guest-runtime runtime-v1.2.3-preview.20260804 \
   "$project_sha" main
 RELEASE_KIND=vmlinux bash "$ROOT/scripts/test-publisher.sh" \
-  "$ROOT/scripts/publish-release.sh" "$TMP/vmlinux-bundle" \
+  "$fixture_root/scripts/publish-release.sh" "$TMP/vmlinux-bundle" \
   kuasar-sandbox/guest-runtime vmlinux-v2.3.4 \
   "$project_sha" main
 RELEASE_KIND=vmlinux bash "$ROOT/scripts/test-publisher.sh" \
-  "$ROOT/scripts/publish-release.sh" "$TMP/vmlinux-bundle" \
+  "$fixture_root/scripts/publish-release.sh" "$TMP/vmlinux-bundle" \
   kuasar-sandbox/guest-runtime vmlinux-v2.3.4 \
   "$project_sha" release/v2.3.x
 
@@ -595,6 +601,30 @@ fi
 
 for kind in runtime vmlinux; do
   if [ "$kind" = runtime ]; then version=runtime-v1.2.3-preview.20260804; else version=vmlinux-v2.3.4; fi
+  for mutation in top-level nested missing extra; do
+    candidate="$TMP/project-license-$kind-$mutation"
+    cp -a "$TMP/$kind-bundle" "$candidate"
+    mkdir "$candidate/root"
+    candidate_archive="$("$fixture_root/scripts/release.sh" archive-name "$kind" "$version" x86_64)"
+    tar -xzf "$candidate/assets/$candidate_archive" -C "$candidate/root"
+    license_root="$candidate/root/share/licenses/$kind/project"
+    case "$mutation" in
+      top-level) printf 'altered project license\n' > "$license_root/LICENSE" ;;
+      nested) printf 'altered nested notice\n' > "$license_root/LICENSES/NOTICE.txt" ;;
+      missing) rm "$license_root/NOTICE" ;;
+      extra) printf 'extra unauthenticated notice\n' > "$license_root/NOTICE.extra" ;;
+    esac
+    release_materials_hash_tree "$candidate/root" "$kind" \
+      "$candidate/root/share/sources/$kind/MATERIALS.sha256"
+    tar --sort=name --owner=0 --group=0 --numeric-owner --mtime=@1700000000 \
+      -czf "$candidate/assets/$candidate_archive" -C "$candidate/root" .
+    (cd "$candidate/assets" && sha256sum "$candidate_archive" > SHA256SUMS)
+    if "$fixture_root/scripts/release.sh" validate "$kind" "$version" x86_64 "$candidate" > "$candidate/result.log" 2>&1; then
+      fail "validator accepted $kind $mutation project-license mutation with regenerated checksums"
+    fi
+    grep -Fq 'license bytes differ from selected Git source: project' "$candidate/result.log" \
+      || fail "project-license mutation failed for an unrelated reason"
+  done
   if SOURCE_SHA=0000000000000000000000000000000000000000 \
     "$fixture_root/scripts/release.sh" validate "$kind" "$version" x86_64 "$TMP/$kind-bundle" >/dev/null 2>&1; then
     fail "validator accepted $kind from another selected source commit"

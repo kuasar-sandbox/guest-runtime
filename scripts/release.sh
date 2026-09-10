@@ -349,7 +349,12 @@ validate_bundle() {
     fi
     [[ "$selected_sha" =~ ^[0-9a-f]{40}$ ]] || fail "flatten-ctl must bind its full selected source commit"
     release_materials_require_go_revision "$extract/bin/flatten-ctl" "$selected_sha"
+  elif [ -z "$selected_sha" ]; then
+    selected_sha="$(awk -F '\t' '$1 == "bin/vmlinux" && $2 == "guest-runtime-kernel-inputs" {
+      split($5, fields, ";"); sub(/^git:/, "", fields[1]); print fields[1]
+    }' "$extract/share/sources/vmlinux/SOURCES.tsv")"
   fi
+  release_materials_require_git_licenses "$extract" "$kind" "$ROOT" "$selected_sha" project
   release_materials_validate "$extract" "$kind"
   if [ -n "$selected_sha" ]; then
     [[ "$selected_sha" =~ ^[0-9a-f]{40}$ ]] || fail "SOURCE_SHA must be a full lowercase commit"
