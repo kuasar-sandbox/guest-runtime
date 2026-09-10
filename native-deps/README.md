@@ -105,9 +105,14 @@ accelerator/sandboxer `RELEASE_DEPENDENCIES` binding. Regenerating checksums doe
 not permit a different project commit, dependency version or native source to
 be published under that request. Local source packaging can still use untagged
 dependency commits; those records are not claimed to be existing releases.
-Required project, Envd, EROFS, Linux and Envd shared-module records must also
+Required project, Envd, EROFS, Linux, system-library and Envd shared-module records must also
 name their own license directories; redirecting them to unrelated, otherwise
 valid materials is rejected.
+License collection refuses unreadable subtrees and incomplete traversals.
+Distinct native link inputs cannot overwrite notices under a shared material
+name. Runtime and Kernel packaging clean only their own temporary workspaces,
+including read-only Go module caches, on success or failure. Existing Envd
+shared-module local replacements and independent Kernel selection are unchanged.
 
 Runtime packaging also reads the fresh `mkfs.erofs` linker map. For each
 linked system archive or startup object it records the actual file digest and

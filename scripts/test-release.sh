@@ -17,6 +17,8 @@ source "$ROOT/scripts/release-materials.sh"
 export FIXTURE_GO_DISTRIBUTION_CACHE
 FIXTURE_GO_DISTRIBUTION_CACHE="$(go env GOMODCACHE)"
 bash "$ROOT/scripts/test-release-materials.sh"
+bash "$ROOT/scripts/test-release-license-traversal.sh"
+bash "$ROOT/scripts/test-release-cleanup.sh"
 GOWORK=off go test -race "$ROOT/scripts/release-go-toolchain.go" "$ROOT/scripts/release-go-toolchain_test.go"
 bash "$ROOT/scripts/test-release-go-contexts.sh"
 bash "$ROOT/native-deps/deps/test-common.sh"
@@ -646,7 +648,7 @@ done
 for kind in runtime vmlinux; do
   if [ "$kind" = runtime ]; then
     version=runtime-v1.2.3-preview.20260804
-    names=(guest-runtime sandboxer accelerator envd erofs-utils github.com/e2b-dev/infra/packages/shared)
+    names=(guest-runtime sandboxer accelerator envd erofs-utils github.com/e2b-dev/infra/packages/shared system:libc.a system:libuuid.a)
   else
     version=vmlinux-v2.3.4
     names=(guest-runtime-kernel-inputs linux)

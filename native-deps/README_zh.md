@@ -92,8 +92,12 @@ Kernel 发行构建固定 `KBUILD_BUILD_USER=kuasar`、`KBUILD_BUILD_HOST=releas
 accelerator/sandboxer `RELEASE_DEPENDENCIES` 绑定。重新生成校验和不能让不同的
 项目 commit、依赖版本或原生来源通过该发布请求。本地源码打包仍可使用尚无 Tag
 的依赖 commit,但不会把这些记录声称为已存在的发行版本。
-项目、Envd、EROFS、Linux 和 Envd shared module 的必需来源记录还必须指向各自
+项目、Envd、EROFS、Linux、系统库和 Envd shared module 的必需来源记录还必须指向各自
 的许可目录;即使另一个目录的材料有效,也不能用它替代当前来源的材料。
+许可证收集拒绝不可读子目录和不完整遍历。不同原生链接输入不能以相同材料
+名称相互覆盖声明。Runtime 和 Kernel 打包在成功或失败退出时只清理本次所属
+临时工作区,包括只读 Go module 缓存。现有 Envd shared module 本地替换和
+Kernel 独立选择不变。
 
 Runtime 打包还读取本次新构建的 `mkfs.erofs` 链接映射。对实际链入的系统静态库
 或启动对象,记录文件摘要和已安装的 Debian 源包或 RPM 源包身份,并收集对应的

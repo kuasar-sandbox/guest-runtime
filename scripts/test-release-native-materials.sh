@@ -214,3 +214,21 @@ for map in missing.map empty.map; do
   fi
 done
 printf 'test-native-materials: source identity, inventory and link-map rejection PASS\n'
+
+(
+mkdir -p "$test_root/first" "$test_root/second"
+printf 'first link input\n' > "$test_root/first/same.a"
+printf 'second link input\n' > "$test_root/second/same.a"
+printf 'LOAD %s\n' "$test_root/first/same.a" "$test_root/second/same.a" \
+  > "$test_root/erofs/collision.map"
+release_native_system_input() { printf '%s\n' "$1" >> "$test_root/collision-collected"; }
+if (release_native_erofs_inputs "$test_root/erofs/collision.map" "$test_root/erofs" bin/mkfs.erofs \
+    > "$test_root/collision.log" 2>&1); then
+  fail "accepted colliding native material names"
+fi
+grep -Fq 'distinct native link inputs share a material name' "$test_root/collision.log" \
+  || fail "native collision failed for an unrelated reason"
+[ "$(wc -l < "$test_root/collision-collected")" -eq 1 ] \
+  || fail "second colliding native input reached the material collector"
+printf 'test-native-materials: colliding input rejected before overwriting materials PASS\n'
+)
