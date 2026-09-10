@@ -418,6 +418,18 @@ validate_bundle() {
       ;;
     vmlinux)
       [ -f "$extract/bin/vmlinux" ] || fail "$archive is missing bin/vmlinux"
+      local tool
+      for tool in kernel-compiler kernel-linker; do
+        release_materials_require_source "$extract" "$kind" bin/vmlinux "system:$tool" ""
+        awk -F '\t' -v name="system:$tool" '
+          $1 == "bin/vmlinux" && $2 == name {
+            if (split($5, fields, ";") != 2 || fields[1] !~ /^sha256:/) exit 1
+            digest=fields[1]; sub(/^sha256:/, "", digest)
+            if (length(digest) != 64 || digest ~ /[^0-9a-f]/ || fields[2] !~ /^package:[A-Za-z0-9.+_-]+$/) exit 1
+          }
+        ' "$extract/share/sources/$kind/SOURCES.tsv" \
+          || fail "invalid Kernel toolchain file identity: $tool"
+      done
       [ "$(sha256sum "$extract/share/licenses/vmlinux/linux/COPYING" | awk '{print $1}')" = "$(release_linux_copying_sha)" ] \
         || fail "Linux COPYING differs from the pinned source"
       release_materials_require_source "$extract" "$kind" 'bin/vmlinux' 'linux' "6.1.169" \
@@ -534,16 +546,30 @@ package_release() {
       release_materials_add_go_binary "$envd_bin" bin/sandbox-runtime.bundle:/opt/sandbox-runtime/bin/envd
       ;;
     vmlinux)
-      local linux_source linux_license_sha
+      local linux_source linux_license_sha kernel_cc kernel_ld
+      kernel_cc="$("${RELEASE_BUILD_ENV[@]}" sh -c 'command -v gcc')" \
+        || fail "Kernel release compiler is unavailable"
+      kernel_ld="$("${RELEASE_BUILD_ENV[@]}" sh -c 'command -v ld')" \
+        || fail "Kernel release linker is unavailable"
+      kernel_cc="$(realpath -e "$kernel_cc")"
+      kernel_ld="$(realpath -e "$kernel_ld")"
+      # Record the actual selected executables using the existing package/source
+      # and license verification path, then pass those exact paths to Kbuild.
+      release_native_system_input "$kernel_cc" bin/vmlinux kernel-compiler
+      release_native_system_input "$kernel_ld" bin/vmlinux kernel-linker
+      sha256sum "$kernel_cc" "$kernel_ld" > "$WORK/kernel-toolchain.sha256"
       # Release metadata must not disclose the build account/host or depend on
       # the wall clock. Development builds retain the normal Kbuild defaults.
       "${RELEASE_BUILD_ENV[@]}" env \
         KBUILD_BUILD_USER=kuasar KBUILD_BUILD_HOST=release KBUILD_BUILD_VERSION=1 \
         KBUILD_BUILD_TIMESTAMP="$(LC_ALL=C date -u -d "@$epoch" '+%a %b %e %T UTC %Y')" \
         make --no-print-directory -C "$build_root/native-deps" \
+        CC="$kernel_cc" HOSTCC="$kernel_cc" LD="$kernel_ld" \
         TARGET_ARCH="$arch" TARBALL_DIR="$tarball_dir" \
         LINUX_BUILD_SRC="$build_root/native-deps/build/src/linux" \
         LINUX_BUILD_OUT="$build_root/native-deps/build/$arch/linux" vmlinux
+      sha256sum --quiet -c "$WORK/kernel-toolchain.sha256" \
+        || fail "Kernel compiler or linker changed during the build"
       copy_external_file "$native_bin_dir/vmlinux" bin/vmlinux
       linux_source="$build_root/native-deps/build/src/linux"
       release_materials_copy_licenses "$linux_source" linux

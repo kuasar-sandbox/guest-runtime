@@ -424,6 +424,10 @@ case "$root" in
   */build/guest-runtime/native-deps)
     [ ! -e "$root/bin/x86_64/envd" ]
     if [ "${!#}" = vmlinux ]; then
+      for tool in "CC=$(realpath -e "$(command -v gcc)")" \
+        "HOSTCC=$(realpath -e "$(command -v gcc)")" "LD=$(realpath -e "$(command -v ld)")"; do
+        printf '%s\n' "$@" | grep -Fxq "$tool"
+      done
       [ "${KBUILD_BUILD_USER:-}" = kuasar ]
       [ "${KBUILD_BUILD_HOST:-}" = release ]
       [ "${KBUILD_BUILD_VERSION:-}" = 1 ]
@@ -761,7 +765,7 @@ for kind in runtime vmlinux; do
     names=(guest-runtime sandboxer accelerator envd erofs-utils github.com/e2b-dev/infra/packages/shared system:libc.a system:libuuid.a)
   else
     version=vmlinux-v2.3.4
-    names=(guest-runtime-kernel-inputs linux)
+    names=(guest-runtime-kernel-inputs linux system:kernel-compiler system:kernel-linker)
   fi
   archive_name="$("$fixture_root/scripts/release.sh" archive-name "$kind" "$version" x86_64)"
   for name in "${names[@]}"; do
@@ -789,6 +793,40 @@ for kind in runtime vmlinux; do
     fi
     grep -Fq "missing or inconsistent source record for $name" "$candidate/result.log" \
       || fail "$name license binding failed for an unrelated reason"
+  done
+done
+
+for tool in kernel-compiler kernel-linker; do
+  for mutation in missing duplicate invalid-digest invalid-package; do
+    candidate="$TMP/kernel-tool-$tool-$mutation"
+    cp -a "$TMP/vmlinux-bundle" "$candidate"
+    mkdir "$candidate/root"
+    candidate_archive=vmlinux-x86_64-v2.3.4.tar.gz
+    tar -xzf "$candidate/assets/$candidate_archive" -C "$candidate/root"
+    inventory="$candidate/root/share/sources/vmlinux/SOURCES.tsv"
+    awk -F '\t' -v OFS='\t' -v name="system:$tool" -v mutation="$mutation" '
+      $2 == name {
+        if (mutation == "missing") next
+        if (mutation == "duplicate") print
+        if (mutation == "invalid-digest") sub(/^sha256:/, "untrusted:", $5)
+        if (mutation == "invalid-package") sub(/;package:/, ";untrusted:", $5)
+      } {print}
+    ' "$inventory" > "$candidate/changed-sources"
+    install -m 0644 "$candidate/changed-sources" "$inventory"
+    release_materials_hash_tree "$candidate/root" vmlinux \
+      "$candidate/root/share/sources/vmlinux/MATERIALS.sha256"
+    tar --sort=name --owner=0 --group=0 --numeric-owner --mtime=@1700000000 \
+      -czf "$candidate/assets/$candidate_archive" -C "$candidate/root" .
+    (cd "$candidate/assets" && sha256sum "$candidate_archive" > SHA256SUMS)
+    if "$fixture_root/scripts/release.sh" validate vmlinux vmlinux-v2.3.4 x86_64 \
+      "$candidate" > "$candidate/result.log" 2>&1; then
+      fail "validator accepted $tool $mutation with regenerated checksums"
+    fi
+    case "$mutation" in
+      missing|duplicate) expected="missing or inconsistent source record for system:$tool" ;;
+      *) expected="invalid Kernel toolchain file identity: $tool" ;;
+    esac
+    grep -Fq "$expected" "$candidate/result.log" || fail "$tool $mutation failed for an unrelated reason"
   done
 done
 

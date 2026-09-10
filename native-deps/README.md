@@ -97,6 +97,14 @@ and `KBUILD_BUILD_VERSION=1`, and derive `KBUILD_BUILD_TIMESTAMP` in UTC from
 the build account, host name and wall clock out of the kernel version metadata.
 Development Kbuild defaults are unchanged; identical complete binaries still
 require identical source, configuration and compiler inputs.
+Kernel packaging resolves GCC and the linker in its filtered build environment,
+passes their exact paths to Kbuild (`CC`, `HOSTCC`, `LD`) and records their file
+SHA-256, installed source-package version and verified license materials under
+`system/kernel-compiler` and `system/kernel-linker`. The executables must still
+match after building. Standalone validation requires both role records and
+their material directories without fetching Runtime dependencies. This records
+the selected compiler/linker on the trusted host; it does not claim to attest
+the host or every transitive compiler subprocess.
 
 Validation rejects non-root numeric archive ownership and checks the exact
 Envd, EROFS and Linux source URLs and digests. Publication passes its selected

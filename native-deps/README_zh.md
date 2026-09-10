@@ -86,6 +86,11 @@ Kernel 发行构建固定 `KBUILD_BUILD_USER=kuasar`、`KBUILD_BUILD_HOST=releas
 `KBUILD_BUILD_TIMESTAMP`。epoch 默认值为 `0`,也用于归档时间戳。这样内核版本
 元数据不会包含构建账号、主机名或构建时的时钟值。开发构建的 Kbuild 默认行为
 不变;完整二进制一致仍要求相同的源码、配置和编译器输入。
+Kernel 打包在过滤后的构建环境中解析 GCC 与链接器,通过 `CC`、`HOSTCC`、`LD`
+把精确路径传给 Kbuild,并在 `system/kernel-compiler`、`system/kernel-linker`
+记录其文件 SHA-256、已安装源包版本及通过验证的许可材料。构建结束后可执行文件
+必须仍匹配。独立验证要求两个角色记录及其材料目录,不获取 Runtime 依赖。这记录
+可信主机上的所选编译器/链接器,不声称证明主机或所有传递调用的编译器子进程可信。
 
 验证器拒绝非 root 的归档数字属主,并核对 Envd、EROFS 和 Linux 的精确来源 URL
 与摘要。发布时把选定的 `SOURCE_SHA` 传入验证器;Runtime 发布还必须提供精确的

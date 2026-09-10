@@ -139,9 +139,12 @@ release_native_verify_license_file() {
 
 release_native_system_input() {
   local input="$1" payload="$2" query owner source_name version label copyright common
-  local source_id rpm_source sibling file count=0
+  local source_id rpm_source sibling file name="${3:-}" count=0
   input="$(realpath -e "$input")" || fail "native link input is missing"
-  label="system/$(basename "$input")"
+  [ -n "$name" ] || name="$(basename "$input")"
+  release_materials_safe_relative "$name" || fail "unsafe native input identity"
+  [[ "$name" != */* ]] || fail "native input identity must be a single name"
+  label="system/$name"
   if [ "$input" = /usr/lib64/libuuid.a ] && [ -f /usr/lib64/.kuasar-libuuid-build-id ]; then
     local build_id
     build_id="$(cat /usr/lib64/.kuasar-libuuid-build-id)"
@@ -199,7 +202,7 @@ release_native_system_input() {
   else
     fail "native input has no verifiable package/source material: $input"
   fi
-  release_materials_record_source "$payload" "system:$(basename "$input")" "$version" \
+  release_materials_record_source "$payload" "system:$name" "$version" \
     "$source_id" "sha256:$(sha256sum "$input" | awk '{print $1}');package:$source_name" "$label"
 }
 
