@@ -240,8 +240,8 @@ grep -Fq 'kuasar-preview-binding' "$ROOT/scripts/publish-release.sh" \
 for input in accelerator_version sandboxer_version; do
   grep -Fq "      $input:" "$WORKFLOW" \
     || fail "runtime release workflow is missing required $input input"
-  [ "$(grep -Fc "ref: \${{ needs.preflight.outputs.$input }}" "$WORKFLOW")" -eq 2 ] \
-    || fail "runtime release workflow does not pin both $input checkouts"
+  [ "$(grep -Fc "ref: \${{ needs.preflight.outputs.$input }}" "$WORKFLOW")" -eq 3 ] \
+    || fail "runtime release workflow does not pin preflight, build and license $input checkouts"
 done
 if grep -Fq 'connector_version' "$WORKFLOW" \
   || grep -Fq 'src/connector' "$WORKFLOW"; then
@@ -349,6 +349,11 @@ printf 'kernel\n' > "$fixture_root/native-deps/bin/x86_64/vmlinux"
 chmod +x "$fixture_root/native-deps/bin/x86_64/mkfs.erofs"
 printf 'fixture sandboxer license\n' > "$TMP/sandboxer/LICENSE"
 printf 'fixture accelerator license\n' > "$TMP/accelerator/LICENSE"
+for dependency in accelerator sandboxer; do
+  mkdir "$TMP/$dependency/LICENSES"
+  printf 'fixture dependency attribution\n' > "$TMP/$dependency/NOTICE"
+  printf 'fixture nested dependency notice\n' > "$TMP/$dependency/LICENSES/NOTICE.txt"
+done
 printf 'fixture envd license\n' \
   > "$fixture_root/native-deps/build/src/e2b-infra/LICENSE"
 printf 'fixture erofs authors\n' \
@@ -359,8 +364,8 @@ printf 'fixture Linux license\n' \
   > "$fixture_root/native-deps/build/src/linux/COPYING"
 printf 'fixture GPL-2.0 text\n' \
   > "$fixture_root/native-deps/build/src/linux/LICENSES/preferred/GPL-2.0"
-sandboxer_sha="$(init_fixture_repo "$TMP/sandboxer" LICENSE .gitignore)"
-accelerator_sha="$(init_fixture_repo "$TMP/accelerator" LICENSE .gitignore)"
+sandboxer_sha="$(init_fixture_repo "$TMP/sandboxer" LICENSE LICENSES NOTICE .gitignore)"
+accelerator_sha="$(init_fixture_repo "$TMP/accelerator" LICENSE LICENSES NOTICE .gitignore)"
 git -C "$TMP/accelerator" tag v0.1.3 "$accelerator_sha"
 git -C "$TMP/sandboxer" tag v0.1.3 "$sandboxer_sha"
 init_fixture_repo "$fixture_root" LICENSE LICENSES NOTICE .gitignore native-deps/.gitignore \
@@ -499,6 +504,10 @@ grep -Fxq kernel "$fixture_root/native-deps/bin/x86_64/vmlinux" \
 "$fixture_root/scripts/release.sh" validate \
   runtime runtime-v1.2.3-preview.20260804 x86_64 "$TMP/runtime-bundle"
 "$fixture_root/scripts/release.sh" validate \
+  vmlinux vmlinux-v2.3.4 x86_64 "$TMP/vmlinux-bundle"
+RELEASE_ACCELERATOR_SOURCE_DIR="$TMP/absent-accelerator" \
+RELEASE_SANDBOXER_SOURCE_DIR="$TMP/absent-sandboxer" \
+  "$fixture_root/scripts/release.sh" validate \
   vmlinux vmlinux-v2.3.4 x86_64 "$TMP/vmlinux-bundle"
 
 RELEASE_KIND=runtime RELEASE_DEPENDENCIES=accelerator=v0.1.3,sandboxer=v0.1.3 bash "$ROOT/scripts/test-publisher.sh" \
@@ -659,6 +668,44 @@ for kind in runtime vmlinux; do
     fail "validator accepted $kind from another selected source commit"
   fi
   SOURCE_SHA="$project_sha" "$fixture_root/scripts/release.sh" validate "$kind" "$version" x86_64 "$TMP/$kind-bundle"
+done
+for dependency in accelerator sandboxer; do
+  for mutation in top-level nested missing extra source integrity; do
+    candidate="$TMP/dependency-$dependency-$mutation"
+    cp -a "$TMP/runtime-bundle" "$candidate"
+    mkdir "$candidate/root"
+    candidate_archive="$(basename "$runtime_archive")"
+    tar -xzf "$runtime_archive" -C "$candidate/root"
+    license_root="$candidate/root/share/licenses/runtime/$dependency"
+    case "$mutation" in
+      top-level) printf 'altered dependency license\n' > "$license_root/LICENSE" ;;
+      nested) printf 'altered dependency notice\n' > "$license_root/LICENSES/NOTICE.txt" ;;
+      missing) rm "$license_root/NOTICE" ;;
+      extra) printf 'extra unauthenticated notice\n' > "$license_root/NOTICE.extra" ;;
+      source|integrity)
+        column=4; [ "$mutation" != integrity ] || column=5
+        awk -F '\t' -v OFS='\t' -v dependency="$dependency" -v column="$column" \
+          '$2 == dependency { $column = (column == 4 ? "https://example.invalid/unselected-source" : "git:0000000000000000000000000000000000000000") } {print}' \
+          "$candidate/root/share/sources/runtime/SOURCES.tsv" > "$candidate/changed-sources"
+        install -m 0644 "$candidate/changed-sources" "$candidate/root/share/sources/runtime/SOURCES.tsv"
+        ;;
+    esac
+    release_materials_hash_tree "$candidate/root" runtime \
+      "$candidate/root/share/sources/runtime/MATERIALS.sha256"
+    tar --sort=name --owner=0 --group=0 --numeric-owner --mtime=@1700000000 \
+      -czf "$candidate/assets/$candidate_archive" -C "$candidate/root" .
+    (cd "$candidate/assets" && sha256sum "$candidate_archive" > SHA256SUMS)
+    if "$fixture_root/scripts/release.sh" validate runtime runtime-v1.2.3-preview.20260804 \
+      x86_64 "$candidate" > "$candidate/result.log" 2>&1; then
+      fail "validator accepted $dependency $mutation with regenerated checksums"
+    fi
+    case "$mutation" in
+      source|integrity) expected='source record' ;;
+      *) expected="license bytes differ from selected Git source: $dependency" ;;
+    esac
+    grep -Fq "$expected" "$candidate/result.log" \
+      || fail "$dependency $mutation failed for an unrelated reason"
+  done
 done
 for binding in accelerator=v9.0.0,sandboxer=v0.1.3 accelerator=v0.1.3,sandboxer=v9.0.0 \
   accelerator=v0.1.3,accelerator=v0.1.3; do

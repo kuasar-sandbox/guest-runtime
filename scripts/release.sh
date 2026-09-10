@@ -316,6 +316,25 @@ requested_dependency_version() {
   printf '%s\n' "$result"
 }
 
+validate_dependency_source() {
+  local extract="$1" name="$2" payload="$3" version="$4"
+  local directory_variable="RELEASE_${name^^}_SOURCE_DIR" sha_variable="RELEASE_${name^^}_SOURCE_SHA"
+  local source sha tagged
+  source="${!directory_variable:-$ROOT/../$name}"
+  sha="${!sha_variable:-}"
+  [ -n "$sha" ] || sha="$(git -C "$source" rev-parse HEAD)" \
+    || fail "cannot resolve selected $name dependency source"
+  [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || fail "$name dependency source must be an exact commit"
+  if [ -n "$version" ]; then
+    tagged="$(git -C "$source" rev-parse --verify "refs/tags/$version^{commit}")" \
+      || fail "selected $name dependency release tag is unavailable"
+    [ "$tagged" = "$sha" ] || fail "$name dependency source does not match the selected release tag"
+  fi
+  release_materials_require_source "$extract" runtime "$payload" "$name" "$version" \
+    "https://github.com/kuasar-sandbox/$name/commit/$sha" "git:$sha"
+  release_materials_require_git_licenses "$extract" runtime "$source" "$sha" "$name"
+}
+
 validate_bundle() {
   [ "$#" -eq 4 ] || fail "usage: release.sh validate <runtime|vmlinux> <version> <arch> <bundle-dir>"
   local kind="$1" version="$2" arch archive bundle="$4"
@@ -373,8 +392,8 @@ validate_bundle() {
       expected_sandboxer="$(requested_dependency_version sandboxer)" || fail "invalid sandboxer release binding"
       expected_accelerator="$(requested_dependency_version accelerator)" || fail "invalid accelerator release binding"
       release_materials_require_source "$extract" "$kind" 'bin/sandbox-runtime.bundle,bin/flatten-ctl' 'guest-runtime' "$version" "$selected_url" "$selected_integrity"
-      release_materials_require_source "$extract" "$kind" 'bin/sandbox-runtime.bundle:/sbin/init' 'sandboxer' "$expected_sandboxer"
-      release_materials_require_source "$extract" "$kind" 'bin/sandbox-runtime.bundle,bin/flatten-ctl' 'accelerator' "$expected_accelerator"
+      validate_dependency_source "$extract" sandboxer 'bin/sandbox-runtime.bundle:/sbin/init' "$expected_sandboxer"
+      validate_dependency_source "$extract" accelerator 'bin/sandbox-runtime.bundle,bin/flatten-ctl' "$expected_accelerator"
       release_materials_require_source "$extract" "$kind" 'bin/sandbox-runtime.bundle:/opt/sandbox-runtime/bin/envd' 'envd' "2026.22" \
         'https://github.com/e2b-dev/infra/archive/refs/tags/2026.22.tar.gz' \
         'sha256:9e1e81f2963fda1805466c337cd0a33638182a15a66295fd19bba6b9c454d92c'

@@ -92,6 +92,12 @@ Kernel 发行构建固定 `KBUILD_BUILD_USER=kuasar`、`KBUILD_BUILD_HOST=releas
 accelerator/sandboxer `RELEASE_DEPENDENCIES` 绑定。重新生成校验和不能让不同的
 项目 commit、依赖版本或原生来源通过该发布请求。本地源码打包仍可使用尚无 Tag
 的依赖 commit,但不会把这些记录声称为已存在的发行版本。
+Runtime 验证还将每个依赖的精确 commit URL、Git integrity 和完整声明树绑定到
+现有的所选兄弟目录及可选 `RELEASE_*_SOURCE_SHA` 输入。提供发布版本时,本地
+Tag 必须解析到该 commit。可信 Runtime 发布端使用限定范围的只读令牌,只检出
+请求的 accelerator/sandboxer Tag,不持久化 checkout 凭据,并在 bundle 验证前
+撤销该令牌。只读取 Git blob,不执行依赖代码;Kernel 不执行这些依赖检出,也不
+要求具备它们的仓库。
 项目、Envd、EROFS、Linux、系统库和 Envd shared module 的必需来源记录还必须指向各自
 的许可目录;即使另一个目录的材料有效,也不能用它替代当前来源的材料。
 Runtime 与 Kernel 验证还将完整项目许可/NOTICE 树(含嵌套 `LICENSES`)与所选

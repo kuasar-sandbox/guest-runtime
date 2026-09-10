@@ -105,6 +105,14 @@ accelerator/sandboxer `RELEASE_DEPENDENCIES` binding. Regenerating checksums doe
 not permit a different project commit, dependency version or native source to
 be published under that request. Local source packaging can still use untagged
 dependency commits; those records are not claimed to be existing releases.
+Runtime validation also binds each dependency's exact commit URL, Git integrity
+and complete notice tree to the existing selected sibling directory and optional
+`RELEASE_*_SOURCE_SHA` input. When a publication version is supplied, its local
+Tag must resolve to that commit. The trusted Runtime publisher checks out only
+the requested accelerator/sandboxer Tags with a scoped read-only token, disables
+persisted checkout credentials and revokes that token before bundle validation.
+It reads Git blobs without executing dependency code; Kernel does not perform
+these dependency checkouts or require their repositories.
 Required project, Envd, EROFS, Linux, system-library and Envd shared-module records must also
 name their own license directories; redirecting them to unrelated, otherwise
 valid materials is rejected.
