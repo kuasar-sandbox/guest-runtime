@@ -279,7 +279,7 @@ release_materials_go_command() {
   # Go private-module bypasses and all caller authentication are excluded.
   local -a clean=(env -i "PATH=$PATH" "HOME=$verification/home"
     "GOMODCACHE=$verification/module-cache" "GOCACHE=$verification/go-cache"
-    "GOENV=off" "GOFLAGS=" "GO111MODULE=on" "GOWORK=off" "GOTOOLCHAIN=local"
+    "GOENV=off" "GOAUTH=off" "GOFLAGS=" "GO111MODULE=on" "GOWORK=off" "GOTOOLCHAIN=local"
     "GOPROXY=$proxy" "GOSUMDB=$sumdb" "GOPRIVATE=" "GONOPROXY="
     "GONOSUMDB=" "GOINSECURE=" "GIT_CONFIG_NOSYSTEM=1"
     "GIT_CONFIG_GLOBAL=/dev/null" "GIT_CONFIG_SYSTEM=/dev/null"
@@ -357,10 +357,9 @@ _release_materials_download_go_toolchain() {
     cd "$verify_root" || exit
     # Toolchain modules require sumdb authentication. Do not inherit Go's
     # private distpack/proxy bootstrap exceptions, or alter the selected compiler.
-    GOWORK=off GOENV=off GOTOOLCHAIN=local GOFLAGS='' GO111MODULE=on \
-      GOPROXY="$proxy" GOSUMDB="$sumdb" GONOSUMDB='' GOPRIVATE='' GONOPROXY='' \
-      GOINSECURE='' GIT_HTTP_USER_AGENT='' \
-      command go mod download -json "golang.org/toolchain@v0.0.1-$toolchain.linux-amd64" \
+    GOPROXY="$proxy" GOSUMDB="$sumdb" \
+      release_materials_go_command "${WORK:-$RELEASE_MATERIALS_WORK}/toolchain-download" \
+      mod download -json "golang.org/toolchain@v0.0.1-$toolchain.linux-amd64" \
       > source.json 2> download.log
   ) || fail "could not authenticate the official Go distribution; check module/checksum routing or the verified cache"
   jq -e --arg version "v0.0.1-$toolchain.linux-amd64" \
@@ -553,6 +552,17 @@ release_materials_require_source() {
     || fail "missing or inconsistent source record for $name ($payload)"
 }
 
+release_materials_require_go_key() {
+  # After release_materials_validate authenticates each observed payload once,
+  # require every official payload without repeating its expensive verification.
+  local root="$1" unit="$2" payload="$3"
+  awk -F '\t' -v payload="$payload" '
+    NR > 1 && $1 == payload { found = 1 }
+    END { exit !found }
+  ' "$root/share/sources/$unit/GO-BUILD-INFO.tsv" \
+    || fail "missing required Go payload record: $payload"
+}
+
 release_materials_require_go() {
   local root="$1" unit="$2" payload="$3" toolchain
   local info="$root/share/sources/$unit/GO-BUILD-INFO.tsv"
@@ -611,6 +621,8 @@ release_materials_validate() {
     [ -s "$source_root/$file" ] || fail "release source material is missing: share/sources/$unit/$file"
     [ "$(stat -c '%a' "$source_root/$file")" = 644 ] \
       || fail "release source material has unsafe mode: share/sources/$unit/$file"
+    [ "$(stat -c '%s' "$source_root/$file")" -le 16777216 ] \
+      || fail "release source material is too large: share/sources/$unit/$file"
   done
   awk -F '\t' '
     NR == 1 {
@@ -619,7 +631,7 @@ release_materials_validate() {
       }
       next
     }
-    NF != 6 { exit 1 }
+    NF != 6 || NR > 16385 || seen[$0]++ { exit 1 }
     {
       for (field = 1; field <= 6; field++) {
         if ($field == "") {

@@ -50,10 +50,14 @@ pin 落在 Makefile 变量(`EROFS_TARBALL` / `LINUX_TARBALL` / `ENVD_TARBALL` �
 仍须匹配该次已完成构建。本地打包和独立验证不要求这个发布输入。该记录不证明
 编译器来源,也不构成对不可信候选代码的隔离。
 
-Go 依赖来源验证使用全新的私有 module/VCS 状态和已启用的 checksum database。
-它清除持久化 Go 设置、私有 module 绕过规则、Git 配置与调用者凭据,仅保留已验证的
+Go 依赖及工具链下载使用全新的私有 module/VCS 状态、已启用的 checksum database
+和 `GOAUTH=off`。它们清除持久化 Go 设置、私有 module 绕过规则、Git 配置与调用者凭据,仅保留已验证的
 无凭据路由。下载来源或工具链之前,上传的 Go 记录键必须匹配官方载荷的精确名称;
 路径别名会被拒绝。这些发行检查不改变普通开发中的 module 认证方式。
+来源清单在逐行处理前拒绝重复或过量记录;每份元数据表上限为 16 MiB,
+来源清单上限为 16,384 行。
+RPM 声明收集核对已安装包列表及每个同源兄弟包文件列表的真实退出状态。
+即使另一个包已提供有效声明,部分枚举失败仍会终止收集,不把部分输出当作完整覆盖。
 
 可信发布端根据已验证请求生成标准发行正文及来源/Preview 标记。下载的
 `release-notes.md` 只是本地 bundle 辅助说明,不能决定公开发行正文或对账来源。
@@ -115,6 +119,20 @@ Runtime 与 Kernel 验证还将完整项目许可/NOTICE 树(含嵌套 `LICENSES
 commit 的 Git blob 比较。本地必须具备该 commit;可信发布端获取源码历史用于
 只读检查,不执行候选文件。重算校验和不能授权内容变化、缺失或额外的项目声明。
 Kernel 检视仍独立于 Runtime 二进制和 Go 分发下载。
+仅在全新的 Kernel 发行 checkout 中关闭 `CONFIG_LOCALVERSION_AUTO`,向 Kbuild
+显式传入空 `LOCALVERSION`,并在构建后核对解析后的配置。保留配置的
+`CONFIG_LOCALVERSION` 后缀,但临时 Git commit ID 或 dirty 标记不能参与选择
+发行字符串。调用者的开发配置片段及 patch 工作区保持不变。
+归档只接受所选单元的载荷:Runtime 的 `bin/` 下仅有 `sandbox-runtime.bundle`、
+`flatten-ctl` 和 `mkfs.erofs`;Kernel 仅有 `bin/vmlinux`。这些载荷/材料根之外的
+目录、路径别名、重复条目和其他单元的材料目录均在解包前被拒绝。Runtime 包
+不能替换独立选择的 Kernel,归档目录也不能改变无关安装根目录的权限。
+Runtime 验证从 checksum-pin 的 EROFS 源码在全新私有目录构建主机读取器,
+因此需要原生 C/autotools 构建前置。它核对 bundle 对齐和前缀摘要,不展开镜像
+目录树地检查完整 EROFS 文件系统,再把必需的 init、Envd 和 mkfs 读入固定私有
+文件。镜像内属主/权限、实际 Go main 身份/目标与构建记录必须匹配;init 还须
+绑定所选 Sandboxer commit,内嵌 mkfs 必须与外部 mkfs 字节相同。
+验证不运行任何上传的可执行文件。Kernel 验证不构建这些读取器。
 Kernel 验证还将 Linux `COPYING` 与从 checksum-pin 的上游 tarball 得出的摘要
 比较,不从上传的许可字节重新计算一个值来证明自身。项目 Kernel 输入来源行也
 绑定同一固定值。小型测试 fixture 完整保留该上游声明,不替代归档交付的完整
@@ -123,6 +141,11 @@ Linux `LICENSES` 材料。
 名称相互覆盖声明。Runtime 和 Kernel 打包在成功或失败退出时只清理本次所属
 临时工作区,包括只读 Go module 缓存。现有 Envd shared module 本地替换和
 Kernel 独立选择不变。
+
+`EROFS-INPUTS.tsv` 保留从本次链接映射选出的全部外部静态库/启动对象名称及
+摘要。验证要求原生来源记录集与该完整清单精确一致,不只检查 libc、libuuid;
+即使重算 bundle 校验和,删除 GCC/CRT 行及声明仍会被拒绝。该清单属于独立的
+已完成构建归档绑定内容,不证明不可信构建者或主机可信。
 
 Runtime 打包还读取本次新构建的 `mkfs.erofs` 链接映射。对实际链入的系统静态库
 或启动对象,记录文件摘要和已安装的 Debian 源包或 RPM 源包身份,并收集对应的

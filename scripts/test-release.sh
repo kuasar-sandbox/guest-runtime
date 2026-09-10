@@ -21,9 +21,13 @@ PYTHONDONTWRITEBYTECODE=1 python3 "$ROOT/scripts/test-release-go-environment.py"
 bash "$ROOT/scripts/test-release-license-traversal.sh"
 bash "$ROOT/scripts/test-release-cleanup.sh"
 GOWORK=off go test -race "$ROOT/scripts/release-go-toolchain.go" "$ROOT/scripts/release-go-toolchain_test.go"
+PYTHONDONTWRITEBYTECODE=1 python3 "$ROOT/scripts/test-release-archive-layout.py"
+PYTHONDONTWRITEBYTECODE=1 python3 "$ROOT/scripts/test-release-kernel-config.py"
+PYTHONDONTWRITEBYTECODE=1 python3 "$ROOT/scripts/test-release-runtime-payloads.py" --prepare "$TMP/runtime-readers"
 bash "$ROOT/scripts/test-release-go-contexts.sh"
 bash "$ROOT/native-deps/deps/test-common.sh"
 bash "$ROOT/scripts/test-release-native-materials.sh"
+bash "$ROOT/scripts/test-release-rpm-enumeration.sh"
 
 init_fixture_repo() {
   local directory="$1"
@@ -296,7 +300,13 @@ printf 'fixture project attribution\n' > "$fixture_root/NOTICE"
 install -m 0644 "$ROOT/.gitignore" "$fixture_root/.gitignore"
 install -m 0644 "$ROOT/native-deps/.gitignore" "$fixture_root/native-deps/.gitignore"
 install -m 0644 "$ROOT/native-deps/Makefile" "$fixture_root/native-deps/Makefile"
-install -m 0755 "$ROOT/scripts/release.sh" "$fixture_root/scripts/release.sh"
+# Reuse readers built from the actual checksum-pinned source within this one
+# private fixture run. Only tool preparation is replaced, never image validation.
+sed '/^command -v go/ i prepare_runtime_verifier() { prepare_release_build_environment; RUNTIME_FSCK="$ROOT/../runtime-readers/runtime-verifier/bin/fsck.erofs"; RUNTIME_DUMP="$ROOT/../runtime-readers/runtime-verifier/build/src/erofs-utils/dump/dump.erofs"; }' \
+  "$ROOT/scripts/release.sh" > "$fixture_root/scripts/release.sh"
+chmod 0755 "$fixture_root/scripts/release.sh"
+install -m 0644 "$ROOT/scripts/release-runtime-payloads.py" "$fixture_root/scripts/release-runtime-payloads.py"
+install -m 0644 "$ROOT/scripts/test-release-runtime-payloads.py" "$fixture_root/scripts/test-release-runtime-payloads.py"
 install -m 0755 "$ROOT/scripts/publish-release.sh" "$fixture_root/scripts/publish-release.sh"
 install -m 0755 "$ROOT/scripts/validate-preview-line.sh" "$fixture_root/scripts/validate-preview-line.sh"
 mkdir "$fixture_root/scripts/testdata"
@@ -306,7 +316,21 @@ install -m 0755 "$ROOT/scripts/release-materials.sh" \
 install -m 0644 "$ROOT/scripts/release-go-toolchain.go" "$fixture_root/scripts/release-go-toolchain.go"
 cat >> "$fixture_root/scripts/release-materials.sh" <<'EOF'
 release_materials_download_go_toolchain() {
-  GOMODCACHE="${FIXTURE_GO_DISTRIBUTION_CACHE:?}" _release_materials_download_go_toolchain "$@"
+  # Seed only public distribution cache files, never HOME/netrc/VCS/auth state.
+  # The real filtered downloader still checks sumdb; the ZIP verifier checks h1.
+  local cached="${FIXTURE_GO_DISTRIBUTION_CACHE:?}/cache/download/golang.org/toolchain/@v"
+  local destination="${WORK:-$RELEASE_MATERIALS_WORK}/toolchain-download/module-cache/cache/download/golang.org/toolchain/@v"
+  local suffix identity="v0.0.1-$1.linux-amd64"
+  mkdir -p "$destination"
+  for suffix in zip ziphash info mod; do
+    [ ! -f "$cached/$identity.$suffix" ] || cp --reflink=auto "$cached/$identity.$suffix" "$destination/"
+  done
+  # These are public signed lookup/tile responses, not authentication state.
+  # Go still verifies them against the configured checksum database key.
+  if [ -d "$FIXTURE_GO_DISTRIBUTION_CACHE/cache/download/sumdb" ]; then
+    cp -a "$FIXTURE_GO_DISTRIBUTION_CACHE/cache/download/sumdb" "${destination%/golang.org/toolchain/@v}/"
+  fi
+  _release_materials_download_go_toolchain "$@"
 }
 EOF
 mkdir -p "$fixture_root/native-deps/deps"
@@ -336,7 +360,7 @@ printf '/bin/\n/build/\n' > "$TMP/accelerator/.gitignore"
 mkdir "$TMP/shared"
 printf 'module github.com/e2b-dev/infra/packages/shared\n\ngo 1.24\n' > "$TMP/shared/go.mod"
 printf 'package shared\nfunc Fixture() {}\n' > "$TMP/shared/shared.go"
-printf 'module fixture\n\ngo 1.24\nrequire github.com/e2b-dev/infra/packages/shared v0.0.0\nreplace github.com/e2b-dev/infra/packages/shared => ../shared\n' \
+printf 'module github.com/e2b-dev/infra/packages/envd\n\ngo 1.24\nrequire github.com/e2b-dev/infra/packages/shared v0.0.0\nreplace github.com/e2b-dev/infra/packages/shared => ../shared\n' \
   > "$TMP/src/go.mod"
 printf 'package main\nimport "github.com/e2b-dev/infra/packages/shared"\nfunc main() { shared.Fixture() }\n' \
   > "$TMP/src/main.go"
@@ -365,13 +389,21 @@ printf 'fixture Linux license\n' \
   > "$fixture_root/native-deps/build/src/linux/COPYING"
 printf 'fixture GPL-2.0 text\n' \
   > "$fixture_root/native-deps/build/src/linux/LICENSES/preferred/GPL-2.0"
-sandboxer_sha="$(init_fixture_repo "$TMP/sandboxer" LICENSE LICENSES NOTICE .gitignore)"
+mkdir -p "$TMP/sandboxer/cmd/sandbox-init"
+printf 'module github.com/kuasar-sandbox/sandboxer\n\ngo 1.24\n' > "$TMP/sandboxer/go.mod"
+printf 'package main\nfunc main() {}\n' > "$TMP/sandboxer/cmd/sandbox-init/main.go"
+sandboxer_sha="$(init_fixture_repo "$TMP/sandboxer" LICENSE LICENSES NOTICE .gitignore go.mod cmd)"
 accelerator_sha="$(init_fixture_repo "$TMP/accelerator" LICENSE LICENSES NOTICE .gitignore)"
 git -C "$TMP/accelerator" tag v0.1.3 "$accelerator_sha"
 git -C "$TMP/sandboxer" tag v0.1.3 "$sandboxer_sha"
+mkdir -p "$fixture_root/native-deps/deps/vmlinux"
+printf 'CONFIG_LOCALVERSION="-kuasar"\nCONFIG_LOCALVERSION_AUTO=y\n' \
+  > "$fixture_root/native-deps/deps/vmlinux/sandbox-common.config"
 init_fixture_repo "$fixture_root" LICENSE LICENSES NOTICE .gitignore native-deps/.gitignore \
+  native-deps/deps/vmlinux/sandbox-common.config \
   native-deps/Makefile native-deps/deps/common.sh scripts/release.sh scripts/release-materials.sh \
   scripts/release-native-materials.sh scripts/release-go-toolchain.go scripts/publish-release.sh \
+  scripts/release-runtime-payloads.py scripts/test-release-runtime-payloads.py \
   scripts/validate-preview-line.sh scripts/testdata/linux-COPYING go.mod cmd >/dev/null
 project_sha="$(git -C "$fixture_root" rev-parse HEAD)"
 printf 'cmd/flatten-ctl/ignored-release-input.go\n' >> "$fixture_root/.git/info/exclude"
@@ -381,6 +413,8 @@ printf 'ignored invalid Go source must not enter a release build\n' \
 mkdir "$TMP/release-build-bin" "$TMP/system-inputs"
 printf 'fixture libc archive\n' > "$TMP/system-inputs/libc.a"
 printf 'fixture libuuid archive\n' > "$TMP/system-inputs/libuuid.a"
+printf 'fixture GCC runtime archive\n' > "$TMP/system-inputs/libgcc.a"
+printf 'fixture startup object\n' > "$TMP/system-inputs/crtbeginT.o"
 printf 'fixture native system license\n' > "$TMP/system-inputs/LICENSE"
 cat > "$TMP/release-build-bin/dpkg-query" <<'EOF'
 #!/bin/sh
@@ -433,6 +467,11 @@ case "$root" in
       [ "${KBUILD_BUILD_HOST:-}" = release ]
       [ "${KBUILD_BUILD_VERSION:-}" = 1 ]
       [ "${KBUILD_BUILD_TIMESTAMP:-}" = 'Tue Nov 14 22:13:20 UTC 2023' ]
+      printf '%s\n' "$@" | grep -Fxq 'LOCALVERSION='
+      grep -Fxq '# CONFIG_LOCALVERSION_AUTO is not set' "$root/deps/vmlinux/sandbox-common.config"
+      ! grep -q '^CONFIG_LOCALVERSION_AUTO=' "$root/deps/vmlinux/sandbox-common.config"
+      mkdir -p "$root/build/x86_64/linux"
+      install -m 0644 "$root/deps/vmlinux/sandbox-common.config" "$root/build/x86_64/linux/.config"
       [ -z "${CFLAGS:-}" ]
     else
       workspace="${root%/guest-runtime/native-deps}"
@@ -448,9 +487,9 @@ case "$root" in
     printf 'fixture erofs authors\n' > "$root/build/x86_64/src/erofs-utils/AUTHORS"
     printf 'fixture erofs license\n' > "$root/build/x86_64/src/erofs-utils/COPYING"
     mkdir -p "$root/build/x86_64/src/erofs-utils/mkfs"
-    printf 'LOAD %s/libc.a\nLOAD %s/libuuid.a\n' \
-      "$RELEASE_TEST_SYSTEM_INPUTS" "$RELEASE_TEST_SYSTEM_INPUTS" \
-      > "$root/build/x86_64/src/erofs-utils/mkfs/mkfs.erofs.map"
+    for input in libc.a libuuid.a libgcc.a crtbeginT.o; do
+      printf 'LOAD %s/%s\n' "$RELEASE_TEST_SYSTEM_INPUTS" "$input"
+    done > "$root/build/x86_64/src/erofs-utils/mkfs/mkfs.erofs.map"
     install -m 0644 "$root/../scripts/testdata/linux-COPYING" "$root/build/src/linux/COPYING"
     printf 'fixture GPL-2.0 text\n' > "$root/build/src/linux/LICENSES/preferred/GPL-2.0"
     ;;
@@ -461,8 +500,18 @@ case "$root" in
     mkdir -p "$root/bin/x86_64" "$root/../sandboxer/bin/x86_64"
     (cd "$root" && GOWORK=off CGO_ENABLED=0 go build -trimpath -buildvcs=true \
       -o bin/x86_64/flatten-ctl ./cmd/flatten-ctl)
-    install -m 0755 "$RELEASE_TEST_TOOL" "$root/../sandboxer/bin/x86_64/sandbox-init"
-    printf 'fresh runtime bundle\n' > "$root/bin/x86_64/sandbox-runtime.bundle"
+    (cd "$root/../sandboxer" && CGO_ENABLED=0 go build -trimpath -buildvcs=true \
+      -o bin/x86_64/sandbox-init ./cmd/sandbox-init)
+    tree="$root/build/runtime-fixture"
+    mkdir -p "$tree/sbin" "$tree/opt/sandbox-runtime/bin"
+    install -m 0755 "$root/../sandboxer/bin/x86_64/sandbox-init" "$tree/sbin/init"
+    install -m 0755 "$root/native-deps/bin/x86_64/envd" "$tree/opt/sandbox-runtime/bin/envd"
+    install -m 0755 "$root/native-deps/bin/x86_64/mkfs.erofs" "$tree/opt/sandbox-runtime/bin/mkfs.erofs"
+    "$fixture_inputs/runtime-readers/runtime-verifier/bin/mkfs.erofs" --all-root -T0 \
+      -U 00000000-0000-0000-0000-000000000000 \
+      "$root/build/runtime.erofs" "$tree" >/dev/null
+    PYTHONDONTWRITEBYTECODE=1 python3 "$root/scripts/test-release-runtime-payloads.py" --pack \
+      "$root/build/runtime.erofs" "$root/bin/x86_64/sandbox-runtime.bundle"
     ;;
   *) echo "release build escaped its fresh workspace: $root" >&2; exit 1 ;;
 esac
@@ -496,9 +545,12 @@ env "${common_env[@]}" "$fixture_root/scripts/release.sh" package \
   runtime runtime-v1.2.3-preview.20260804 x86_64 "$TMP/runtime-bundle"
 env "${common_env[@]}" "$fixture_root/scripts/release.sh" package \
   vmlinux vmlinux-v2.3.4 x86_64 "$TMP/vmlinux-bundle"
-tar -xOzf "$TMP/runtime-bundle/assets/sandbox-runtime-x86_64-v1.2.3-preview.20260804.tar.gz" \
-  ./bin/sandbox-runtime.bundle | grep -Fxq 'fresh runtime bundle' \
-  || fail "runtime packaging reused an old local output"
+PYTHONDONTWRITEBYTECODE=1 python3 "$ROOT/scripts/test-release-runtime-binding.py" \
+  "$fixture_root" "$TMP/runtime-bundle" "$TMP/runtime-readers/runtime-verifier"
+if tar -xOzf "$TMP/runtime-bundle/assets/sandbox-runtime-x86_64-v1.2.3-preview.20260804.tar.gz" \
+  ./bin/sandbox-runtime.bundle | cmp -s "$fixture_root/bin/x86_64/sandbox-runtime.bundle" -; then
+  fail "runtime packaging reused an old local output"
+fi
 tar -xOzf "$TMP/vmlinux-bundle/assets/vmlinux-x86_64-v2.3.4.tar.gz" \
   ./bin/vmlinux | grep -Fxq 'fresh kernel' \
   || fail "kernel packaging reused an old local output"
@@ -506,6 +558,8 @@ grep -Fxq 'runtime bundle' "$fixture_root/bin/x86_64/sandbox-runtime.bundle" \
   || fail "release packaging changed the caller's runtime output"
 grep -Fxq kernel "$fixture_root/native-deps/bin/x86_64/vmlinux" \
   || fail "release packaging changed the caller's kernel output"
+grep -Fxq 'CONFIG_LOCALVERSION_AUTO=y' "$fixture_root/native-deps/deps/vmlinux/sandbox-common.config" \
+  || fail "release packaging changed the caller's Kernel config"
 "$fixture_root/scripts/release.sh" validate \
   runtime runtime-v1.2.3-preview.20260804 x86_64 "$TMP/runtime-bundle"
 "$fixture_root/scripts/release.sh" validate \
@@ -540,6 +594,7 @@ for path in ./bin/sandbox-runtime.bundle ./bin/flatten-ctl ./bin/mkfs.erofs \
   ./share/sources/runtime/SOURCES.tsv \
   ./share/sources/runtime/GO-BUILD-INFO.tsv \
   ./share/sources/runtime/GO-MODULES.tsv \
+  ./share/sources/runtime/EROFS-INPUTS.tsv \
   ./share/sources/runtime/MATERIALS.sha256; do
   tar -tzf "$runtime_archive" | grep -Fx "$path" >/dev/null \
     || fail "runtime archive is missing $path"
@@ -585,6 +640,25 @@ for mutation in bytes bytes-and-source; do
   fi
   grep -Fq 'Linux COPYING differs from the pinned source' "$candidate/result.log" \
     || fail "Linux COPYING mutation failed for an unrelated reason"
+done
+for input in libc.a libuuid.a libgcc.a crtbeginT.o; do
+  candidate="$TMP/omitted-native-$input"
+  cp -a "$TMP/runtime-bundle" "$candidate"
+  mkdir "$candidate/root"
+  tar -xzf "$runtime_archive" -C "$candidate/root"
+  table="$candidate/root/share/sources/runtime/SOURCES.tsv"
+  awk -F '\t' -v name="system:$input" '$2 != name' "$table" > "$candidate/changed-sources"
+  install -m 0644 "$candidate/changed-sources" "$table"
+  mv "$candidate/root/share/licenses/runtime/system/$input" "$candidate/removed-notices"
+  release_materials_hash_tree "$candidate/root" runtime "$candidate/root/share/sources/runtime/MATERIALS.sha256"
+  tar --sort=name --owner=0 --group=0 --numeric-owner --mtime=@1700000000 \
+    -czf "$candidate/assets/$(basename "$runtime_archive")" -C "$candidate/root" .
+  (cd "$candidate/assets" && sha256sum "$(basename "$runtime_archive")" > SHA256SUMS)
+  if "$fixture_root/scripts/release.sh" validate runtime runtime-v1.2.3-preview.20260804 x86_64 "$candidate" > "$candidate/result.log" 2>&1; then
+    fail "validator accepted omitted native input and notices: $input"
+  fi
+  grep -Fq 'EROFS source records omit or alter collected linker inputs' "$candidate/result.log" \
+    || fail "omitted native input failed for an unrelated reason"
 done
 if tar -tzf "$runtime_archive" | grep -E '^\./(docs|test/e2e)(/|$)' >/dev/null \
   || tar -tzf "$vmlinux_archive" | grep -E '^\./(docs|test/e2e)(/|$)' >/dev/null; then
@@ -644,6 +718,29 @@ fi
 
 for kind in runtime vmlinux; do
   if [ "$kind" = runtime ]; then version=runtime-v1.2.3-preview.20260804; else version=vmlinux-v2.3.4; fi
+  for extra_path in root/ etc/ bin/extra/ share/licenses/foreign/ bin/vmlinux bin/sandbox-runtime.bundle bin/other-tool; do
+    if { [ "$kind" = vmlinux ] && [ "$extra_path" = bin/vmlinux ]; } \
+      || { [ "$kind" = runtime ] && [ "$extra_path" = bin/sandbox-runtime.bundle ]; }; then continue; fi
+    candidate="$(mktemp -d "$TMP/extra-layout-$kind.XXXXXX")"
+    cp -a "$TMP/$kind-bundle/." "$candidate"
+    mkdir "$candidate/root"
+    candidate_archive="$("$fixture_root/scripts/release.sh" archive-name "$kind" "$version" x86_64)"
+    tar -xzf "$candidate/assets/$candidate_archive" -C "$candidate/root"
+    case "$extra_path" in
+      */) mkdir -p "$candidate/root/$extra_path" ;;
+      *) printf 'foreign payload must not be installed\n' > "$candidate/root/$extra_path" ;;
+    esac
+    release_materials_hash_tree "$candidate/root" "$kind" \
+      "$candidate/root/share/sources/$kind/MATERIALS.sha256"
+    tar --sort=name --owner=0 --group=0 --numeric-owner --mtime=@1700000000 \
+      -czf "$candidate/assets/$candidate_archive" -C "$candidate/root" .
+    (cd "$candidate/assets" && sha256sum "$candidate_archive" > SHA256SUMS)
+    if "$fixture_root/scripts/release.sh" validate "$kind" "$version" x86_64 "$candidate" > "$candidate/result.log" 2>&1; then
+      fail "validator accepted $kind extra layout entry $extra_path with regenerated checksums"
+    fi
+    grep -Fq 'outside the exact' "$candidate/result.log" \
+      || fail "extra layout entry failed for an unrelated reason"
+  done
   for mutation in top-level nested missing extra; do
     candidate="$TMP/project-license-$kind-$mutation"
     cp -a "$TMP/$kind-bundle" "$candidate"
@@ -824,7 +921,8 @@ for tool in kernel-compiler kernel-linker; do
       fail "validator accepted $tool $mutation with regenerated checksums"
     fi
     case "$mutation" in
-      missing|duplicate) expected="missing or inconsistent source record for system:$tool" ;;
+      missing) expected="missing or inconsistent source record for system:$tool" ;;
+      duplicate) expected="invalid SOURCES.tsv records" ;;
       *) expected="invalid Kernel toolchain file identity: $tool" ;;
     esac
     grep -Fq "$expected" "$candidate/result.log" || fail "$tool $mutation failed for an unrelated reason"

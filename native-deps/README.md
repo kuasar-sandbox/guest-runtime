@@ -45,12 +45,17 @@ checksums are regenerated. Local packaging and standalone validation do not
 require this publication input. The receipt does not attest compiler provenance
 or isolate untrusted candidate code.
 
-Go dependency-source verification uses fresh private module/VCS state and an
-enabled checksum database. It clears persisted Go settings, private-module
+Go dependency and toolchain downloads use fresh private module/VCS state, an
+enabled checksum database and `GOAUTH=off`. They clear persisted Go settings, private-module
 bypasses, Git configuration and caller credentials while retaining validated,
 credential-free routing. Uploaded Go record keys must match the exact official
 payload names before any source or toolchain download; path aliases are rejected.
 These release checks do not change ordinary development module authentication.
+Source inventories reject duplicate or excessive records before per-row work;
+each metadata table is capped at 16 MiB and the source inventory at 16,384 rows.
+RPM notice collection checks both the installed-package listing and every
+same-source sibling file listing. A partial failure aborts collection even when
+another sibling supplied valid notices; partial output is not complete coverage.
 
 The trusted publisher generates the standard release text and source/Preview
 markers from its validated request. Downloaded `release-notes.md` is a local
@@ -99,6 +104,11 @@ verification material with `GOTOOLCHAIN=local` but does not switch the build
 compiler or silently enable automatic toolchain selection. These checks assume
 the trusted build host and do not attest a compromised host.
 
+Only the fresh Kernel release checkout disables `CONFIG_LOCALVERSION_AUTO`;
+Kbuild receives an explicit empty `LOCALVERSION` and the resolved configuration
+is checked after building. The configured `CONFIG_LOCALVERSION` suffix remains,
+but temporary Git commit IDs or dirty markers cannot select the release string.
+The caller's development fragments and patch workspace are not changed.
 Kernel release builds set `KBUILD_BUILD_USER=kuasar`, `KBUILD_BUILD_HOST=release`
 and `KBUILD_BUILD_VERSION=1`, and derive `KBUILD_BUILD_TIMESTAMP` in UTC from
 `SOURCE_DATE_EPOCH` (default `0`, also used for archive timestamps). This keeps
@@ -114,6 +124,20 @@ their material directories without fetching Runtime dependencies. This records
 the selected compiler/linker on the trusted host; it does not claim to attest
 the host or every transitive compiler subprocess.
 
+Validation accepts only the selected unit's payloads: Runtime contains
+`sandbox-runtime.bundle`, `flatten-ctl` and `mkfs.erofs` under `bin/`; Kernel
+contains only `bin/vmlinux`. Directories outside those payload/material roots,
+path aliases, duplicates and another unit's material directories are rejected
+before extraction. A Runtime archive cannot replace the independently selected
+Kernel, and archive directories cannot change unrelated deployment-root modes.
+Runtime validation builds its host readers from the checksum-pinned EROFS source
+in a fresh private directory (the native C/autotools prerequisites are required).
+It verifies the bundle alignment and prefix digest, checks the complete EROFS
+filesystem without extracting its tree, then reads only the required init, Envd
+and mkfs payloads into fixed private files. Their in-image ownership/modes, actual
+Go main identities/targets and build records must match; init must also bind the
+selected Sandboxer commit, and embedded mkfs must equal the outer mkfs bytes.
+No uploaded executable is run. Kernel validation does not build these readers.
 Validation rejects non-root numeric archive ownership and checks the exact
 Envd, EROFS and Linux source URLs and digests. Publication passes its selected
 `SOURCE_SHA` into validation; Runtime publication also requires the exact
@@ -148,6 +172,13 @@ Distinct native link inputs cannot overwrite notices under a shared material
 name. Runtime and Kernel packaging clean only their own temporary workspaces,
 including read-only Go module caches, on success or failure. Existing Envd
 shared-module local replacements and independent Kernel selection are unchanged.
+
+`EROFS-INPUTS.tsv` preserves every external archive/startup-object name and
+digest selected from that fresh link map. Validation requires exactly the same
+complete native source-record set, not just libc and libuuid; removing GCC/CRT
+rows and notices is rejected even with regenerated bundle checksums. The
+inventory is part of the independent completed-build archive binding; it is not
+an attestation of an untrusted producer or host.
 
 Runtime packaging also reads the fresh `mkfs.erofs` linker map. For each
 linked system archive or startup object it records the actual file digest and

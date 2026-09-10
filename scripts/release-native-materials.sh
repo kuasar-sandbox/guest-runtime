@@ -185,7 +185,15 @@ release_native_system_input() {
     source_name="$owner"
     source_id="rpm-source:$rpm_source"
     # Static/devel subpackages may keep notices in a sibling from the SAME SRPM.
+    # Capture each status before accepting potentially partial command output.
+    local packages siblings files
+    packages="$(rpm -qa --qf '%{NAME}.%{ARCH}\t%{SOURCERPM}\n')" \
+      || fail "cannot enumerate installed RPM packages for license collection"
+    siblings="$(awk -F '\t' -v source="$rpm_source" '$2 == source {print $1}' <<< "$packages")" \
+      || fail "cannot select same-source RPM license packages"
     while IFS= read -r sibling; do
+      [ -n "$sibling" ] || continue
+      files="$(rpm -ql "$sibling")" || fail "cannot enumerate RPM license files: $sibling"
       while IFS= read -r file; do
         case "$(basename "$file")" in
           LICENSE*|COPYING*|NOTICE*|COPYRIGHT*|copyright|AUTHORS*|CREDITS*) ;;
@@ -195,9 +203,8 @@ release_native_system_input() {
         release_native_verify_license_file "$file" rpm "$source_id"
         release_native_copy_file "$file" "$label" "${file#/}"
         count=$((count + 1))
-      done < <(rpm -ql "$sibling")
-    done < <(rpm -qa --qf '%{NAME}.%{ARCH}\t%{SOURCERPM}\n' \
-      | awk -F '\t' -v source="$rpm_source" '$2 == source {print $1}')
+      done <<< "$files"
+    done <<< "$siblings"
     [ "$count" -gt 0 ] || fail "native RPM license material is missing: $rpm_source"
   else
     fail "native input has no verifiable package/source material: $input"
@@ -208,8 +215,10 @@ release_native_system_input() {
 
 release_native_erofs_inputs() {
   local map="$1" erofs_source="$2" payload="$3" input canonical name count=0
+  local inventory="$RELEASE_MATERIALS_WORK/erofs-inputs"
   local -A selected_inputs=()
   [ -s "$map" ] || fail "fresh EROFS linker map is missing"
+  : > "$inventory"
   erofs_source="$(realpath -e "$erofs_source")"
   while IFS= read -r input; do
     [ -n "$input" ] || continue
@@ -222,8 +231,10 @@ release_native_erofs_inputs() {
     if [ -n "${selected_inputs[$name]:-}" ] && [ "${selected_inputs[$name]}" != "$canonical" ]; then
       fail "distinct native link inputs share a material name: $name"
     fi
+    [ -z "${selected_inputs[$name]:-}" ] || continue
     selected_inputs[$name]="$canonical"
     release_native_system_input "$canonical" "$payload"
+    printf '%s\t%s\n' "$name" "$(sha256sum "$canonical" | awk '{print $1}')" >> "$inventory"
     count=$((count + 1))
   done < <(awk '$1 == "LOAD" && $2 ~ /\.(a|o)$/ {print $2}' "$map" | LC_ALL=C sort -u)
   [ "$count" -gt 0 ] || fail "EROFS linker map contains no system inputs"
@@ -231,4 +242,35 @@ release_native_erofs_inputs() {
     awk -F '\t' -v name="system:$input" '$2 == name {found=1} END {exit !found}' \
       "$RELEASE_MATERIALS_WORK/sources" || fail "EROFS source material is missing $input"
   done
+  local destination="$RELEASE_MATERIALS_STAGE/share/sources/$RELEASE_MATERIALS_UNIT/EROFS-INPUTS.tsv"
+  { printf 'input\tsha256\n'; LC_ALL=C sort "$inventory"; } > "$destination"
+  chmod 0644 "$destination"
+}
+
+release_native_validate_erofs_inventory() {
+  local source="$1/share/sources/runtime" expected="$WORK/expected-erofs-inputs"
+  local actual="$WORK/actual-erofs-inputs" inventory="$1/share/sources/runtime/EROFS-INPUTS.tsv"
+  if [ ! -s "$inventory" ] || [ -L "$inventory" ] || [ "$(stat -c '%a' "$inventory")" != 644 ] \
+    || [ "$(stat -c '%s' "$inventory")" -gt 1048576 ]; then
+    fail "missing or unsafe complete EROFS input inventory"
+  fi
+  awk -F '\t' '
+    NR == 1 { if ($0 != "input\tsha256") exit 1; next }
+    NF != 2 || NR > 1025 || $1 !~ /^[A-Za-z0-9._+-]+[.](a|o)$/ ||
+      length($2) != 64 || $2 ~ /[^0-9a-f]/ || seen[$1]++ { exit 1 }
+    { rows++; print }
+    END { if (rows < 2) exit 1 }
+  ' "$inventory" > "$expected" || fail "invalid complete EROFS input inventory"
+  LC_ALL=C sort -o "$expected" "$expected"
+  awk -F '\t' '
+    $2 ~ /^system:/ {
+      if ($1 != "bin/mkfs.erofs,bin/sandbox-runtime.bundle:/opt/sandbox-runtime/bin/mkfs.erofs") exit 1
+      name=$2; sub(/^system:/, "", name)
+      split($5, fields, ";"); digest=fields[1]; sub(/^sha256:/, "", digest)
+      if (fields[1] !~ /^sha256:/ || length(digest) != 64 || digest ~ /[^0-9a-f]/) exit 1
+      print name FS digest
+    }
+  ' "$source/SOURCES.tsv" > "$actual" || fail "invalid EROFS source input identity"
+  LC_ALL=C sort -o "$actual" "$actual"
+  cmp -s "$expected" "$actual" || fail "EROFS source records omit or alter collected linker inputs"
 }
