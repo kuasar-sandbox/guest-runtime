@@ -44,6 +44,12 @@ pin 落在 Makefile 变量(`EROFS_TARBALL` / `LINUX_TARBALL` / `ENVD_TARBALL` �
 字节)。发布其他原生输入时,必须同时更新仓库 pin、摘要与发行来源记录;否则打包会
 失败,不会为不同输入生成错误的来源记录。
 
+发行工作流在上传前把已完成归档的 SHA-256 记录为 build job output。发布者通过
+`RELEASE_ARCHIVE_SHA256` 接收这一独立值,在任何 Tag/Release 写入前核对;不能用
+下载后从 bundle 重新计算的值代替。即使重算 bundle 自身的校验和,全部载荷与材料
+仍须匹配该次已完成构建。本地打包和独立验证不要求这个发布输入。该记录不证明
+编译器来源,也不构成对不可信候选代码的隔离。
+
 发行打包从所选 Git commit 的全新 checkout 出发,在本次临时兄弟工作区中调用现有组件
 Makefile。Runtime 打包重建其最小 accelerator/sandboxer 依赖闭包、Envd、EROFS
 工具和 Runtime image;Kernel 打包独立重建采用所选 patch 与 config 的 Linux。

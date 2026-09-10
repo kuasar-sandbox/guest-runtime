@@ -210,6 +210,14 @@ grep -Fqx 'run-name: Release ${{ inputs.version }} @${{ inputs.source_sha }}' \
 sed -n '/- name: Publish runtime release/,/run: |/p' "$WORKFLOW" \
   | grep -Fq 'RELEASE_DEPENDENCIES: accelerator=${{ needs.preflight.outputs.accelerator_version }},sandboxer=${{ needs.preflight.outputs.sandboxer_version }}' \
   || fail "runtime Preview publish step does not receive dependency binding"
+for workflow in release-runtime.yml release-vmlinux.yml; do
+  [ "$(grep -Fc 'archive_sha256: ${{ steps.release-archive-digest.outputs.archive_sha256 }}' \
+    "$ROOT/.github/workflows/$workflow")" -eq 1 ] \
+    || fail "$workflow does not expose exactly one independent build archive digest"
+  [ "$(grep -Fc 'RELEASE_ARCHIVE_SHA256: ${{ needs.build.outputs.archive_sha256 }}' \
+    "$ROOT/.github/workflows/$workflow")" -eq 1 ] \
+    || fail "$workflow does not pass the independent build digest to publication"
+done
 grep -Fq 'kuasar-preview-binding' "$ROOT/scripts/publish-release.sh" \
   || fail "Preview publisher does not record its build binding"
 for input in accelerator_version sandboxer_version; do

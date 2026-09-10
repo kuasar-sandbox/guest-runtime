@@ -36,6 +36,15 @@ from its exact public mirror). To publish another native input, update its
 repository pin, digest and release source record together; packaging fails
 instead of emitting provenance for a different input.
 
+The release workflow records the completed archive's SHA-256 as a build-job
+output before uploading it. The publisher receives that independent value as
+`RELEASE_ARCHIVE_SHA256` and checks it before any Tag or Release write; a value
+recalculated from the downloaded bundle is not a substitute. This binds every
+payload and material file to that completed build, even if the bundle's own
+checksums are regenerated. Local packaging and standalone validation do not
+require this publication input. The receipt does not attest compiler provenance
+or isolate untrusted candidate code.
+
 Release packaging builds from fresh checkouts of the selected Git commits in a
 temporary sibling workspace, using the existing component Makefiles. Runtime
 packaging rebuilds its minimal accelerator/sandboxer closure, Envd, EROFS tools,

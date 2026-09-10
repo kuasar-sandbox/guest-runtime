@@ -222,6 +222,17 @@ publish_bundle() {
   if [ "${RELEASE_KIND:-}" = runtime ] && [ -z "${RELEASE_DEPENDENCIES:-}" ]; then
     fail "Runtime publication requires RELEASE_DEPENDENCIES"
   fi
+  # This digest comes from the completed build job, not downloaded SHA256SUMS.
+  local expected_digest="${RELEASE_ARCHIVE_SHA256:-}" archive digest
+  [[ "$expected_digest" =~ ^[0-9a-f]{64}$ ]] \
+    || fail "RELEASE_ARCHIVE_SHA256 must be the independently recorded build digest"
+  archive="$(release_cli archive-name "$tag" "$arch")"
+  if [ ! -f "$bundle/assets/$archive" ] || [ -L "$bundle/assets/$archive" ]; then
+    fail "release build archive is missing or is a symbolic link"
+  fi
+  digest="$(sha256sum -- "$bundle/assets/$archive")"
+  [ "${digest%% *}" = "$expected_digest" ] \
+    || fail "release archive differs from the independently recorded build digest"
   SOURCE_SHA="$commit" release_cli validate "$tag" "$arch" "$bundle"
 
   local tag_state="$TMP/tag"
