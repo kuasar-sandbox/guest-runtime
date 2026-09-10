@@ -190,6 +190,12 @@ make help       # 列举目标
 压缩 / fuse / 网络特性)→ 只编 `lib` + `mkfs` + `fsck` 三个子目录 → 产出
 `bin/<arch>/{mkfs.erofs,fsck.erofs}`。
 
+Runtime 发行打包使用编译器 `-ffile-prefix-map` 标志,将随机原生构建工作区映射
+到虚拟调试源码前缀 `/usr/src/kuasar`。保留调试信息,但不把临时目录写入
+`mkfs.erofs` 及其 Runtime 内副本。普通开发 CFLAGS 和 Kernel 构建不变。
+安装原生构建依赖后,可在仓库根目录执行 `bash scripts/test-erofs-reproducibility.sh`,
+在两个独立目录重新构建 pin 的源码并比较两个原生工具。
+
 - 跳过 `mount`/`dump`/`fuse` 子目录:平台不消费这些工具,同时避开 v1.9.1 的 mount.erofs
   在 `--disable-multithreading` 下的 pthread 链接问题。
 - configure 期硬依赖 libuuid(无 `--without-uuid` 出口);交叉编译需 multi-arch 的

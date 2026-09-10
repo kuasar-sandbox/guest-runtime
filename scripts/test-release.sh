@@ -415,6 +415,10 @@ case "$root" in
       [ "${KBUILD_BUILD_HOST:-}" = release ]
       [ "${KBUILD_BUILD_VERSION:-}" = 1 ]
       [ "${KBUILD_BUILD_TIMESTAMP:-}" = 'Tue Nov 14 22:13:20 UTC 2023' ]
+      [ -z "${CFLAGS:-}" ]
+    else
+      workspace="${root%/guest-runtime/native-deps}"
+      [ "${CFLAGS:-}" = "-O2 -g -ffile-prefix-map=$workspace=/usr/src/kuasar" ]
     fi
     mkdir -p "$root/bin/x86_64" "$root/build/src/e2b-infra" \
       "$root/build/x86_64/src/erofs-utils" "$root/build/src/linux/LICENSES/preferred"

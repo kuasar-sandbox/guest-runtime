@@ -224,6 +224,10 @@ prepare_release_build_environment() {
   done
 }
 
+release_runtime_native_cflags() {
+  printf '%s\n' "-O2 -g -ffile-prefix-map=$1=/usr/src/kuasar"
+}
+
 verify_release_go_contexts() {
   local build_root="$1" sandboxer_root="$2" envd_root="$3" context directory info
   for context in runtime sandboxer envd; do
@@ -450,6 +454,7 @@ package_release() {
       # Fresh source/build roots prevent local output and extraction caches from
       # changing the payload while the material record still names pinned inputs.
       "${RELEASE_BUILD_ENV[@]}" \
+        CFLAGS="$(release_runtime_native_cflags "$build_workspace")" \
         make --no-print-directory -C "$build_root/native-deps" \
         TARGET_ARCH="$arch" TARBALL_DIR="$tarball_dir" \
         ENVD_SRC="$envd_source" erofs envd

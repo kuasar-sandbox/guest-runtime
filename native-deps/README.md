@@ -209,6 +209,14 @@ Build duration depends on the host, toolchain and cache state; these commands do
 
 `deps/build-erofs.sh` extracts erofs-utils into `build/<arch>/src/erofs-utils/`, keeping one tree per architecture because this autotools path does not support out-of-source builds. It runs `autoreconf` and `configure` with compression/FUSE/network features disabled, builds only the `lib`, `mkfs` and `fsck` subdirectories, and writes `bin/<arch>/{mkfs.erofs,fsck.erofs}`.
 
+Runtime release packaging maps its random native build workspace to the virtual
+debug-source prefix `/usr/src/kuasar` with the compiler's `-ffile-prefix-map` flag.
+Debug information is retained without embedding the temporary directory in
+`mkfs.erofs` or its Runtime copy. Ordinary development CFLAGS and Kernel builds
+are unchanged. With the native prerequisites installed, run
+`bash scripts/test-erofs-reproducibility.sh` from the repository root to rebuild
+the pinned source twice in separate directories and compare both native tools.
+
 - The `mount`/`dump`/`fuse` subdirectories are skipped. The project does not consume those tools; the source workflow also avoids the v1.9.1 mount.erofs pthread-linking issue under `--disable-multithreading`.
 - Configure requires libuuid and has no `--without-uuid` path. Cross-compilation requires multiarch `uuid-dev:<arch>`; the script checks it first and prints apt guidance (§4.2).
 - Host build tools: `autoconf automake libtool pkg-config make gcc g++`.
