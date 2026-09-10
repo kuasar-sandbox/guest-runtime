@@ -79,6 +79,11 @@ Before collection, each installed input must match its file digest in the
 trusted build host's Debian or RPM database. Missing, ambiguous or changed
 file records fail packaging; package ownership alone is insufficient. This
 checks installed file integrity, not a compromised host or package database.
+Collected copyright, license and NOTICE bytes must also match their installed
+package digests. Their source package must match the linked input; referenced
+Debian common-license texts are verified against their own owning packages.
+Multi-Arch co-owners must all agree on the bytes and required source identity.
+Missing, changed or conflicting license records fail collection.
 
 The project CI template builds static libuuid from its pinned, checksum-verified
 util-linux source. Its provisioner retains a per-build `SOURCES.tsv`,
