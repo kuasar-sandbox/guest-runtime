@@ -49,6 +49,8 @@ pin 落在 Makefile 变量(`EROFS_TARBALL` / `LINUX_TARBALL` / `ENVD_TARBALL` �
 下载后从 bundle 重新计算的值代替。即使重算 bundle 自身的校验和,全部载荷与材料
 仍须匹配该次已完成构建。本地打包和独立验证不要求这个发布输入。该记录不证明
 编译器来源,也不构成对不可信候选代码的隔离。
+可信发布端根据已验证请求生成标准发行正文及来源/Preview 标记。下载的
+`release-notes.md` 只是本地 bundle 辅助说明,不能决定公开发行正文或对账来源。
 
 发行打包从所选 Git commit 的全新 checkout 出发,在本次临时兄弟工作区中调用现有组件
 Makefile。Runtime 打包重建其最小 accelerator/sandboxer 依赖闭包、Envd、EROFS
