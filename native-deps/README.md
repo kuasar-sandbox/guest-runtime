@@ -24,194 +24,108 @@ Project-level aggregation runs `make -C kuasar-sandbox build`, which invokes thi
 | --- | --- | --- | --- |
 | `mkfs.erofs` / `fsck.erofs` | erofs-utils v1.9.1 | — | accelerator flattening, guest-runtime image construction, source diagnostics and accelerator tests |
 | `vmlinux` | Linux 6.1.169 (LTS, cdn.kernel.org) | `deps/linux-patches/` and `deps/vmlinux/*.config` | sandboxer / sandbox-ctl guest kernel |
-| `envd` | e2b-dev/infra 2026.22 source tarball | — | Guest agent in `sandbox-runtime.bundle` |
+| `envd` | e2b-dev/runtime 2026.22 source tarball | — | Guest agent in `sandbox-runtime.bundle` |
 | `versitygw` (opt-in) | versity/versitygw v1.5.0 | — | Local/single-node S3-compatible file-storage integration where required |
 
 Pins live in Makefile variables (`EROFS_TARBALL`, `LINUX_TARBALL`, `ENVD_TARBALL`, and optional `VERSITYGW_TARBALL`), accepting `url#filename` or a local path. An empty corresponding `*_TARBALL_SHA256` skips verification. The current default EROFS, Linux and Envd inputs have hashes configured; the optional gateway hash must be supplied when required by the deployment's verification policy. Updating a version means updating those variables and revalidating patch application.
 
-Those overrides are development-build inputs. The Runtime and vmlinux release
-packagers accept only the repository-pinned EROFS, Linux and Envd inputs with
-their configured digests (the release workflow may fetch the same Linux bytes
-from its exact public mirror). To publish another native input, update its
-repository pin, digest and release source record together; packaging fails
-instead of emitting provenance for a different input.
+Use the normal Makefile targets to build the selected sources, then package the
+matching outputs. From the repository root, `make release-runtime` depends on
+`sandbox-runtime`, while `make release-vmlinux` depends only on `vmlinux`.
+Calling `release.sh package` directly reuses prebuilt files; it does not rebuild
+native dependencies, replace source checkouts or reset caches. Runtime and
+Kernel remain independently built, packaged and selected.
 
-The release workflow records the completed archive's SHA-256 as a build-job
-output before uploading it. The publisher receives that independent value as
-`RELEASE_ARCHIVE_SHA256` and checks it before any Tag or Release write; a value
-recalculated from the downloaded bundle is not a substitute. This binds every
-payload and material file to that completed build, even if the bundle's own
-checksums are regenerated. Local packaging and standalone validation do not
-require this publication input. The receipt does not attest compiler provenance
-or isolate untrusted candidate code.
+Runtime inputs are `bin/<arch>/{sandbox-runtime.bundle,flatten-ctl}` and
+`native-deps/bin/<arch>/mkfs.erofs`; Kernel uses
+`native-deps/bin/<arch>/vmlinux`. Existing `RELEASE_BIN_DIR` and
+`RELEASE_NATIVE_BIN_DIR` overrides select matching output directories.
+`RELEASE_SANDBOXER_SOURCE_DIR`, `RELEASE_ACCELERATOR_SOURCE_DIR`,
+`RELEASE_ENVD_SOURCE_DIR`, `RELEASE_EROFS_SOURCE_DIR` and
+`RELEASE_LINUX_SOURCE_DIR` select the corresponding source trees;
+`RELEASE_SANDBOX_INIT_BIN` and `RELEASE_ENVD_BIN` select the matching init
+and Envd binaries for material collection and image consistency checks. Keep source versions, native link maps and these outputs
+together. Native pin changes require updating the recipe, digests and source
+records together; a path override is not permission to label different source
+bytes as the configured version.
 
-Go dependency and toolchain downloads use fresh private module/VCS state, an
-enabled checksum database and `GOAUTH=off`. They clear persisted Go settings, private-module
-bypasses, Git configuration and caller credentials while retaining validated,
-credential-free routing. Uploaded Go record keys must match the exact official
-payload names before any source or toolchain download; path aliases are rejected.
-These release checks do not change ordinary development module authentication.
-Only the exact Accelerator and Sandboxer modules use separately
-authenticated internal-source notices for the Runtime payload closure. Any other
-organization-owned module must pass the same module checksum and notice
-verification as an external dependency.
-Source inventories reject duplicate or excessive records before per-row work;
-each metadata table is capped at 16 MiB and the source inventory at 16,384 rows.
-RPM notice collection checks both the installed-package listing and every
-same-source sibling file listing. A partial failure aborts collection even when
-another sibling supplied valid notices; partial output is not complete coverage.
+The Runtime source build uses `GOWORK=off` and the minimal
+Accelerator/Sandboxer dependency closure. Internal records use a release version
+only when its local Git tag identifies the selected commit, otherwise
+`git:<commit>`; future target tags need not exist. `flatten-ctl` must be the
+Linux/amd64 `github.com/kuasar-sandbox/guest-runtime/cmd/flatten-ctl` main
+package, with clean Go VCS metadata matching the selected project commit.
+The package records its requested Runtime or Kernel version separately from
+source commits.
 
-The trusted publisher generates the standard release text and source/Preview
-markers from its validated request. Downloaded `release-notes.md` is a local
-bundle aid, not an authority for the public release body or reconciliation.
+Go compiler selection is recorded separately in the guest-runtime, sandboxer
+and Envd module directories. When these select different compiler versions,
+each payload's actual version and the corresponding installed Go/bundled
+dependency notices are collected. The parent module's context does not replace
+a payload's own selection. Module materials use the effective replacements and
+matching module checksums with the normal Go cache and routing. Existing
+internal and Envd shared-module local replacements remain supported; other
+unversioned third-party replacements are not supported in official packages.
+Compiler distributions are neither downloaded nor authenticated by these
+material collectors, and standalone validation does not require the payload's
+compiler version.
 
-Release packaging builds from fresh checkouts of the selected Git commits in a
-temporary sibling workspace, using the existing component Makefiles. Runtime
-packaging rebuilds its minimal accelerator/sandboxer closure, Envd, EROFS tools,
-and the image; kernel packaging independently rebuilds Linux with the selected
-patches and configuration. Only checksum-verified download tarballs are reused.
-Existing binary outputs, extracted source trees and development work remain
-untouched. Internal dependency records retain a release version only when its
-local Git tag identifies the selected commit; otherwise they record
-`git:<commit>`, including when a target formal tag does not exist yet.
-Runtime validates `flatten-ctl` as the Linux/amd64
-`github.com/kuasar-sandbox/guest-runtime/cmd/flatten-ctl` main package in this
-module, with clean Go VCS metadata matching the selected project commit. A
-source archive without Git metadata is not used for that release build.
+Materials are isolated under `share/licenses/runtime` and
+`share/sources/runtime`, or the separate `vmlinux` namespaces. Each unit
+carries `SOURCES.tsv`, `GO-BUILD-INFO.tsv`, `GO-MODULES.tsv` and
+`MATERIALS.sha256`. Collection rejects missing notices, unreadable subtrees,
+partial traversals and collisions between different inputs. Project, Envd,
+EROFS, Linux, internal/shared-module and system records must reference their
+own material directories. Kernel includes Linux `COPYING` and the complete
+`LICENSES` tree from its selected source; the recorded COPYING digest must
+agree with the bundled file.
 
-Runtime and Kernel build commands use a private home and caches, without the
-caller's cloud/release credentials or build-flag overrides. Credential-free HTTPS
-module/network routing and a configured checksum mirror may be retained.
-`GOSUMDB` and `GOTOOLCHAIN` remain explicit inputs, defaulting to
-`sum.golang.org` and `local`; Runtime verification requires an enabled checksum
-database. Kernel packaging does not fetch a Go distribution.
-Runtime resolves the existing checksum-pinned Envd source first, then records
-compiler selection separately in the guest-runtime, sandboxer and Envd module
-directories. If explicit automatic selection chooses different compiler
-versions, each actual distribution is verified; the parent's Go context is not
-used as evidence for all guest binaries.
+Validation accepts only the selected unit's payloads: Runtime has
+`sandbox-runtime.bundle`, `flatten-ctl` and `mkfs.erofs` under `bin/`;
+Kernel has only `bin/vmlinux`. It checks exact paths, duplicate entries,
+types, root ownership, modes, inventory, source-record consistency and
+checksums. Foreign unit materials and unrelated directories are refused before
+extraction. A Runtime archive cannot replace the independently selected Kernel
+or alter unrelated deployment-root modes.
 
-Release packaging records the Go compiler selected in the fresh build context,
-then compares its distribution inputs before and after building with the matching
-`golang.org/toolchain` archive authenticated by the configured checksum database.
-This covers the compiler, standard-library sources and other files in that
-distribution; extra non-build `api`, `doc`, `misc` and `test` files in a full Go
-installation are not authenticated or used as release license sources. The
-standard `go.mod`/`_go.mod` installation transformation is accounted for.
-Go license/notice bytes, including nested compiler and standard-library dependency
-materials, come from the verified archive with their relative paths retained.
-Standalone validation
-rechecks their bytes, source URL and module h1. A version string or recomputed
-bundle checksum cannot substitute for that source check. Verification requires
-an enabled checksum database and its matching archive/cache; it may fetch
-verification material with `GOTOOLCHAIN=local` but does not switch the build
-compiler or silently enable automatic toolchain selection. These checks assume
-the trusted build host and do not attest a compromised host.
+Standalone Runtime validation uses trusted host `fsck.erofs` and
+`dump.erofs` already installed on `PATH`. It does not download EROFS sources
+or compile readers on demand. These readers must support the image format,
+`fsck.erofs --extract` and `dump.erofs --path/--cat`.
+Validation checks the bundle's alignment and prefix digest, verifies the
+complete EROFS filesystem without extracting its tree, and reads only init,
+Envd, mkfs and flatten-ctl into fixed private files. In-image ownership/modes,
+Go main identities/targets and build records must match; init must also bind
+the selected Sandboxer commit. Embedded mkfs and flatten-ctl must equal their
+outer payloads. No archive executable is run. Kernel validation needs no EROFS
+reader, Runtime payload or dependency checkout.
 
-Only the fresh Kernel release checkout disables `CONFIG_LOCALVERSION_AUTO`;
-Kbuild receives an explicit empty `LOCALVERSION` and the resolved configuration
-is checked after building. The configured `CONFIG_LOCALVERSION` suffix remains,
-but temporary Git commit IDs or dirty markers cannot select the release string.
-The caller's development fragments and patch workspace are not changed.
-Kernel release builds set `KBUILD_BUILD_USER=kuasar`, `KBUILD_BUILD_HOST=release`
-and `KBUILD_BUILD_VERSION=1`, and derive `KBUILD_BUILD_TIMESTAMP` in UTC from
-`SOURCE_DATE_EPOCH` (default `0`, also used for archive timestamps). This keeps
-the build account, host name and wall clock out of the kernel version metadata.
-Development Kbuild defaults are unchanged; identical complete binaries still
-require identical source, configuration and compiler inputs.
-Kernel packaging resolves GCC and the linker in its filtered build environment,
-passes their exact paths to Kbuild (`CC`, `HOSTCC`, `LD`) and records their file
-SHA-256, installed source-package version and verified license materials under
-`system/kernel-compiler` and `system/kernel-linker`. The executables must still
-match after building. Standalone validation requires both role records and
-their material directories without fetching Runtime dependencies. This records
-the selected compiler/linker on the trusted host; it does not claim to attest
-the host or every transitive compiler subprocess.
+The matching `mkfs.erofs` link map supplies every actual external archive and
+startup object to `EROFS-INPUTS.tsv`. The inventory retains their names and
+file digests; source rows and per-input `system/<input>` notice directories
+must cover exactly that set, including libc, libuuid and GCC/CRT inputs.
+Packaging records installed Debian/RPM source-package identities and copies
+their copyright, license and NOTICE files, including referenced common-license
+texts. Package names or SPDX labels alone do not replace the texts. RPM package
+and same-source sibling file listings must complete successfully; partial output
+is not complete coverage. Installed package ownership provides attribution,
+not dpkg/RPM file-digest or co-owner authentication.
 
-Validation accepts only the selected unit's payloads: Runtime contains
-`sandbox-runtime.bundle`, `flatten-ctl` and `mkfs.erofs` under `bin/`; Kernel
-contains only `bin/vmlinux`. Directories outside those payload/material roots,
-path aliases, duplicates and another unit's material directories are rejected
-before extraction. A Runtime archive cannot replace the independently selected
-Kernel, and archive directories cannot change unrelated deployment-root modes.
-Runtime validation builds its host readers from the checksum-pinned EROFS source
-in a fresh private directory (the native C/autotools prerequisites are required).
-It verifies the bundle alignment and prefix digest, checks the complete EROFS
-filesystem without extracting its tree, then reads only the required init, Envd,
-mkfs and flatten-ctl payloads into fixed private files. Their in-image ownership/modes, actual
-Go main identities/targets and build records must match; init must also bind the
-selected Sandboxer commit. Embedded mkfs and flatten-ctl must each equal their
-verified outer payload bytes.
-No uploaded executable is run. Kernel validation does not build these readers.
-Validation rejects non-root numeric archive ownership and checks the exact
-Envd, EROFS and Linux source URLs and digests. Publication passes its selected
-`SOURCE_SHA` into validation; Runtime publication also requires the exact
-accelerator/sandboxer `RELEASE_DEPENDENCIES` binding. Regenerating checksums does
-not permit a different project commit, dependency version or native source to
-be published under that request. Local source packaging can still use untagged
-dependency commits; those records are not claimed to be existing releases.
-Runtime validation also binds each dependency's exact commit URL, Git integrity
-and complete notice tree to the existing selected sibling directory and optional
-`RELEASE_*_SOURCE_SHA` input. When a publication version is supplied, its local
-Tag must resolve to that commit. The trusted Runtime publisher checks out only
-the requested accelerator/sandboxer Tags with a scoped read-only token, disables
-persisted checkout credentials and revokes that token before bundle validation.
-It reads Git blobs without executing dependency code; Kernel does not perform
-these dependency checkouts or require their repositories.
-Required project, Envd, EROFS, Linux, system-library and Envd shared-module records must also
-name their own license directories; redirecting them to unrelated, otherwise
-valid materials is rejected.
-Runtime and Kernel validation compare the complete project license/notice tree,
-including nested `LICENSES`, with the selected commit's Git blobs. That commit
-must be available locally; trusted publication fetches source history for these
-reads without executing candidate files. Recomputed checksums cannot authorize
-changed, missing or extra project notices. Kernel inspection remains independent
-of Runtime binaries and Go distribution downloads.
-Kernel validation additionally compares Linux `COPYING` with the digest derived
-from the checksum-pinned upstream tarball, not a digest recomputed from uploaded
-license bytes. The same fixed value binds the project kernel-input source row.
-The small test fixture preserves that upstream notice verbatim; it is not a
-replacement for the complete Linux `LICENSES` material shipped in the archive.
-License collection refuses unreadable subtrees and incomplete traversals.
-Distinct native link inputs cannot overwrite notices under a shared material
-name. Runtime and Kernel packaging clean only their own temporary workspaces,
-including read-only Go module caches, on success or failure. Existing Envd
-shared-module local replacements and independent Kernel selection are unchanged.
+The existing project CI template builds static libuuid from pinned,
+checksum-verified util-linux source. Its provisioner retains `SOURCES.tsv`,
+`MATERIALS.sha256` and a license directory beside the template inputs and
+copies them with the library into each prepared slot. Packaging checks this
+source-built library's inventory and digest. Missing, altered or unowned inputs
+need the actual matching materials, not fabricated source records.
 
-`EROFS-INPUTS.tsv` preserves every external archive/startup-object name and
-digest selected from that fresh link map. Validation requires exactly the same
-complete native source-record set, not just libc and libuuid; removing GCC/CRT
-rows and notices is rejected even with regenerated bundle checksums. The
-license directory of every input must be its own `system/<input>` directory;
-redirecting GCC/CRT records to another input's valid notices is rejected.
-The inventory is part of the independent completed-build archive binding; it is not
-an attestation of an untrusted producer or host.
-
-Runtime packaging also reads the fresh `mkfs.erofs` linker map. For each
-linked system archive or startup object it records the actual file digest and
-the installed Debian source package or RPM source-package identity, and copies
-the corresponding copyright, license and notice files, including referenced
-common license texts. This covers libc, libuuid and compiler runtime/startup
-inputs as well as erofs-utils itself; a package name or SPDX label alone does
-not replace those files.
-Before collection, each installed input must match its file digest in the
-trusted build host's Debian or RPM database. Missing, ambiguous or changed
-file records fail packaging; package ownership alone is insufficient. This
-checks installed file integrity, not a compromised host or package database.
-Collected copyright, license and NOTICE bytes must also match their installed
-package digests. Their source package must match the linked input; referenced
-Debian common-license texts are verified against their own owning packages.
-Multi-Arch co-owners must all agree on the bytes and required source identity.
-Missing, changed or conflicting license records fail collection.
-
-The project CI template builds static libuuid from its pinned, checksum-verified
-util-linux source. Its provisioner retains a per-build `SOURCES.tsv`,
-`MATERIALS.sha256` and license directory beside the template inputs and copies
-them with the library into every prepared slot. Packaging verifies both the
-inventory and the actual library digest. Missing, altered or unowned native
-inputs are rejected; update the trusted template instead of fabricating source
-records. The resulting materials support release review, not a legal
-certification. Kernel source selection remains independent of Runtime.
+The publisher supplies the selected project `SOURCE_SHA` to validation before
+Tag/Release writes, uses the bundle's `release-notes.md` body and appends the
+existing source/Preview markers. Source selection, build/publish permission
+separation and refusal to replace published assets remain required. Independent
+validation is an offline bundle check: it does not fetch project/dependency Git
+objects or Go modules, or compare notices with remote source trees. Checksums
+and VCS records do not attest an arbitrary producer or isolate untrusted CI
+candidates. These materials support release review, not legal certification.
 
 `librocksdb`, accelerator's CGO link dependency, is built in that repository, not here.
 
@@ -282,15 +196,7 @@ Build duration depends on the host, toolchain and cache state; these commands do
 
 `deps/build-erofs.sh` extracts erofs-utils into `build/<arch>/src/erofs-utils/`, keeping one tree per architecture because this autotools path does not support out-of-source builds. It runs `autoreconf` and `configure` with compression/FUSE/network features disabled, builds only the `lib`, `mkfs` and `fsck` subdirectories, and writes `bin/<arch>/{mkfs.erofs,fsck.erofs}`.
 
-Runtime release packaging maps its random native build workspace to the virtual
-debug-source prefix `/usr/src/kuasar` with the compiler's `-ffile-prefix-map` flag.
-Debug information is retained without embedding the temporary directory in
-`mkfs.erofs` or its Runtime copy. Ordinary development CFLAGS and Kernel builds
-are unchanged. With the native prerequisites installed, run
-`bash scripts/test-erofs-reproducibility.sh` from the repository root to rebuild
-the pinned source twice in separate directories and compare both native tools.
-
-- The `mount`/`dump`/`fuse` subdirectories are skipped. The project does not consume those tools; the source workflow also avoids the v1.9.1 mount.erofs pthread-linking issue under `--disable-multithreading`.
+- The Runtime tool build skips the `mount`/`dump`/`fuse` subdirectories; it also avoids the v1.9.1 mount.erofs pthread-linking issue under `--disable-multithreading`. Standalone bundle validation separately requires a trusted host `dump.erofs` installation (§1.1).
 - Configure requires libuuid and has no `--without-uuid` path. Cross-compilation requires multiarch `uuid-dev:<arch>`; the script checks it first and prints apt guidance (§4.2).
 - Host build tools: `autoconf automake libtool pkg-config make gcc g++`.
 
@@ -309,7 +215,7 @@ The target invokes the fetch, patch-application and build stages of `deps/build-
 <a id="23-envdmake-envd"></a>
 ### 2.3 Envd (`make envd`)
 
-`deps/build-envd.sh` extracts the e2b-dev/infra source tarball into architecture-neutral `build/src/e2b-infra/` and builds `packages/envd` with `GOWORK=off GOOS=linux CGO_ENABLED=0 -trimpath -ldflags "-s -w"`, producing `bin/<arch>/envd`. GOARCH selects the target without a cross C toolchain.
+`deps/build-envd.sh` extracts the e2b-dev/runtime source tarball into architecture-neutral `build/src/e2b-infra/` and builds `packages/envd` with `GOWORK=off GOOS=linux CGO_ENABLED=0 -trimpath -ldflags "-s -w"`, producing `bin/<arch>/envd`. GOARCH selects the target without a cross C toolchain.
 
 - `make sandbox-runtime` includes it as `/opt/sandbox-runtime/bin/envd`, the E2B-profile guest data-plane agent on port 49983.
 - Envd's `go.mod` may require a newer Go toolchain, such as `go 1.26.3`. `GOTOOLCHAIN=auto` downloads it when necessary; toolchain downloading requires GOSUMDB to be enabled and is rejected with `GOSUMDB=off`.

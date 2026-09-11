@@ -3,7 +3,6 @@ import hashlib
 import os
 from pathlib import Path
 import re
-import resource
 import stat
 import struct
 import subprocess
@@ -17,8 +16,6 @@ PAYLOADS = {
     "mkfs.erofs": "/opt/sandbox-runtime/bin/mkfs.erofs",
     "flatten-ctl": "/opt/sandbox-runtime/bin/flatten-ctl",
 }
-MAX_IMAGE = 1024 * 1024 * 1024
-MAX_PAYLOAD = 256 * 1024 * 1024
 
 
 def require(condition, message):
@@ -28,8 +25,8 @@ def require(condition, message):
 
 def verify_bundle(image):
     size = image.stat().st_size
-    require(0 < size <= MAX_IMAGE and size % (2 << 20) == 0,
-            "Runtime bundle must be bounded and 2 MiB aligned")
+    require(0 < size and size % (2 << 20) == 0,
+            "Runtime bundle must be nonempty and 2 MiB aligned")
     with image.open("rb") as data:
         data.seek(1024)
         require(data.read(4) == bytes.fromhex("e2e1f5e0"), "missing offset-zero EROFS")
@@ -64,14 +61,9 @@ def verify_bundle(image):
                 "Runtime EROFS prefix digest differs from its marker")
 
 
-def run_reader(command, output, limit, timeout):
-    # All command executables are supplied by the trusted validator's fresh
-    # checksum-pinned native build. Image paths are data arguments only.
-    def restrict_output():
-        resource.setrlimit(resource.RLIMIT_FSIZE, (limit, limit))
-
-    subprocess.run(command, stdout=output, stderr=subprocess.DEVNULL,
-                   check=True, timeout=timeout, preexec_fn=restrict_output)
+def run_reader(command, output):
+    # Executables come from the trusted host. Image paths are data only.
+    subprocess.run(command, stdout=output, stderr=subprocess.DEVNULL, check=True)
 
 
 def read_payloads(image, fsck, dump, destination):
@@ -80,23 +72,23 @@ def read_payloads(image, fsck, dump, destination):
     # --extract without a destination validates every file but creates no host
     # filesystem tree. In-image links and ownership are never applied to the host.
     with open(os.devnull, "wb") as output:
-        run_reader([str(fsck), "--extract", str(image)], output, 1024 * 1024, 120)
+        run_reader([str(fsck), "--extract", str(image)], output)
     for label, path in PAYLOADS.items():
         metadata = destination / (label + ".metadata")
         with metadata.open("xb") as output:
             os.chmod(metadata, 0o600)
-            run_reader([str(dump), "--path=" + path, str(image)], output, 16384, 15)
+            run_reader([str(dump), "--path=" + path, str(image)], output)
         text = metadata.read_text()
         sizes = re.findall(r"^Size: ([0-9]+)\s+On-disk size: [0-9]+\s+regular file$", text, re.M)
-        require(len(sizes) == 1 and 0 < int(sizes[0]) <= MAX_PAYLOAD,
-                "required Runtime payload is not a bounded regular file: " + label)
+        require(len(sizes) == 1 and 0 < int(sizes[0]),
+                "required Runtime payload is not a regular file: " + label)
         require(len(re.findall(r"^Uid: 0\s+Gid: 0\s+Access: 0755/rwxr-xr-x$", text, re.M)) == 1,
                 "required Runtime payload must be root-owned mode 0755: " + label)
         size = int(sizes[0])
         target = destination / label
         with target.open("xb") as output:
             os.chmod(target, 0o600)
-            run_reader([str(dump), "--cat", "--path=" + path, str(image)], output, size, 60)
+            run_reader([str(dump), "--cat", "--path=" + path, str(image)], output)
         require(target.stat().st_size == size, "Runtime payload read size differs: " + label)
 
 

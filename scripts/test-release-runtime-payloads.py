@@ -1,9 +1,9 @@
-"""Exercise the real pinned EROFS readers with private synthetic images."""
+"""Exercise trusted host EROFS readers with private synthetic images."""
 import hashlib
 import importlib.util
 import io
 from pathlib import Path
-import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -17,13 +17,18 @@ SPEC.loader.exec_module(READER)
 
 
 def build_tools(work):
-    source = (ROOT / "scripts/release.sh").read_text()
-    functions = "\n".join(re.search(r"(?ms)^" + name + r"\(\) \{\n.*?^\}", source).group()
-                          for name in ("prepare_release_build_environment", "prepare_runtime_verifier"))
-    subprocess.run(["bash", "-c", 'set -euo pipefail\nROOT=$1\nWORK=$2\n'
-                    'fail() { printf "%s\\n" "$*" >&2; exit 1; }\n' + functions
-                    + '\nprepare_runtime_verifier\n', "_", str(ROOT), str(work)], check=True, timeout=240)
-    return work / "runtime-verifier"
+    tools = work / "runtime-verifier"
+    for name, relative in (
+            ("mkfs.erofs", "bin/mkfs.erofs"),
+            ("fsck.erofs", "bin/fsck.erofs"),
+            ("dump.erofs", "build/src/erofs-utils/dump/dump.erofs")):
+        executable = shutil.which(name)
+        if executable is None:
+            raise RuntimeError("Runtime tests require trusted host " + name + " on PATH")
+        target = tools / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(executable, target)
+    return tools
 
 
 def make_bundle(erofs, output):

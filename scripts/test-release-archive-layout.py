@@ -7,7 +7,8 @@ import tarfile
 import tempfile
 import unittest
 
-SOURCE = Path(__file__).with_name("release.sh").read_text()
+ROOT = Path(__file__).resolve().parents[1]
+SOURCE = (ROOT / "scripts/release.sh").read_text()
 FUNCTION = re.search(r"(?ms)^validate_archive_paths\(\) \{\n.*?^\}", SOURCE).group()
 
 
@@ -33,9 +34,9 @@ class ArchiveLayout(unittest.TestCase):
                     item.mode = 0o755 if is_directory or name in ("./bin/flatten-ctl", "./bin/mkfs.erofs") else 0o644
                     item.size = 0 if is_directory else 8
                     output.addfile(item, None if is_directory else io.BytesIO(b"fixture\n"))
-            script = 'set -euo pipefail\nWORK=$1\nfail() { echo "$*" >&2; exit 1; }\n'
+            script = 'set -euo pipefail\nWORK=$1\nROOT=$4\nfail() { echo "$*" >&2; exit 1; }\n'
             return subprocess.run(["bash", "-c", script + FUNCTION + '\nvalidate_archive_paths "$2" "$3"',
-                                   "_", directory, str(archive), kind],
+                                   "_", directory, str(archive), kind, str(ROOT)],
                                   text=True, capture_output=True, timeout=10)
 
     def test_exact_unit_layouts_pass(self):

@@ -151,7 +151,7 @@ VMLINUX_VERSION ?= vmlinux-v0.1.0
 ACCELERATOR_VERSION ?= v0.1.3
 SANDBOXER_VERSION ?= v0.1.3
 
-release-runtime:
+release-runtime: sandbox-runtime
 	rm -rf $(BUILD_DIR)/release-runtime-bundle
 	SOURCE_DATE_EPOCH="$$(git show -s --format=%ct HEAD)" \
 	RELEASE_ACCELERATOR_VERSION="$(ACCELERATOR_VERSION)" \
@@ -159,7 +159,7 @@ release-runtime:
 		bash scripts/release.sh package runtime "$(RUNTIME_VERSION)" "$(TARGET_ARCH)" \
 		$(BUILD_DIR)/release-runtime-bundle
 
-release-vmlinux:
+release-vmlinux: vmlinux
 	rm -rf $(BUILD_DIR)/release-vmlinux-bundle
 	SOURCE_DATE_EPOCH="$$(git show -s --format=%ct HEAD)" \
 		bash scripts/release.sh package vmlinux "$(VMLINUX_VERSION)" "$(TARGET_ARCH)" \

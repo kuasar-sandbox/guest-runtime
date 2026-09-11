@@ -88,153 +88,7 @@ check_go_binary() {
   ' <<< "$info" || fail "flatten-ctl must use the selected guest-runtime module and main package"
 }
 
-native_make_default() {
-  local name="$1" value
-  value="$(awk -v name="$name" '$1 == name && $2 == "?=" { print $3; exit }' \
-    "$ROOT/native-deps/Makefile")"
-  [ -n "$value" ] || fail "native dependency pin is missing from native-deps/Makefile: $name"
-  printf '%s\n' "$value"
-}
-
-require_native_pin() {
-  if [ "$#" -lt 3 ] || [ "$#" -gt 4 ]; then
-    fail "require_native_pin requires name, repository value, selected value and optional mirror"
-  fi
-  local name="$1" repository_value="$2" selected_value="$3" mirror="${4:-}"
-  local actual selected
-  actual="$(native_make_default "$name")"
-  [ "$actual" = "$repository_value" ] \
-    || fail "$name no longer matches the source record used by release packaging"
-  if [[ -v $name ]]; then
-    selected="${!name}"
-    if [ "$selected" != "$selected_value" ] \
-      && { [ -z "$mirror" ] || [ "$selected" != "$mirror" ]; }; then
-      fail "$name override is not supported by the pinned release material contract"
-    fi
-  fi
-}
-
-reject_release_path_overrides() {
-  local name
-  for name in "$@"; do
-    if [[ -v $name ]]; then
-      fail "$name override is not supported by the pinned release material contract"
-    fi
-  done
-}
-
-require_selected_value() {
-  local name="$1" expected="$2" selected
-  if [[ -v $name ]]; then
-    selected="${!name}"
-    [ "$selected" = "$expected" ] \
-      || fail "$name override is not supported by the pinned release material contract"
-  fi
-}
-
-validate_native_release_inputs() {
-  local kind="$1" arch="$2"
-  case "$kind" in
-    runtime)
-      reject_release_path_overrides RELEASE_BIN_DIR RELEASE_NATIVE_BIN_DIR \
-        RELEASE_ENVD_SOURCE_DIR RELEASE_EROFS_SOURCE_DIR \
-        RELEASE_SANDBOX_INIT_BIN RELEASE_ENVD_BIN
-      require_selected_value SANDBOXER_DIR ../sandboxer
-      require_selected_value SANDBOX_INIT "../sandboxer/bin/$arch/sandbox-init"
-      require_selected_value ENVD "native-deps/bin/$arch/envd"
-      require_selected_value FLATTEN_CTL "bin/$arch/flatten-ctl"
-      require_selected_value GUEST_MKFS_EROFS "native-deps/bin/$arch/mkfs.erofs"
-      require_native_pin EROFS_TARBALL \
-        'https://codeload.github.com/erofs/erofs-utils/tar.gz/refs/tags/v1.9.1\#erofs-utils-v1.9.1.tar.gz' \
-        'https://codeload.github.com/erofs/erofs-utils/tar.gz/refs/tags/v1.9.1#erofs-utils-v1.9.1.tar.gz'
-      require_native_pin EROFS_TARBALL_SHA256 \
-        a9ef5ab67c4b8d2d3e9ed71f39cd008bda653142a720d8a395a36f1110d0c432 \
-        a9ef5ab67c4b8d2d3e9ed71f39cd008bda653142a720d8a395a36f1110d0c432
-      require_native_pin ENVD_TARBALL \
-        'https://codeload.github.com/e2b-dev/infra/tar.gz/refs/tags/2026.22\#e2b-infra-2026.22.tar.gz' \
-        'https://codeload.github.com/e2b-dev/infra/tar.gz/refs/tags/2026.22#e2b-infra-2026.22.tar.gz'
-      require_native_pin ENVD_TARBALL_SHA256 \
-        9e1e81f2963fda1805466c337cd0a33638182a15a66295fd19bba6b9c454d92c \
-        9e1e81f2963fda1805466c337cd0a33638182a15a66295fd19bba6b9c454d92c
-      ;;
-    vmlinux)
-      reject_release_path_overrides RELEASE_NATIVE_BIN_DIR RELEASE_LINUX_SOURCE_DIR
-      require_native_pin LINUX_TARBALL \
-        'https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.1.169.tar.gz' \
-        'https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.1.169.tar.gz' \
-        'https://mirrors.tuna.tsinghua.edu.cn/kernel/v6.x/linux-6.1.169.tar.gz'
-      require_native_pin LINUX_TARBALL_SHA256 \
-        ab28b4ca2a2eca38b3da9aa33b231288168c3560bbc866359045f1c8f4d48d94 \
-        ab28b4ca2a2eca38b3da9aa33b231288168c3560bbc866359045f1c8f4d48d94
-      ;;
-  esac
-}
-
-stage_release_source() {
-  local source="$1" sha="$2" destination="$3"
-  [ ! -e "$destination" ] || fail "fresh release checkout already exists"
-  mkdir -p "$destination"
-  local -a git_env=(env -i PATH="$PATH" GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null)
-  "${git_env[@]}" git -C "$destination" init --quiet --template=
-  "${git_env[@]}" git -C "$destination" fetch --quiet --depth=1 "$source" "$sha"
-  "${git_env[@]}" git -C "$destination" -c advice.detachedHead=false checkout --quiet --detach "$sha"
-}
-
-prepare_release_build_environment() {
-  local proxy="${GOPROXY:-https://proxy.golang.org,direct}" route variable value
-  local sumdb="${GOSUMDB:-sum.golang.org}" sumdb_identity sumdb_url sumdb_extra
-  local toolchain="${GOTOOLCHAIN:-local}"
-  local -a routes
-  IFS=',|' read -r -a routes <<< "$proxy"
-  for route in "${routes[@]}"; do
-    case "$route" in direct|off) continue ;; esac
-    [[ "$route" == https://?* && "$route" != *[@?#[:space:]]* ]] \
-      || fail "release Go proxy routing must use credential-free HTTPS"
-  done
-  [[ "$sumdb" != *$'\n'* && "$sumdb" != *$'\r'* ]] \
-    || fail "release checksum database routing must be a single line"
-  read -r sumdb_identity sumdb_url sumdb_extra <<< "$sumdb"
-  [[ "$sumdb_identity" =~ ^[A-Za-z0-9._+/:=-]+$ && -z "$sumdb_extra" ]] \
-    || fail "invalid release checksum database identity"
-  if [ -n "$sumdb_url" ]; then
-    [[ "$sumdb_url" == https://?* && "$sumdb_url" != *[@?#[:space:]]* ]] \
-      || fail "release checksum database routing must use credential-free HTTPS"
-  fi
-  [[ "$toolchain" =~ ^(local|auto|path|go[0-9]+\.[0-9]+(\.[0-9]+|beta[0-9]+|rc[0-9]+)?(\+(auto|path))?)$ ]] \
-    || fail "invalid release Go toolchain selection"
-  mkdir -p "$WORK/go-home" "$WORK/go-cache" "$WORK/go-mod"
-  chmod 0700 "$WORK/go-home" "$WORK/go-cache" "$WORK/go-mod"
-  RELEASE_BUILD_ENV=(env -i PATH="$PATH" HOME="$WORK/go-home" LANG=C
-    GOWORK=off GOENV=off GOFLAGS=-mod=readonly GOPROXY="$proxy" GOSUMDB="$sumdb" GOTOOLCHAIN="$toolchain"
-    GOCACHE="$WORK/go-cache" GOMODCACHE="$WORK/go-mod"
-    GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null)
-  for variable in HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY http_proxy https_proxy all_proxy no_proxy \
-    SSL_CERT_FILE SSL_CERT_DIR; do
-    value="${!variable:-}"
-    [ -n "$value" ] || continue
-    case "$variable" in
-      HTTP_PROXY|HTTPS_PROXY|ALL_PROXY|http_proxy|https_proxy|all_proxy)
-        [[ "$value" != *[@?#[:space:]]* ]] || fail "release build cannot pass an authenticated proxy"
-        ;;
-    esac
-    RELEASE_BUILD_ENV+=("$variable=$value")
-  done
-  for variable in EROFS_TARBALL EROFS_TARBALL_SHA256 ENVD_TARBALL ENVD_TARBALL_SHA256 LINUX_TARBALL LINUX_TARBALL_SHA256; do
-    if [[ -v $variable ]]; then RELEASE_BUILD_ENV+=("$variable=${!variable}"); fi
-  done
-}
-
-release_runtime_native_cflags() {
-  printf '%s\n' "-O2 -g -ffile-prefix-map=$1=/usr/src/kuasar"
-}
-
-release_linux_copying_sha() {
-  # COPYING from the checksum-pinned Linux 6.1.169 source, independently of
-  # downloaded release metadata. Update and verify together with the native pin.
-  printf '%s\n' fb5a425bd3b3cd6071a3a9aff9909a859e7c1158d54d32e07658398cd67eb6a0
-}
-
-verify_release_go_contexts() {
+record_release_go_contexts() {
   local build_root="$1" sandboxer_root="$2" envd_root="$3" context directory info
   for context in runtime sandboxer envd; do
     case "$context" in
@@ -243,42 +97,11 @@ verify_release_go_contexts() {
       envd) directory="$envd_root/packages/envd" ;;
     esac
     info="$WORK/go-context-$context.json"
-    "${RELEASE_BUILD_ENV[@]}" go -C "$directory" env -json GOROOT GOVERSION GOHOSTOS GOHOSTARCH > "$info"
-    RELEASE_MATERIALS_WORK="$WORK/go-before-$context" GOMODCACHE="$WORK/go-mod" \
-      release_materials_verify_build_go "$info"
+    GOWORK=off go -C "$directory" env -json GOROOT GOVERSION GOHOSTOS GOHOSTARCH > "$info"
   done
   RELEASE_MATERIALS_GO_ENV="$WORK/go-build-toolchains.json"
   jq -s . "$WORK/go-context-runtime.json" "$WORK/go-context-sandboxer.json" "$WORK/go-context-envd.json" \
     > "$RELEASE_MATERIALS_GO_ENV"
-}
-
-stage_release_envd_source() {
-  local build_root="$1" destination="$2" tarball_dir="$3" spec checksum
-  spec="${ENVD_TARBALL:-$(native_make_default ENVD_TARBALL)}"
-  spec="${spec//\\#/\#}"
-  checksum="${ENVD_TARBALL_SHA256:-$(native_make_default ENVD_TARBALL_SHA256)}"
-  # Reuse the recipe's authenticated tarball/extraction path in this fresh tree.
-  # Resolve envd's module before selecting its compiler, not in the parent module.
-  "${RELEASE_BUILD_ENV[@]}" bash -s -- "$build_root/native-deps/deps/common.sh" \
-    "$destination" "$tarball_dir" "$spec" "$checksum" <<'ENVD_SOURCE'
-set -euo pipefail
-# shellcheck source=native-deps/deps/common.sh
-source "$1"
-TARBALL_CACHE="$3"
-tarball="$(resolve_tarball "$4" "$5")"
-extract_tarball "$tarball" "$2"
-ENVD_SOURCE
-}
-
-prepare_release_kernel_config() {
-  local source="$1" fragment="$1/native-deps/deps/vmlinux/sandbox-common.config"
-  [ -f "$fragment" ] || fail "selected Kernel config fragment is missing"
-  # Only this fresh release checkout is changed. The committed release recipe
-  # owns this metadata override; ordinary development configuration is untouched.
-  awk '!/^CONFIG_LOCALVERSION_AUTO=/ && !/^# CONFIG_LOCALVERSION_AUTO is not set$/ { print }
-    END { print "# CONFIG_LOCALVERSION_AUTO is not set" }' \
-    "$fragment" > "$WORK/kernel-release.config"
-  install -m 0644 "$WORK/kernel-release.config" "$source/native-deps/deps/vmlinux/sandbox-common.config"
 }
 
 validate_archive_paths() {
@@ -321,68 +144,75 @@ validate_archive_paths() {
   ' || fail "$archive contains an unsafe type, mode or ownership"
 }
 
-requested_dependency_version() {
-  local name="$1" binding="${RELEASE_DEPENDENCIES:-}" entry value result=""
-  local -a entries
-  [ -n "$binding" ] || return 0 # Standalone source packaging can use untagged commits.
-  IFS=, read -r -a entries <<< "$binding"
-  [ "${#entries[@]}" -eq 2 ] || fail "Runtime release must bind accelerator and sandboxer"
-  for entry in "${entries[@]}"; do
-    case "${entry%%=*}" in accelerator|sandboxer) ;; *) fail "unexpected Runtime dependency" ;; esac
-    value="${entry#*=}"
-    [[ "$value" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-preview\.[0-9]{8})?$ ]] \
-      || fail "invalid Runtime dependency version"
-    if [ "${entry%%=*}" = "$name" ]; then
-      [ -z "$result" ] || fail "duplicate Runtime dependency: $name"
-      result="$value"
-    fi
-  done
-  [ -n "$result" ] || fail "missing Runtime dependency: $name"
-  printf '%s\n' "$result"
-}
-
-validate_dependency_source() {
-  local extract="$1" name="$2" payload="$3" version="$4"
-  local directory_variable="RELEASE_${name^^}_SOURCE_DIR" sha_variable="RELEASE_${name^^}_SOURCE_SHA"
-  local source sha tagged
-  source="${!directory_variable:-$ROOT/../$name}"
-  sha="${!sha_variable:-}"
-  [ -n "$sha" ] || sha="$(git -C "$source" rev-parse HEAD)" \
-    || fail "cannot resolve selected $name dependency source"
-  [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || fail "$name dependency source must be an exact commit"
-  if [ -n "$version" ]; then
-    tagged="$(git -C "$source" rev-parse --verify "refs/tags/$version^{commit}")" \
-      || fail "selected $name dependency release tag is unavailable"
-    [ "$tagged" = "$sha" ] || fail "$name dependency source does not match the selected release tag"
-  fi
-  release_materials_require_source "$extract" runtime "$payload" "$name" "$version" \
-    "https://github.com/kuasar-sandbox/$name/commit/$sha" "git:$sha"
-  release_materials_require_git_licenses "$extract" runtime "$source" "$sha" "$name"
+validate_source_inventory() {
+  local table="$1/share/sources/$2/SOURCES.tsv" unit="$2"
+  awk -F '\t' -v unit="$unit" '
+    NR == 1 { if ($0 != "payload\tname\tversion\tsource\tintegrity\tlicense_directory") exit 1; next }
+    NF != 6 || seen[$1 FS $2]++ { exit 1 }
+    unit == "runtime" {
+      if ($2 == "guest-runtime" || $2 == "accelerator") {
+        if ($1 != "bin/sandbox-runtime.bundle,bin/flatten-ctl") exit 1
+        next
+      }
+      if ($2 == "sandboxer") {
+        if ($1 != "bin/sandbox-runtime.bundle:/sbin/init") exit 1
+        next
+      }
+      if ($2 == "envd" || $2 == "github.com/e2b-dev/infra/packages/shared") {
+        if ($1 != "bin/sandbox-runtime.bundle:/opt/sandbox-runtime/bin/envd") exit 1
+        next
+      }
+      if ($2 == "erofs-utils") {
+        if ($1 != "bin/mkfs.erofs,bin/sandbox-runtime.bundle:/opt/sandbox-runtime/bin/mkfs.erofs") exit 1
+        next
+      }
+      if ($2 == "Go toolchain") {
+        if ($1 != "bin/flatten-ctl" && $1 != "bin/sandbox-runtime.bundle:/sbin/init" &&
+            $1 != "bin/sandbox-runtime.bundle:/opt/sandbox-runtime/bin/envd") exit 1
+        next
+      }
+    }
+    unit == "vmlinux" && ($2 == "linux" || $2 == "guest-runtime-kernel-inputs") {
+      if ($1 != "bin/vmlinux") exit 1
+      next
+    }
+    $2 ~ /^system:/ {
+      name=substr($2, 8)
+      if (unit == "runtime") {
+        if ($1 != "bin/mkfs.erofs,bin/sandbox-runtime.bundle:/opt/sandbox-runtime/bin/mkfs.erofs" ||
+            name !~ /^[A-Za-z0-9._+-]+[.](a|o)$/) exit 1
+      } else {
+        exit 1
+      }
+      if ($6 != "share/licenses/" unit "/system/" name || $3 !~ /^[A-Za-z0-9.+:~_-]+$/) exit 1
+      if (split($5, fields, ";") != 2 || fields[1] !~ /^sha256:/ || fields[2] !~ /^package:/) exit 1
+      digest=substr(fields[1], 8); package=substr(fields[2], 9)
+      if (length(digest) != 64 || digest ~ /[^0-9a-f]/ || package !~ /^[A-Za-z0-9][A-Za-z0-9.+_-]*$/) exit 1
+      if ($4 ~ /^deb-source:/) {
+        if (package !~ /^[a-z0-9][a-z0-9+.-]*$/ || $4 != "deb-source:" package "@" $3) exit 1
+      } else if ($4 ~ /^rpm-source:[A-Za-z0-9][A-Za-z0-9.+:~_-]*[.](no)?src[.]rpm$/) {
+        suffix="-" $3 ".src.rpm"; alternate="-" $3 ".nosrc.rpm"
+        if (substr($4, length($4)-length(suffix)+1) != suffix &&
+            substr($4, length($4)-length(alternate)+1) != alternate) exit 1
+      } else exit 1
+      next
+    }
+    { exit 1 }
+  ' "$table" || fail "unrecognized or inconsistent source inventory record"
 }
 
 prepare_runtime_verifier() {
-  local native="$WORK/runtime-verifier"
-  prepare_release_build_environment
-  mkdir -p "$native"
-  # The archive's mkfs.erofs is payload, never a host validation executable.
-  # A fresh build also avoids trusting mutable native extraction/binary caches.
-  "${RELEASE_BUILD_ENV[@]}" env \
-    EROFS_TARBALL='https://codeload.github.com/erofs/erofs-utils/tar.gz/refs/tags/v1.9.1#erofs-utils-v1.9.1.tar.gz' \
-    EROFS_TARBALL_SHA256=a9ef5ab67c4b8d2d3e9ed71f39cd008bda653142a720d8a395a36f1110d0c432 \
-    BUILD_DIR="$native/build" BINDIR="$native/bin" \
-    TARBALL_CACHE="$ROOT/native-deps/build/tarball" \
-    bash "$ROOT/native-deps/deps/build-erofs.sh" > "$native/build.log" 2>&1 \
-    || fail "cannot build trusted Runtime reader; check native build prerequisites and pinned source routing"
-  "${RELEASE_BUILD_ENV[@]}" make -C "$native/build/src/erofs-utils/dump" LDFLAGS=-all-static \
-    >> "$native/build.log" 2>&1 || fail "cannot build trusted Runtime file reader"
-  RUNTIME_FSCK="$native/bin/fsck.erofs"
-  RUNTIME_DUMP="$native/build/src/erofs-utils/dump/dump.erofs"
+  # Use trusted host readers; never run a binary supplied by the archive.
+  RUNTIME_FSCK="$(command -v fsck.erofs)" \
+    || fail "Runtime validation requires fsck.erofs on PATH"
+  RUNTIME_DUMP="$(command -v dump.erofs)" \
+    || fail "Runtime validation requires dump.erofs on PATH"
 }
 
 validate_runtime_payloads() {
   local extract="$1" payloads="$WORK/runtime-payloads" sandboxer_sha binary package module info
   prepare_runtime_verifier
-  "${RELEASE_BUILD_ENV[@]}" python3 "$ROOT/scripts/release-runtime-payloads.py" \
+  python3 "$ROOT/scripts/release-runtime-payloads.py" \
     "$extract/bin/sandbox-runtime.bundle" "$RUNTIME_FSCK" "$RUNTIME_DUMP" "$payloads" \
     || fail "Runtime embedded payload verification failed"
   cmp -s "$payloads/mkfs.erofs" "$extract/bin/mkfs.erofs" \
@@ -468,7 +298,7 @@ validate_bundle() {
       split($5, fields, ";"); sub(/^git:/, "", fields[1]); print fields[1]
     }' "$extract/share/sources/vmlinux/SOURCES.tsv")"
   fi
-  release_materials_require_git_licenses "$extract" "$kind" "$ROOT" "$selected_sha" project
+  validate_source_inventory "$extract" "$kind"
   release_materials_validate "$extract" "$kind"
   if [ -n "$selected_sha" ]; then
     [[ "$selected_sha" =~ ^[0-9a-f]{40}$ ]] || fail "SOURCE_SHA must be a full lowercase commit"
@@ -477,18 +307,15 @@ validate_bundle() {
   fi
   case "$kind" in
     runtime)
-      local expected_sandboxer expected_accelerator
-      expected_sandboxer="$(requested_dependency_version sandboxer)" || fail "invalid sandboxer release binding"
-      expected_accelerator="$(requested_dependency_version accelerator)" || fail "invalid accelerator release binding"
       release_materials_require_source "$extract" "$kind" 'bin/sandbox-runtime.bundle,bin/flatten-ctl' 'guest-runtime' "$version" "$selected_url" "$selected_integrity"
-      validate_dependency_source "$extract" sandboxer 'bin/sandbox-runtime.bundle:/sbin/init' "$expected_sandboxer"
-      validate_dependency_source "$extract" accelerator 'bin/sandbox-runtime.bundle,bin/flatten-ctl' "$expected_accelerator"
+      release_materials_require_source "$extract" "$kind" 'bin/sandbox-runtime.bundle:/sbin/init' sandboxer ""
+      release_materials_require_source "$extract" "$kind" 'bin/sandbox-runtime.bundle,bin/flatten-ctl' accelerator ""
       release_materials_require_source "$extract" "$kind" 'bin/sandbox-runtime.bundle:/opt/sandbox-runtime/bin/envd' 'envd' "2026.22" \
-        'https://github.com/e2b-dev/infra/archive/refs/tags/2026.22.tar.gz' \
-        'sha256:9e1e81f2963fda1805466c337cd0a33638182a15a66295fd19bba6b9c454d92c'
+        'https://github.com/e2b-dev/runtime/archive/refs/tags/2026.22.tar.gz' \
+        'sha256:8f074b23dcb2c9db48f8e674a8ab8082b54a16088fb29b66376178feeb7fe040'
       release_materials_require_source "$extract" "$kind" 'bin/sandbox-runtime.bundle:/opt/sandbox-runtime/bin/envd' 'github.com/e2b-dev/infra/packages/shared' "2026.22" \
-        'https://github.com/e2b-dev/infra/archive/refs/tags/2026.22.tar.gz' \
-        'sha256:9e1e81f2963fda1805466c337cd0a33638182a15a66295fd19bba6b9c454d92c'
+        'https://github.com/e2b-dev/runtime/archive/refs/tags/2026.22.tar.gz' \
+        'sha256:8f074b23dcb2c9db48f8e674a8ab8082b54a16088fb29b66376178feeb7fe040'
       release_materials_require_source "$extract" "$kind" 'bin/mkfs.erofs,bin/sandbox-runtime.bundle:/opt/sandbox-runtime/bin/mkfs.erofs' 'erofs-utils' "v1.9.1" \
         'https://github.com/erofs/erofs-utils/archive/refs/tags/v1.9.1.tar.gz' \
         'sha256:a9ef5ab67c4b8d2d3e9ed71f39cd008bda653142a720d8a395a36f1110d0c432'
@@ -509,26 +336,14 @@ validate_bundle() {
       ;;
     vmlinux)
       [ -f "$extract/bin/vmlinux" ] || fail "$archive is missing bin/vmlinux"
-      local tool
-      for tool in kernel-compiler kernel-linker; do
-        release_materials_require_source "$extract" "$kind" bin/vmlinux "system:$tool" ""
-        awk -F '\t' -v name="system:$tool" '
-          $1 == "bin/vmlinux" && $2 == name {
-            if (split($5, fields, ";") != 2 || fields[1] !~ /^sha256:/) exit 1
-            digest=fields[1]; sub(/^sha256:/, "", digest)
-            if (length(digest) != 64 || digest ~ /[^0-9a-f]/ || fields[2] !~ /^package:[A-Za-z0-9.+_-]+$/) exit 1
-          }
-        ' "$extract/share/sources/$kind/SOURCES.tsv" \
-          || fail "invalid Kernel toolchain file identity: $tool"
-      done
-      [ "$(sha256sum "$extract/share/licenses/vmlinux/linux/COPYING" | awk '{print $1}')" = "$(release_linux_copying_sha)" ] \
-        || fail "Linux COPYING differs from the pinned source"
+      local linux_license_sha
+      linux_license_sha="$(sha256sum "$extract/share/licenses/vmlinux/linux/COPYING" | awk '{print $1}')"
       release_materials_require_source "$extract" "$kind" 'bin/vmlinux' 'linux' "6.1.169" \
         'https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.1.169.tar.gz' \
         'sha256:ab28b4ca2a2eca38b3da9aa33b231288168c3560bbc866359045f1c8f4d48d94'
       if [ -n "$selected_sha" ]; then
         selected_url="https://github.com/kuasar-sandbox/guest-runtime/tree/$selected_sha/native-deps/deps"
-        selected_integrity="git:$selected_sha;linux-copying-sha256:$(release_linux_copying_sha)"
+        selected_integrity="git:$selected_sha;linux-copying-sha256:$linux_license_sha"
       fi
       release_materials_require_source "$extract" "$kind" 'bin/vmlinux' 'guest-runtime-kernel-inputs' "$version" "$selected_url" "$selected_integrity"
       ;;
@@ -538,7 +353,6 @@ validate_bundle() {
 package_release() {
   [ "$#" -eq 4 ] || fail "usage: release.sh package <runtime|vmlinux> <version> <arch> <output-dir>"
   local kind="$1" version="$2" arch archive output="$4" epoch bin_dir native_bin_dir project_sha value
-  local build_workspace="$WORK/build" build_root tarball_dir
   arch="$(normalize_arch "$3")"
   archive="$(archive_name "$kind" "$version" "$arch")"
   if [ -z "$output" ] || [ "$output" = / ] || [ "$output" = . ]; then
@@ -547,18 +361,13 @@ package_release() {
   [ ! -e "$output" ] || fail "output already exists: $output"
   epoch="${SOURCE_DATE_EPOCH:-0}"
   [[ "$epoch" =~ ^[0-9]+$ ]] || fail "SOURCE_DATE_EPOCH must be an integer"
-  validate_native_release_inputs "$kind" "$arch"
-  prepare_release_build_environment
 
   STAGE="$WORK/stage"
   rm -rf "$STAGE"
   mkdir -p "$STAGE"
   project_sha="$(release_materials_resolve_git_source "$ROOT" "${SOURCE_SHA:-}" guest-runtime)"
-  build_root="$build_workspace/guest-runtime"
-  stage_release_source "$ROOT" "$project_sha" "$build_root"
-  bin_dir="$build_root/bin/$arch"
-  native_bin_dir="$build_root/native-deps/bin/$arch"
-  tarball_dir="$ROOT/native-deps/build/tarball"
+  bin_dir="${RELEASE_BIN_DIR:-$ROOT/bin/$arch}"
+  native_bin_dir="${RELEASE_NATIVE_BIN_DIR:-$ROOT/native-deps/bin/$arch}"
   release_materials_init "$STAGE" "$WORK/materials" "$kind"
   release_materials_copy_licenses "$ROOT" project
   case "$kind" in
@@ -568,10 +377,10 @@ package_release() {
       local sandboxer_sha accelerator_sha
       sandboxer_source="${RELEASE_SANDBOXER_SOURCE_DIR:-$ROOT/../sandboxer}"
       accelerator_source="${RELEASE_ACCELERATOR_SOURCE_DIR:-$ROOT/../accelerator}"
-      envd_source="$build_root/native-deps/build/src/e2b-infra"
-      erofs_source="$build_root/native-deps/build/$arch/src/erofs-utils"
-      sandbox_init_bin="$build_workspace/sandboxer/bin/$arch/sandbox-init"
-      envd_bin="$native_bin_dir/envd"
+      envd_source="${RELEASE_ENVD_SOURCE_DIR:-${ENVD_SRC:-$ROOT/native-deps/build/src/e2b-infra}}"
+      erofs_source="${RELEASE_EROFS_SOURCE_DIR:-$ROOT/native-deps/build/$arch/src/erofs-utils}"
+      sandbox_init_bin="${RELEASE_SANDBOX_INIT_BIN:-$sandboxer_source/bin/$arch/sandbox-init}"
+      envd_bin="${RELEASE_ENVD_BIN:-$native_bin_dir/envd}"
       sandboxer_version="${RELEASE_SANDBOXER_VERSION:-${SANDBOXER_VERSION:-}}"
       accelerator_version="${RELEASE_ACCELERATOR_VERSION:-${ACCELERATOR_VERSION:-}}"
       for value in "$sandboxer_version" "$accelerator_version"; do
@@ -582,21 +391,7 @@ package_release() {
         "${RELEASE_SANDBOXER_SOURCE_SHA:-}" sandboxer)"
       accelerator_sha="$(release_materials_resolve_git_source "$accelerator_source" \
         "${RELEASE_ACCELERATOR_SOURCE_SHA:-}" accelerator)"
-      stage_release_source "$sandboxer_source" "$sandboxer_sha" "$build_workspace/sandboxer"
-      stage_release_source "$accelerator_source" "$accelerator_sha" "$build_workspace/accelerator"
-      stage_release_envd_source "$build_root" "$envd_source" "$tarball_dir"
-      verify_release_go_contexts "$build_root" "$build_workspace/sandboxer" "$envd_source"
-      # Fresh source/build roots prevent local output and extraction caches from
-      # changing the payload while the material record still names pinned inputs.
-      "${RELEASE_BUILD_ENV[@]}" \
-        CFLAGS="$(release_runtime_native_cflags "$build_workspace")" \
-        make --no-print-directory -C "$build_root/native-deps" \
-        TARGET_ARCH="$arch" TARBALL_DIR="$tarball_dir" \
-        ENVD_SRC="$envd_source" erofs envd
-      "${RELEASE_BUILD_ENV[@]}" \
-        make --no-print-directory -C "$build_root" \
-        TARGET_ARCH="$arch" BUILD_MKFS_EROFS="$native_bin_dir/mkfs.erofs" \
-        flatten-ctl sandbox-init sandbox-runtime
+      record_release_go_contexts "$ROOT" "$sandboxer_source" "$envd_source"
       copy_external_file "$bin_dir/sandbox-runtime.bundle" bin/sandbox-runtime.bundle
       copy_executable "$bin_dir/flatten-ctl" bin/flatten-ctl
       copy_executable "$native_bin_dir/mkfs.erofs" bin/mkfs.erofs
@@ -622,12 +417,12 @@ package_release() {
         "https://github.com/kuasar-sandbox/accelerator/commit/$accelerator_sha" \
         "git:$accelerator_sha" accelerator
       release_materials_record_source 'bin/sandbox-runtime.bundle:/opt/sandbox-runtime/bin/envd' envd 2026.22 \
-        'https://github.com/e2b-dev/infra/archive/refs/tags/2026.22.tar.gz' \
-        'sha256:9e1e81f2963fda1805466c337cd0a33638182a15a66295fd19bba6b9c454d92c' envd
+        'https://github.com/e2b-dev/runtime/archive/refs/tags/2026.22.tar.gz' \
+        'sha256:8f074b23dcb2c9db48f8e674a8ab8082b54a16088fb29b66376178feeb7fe040' envd
       release_materials_record_source 'bin/sandbox-runtime.bundle:/opt/sandbox-runtime/bin/envd' \
         github.com/e2b-dev/infra/packages/shared 2026.22 \
-        'https://github.com/e2b-dev/infra/archive/refs/tags/2026.22.tar.gz' \
-        'sha256:9e1e81f2963fda1805466c337cd0a33638182a15a66295fd19bba6b9c454d92c' \
+        'https://github.com/e2b-dev/runtime/archive/refs/tags/2026.22.tar.gz' \
+        'sha256:8f074b23dcb2c9db48f8e674a8ab8082b54a16088fb29b66376178feeb7fe040' \
         go/github.com/e2b-dev/infra/packages/shared@v0.0.0
       release_materials_record_source 'bin/mkfs.erofs,bin/sandbox-runtime.bundle:/opt/sandbox-runtime/bin/mkfs.erofs' erofs-utils v1.9.1 \
         'https://github.com/erofs/erofs-utils/archive/refs/tags/v1.9.1.tar.gz' \
@@ -637,40 +432,11 @@ package_release() {
       release_materials_add_go_binary "$envd_bin" bin/sandbox-runtime.bundle:/opt/sandbox-runtime/bin/envd
       ;;
     vmlinux)
-      local linux_source linux_license_sha kernel_cc kernel_ld
-      kernel_cc="$("${RELEASE_BUILD_ENV[@]}" sh -c 'command -v gcc')" \
-        || fail "Kernel release compiler is unavailable"
-      kernel_ld="$("${RELEASE_BUILD_ENV[@]}" sh -c 'command -v ld')" \
-        || fail "Kernel release linker is unavailable"
-      kernel_cc="$(realpath -e "$kernel_cc")"
-      kernel_ld="$(realpath -e "$kernel_ld")"
-      # Record the actual selected executables using the existing package/source
-      # and license verification path, then pass those exact paths to Kbuild.
-      release_native_system_input "$kernel_cc" bin/vmlinux kernel-compiler
-      release_native_system_input "$kernel_ld" bin/vmlinux kernel-linker
-      sha256sum "$kernel_cc" "$kernel_ld" > "$WORK/kernel-toolchain.sha256"
-      prepare_release_kernel_config "$build_root"
-      # Release metadata must not disclose the build account/host or depend on
-      # the wall clock. Development builds retain the normal Kbuild defaults.
-      "${RELEASE_BUILD_ENV[@]}" env \
-        KBUILD_BUILD_USER=kuasar KBUILD_BUILD_HOST=release KBUILD_BUILD_VERSION=1 \
-        KBUILD_BUILD_TIMESTAMP="$(LC_ALL=C date -u -d "@$epoch" '+%a %b %e %T UTC %Y')" \
-        make --no-print-directory -C "$build_root/native-deps" \
-        CC="$kernel_cc" HOSTCC="$kernel_cc" LD="$kernel_ld" LOCALVERSION= \
-        TARGET_ARCH="$arch" TARBALL_DIR="$tarball_dir" \
-        LINUX_BUILD_SRC="$build_root/native-deps/build/src/linux" \
-        LINUX_BUILD_OUT="$build_root/native-deps/build/$arch/linux" vmlinux
-      grep -Fxq '# CONFIG_LOCALVERSION_AUTO is not set' \
-        "$build_root/native-deps/build/$arch/linux/.config" \
-        || fail "release Kernel config retained Git-derived local versions"
-      sha256sum --quiet -c "$WORK/kernel-toolchain.sha256" \
-        || fail "Kernel compiler or linker changed during the build"
+      local linux_source linux_license_sha
       copy_external_file "$native_bin_dir/vmlinux" bin/vmlinux
-      linux_source="$build_root/native-deps/build/src/linux"
+      linux_source="${RELEASE_LINUX_SOURCE_DIR:-${LINUX_BUILD_SRC:-$ROOT/native-deps/build/src/linux}}"
       release_materials_copy_licenses "$linux_source" linux
       linux_license_sha="$(sha256sum "$linux_source/COPYING" | awk '{print $1}')"
-      [ "$linux_license_sha" = "$(release_linux_copying_sha)" ] \
-        || fail "Linux COPYING differs from the pinned source"
       release_materials_record_source bin/vmlinux linux 6.1.169 \
         'https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.1.169.tar.gz' \
         'sha256:ab28b4ca2a2eca38b3da9aa33b231288168c3560bbc866359045f1c8f4d48d94' linux
@@ -679,7 +445,7 @@ package_release() {
         "git:$project_sha;linux-copying-sha256:$linux_license_sha" project
       ;;
   esac
-  GOMODCACHE="$WORK/go-mod" release_materials_finish
+  release_materials_finish
 
   mkdir -p "$output/assets"
   tar --sort=name --owner=0 --group=0 --numeric-owner --mtime="@$epoch" \

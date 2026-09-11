@@ -31,7 +31,7 @@ native-deps 目录的构建工作流:从上游源码构建 kuasar-sandbox 平台
 |---|---|---|---|
 | `mkfs.erofs` `fsck.erofs` | erofs-utils v1.9.1 | — | `accelerator`(展平)、`guest-runtime`(打 guest erofs)、源码树诊断 / accelerator 测试 |
 | `vmlinux` | linux 6.1.169(LTS,cdn.kernel.org) | `deps/linux-patches/` + `deps/vmlinux/*.config` | `sandboxer`/`sandbox-ctl`(guest 内核) |
-| `envd` | e2b-dev/infra 2026.22(源码 tarball) | — | `guest-runtime`(注入 `sandbox-runtime.bundle`) |
+| `envd` | e2b-dev/runtime 2026.22(源码 tarball) | — | `guest-runtime`(注入 `sandbox-runtime.bundle`) |
 | `versitygw`(可选) | versity/versitygw v1.5.0 | — | 按需用于本地/单节点 S3-compatible 文件存储集成 |
 
 pin 落在 Makefile 变量(`EROFS_TARBALL` / `LINUX_TARBALL` / `ENVD_TARBALL` 及可选
@@ -39,137 +39,79 @@ pin 落在 Makefile 变量(`EROFS_TARBALL` / `LINUX_TARBALL` / `ENVD_TARBALL` �
 `*_TARBALL_SHA256` 为空时跳过校验。当前 EROFS、Linux、Envd 默认输入配置了 hash;
 可选网关的 hash 按部署验证策略补充。升级版本 = 改变量 + 重验 patch 应用。
 
-这些覆盖项用于开发构建。Runtime 与 vmlinux 发行打包器只接受仓库 pin 且带已配置
-摘要的 EROFS、Linux 和 Envd 输入(发行工作流可以从精确的公共镜像取得相同 Linux
-字节)。发布其他原生输入时,必须同时更新仓库 pin、摘要与发行来源记录;否则打包会
-失败,不会为不同输入生成错误的来源记录。
+先使用正常 Makefile 目标构建所选源码,再打包匹配的输出。在仓库根目录执行的
+`make release-runtime` 依赖 `sandbox-runtime`,`make release-vmlinux`
+只依赖 `vmlinux`。直接调用 `release.sh package` 会复用预构建文件,不重建
+原生依赖、不替换源码 checkout、不重置缓存。Runtime 与 Kernel 保持独立构建、
+打包及选择。
 
-发行工作流在上传前把已完成归档的 SHA-256 记录为 build job output。发布者通过
-`RELEASE_ARCHIVE_SHA256` 接收这一独立值,在任何 Tag/Release 写入前核对;不能用
-下载后从 bundle 重新计算的值代替。即使重算 bundle 自身的校验和,全部载荷与材料
-仍须匹配该次已完成构建。本地打包和独立验证不要求这个发布输入。该记录不证明
-编译器来源,也不构成对不可信候选代码的隔离。
+Runtime 输入为 `bin/<arch>/{sandbox-runtime.bundle,flatten-ctl}` 和
+`native-deps/bin/<arch>/mkfs.erofs`;Kernel 使用
+`native-deps/bin/<arch>/vmlinux`。已有 `RELEASE_BIN_DIR`、
+`RELEASE_NATIVE_BIN_DIR` 可选择匹配输出目录。
+`RELEASE_SANDBOXER_SOURCE_DIR`、`RELEASE_ACCELERATOR_SOURCE_DIR`、
+`RELEASE_ENVD_SOURCE_DIR`、`RELEASE_EROFS_SOURCE_DIR`、
+`RELEASE_LINUX_SOURCE_DIR` 选择对应源码树;
+`RELEASE_SANDBOX_INIT_BIN`、`RELEASE_ENVD_BIN` 选择与镜像匹配的 init 和 Envd
+二进制,用于材料收集与镜像一致性检查。
+源码版本、原生链接映射与这些产物应一并保留。原生 pin 变化需要同步更新配方、
+摘要与来源记录;路径覆盖不表示可以把不同源码字节标记为配置的版本。
 
-Go 依赖及工具链下载使用全新的私有 module/VCS 状态、已启用的 checksum database
-和 `GOAUTH=off`。它们清除持久化 Go 设置、私有 module 绕过规则、Git 配置与调用者凭据,仅保留已验证的
-无凭据路由。下载来源或工具链之前,上传的 Go 记录键必须匹配官方载荷的精确名称;
-路径别名会被拒绝。这些发行检查不改变普通开发中的 module 认证方式。
-只有 Runtime 载荷闭包中精确的 Accelerator 和 Sandboxer module
-使用单独认证的内部源码声明。组织内的其他 module 与外部依赖一样,必须通过
-module 校验和与许可材料验证。
-来源清单在逐行处理前拒绝重复或过量记录;每份元数据表上限为 16 MiB,
-来源清单上限为 16,384 行。
-RPM 声明收集核对已安装包列表及每个同源兄弟包文件列表的真实退出状态。
-即使另一个包已提供有效声明,部分枚举失败仍会终止收集,不把部分输出当作完整覆盖。
+Runtime 源码构建使用 `GOWORK=off` 及最小 Accelerator/Sandboxer 依赖闭包。
+内部记录只有在本地 Git Tag 指向所选 commit 时使用发行版本,否则使用
+`git:<commit>`;未来目标 Tag 不必已经存在。`flatten-ctl` 必须是 Linux/amd64
+的 `github.com/kuasar-sandbox/guest-runtime/cmd/flatten-ctl` 主入口,
+且 Go VCS 元数据为干净状态并匹配所选项目 commit。包中请求的 Runtime 或 Kernel
+版本与源码 commit 分别记录。
 
-可信发布端根据已验证请求生成标准发行正文及来源/Preview 标记。下载的
-`release-notes.md` 只是本地 bundle 辅助说明,不能决定公开发行正文或对账来源。
+分别在 guest-runtime、sandboxer、Envd 的 module 目录记录 Go 编译器选择。
+若这些目录选择不同的编译器版本,则按各载荷实际版本收集对应安装的 Go 及随附
+依赖声明,不以父 module 上下文替代载荷自身的选择。Module 材料使用生效的替换
+及匹配的 module 校验和,沿用正常 Go 缓存与路由。现有内部组件及 Envd shared
+module 本地替换继续支持;官方包不支持其他无版本的第三方替换。这些材料收集器
+不下载或认证编译器分发,独立验证也不要求安装与载荷相同版本的编译器。
 
-发行打包从所选 Git commit 的全新 checkout 出发,在本次临时兄弟工作区中调用现有组件
-Makefile。Runtime 打包重建其最小 accelerator/sandboxer 依赖闭包、Envd、EROFS
-工具和 Runtime image;Kernel 打包独立重建采用所选 patch 与 config 的 Linux。
-仅复用通过 checksum 验证的下载 tarball。已有二进制、解压源码树和开发中的工作
-保持不变。内部依赖记录只有在本地 Git Tag 指向所选 commit 时才保留该发行版本;
-否则记录 `git:<commit>`,目标正式 Tag 尚不存在时也适用。
-Runtime 验证 `flatten-ctl` 必须为本 module 的 Linux/amd64
-`github.com/kuasar-sandbox/guest-runtime/cmd/flatten-ctl` 主入口,且 Go VCS 元数据
-为干净状态并匹配所选项目 commit。该发行构建不使用缺少 Git 元数据的源码归档。
+材料隔离放在 `share/licenses/runtime`、`share/sources/runtime` 或独立的
+`vmlinux` 命名空间。每个单元包含 `SOURCES.tsv`、`GO-BUILD-INFO.tsv`、
+`GO-MODULES.tsv` 和 `MATERIALS.sha256`。声明缺失、子目录不可读、遍历不完整
+或不同输入发生材料冲突时收集失败。项目、Envd、EROFS、Linux、内部/shared
+module 及系统记录必须指向各自的材料目录。Kernel 包含所选源码中的 Linux
+`COPYING` 和完整 `LICENSES` 树;记录的 COPYING 摘要须与包内文件一致。
 
-Runtime 与 Kernel 构建命令使用私有 home/缓存,不继承调用者的云/发布凭据或构建
-flag 覆盖。可以保留无凭据的 HTTPS module/network 路由及配置的 checksum mirror。
-`GOSUMDB`、`GOTOOLCHAIN` 仍为显式输入,默认分别是 `sum.golang.org`、`local`;
-Runtime 验证要求启用 checksum database。Kernel 打包不获取 Go 分发材料。
-Runtime 先解析现有的 checksum-pin Envd 源码,再分别在 guest-runtime、sandboxer、
-Envd 的 module 目录记录编译器选择。如果显式自动选择产生不同的编译器版本,则
-分别验证每个实际分发;不会把父目录的 Go 上下文当成所有 guest 二进制的证据。
+验证只接受所选单元的载荷:Runtime 的 `bin/` 下为
+`sandbox-runtime.bundle`、`flatten-ctl`、`mkfs.erofs`;Kernel 只有
+`bin/vmlinux`。检查精确路径、重复条目、类型、root 属主、权限、清单、来源记录
+相符性及校验和。其他单元的材料和无关目录在解包前被拒绝。Runtime 包不能替换
+独立选择的 Kernel,也不能改变无关安装根目录的权限。
 
-发行打包记录全新构建上下文实际选定的 Go 编译器,在构建前后将其分发输入与匹配的
-`golang.org/toolchain` 归档逐项比较;归档由配置的 checksum database 认证。这覆盖
-编译器、标准库源码及该分发中的其他文件。完整 Go 安装中额外的非构建 `api`、
-`doc`、`misc`、`test` 文件不在认证范围,也不作为发行许可来源;核对时处理标准的
-`go.mod`/`_go.mod` 安装转换。Go 许可/NOTICE 正文来自已验证归档,包括编译器和
-标准库内嵌依赖的材料,保留各自相对路径。独立验证还会
-重新核对其字节、来源 URL 和 module h1。版本字符串或重算 bundle 校验和不能替代
-来源核对。验证要求启用 checksum database 并取得匹配的归档/缓存;即使采用
-`GOTOOLCHAIN=local`,也可能获取核验材料,但不切换构建编译器或静默启用工具链
-自动选择。这些检查以可信构建主机为前提,不证明已失陷主机可信。
+Runtime 独立验证使用已安装在 `PATH` 中的可信主机 `fsck.erofs` 和
+`dump.erofs`,不下载 EROFS 源码或现场编译读取器。读取器须支持镜像格式、
+`fsck.erofs --extract` 及 `dump.erofs --path/--cat`。
+验证检查 bundle 对齐和前缀摘要,不展开目录树地验证完整 EROFS 文件系统,只把
+init、Envd、mkfs、flatten-ctl 读入固定私有文件。镜像内属主/权限、Go main
+身份/目标及构建记录须一致;init 还须绑定所选 Sandboxer commit。内嵌 mkfs、
+flatten-ctl 必须分别等于外部对应载荷。不执行任何归档可执行文件。Kernel 验证
+不需要 EROFS 读取器、Runtime 载荷或依赖 checkout。
 
-Kernel 发行构建固定 `KBUILD_BUILD_USER=kuasar`、`KBUILD_BUILD_HOST=release`
-和 `KBUILD_BUILD_VERSION=1`,并根据 `SOURCE_DATE_EPOCH` 生成 UTC 格式的
-`KBUILD_BUILD_TIMESTAMP`。epoch 默认值为 `0`,也用于归档时间戳。这样内核版本
-元数据不会包含构建账号、主机名或构建时的时钟值。开发构建的 Kbuild 默认行为
-不变;完整二进制一致仍要求相同的源码、配置和编译器输入。
-Kernel 打包在过滤后的构建环境中解析 GCC 与链接器,通过 `CC`、`HOSTCC`、`LD`
-把精确路径传给 Kbuild,并在 `system/kernel-compiler`、`system/kernel-linker`
-记录其文件 SHA-256、已安装源包版本及通过验证的许可材料。构建结束后可执行文件
-必须仍匹配。独立验证要求两个角色记录及其材料目录,不获取 Runtime 依赖。这记录
-可信主机上的所选编译器/链接器,不声称证明主机或所有传递调用的编译器子进程可信。
+匹配的 `mkfs.erofs` 链接映射把全部实际外部静态库及启动对象提供给
+`EROFS-INPUTS.tsv`。清单保留名称与文件摘要;来源行及每个输入的
+`system/<input>` 声明目录须精确覆盖整个集合,包括 libc、libuuid 和 GCC/CRT
+输入。打包记录已安装的 Debian/RPM 源包身份,复制其版权、许可和 NOTICE 文件,
+包括引用的公共许可正文。包名或 SPDX 标识本身不能代替正文。RPM 包列表和同源
+兄弟包文件列表须完整成功;部分输出不算完整覆盖。已安装包归属用于来源归类,
+不用于 dpkg/RPM 文件摘要认证或共同所有者认证。
 
-验证器拒绝非 root 的归档数字属主,并核对 Envd、EROFS 和 Linux 的精确来源 URL
-与摘要。发布时把选定的 `SOURCE_SHA` 传入验证器;Runtime 发布还必须提供精确的
-accelerator/sandboxer `RELEASE_DEPENDENCIES` 绑定。重新生成校验和不能让不同的
-项目 commit、依赖版本或原生来源通过该发布请求。本地源码打包仍可使用尚无 Tag
-的依赖 commit,但不会把这些记录声称为已存在的发行版本。
-Runtime 验证还将每个依赖的精确 commit URL、Git integrity 和完整声明树绑定到
-现有的所选兄弟目录及可选 `RELEASE_*_SOURCE_SHA` 输入。提供发布版本时,本地
-Tag 必须解析到该 commit。可信 Runtime 发布端使用限定范围的只读令牌,只检出
-请求的 accelerator/sandboxer Tag,不持久化 checkout 凭据,并在 bundle 验证前
-撤销该令牌。只读取 Git blob,不执行依赖代码;Kernel 不执行这些依赖检出,也不
-要求具备它们的仓库。
-项目、Envd、EROFS、Linux、系统库和 Envd shared module 的必需来源记录还必须指向各自
-的许可目录;即使另一个目录的材料有效,也不能用它替代当前来源的材料。
-Runtime 与 Kernel 验证还将完整项目许可/NOTICE 树(含嵌套 `LICENSES`)与所选
-commit 的 Git blob 比较。本地必须具备该 commit;可信发布端获取源码历史用于
-只读检查,不执行候选文件。重算校验和不能授权内容变化、缺失或额外的项目声明。
-Kernel 检视仍独立于 Runtime 二进制和 Go 分发下载。
-仅在全新的 Kernel 发行 checkout 中关闭 `CONFIG_LOCALVERSION_AUTO`,向 Kbuild
-显式传入空 `LOCALVERSION`,并在构建后核对解析后的配置。保留配置的
-`CONFIG_LOCALVERSION` 后缀,但临时 Git commit ID 或 dirty 标记不能参与选择
-发行字符串。调用者的开发配置片段及 patch 工作区保持不变。
-归档只接受所选单元的载荷:Runtime 的 `bin/` 下仅有 `sandbox-runtime.bundle`、
-`flatten-ctl` 和 `mkfs.erofs`;Kernel 仅有 `bin/vmlinux`。这些载荷/材料根之外的
-目录、路径别名、重复条目和其他单元的材料目录均在解包前被拒绝。Runtime 包
-不能替换独立选择的 Kernel,归档目录也不能改变无关安装根目录的权限。
-Runtime 验证从 checksum-pin 的 EROFS 源码在全新私有目录构建主机读取器,
-因此需要原生 C/autotools 构建前置。它核对 bundle 对齐和前缀摘要,不展开镜像
-目录树地检查完整 EROFS 文件系统,再把必需的 init、Envd、mkfs 和 flatten-ctl 读入固定私有
-文件。镜像内属主/权限、实际 Go main 身份/目标与构建记录必须匹配;init 还须
-绑定所选 Sandboxer commit。内嵌 mkfs 和 flatten-ctl 必须分别与通过验证的外部
-对应载荷字节相同。
-验证不运行任何上传的可执行文件。Kernel 验证不构建这些读取器。
-Kernel 验证还将 Linux `COPYING` 与从 checksum-pin 的上游 tarball 得出的摘要
-比较,不从上传的许可字节重新计算一个值来证明自身。项目 Kernel 输入来源行也
-绑定同一固定值。小型测试 fixture 完整保留该上游声明,不替代归档交付的完整
-Linux `LICENSES` 材料。
-许可证收集拒绝不可读子目录和不完整遍历。不同原生链接输入不能以相同材料
-名称相互覆盖声明。Runtime 和 Kernel 打包在成功或失败退出时只清理本次所属
-临时工作区,包括只读 Go module 缓存。现有 Envd shared module 本地替换和
-Kernel 独立选择不变。
+现有项目 CI 模板从 pin 且通过 checksum 验证的 util-linux 源码构建静态 libuuid。
+Provisioner 在模板输入旁保留 `SOURCES.tsv`、`MATERIALS.sha256` 和许可目录,
+随库复制到每个准备的 slot。打包检查该源码构建库的清单与摘要。输入缺失、被改动
+或无法归属时需要提供实际匹配的材料,不能编造来源记录。
 
-`EROFS-INPUTS.tsv` 保留从本次链接映射选出的全部外部静态库/启动对象名称及
-摘要。验证要求原生来源记录集与该完整清单精确一致,不只检查 libc、libuuid;
-即使重算 bundle 校验和,删除 GCC/CRT 行及声明仍会被拒绝。该清单属于独立的
-已完成构建归档绑定内容。每个输入必须指向自身的 `system/<input>` 许可目录;
-把 GCC/CRT 记录改指向另一个输入的有效声明也会被拒绝。该清单
-不证明不可信构建者或主机可信。
-
-Runtime 打包还读取本次新构建的 `mkfs.erofs` 链接映射。对实际链入的系统静态库
-或启动对象,记录文件摘要和已安装的 Debian 源包或 RPM 源包身份,并收集对应的
-版权、许可和 NOTICE 文件,包括其引用的公共许可正文。这既覆盖 erofs-utils,
-也覆盖 libc、libuuid、编译器运行库及启动对象;仅列包名或 SPDX 标识不能替代正文。
-采集前,每个已安装输入都必须匹配可信构建主机 Debian 或 RPM 数据库中的文件
-摘要。文件记录缺失、歧义或内容变更都会导致打包失败,仅有包归属不足以证明来源。
-这检查已安装文件的完整性,不证明已失陷主机或包数据库可信。
-收集的版权、许可和 NOTICE 正文字节也必须匹配其已安装包的文件摘要,所属源包
-必须匹配链接输入。引用的 Debian common-license 正文按其自身所属包核验。
-Multi-Arch 共同所有者必须全部认同文件字节与要求的源包身份;许可记录缺失、
-内容变化或归属冲突时拒绝收集。
-
-项目 CI 模板从 pin 且通过 checksum 验证的 util-linux 源码构建静态 libuuid。
-provisioner 按构建身份保留 `SOURCES.tsv`、`MATERIALS.sha256` 和许可目录,
-并随库文件复制到每个准备的 slot。打包同时验证材料清单与实际库摘要。
-来源缺失、材料被改动或无法归属的原生输入会被拒绝;应更新可信模板,不能编造
-来源记录。这些材料服务于发行检视,不构成法律认证。Kernel 源码选择仍独立于 Runtime。
+发布者在 Tag/Release 写入前将选定项目 `SOURCE_SHA` 传入验证器,采用 bundle
+的 `release-notes.md` 正文,追加既有来源/Preview 标记。源码选择、构建/发布
+权限分离及拒绝替换已发布资产的要求保持不变。独立验证是离线包内检查,不获取
+项目/依赖 Git 对象或 Go 模块,不与远端源码树比较许可正文。校验和及 VCS 记录
+不能证明任意生产者身份,也不构成对不可信 CI 候选的隔离。这些材料服务于发行
+检视,不构成法律认证。
 
 `librocksdb`(`accelerator` 的 CGO 链接依赖)在该仓内构建,不在此处。
 
@@ -244,14 +186,9 @@ make help       # 列举目标
 压缩 / fuse / 网络特性)→ 只编 `lib` + `mkfs` + `fsck` 三个子目录 → 产出
 `bin/<arch>/{mkfs.erofs,fsck.erofs}`。
 
-Runtime 发行打包使用编译器 `-ffile-prefix-map` 标志,将随机原生构建工作区映射
-到虚拟调试源码前缀 `/usr/src/kuasar`。保留调试信息,但不把临时目录写入
-`mkfs.erofs` 及其 Runtime 内副本。普通开发 CFLAGS 和 Kernel 构建不变。
-安装原生构建依赖后,可在仓库根目录执行 `bash scripts/test-erofs-reproducibility.sh`,
-在两个独立目录重新构建 pin 的源码并比较两个原生工具。
-
-- 跳过 `mount`/`dump`/`fuse` 子目录:平台不消费这些工具,同时避开 v1.9.1 的 mount.erofs
-  在 `--disable-multithreading` 下的 pthread 链接问题。
+- Runtime 工具构建跳过 `mount`/`dump`/`fuse` 子目录,同时避开 v1.9.1 的 mount.erofs
+  在 `--disable-multithreading` 下的 pthread 链接问题。独立 bundle 验证另需安装
+  可信主机 `dump.erofs` (§1.1)。
 - configure 期硬依赖 libuuid(无 `--without-uuid` 出口);交叉编译需 multi-arch 的
   `uuid-dev:<arch>`,脚本前置探测并打印 apt 安装指引(§4.2)。
 - host 构建依赖:`autoconf automake libtool pkg-config make gcc g++`。
@@ -280,7 +217,7 @@ Runtime 发行打包使用编译器 `-ffile-prefix-map` 标志,将随机原生�
 
 ### 2.3 envd(`make envd`)
 
-`deps/build-envd.sh`:e2b-dev/infra 源码 tarball 解压到跨架构共享的
+`deps/build-envd.sh`:e2b-dev/runtime 源码 tarball 解压到跨架构共享的
 `build/src/e2b-infra/`,对 `packages/envd` 执行 `go build`(`GOWORK=off GOOS=linux
 CGO_ENABLED=0 -trimpath -ldflags "-s -w"`)→ `bin/<arch>/envd`。GOARCH 即选目标
 架构,交叉无需 C 工具链。
