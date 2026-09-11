@@ -6,12 +6,12 @@
 # auto-bind-mounts it into the guest. It is treated as a TARGET-ARCH binary
 # (the guest's arch), built CGO-free so GOARCH alone handles cross-compilation.
 #
-# Source comes from the e2b-dev/infra release tarball (pinned by tag in the URL),
+# Source comes from the e2b-dev/runtime release tarball (pinned by tag in the URL),
 # fetched + extracted via the shared tarball/src cache like the other deps.
 #
 # Inputs (env):
 #   ENVD_TARBALL          URL or local path; supports "url#filename" form.
-#                         Default: e2b-dev/infra 2026.22 github archive.
+#                         Default: e2b-dev/runtime 2026.22 github archive.
 #   ENVD_TARBALL_SHA256   Optional expected SHA256. Empty → skip verify.
 #   BUILD_DIR             Per-arch build directory (e.g. build/x86_64).
 #   BINDIR                Per-arch bin directory (e.g. bin/x86_64).
@@ -35,7 +35,7 @@ script_dir="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck disable=SC1091
 source "$script_dir/common.sh"
 
-: "${ENVD_TARBALL:=https://codeload.github.com/e2b-dev/infra/tar.gz/refs/tags/2026.22#e2b-infra-2026.22.tar.gz}"
+: "${ENVD_TARBALL:=https://codeload.github.com/e2b-dev/runtime/tar.gz/refs/tags/2026.22#e2b-runtime-2026.22.tar.gz}"
 : "${ENVD_TARBALL_SHA256:=}"
 : "${BUILD_DIR:=$(pwd)/build}"
 : "${BINDIR:=$(pwd)/bin}"
