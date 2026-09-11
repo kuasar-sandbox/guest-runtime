@@ -24,7 +24,10 @@ def run(source, original, readers):
         work = Path(temporary)
         base = work / "base"
         base.mkdir()
-        subprocess.run(["tar", "-xzf", str(original / "assets" / archive_name), "-C", str(base)], check=True)
+        # Preserve the fixture archive's modes, including its root directory,
+        # so a restrictive caller umask does not mask the intended mutation.
+        subprocess.run(["tar", "--same-permissions", "-xzf", str(original / "assets" / archive_name),
+                        "-C", str(base)], check=True)
         FIXTURE.READER.read_payloads(base / "bin/sandbox-runtime.bundle", readers / "bin/fsck.erofs",
                                      readers / "build/src/erofs-utils/dump/dump.erofs", work / "payloads")
         marker = work / "must-not-execute"

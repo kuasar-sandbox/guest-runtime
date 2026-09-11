@@ -78,3 +78,39 @@ grep -Fq 'distinct native link inputs share a material name' "$test_root/collisi
   || fail "second colliding native input reached the material collector"
 printf 'test-native-materials: colliding input rejected before overwriting materials PASS\n'
 )
+
+# C5 was withdrawn: ordinary complete inventories have no added row/byte quota.
+# Keep the existing structural, permission and source-table consistency checks.
+(
+WORK="$test_root/inventory-work"
+inventory_root="$test_root/inventory"
+source_root="$inventory_root/share/sources/runtime"
+mkdir -p "$WORK" "$source_root"
+awk 'BEGIN {
+  print "input\tsha256"
+  for (i=0; i<4096; i++) {
+    name=sprintf("lib%0200d.a", i)
+    printf "%s\t%064d\n", name, i
+  }
+}' > "$source_root/EROFS-INPUTS.tsv"
+chmod 0644 "$source_root/EROFS-INPUTS.tsv"
+awk -F '\t' 'NR > 1 {
+  printf "bin/mkfs.erofs,bin/sandbox-runtime.bundle:/opt/sandbox-runtime/bin/mkfs.erofs\tsystem:%s\tfixture\tfixture\tsha256:%s\tshare/licenses/runtime/system/%s\n", $1, $2, $1
+}' "$source_root/EROFS-INPUTS.tsv" > "$source_root/SOURCES.tsv"
+[ "$(stat -c %s "$source_root/EROFS-INPUTS.tsv")" -gt 1048576 ]
+release_native_validate_erofs_inventory "$inventory_root"
+for mutation in duplicate malformed mismatch mode; do
+  candidate="$test_root/inventory-$mutation"
+  cp -a "$inventory_root" "$candidate"
+  case "$mutation" in
+    duplicate) sed -n '2p' "$source_root/EROFS-INPUTS.tsv" >> "$candidate/share/sources/runtime/EROFS-INPUTS.tsv" ;;
+    malformed) sed -i '2s/[0-9]$/x/' "$candidate/share/sources/runtime/EROFS-INPUTS.tsv" ;;
+    mismatch) sed -i '1d' "$candidate/share/sources/runtime/SOURCES.tsv" ;;
+    mode) chmod 0600 "$candidate/share/sources/runtime/EROFS-INPUTS.tsv" ;;
+  esac
+  if (release_native_validate_erofs_inventory "$candidate" > "$test_root/inventory-$mutation.log" 2>&1); then
+    fail "complete native inventory accepted $mutation"
+  fi
+done
+printf 'test-native-materials: no withdrawn inventory quota; structure and consistency retained PASS\n'
+)
