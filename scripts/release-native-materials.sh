@@ -159,13 +159,12 @@ release_native_erofs_inputs() {
 release_native_validate_erofs_inventory() {
   local source="$1/share/sources/runtime" expected="$WORK/expected-erofs-inputs"
   local actual="$WORK/actual-erofs-inputs" inventory="$1/share/sources/runtime/EROFS-INPUTS.tsv"
-  if [ ! -s "$inventory" ] || [ -L "$inventory" ] || [ "$(stat -c '%a' "$inventory")" != 644 ] \
-    || [ "$(stat -c '%s' "$inventory")" -gt 1048576 ]; then
+  if [ ! -s "$inventory" ] || [ -L "$inventory" ] || [ "$(stat -c '%a' "$inventory")" != 644 ]; then
     fail "missing or unsafe complete EROFS input inventory"
   fi
   awk -F '\t' '
     NR == 1 { if ($0 != "input\tsha256") exit 1; next }
-    NF != 2 || NR > 1025 || $1 !~ /^[A-Za-z0-9._+-]+[.](a|o)$/ ||
+    NF != 2 || $1 !~ /^[A-Za-z0-9._+-]+[.](a|o)$/ ||
       length($2) != 64 || $2 ~ /[^0-9a-f]/ || seen[$1]++ { exit 1 }
     { rows++; print }
     END { if (rows < 2) exit 1 }
