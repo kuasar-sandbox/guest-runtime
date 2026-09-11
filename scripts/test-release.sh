@@ -512,7 +512,7 @@ done
 candidate="$TMP/linux-copying-bytes"
 cp -a "$TMP/vmlinux-bundle" "$candidate"
 mkdir "$candidate/root"
-tar -xzf "$vmlinux_archive" -C "$candidate/root"
+tar --same-permissions -xzf "$vmlinux_archive" -C "$candidate/root"
 copying="$candidate/root/share/licenses/vmlinux/linux/COPYING"
 printf 'unselected notice bytes\n' >> "$copying"
 release_materials_hash_tree "$candidate/root" vmlinux \
@@ -530,7 +530,7 @@ for input in libc.a libuuid.a libgcc.a crtbeginT.o; do
   candidate="$TMP/omitted-native-$input"
   cp -a "$TMP/runtime-bundle" "$candidate"
   mkdir "$candidate/root"
-  tar -xzf "$runtime_archive" -C "$candidate/root"
+  tar --same-permissions -xzf "$runtime_archive" -C "$candidate/root"
   table="$candidate/root/share/sources/runtime/SOURCES.tsv"
   awk -F '\t' -v name="system:$input" '$2 != name' "$table" > "$candidate/changed-sources"
   install -m 0644 "$candidate/changed-sources" "$table"
@@ -549,7 +549,7 @@ for input in libgcc.a crtbeginT.o; do
   candidate="$TMP/redirected-native-$input"
   cp -a "$TMP/runtime-bundle" "$candidate"
   mkdir "$candidate/root"
-  tar -xzf "$runtime_archive" -C "$candidate/root"
+  tar --same-permissions -xzf "$runtime_archive" -C "$candidate/root"
   table="$candidate/root/share/sources/runtime/SOURCES.tsv"
   awk -F '\t' -v OFS='\t' -v name="system:$input" \
     '$2 == name {$6="share/licenses/runtime/system/libc.a"} {print}' "$table" > "$candidate/changed-sources"
@@ -624,7 +624,7 @@ for kind in runtime vmlinux; do
     cp -a "$TMP/$kind-bundle/." "$candidate"
     mkdir "$candidate/root"
     candidate_archive="$("$fixture_root/scripts/release.sh" archive-name "$kind" "$version" x86_64)"
-    tar -xzf "$candidate/assets/$candidate_archive" -C "$candidate/root"
+    tar --same-permissions -xzf "$candidate/assets/$candidate_archive" -C "$candidate/root"
     case "$extra_path" in
       */) mkdir -p "$candidate/root/$extra_path" ;;
       *) printf 'foreign payload must not be installed\n' > "$candidate/root/$extra_path" ;;
@@ -652,7 +652,7 @@ for dependency in accelerator sandboxer; do
     cp -a "$TMP/runtime-bundle" "$candidate"
     mkdir "$candidate/root"
     candidate_archive="$(basename "$runtime_archive")"
-    tar -xzf "$runtime_archive" -C "$candidate/root"
+    tar --same-permissions -xzf "$runtime_archive" -C "$candidate/root"
     case "$mutation" in
       source|integrity)
         column=4; [ "$mutation" != integrity ] || column=5
@@ -693,7 +693,7 @@ for mutation in wrong-os wrong-arch other-main other-module unstamped dirty-sour
   candidate="$TMP/flatten-$mutation"
   cp -a "$TMP/runtime-bundle" "$candidate"
   mkdir "$candidate/root"
-  tar -xzf "$runtime_archive" -C "$candidate/root"
+  tar --same-permissions -xzf "$runtime_archive" -C "$candidate/root"
   payload="$TMP/$mutation"
   case "$mutation" in
     wrong-os) payload="$TMP/target-darwin-amd64" ;;
@@ -730,14 +730,14 @@ for kind in runtime vmlinux; do
     candidate="$TMP/$kind-$mutation"
     cp -a "$TMP/$kind-bundle" "$candidate"
     mkdir "$candidate/root"
-    tar -xzf "$candidate/assets/$archive_name" -C "$candidate/root"
+    tar --same-permissions -xzf "$candidate/assets/$archive_name" -C "$candidate/root"
     inventory="$candidate/root/share/sources/$kind/SOURCES.tsv"
     if [ "$mutation" = unknown-source ]; then
       printf '%s\tfabricated-source\t1.2.3\thttps://example.invalid/source\tsha256:%064d\tshare/licenses/%s/project\n' \
         "$payload" 0 "$kind" >> "$inventory"
     else
       label="share/licenses/$kind/system/uninventoried.a"
-      mkdir -p "$candidate/root/$label"
+      install -d -m 0755 "$candidate/root/$label"
       install -m 0644 "$candidate/root/share/licenses/$kind/project/LICENSE" "$candidate/root/$label/LICENSE"
       native_payload=bin/vmlinux
       if [ "$kind" = runtime ]; then
@@ -776,7 +776,7 @@ for kind in runtime vmlinux; do
     candidate="$TMP/$kind-license-${name//\//-}"
     cp -a "$TMP/$kind-bundle" "$candidate"
     mkdir "$candidate/root"
-    tar -xzf "$candidate/assets/$archive_name" -C "$candidate/root"
+    tar --same-permissions -xzf "$candidate/assets/$archive_name" -C "$candidate/root"
     inventory="$candidate/root/share/sources/$kind/SOURCES.tsv"
     label="share/licenses/$kind/project"
     case "$name" in
@@ -785,7 +785,7 @@ for kind in runtime vmlinux; do
     esac
     awk -F '\t' -v OFS='\t' -v name="$name" -v label="$label" \
       '$2 == name {$6=label} {print}' "$inventory" > "$candidate/changed.tsv"
-    mv "$candidate/changed.tsv" "$inventory"
+    install -m 0644 "$candidate/changed.tsv" "$inventory"
     release_materials_hash_tree "$candidate/root" "$kind" \
       "$candidate/root/share/sources/$kind/MATERIALS.sha256"
     tar --sort=name --owner=0 --group=0 --numeric-owner --mtime=@1700000000 \
@@ -819,7 +819,7 @@ for kind in runtime vmlinux; do
       candidate="$TMP/$kind-$mutation-$name"
       cp -a "$TMP/$kind-bundle" "$candidate"
       mkdir "$candidate/root"
-      tar -xzf "$candidate/assets/$archive_name" -C "$candidate/root"
+      tar --same-permissions -xzf "$candidate/assets/$archive_name" -C "$candidate/root"
       owner=0
       if [ "$mutation" = owner ]; then
         owner=1234
@@ -839,7 +839,7 @@ for kind in runtime vmlinux; do
         awk -F '\t' -v OFS='\t' -v name="$name" -v column="$column" \
           '$2 == name {$column="https://example.invalid/not-the-selected-source"} {print}' \
           "$inventory" > "$candidate/changed.tsv"
-        mv "$candidate/changed.tsv" "$inventory"
+        install -m 0644 "$candidate/changed.tsv" "$inventory"
         release_materials_hash_tree "$candidate/root" "$kind" \
           "$candidate/root/share/sources/$kind/MATERIALS.sha256"
       fi
