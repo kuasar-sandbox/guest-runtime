@@ -57,5 +57,21 @@ class SourceInventory(unittest.TestCase):
                 self.assertNotEqual(self.validate(unit, changed).returncode, 0)
 
 
+    def test_existing_source_built_libuuid_catalog_is_accepted(self):
+        row = [EROFS, "system:libuuid.a", "util-linux-2.23.2.tar.xz",
+               "https://example.invalid/util-linux-2.23.2-65.src.rpm",
+               "sha256:" + "a" * 64 + ";tarball-sha256:" + "b" * 64 + ";srpm-sha256:" + "c" * 64,
+               "share/licenses/runtime/system/libuuid.a"]
+        self.assertEqual(self.validate("runtime", row).returncode, 0)
+        for column, value in ((0, "bin/other"), (1, "system:libgcc.a"),
+                              (3, "https://example.invalid/not-an-srpm"),
+                              (4, row[4].replace("b" * 64, "invalid")),
+                              (4, row[4] + ";extra:field"),
+                              (5, "share/licenses/runtime/project")):
+            changed = list(row)
+            changed[column] = value
+            self.assertNotEqual(self.validate("runtime", changed).returncode, 0)
+
+
 if __name__ == "__main__":
     unittest.main()

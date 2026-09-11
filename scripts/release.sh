@@ -185,6 +185,17 @@ validate_source_inventory() {
         exit 1
       }
       if ($6 != "share/licenses/" unit "/system/" name || $3 !~ /^[A-Za-z0-9.+:~_-]+$/) exit 1
+      # The existing runner source-build catalog records tarball/SRPM inputs
+      # instead of a binary package owner; preserve that collection format.
+      if (name == "libuuid.a" && split($5, fields, ";") == 3) {
+        if ($4 !~ /^https:\/\/[^[:space:]]+[.]src[.]rpm$/ ||
+            fields[1] !~ /^sha256:/ || fields[2] !~ /^tarball-sha256:/ || fields[3] !~ /^srpm-sha256:/) exit 1
+        for (i=1; i<=3; i++) {
+          digest=fields[i]; sub(/^[^:]+:/, "", digest)
+          if (length(digest) != 64 || digest ~ /[^0-9a-f]/) exit 1
+        }
+        next
+      }
       if (split($5, fields, ";") != 2 || fields[1] !~ /^sha256:/ || fields[2] !~ /^package:/) exit 1
       digest=substr(fields[1], 8); package=substr(fields[2], 9)
       if (length(digest) != 64 || digest ~ /[^0-9a-f]/ || package !~ /^[A-Za-z0-9][A-Za-z0-9.+_-]*$/) exit 1

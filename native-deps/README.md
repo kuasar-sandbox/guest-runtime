@@ -120,7 +120,8 @@ need the actual matching materials, not fabricated source records.
 
 The publisher supplies the selected project `SOURCE_SHA` to validation before
 Tag/Release writes, uses the bundle's `release-notes.md` body and appends the
-existing source/Preview markers. Source selection, build/publish permission
+existing source/Preview markers. Producer-supplied notes may not contain those
+reserved markers. Source selection, build/publish permission
 separation and refusal to replace published assets remain required. Independent
 validation is an offline bundle check: it does not fetch project/dependency Git
 objects or Go modules, or compare notices with remote source trees. Checksums
