@@ -38,15 +38,18 @@ The source build uses sibling repositories. `go.mod` resolves `accelerator` thro
 <workspace>/
 ├── guest-runtime/
 ├── accelerator/
-├── connector/
 └── sandboxer/
 ```
 
 For coordinated development, use compatible `main` revisions from these sibling repositories. To reproduce a released composition, use the exact component tags selected by the corresponding [project aggregate release](https://github.com/kuasar-sandbox/kuasar-sandbox/releases) rather than independently choosing GitHub Latest tags. The complete six-repository workspace is documented in the [project README](https://github.com/kuasar-sandbox/kuasar-sandbox).
 
 Go-only `flatten-ctl` builds require a sibling `accelerator` checkout. Building the
-Runtime from source also requires `sandboxer` for `sandbox-init` and its sibling
-`connector` dependency, plus the host/target native tools below. The standalone
+Runtime from source also requires `sandboxer` for `sandbox-init`, plus the
+host/target native tools below. Use `GOWORK=off` for this minimal source closure:
+the guest `sandbox-init` target does not import Connector, while a shared Go
+workspace can load unrelated host-side Sandboxer dependencies. The full host
+Sandboxer build still needs Connector; Runtime does not add it as a release input.
+The standalone
 Kernel target uses its own Native build inputs; it does not require starting the
 platform. Internal `require` versions identify target formal component releases,
 with Daily Preview suffixes removed. Those tags may not exist yet: local `replace`
@@ -68,11 +71,11 @@ Other prerequisites and native-source locations are documented in [Native build 
 ## Build
 
 ```bash
-make native-deps                 # VMLinux, target EROFS tools, Envd, and native inputs
-make flatten-ctl                 # OCI/directory -> deterministic EROFS builder
-make build                       # assemble sandbox-runtime.bundle
-make sandbox-runtime             # build the runtime image, building sandbox-init if needed
-make build TARGET_ARCH=aarch64   # cross-build where documented dependencies support it
+GOWORK=off make native-deps                # VMLinux, target EROFS tools, Envd, and native inputs
+GOWORK=off make flatten-ctl                # OCI/directory -> deterministic EROFS builder
+GOWORK=off make build                      # assemble sandbox-runtime.bundle
+GOWORK=off make sandbox-runtime            # build the runtime image, building sandbox-init if needed
+GOWORK=off make build TARGET_ARCH=aarch64  # cross-build where documented dependencies support it
 ```
 
 `make sandbox-runtime` consumes:

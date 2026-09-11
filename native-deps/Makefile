@@ -64,8 +64,8 @@ EROFS_TARBALL                   ?= https://codeload.github.com/erofs/erofs-utils
 EROFS_TARBALL_SHA256            ?= a9ef5ab67c4b8d2d3e9ed71f39cd008bda653142a720d8a395a36f1110d0c432
 LINUX_TARBALL                   ?= https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.1.169.tar.gz
 LINUX_TARBALL_SHA256            ?= ab28b4ca2a2eca38b3da9aa33b231288168c3560bbc866359045f1c8f4d48d94
-ENVD_TARBALL                    ?= https://codeload.github.com/e2b-dev/infra/tar.gz/refs/tags/2026.22\#e2b-infra-2026.22.tar.gz
-ENVD_TARBALL_SHA256             ?= 9e1e81f2963fda1805466c337cd0a33638182a15a66295fd19bba6b9c454d92c
+ENVD_TARBALL                    ?= https://codeload.github.com/e2b-dev/runtime/tar.gz/refs/tags/2026.22\#e2b-runtime-2026.22.tar.gz
+ENVD_TARBALL_SHA256             ?= 8f074b23dcb2c9db48f8e674a8ab8082b54a16088fb29b66376178feeb7fe040
 VERSITYGW_TARBALL               ?= https://codeload.github.com/versity/versitygw/tar.gz/refs/tags/v1.5.0\#versitygw-1.5.0.tar.gz
 VERSITYGW_TARBALL_SHA256        ?=
 
@@ -88,7 +88,7 @@ LINUX_BUILD_SRC   ?= $(abspath build/src/linux)
 LINUX_BUILD_OUT   ?= $(abspath $(BUILD_DIR)/linux)
 LINUX_PATCHES_DIR := $(abspath deps/linux-patches)
 
-# envd: e2b-dev/infra source tree — arch-neutral and shared (Go: GOARCH picks
+# envd: e2b-dev/runtime source tree — arch-neutral and shared (Go: GOARCH picks
 # the target at build), like linux.
 ENVD_SRC ?= $(abspath build/src/e2b-infra)
 
@@ -210,7 +210,7 @@ help:
 	@echo "  build (=all)          vmlinux + erofs + envd (multi-min cold)"
 	@echo "  erofs                 build mkfs.erofs (erofs-utils)"
 	@echo "  vmlinux               build the guest kernel (~5-10 min cold)"
-	@echo "  envd                  build the e2b guest agent (e2b-dev/infra; pin via ENVD_TARBALL)"
+	@echo "  envd                  build the e2b guest agent (e2b-dev/runtime; pin via ENVD_TARBALL)"
 	@echo "  versitygw             build the S3 gateway (opt-in; for builder.files_storage on single-node/local)"
 	@echo "  linux-patches-format  extract HEAD linux commits back to deps/linux-patches/"
 	@echo "  test                  syntax-check native dependency build scripts"

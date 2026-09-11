@@ -136,7 +136,8 @@ sandbox-runtime:
 
 test:
 	$(MAKE) -C native-deps test
-	python3 -m py_compile scripts/guest-inspect.py
+	PYTHONPYCACHEPREFIX="$(abspath $(BUILD_DIR)/python-cache)" \
+		python3 -m py_compile scripts/guest-inspect.py
 	CGO_ENABLED=0 $(GO) test ./...
 
 vet:
@@ -147,10 +148,14 @@ test-e2e:
 
 RUNTIME_VERSION ?= runtime-v0.1.0
 VMLINUX_VERSION ?= vmlinux-v0.1.0
+ACCELERATOR_VERSION ?= v0.1.3
+SANDBOXER_VERSION ?= v0.1.3
 
 release-runtime: sandbox-runtime
 	rm -rf $(BUILD_DIR)/release-runtime-bundle
 	SOURCE_DATE_EPOCH="$$(git show -s --format=%ct HEAD)" \
+	RELEASE_ACCELERATOR_VERSION="$(ACCELERATOR_VERSION)" \
+	RELEASE_SANDBOXER_VERSION="$(SANDBOXER_VERSION)" \
 		bash scripts/release.sh package runtime "$(RUNTIME_VERSION)" "$(TARGET_ARCH)" \
 		$(BUILD_DIR)/release-runtime-bundle
 
