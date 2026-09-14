@@ -105,6 +105,8 @@ GOWORK=off make build TARGET_ARCH=aarch64  # 在依赖支持的范围内交叉�
 
 当前 GitHub 组件资产在组件 build/package 检查后从所选 source ref 和精确 commit 发布 Linux x86_64。项目聚合 Release 随后选择精确 Runtime、VMLinux 和其他组件 Tag,并对该组合执行跨组件集成测试及已发布资产的 MicroVM 验证。Source Makefile 支持其他 `TARGET_ARCH` 不等于已为该架构发布预构建 artifact。
 
+Runtime 发布内嵌所选 sandboxer Release 中的 `sandbox-init`。安装该二进制前会校验 Release 的 Tag/源码、资产大小、GitHub 摘要及 `SHA256SUMS`；所选 sandboxer 源码仍用于来源和许可证校验。重新编译同一提交可能改变 Go 构建元数据或工作区派生的默认值，因此源码重编译不能证明与已发布依赖逐字节一致。
+
 ## Kernel source 与许可证
 
 VMLinux Release 必须可追溯到公开 kernel source version、config、项目 patch set、toolchain 和 source commit。Kernel patch 与复制的 kernel material 保留上游 copyright 和 GPL 义务。项目原创 build script 不会重许可 Linux kernel。

@@ -109,6 +109,8 @@ The two version numbers may advance independently. The project aggregate release
 
 Current GitHub component assets are published for Linux x86_64 from selected source refs and exact commits after their component build and packaging checks. The project aggregate release later selects exact Runtime, VMLinux, and other component tags and performs cross-component integration tests plus released-asset MicroVM validation for that composition. Source Makefiles may support another `TARGET_ARCH`, but source-build support does not by itself mean a prebuilt artifact is published for that architecture.
 
+Runtime publication embeds `sandbox-init` from the selected sandboxer Release. It verifies the Release tag/source, asset sizes and GitHub digests, and `SHA256SUMS` before installing the binary; the selected sandboxer source remains available for provenance and license validation. Rebuilding the same commit can change Go build metadata or workspace-derived defaults, so a source rebuild does not establish byte identity with the published dependency.
+
 ## Kernel source and licensing
 
 A VMLinux release must be traceable to its public kernel source version, configuration, project patch set, toolchain, and source commit. Kernel patches and copied kernel material retain their upstream copyright and GPL obligations. Project-original build scripts do not relicense the Linux kernel.
