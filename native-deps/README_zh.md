@@ -1,6 +1,5 @@
 [English](README.md) | [简体中文](README_zh.md)
 
-<a id="build--原生依赖构建工作流"></a>
 <a id="native-deps"></a>
 # native-deps — 原生依赖构建与维护
 
@@ -15,7 +14,7 @@ native-deps 目录的构建工作流:从上游源码构建 kuasar-sandbox 平台
 本文覆盖构建目标、patch 开发循环、交叉编译与缓存/清理约定;产物本身的设计契约不在
 本文:内核配置体系见 [Guest 内核规范](../docs/vmlinux_zh.md)。patched
 `cloud-hypervisor` 是 `sandbox-ctl` 的 VMM 运行件,构建与 patch 契约见
-`sandboxer/docs/cloud-hypervisor.md`。
+[Cloud Hypervisor](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/cloud-hypervisor_zh.md)。
 
 平台级聚合由项目主仓编排:
 `make -C kuasar-sandbox build` 首先驱动本目录 `make build`,再把
@@ -24,7 +23,6 @@ native-deps 目录的构建工作流:从上游源码构建 kuasar-sandbox 平台
 
 ## 1. 概述
 
-<a id="产物与消费方"></a>
 ### 1.1 产物与版本 pin
 
 | 产物 | 上游(pin) | 本仓输入 | 消费方 |
@@ -116,7 +114,6 @@ Provisioner 在模板输入旁保留 `SOURCES.tsv`、`MATERIALS.sha256` 和许�
 
 `librocksdb`(`accelerator` 的 CGO 链接依赖)在该仓内构建,不在此处。
 
-<a id="组成"></a>
 ### 1.2 构建源码组织
 
 | 路径 | 角色 |
@@ -128,7 +125,6 @@ Provisioner 在模板输入旁保留 `SOURCES.tsv`、`MATERIALS.sha256` 和许�
 | `deps/vmlinux/*.config` | 内核 defconfig 片段(common + per-arch) |
 
 
-<a id="12-目录布局"></a>
 ### 1.3 目录布局
 
 ```
@@ -153,7 +149,6 @@ build/
 交叉构建不更新 host 入口软链,避免指向 host 不可执行的产物。
 可选网关仅在构建对应目标后才有输出。
 
-<a id="13-幂等与缓存"></a>
 ### 1.4 幂等与缓存
 
 - **产物复用**:erofs / envd 目标文件已存在时复用产物,需要强制重建时删除输出。
@@ -165,7 +160,6 @@ build/
   缓存与 `build/src/*` 源树。内核源树可能携带尚未 format 回 `deps/` 的 patch
   开发 WIP,不能静默丢弃。
 
-<a id="构建"></a>
 ## 2. 构建目标
 
 ```bash
@@ -314,9 +308,8 @@ envd 是 `CGO_ENABLED=0` 的纯 Go 构建,GOARCH 即完成交叉,无须以上 C 
   此时若存在 `$HOME/linux-build/src` 目录,默认把 `LINUX_BUILD_SRC` /
   `LINUX_BUILD_OUT` 放到 `$HOME/linux-build/` 下,以便使用 Linux-native 文件系统。
 
-<a id="文档"></a>
 ## 6. See Also
 
 - [Guest 内核规范](../docs/vmlinux_zh.md) —— guest 内核配置体系、架构差异与关键决策。
-- `kuasar-sandbox/docs/release.md` —— runtime、vmlinux 独立版本与平台聚合发布;
+- [Release](https://github.com/kuasar-sandbox/kuasar-sandbox/blob/main/docs/release_zh.md) —— runtime、vmlinux 独立版本与平台聚合发布;
   本目录运行期必需产物经 `kuasar-sandbox/release/bin-inputs.manifest` 收集进共享 `bin/`。

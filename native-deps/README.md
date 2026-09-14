@@ -1,6 +1,5 @@
 [English](README.md) | [简体中文](README_zh.md)
 
-<a id="build--native-dependency-build-workflow"></a>
 <a id="native-deps"></a>
 # native-deps — build and maintenance
 
@@ -8,16 +7,12 @@ The native-deps directory builds upstream sources into three default artifact fa
 
 The common pipeline is: pinned upstream tarball URL with optional SHA256 verification → shared cache and extraction → local patches (vmlinux, using `git am`) → build → `bin/<arch>/`.
 
-This document covers targets, patch development, cross-compilation and cache/cleanup rules. Artifact-specific design belongs elsewhere: see [the kernel specification](../docs/vmlinux.md) for kernel configuration, and `sandboxer/docs/cloud-hypervisor.md` for the VMM and its patches.
+This document covers targets, patch development, cross-compilation and cache/cleanup rules. Artifact-specific design belongs elsewhere: see [the kernel specification](../docs/vmlinux.md) for kernel configuration, and [Cloud Hypervisor](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/cloud-hypervisor.md) for the VMM and its patches.
 
 Project-level aggregation runs `make -C kuasar-sandbox build`, which invokes this directory's `make build`, then collects artifacts according to `kuasar-sandbox/release/bin-inputs.manifest` into `kuasar-sandbox/bin/<arch>/` for E2E, Demo and local integration reuse.
 
-<a id="1-概述"></a>
 ## 1. Overview
 
-<a id="11-产物与版本-pin"></a>
-<a id="artifacts-and-consumers"></a>
-<a id="产物与消费方"></a>
 ### 1.1 Artifacts and pinned versions
 
 | Artifact | Pinned upstream | Repository inputs | Consumers |
@@ -130,8 +125,6 @@ candidates. These materials support release review, not legal certification.
 
 `librocksdb`, accelerator's CGO link dependency, is built in that repository, not here.
 
-<a id="组成"></a>
-<a id="layout"></a>
 ### 1.2 Build-source layout
 
 | Path | Role |
@@ -143,8 +136,6 @@ candidates. These materials support release review, not legal certification.
 | `deps/vmlinux/*.config` | Common and per-architecture kernel configuration fragments |
 
 
-<a id="12-目录布局"></a>
-<a id="12-directory-layout"></a>
 ### 1.3 Directory layout
 
 ```text
@@ -167,17 +158,12 @@ build/
 
 Native builds (host = target) create `bin/<name> → <arch>/<name>` for their public binary entries. Cross-builds do not update host entry symlinks, avoiding a link to a binary the host cannot execute. Optional gateway output appears only when that target is built.
 
-<a id="13-幂等与缓存"></a>
-<a id="13-idempotency-and-caching"></a>
 ### 1.4 Idempotency and caching
 
 - **Artifact reuse:** EROFS and Envd outputs are reused when their target files already exist; remove outputs to force those builds. Kernel output is also governed by tracked inputs: changes to its build script, common/architecture config fragments or patches trigger configuration reevaluation and incremental Kbuild rather than unconditional existence-only skipping.
 - **Tarball cache:** `build/tarball/` caches by filename; hits avoid downloading. Extraction uses an `.extracted` marker for idempotency.
 - **`make clean`:** removes `bin/` and target build output while **retaining** tarball caches and architecture-neutral `build/src/*` source trees. Kernel source trees may contain unexported patch-development work and must not be silently discarded.
 
-<a id="2-构建目标"></a>
-<a id="build"></a>
-<a id="构建"></a>
 ## 2. Build targets
 
 ```bash
@@ -192,7 +178,6 @@ make help       # List targets
 
 Build duration depends on the host, toolchain and cache state; these commands do not carry a fixed timing guarantee.
 
-<a id="21-erofsmake-erofs"></a>
 ### 2.1 EROFS (`make erofs`)
 
 `deps/build-erofs.sh` extracts erofs-utils into `build/<arch>/src/erofs-utils/`, keeping one tree per architecture because this autotools path does not support out-of-source builds. It runs `autoreconf` and `configure` with compression/FUSE/network features disabled, builds only the `lib`, `mkfs` and `fsck` subdirectories, and writes `bin/<arch>/{mkfs.erofs,fsck.erofs}`.
@@ -201,7 +186,6 @@ Build duration depends on the host, toolchain and cache state; these commands do
 - Configure requires libuuid and has no `--without-uuid` path. Cross-compilation requires multiarch `uuid-dev:<arch>`; the script checks it first and prints apt guidance (§4.2).
 - Host build tools: `autoconf automake libtool pkg-config make gcc g++`.
 
-<a id="22-vmlinuxmake-vmlinux"></a>
 ### 2.2 vmlinux (`make vmlinux`)
 
 The target invokes the fetch, patch-application and build stages of `deps/build-vmlinux.sh` when its output needs rebuilding (§3). After applying `deps/linux-patches/*.patch`, it combines `deps/vmlinux/sandbox-common.config` with `sandbox-<arch>.config` into `arch/<kbuild_arch>/configs/sandbox_defconfig`, runs `make sandbox_defconfig` and `make olddefconfig` to resolve Kconfig dependencies, then `make -j$(nproc) <target>`, and copies out `bin/<arch>/vmlinux`.
@@ -213,7 +197,6 @@ The target invokes the fetch, patch-application and build stages of `deps/build-
 - Host requirements: `bc bison flex make tar pkg-config gcc`, libelf headers (`libelf-dev` / `elfutils-libelf-devel`) and libssl headers (`libssl-dev` / `openssl-devel`). The headers support host Kbuild tools such as fixdep/sign-file; they are not linked into vmlinux.
 - The two-fragment configuration contract and important enabled/disabled options are documented in [vmlinux.md](../docs/vmlinux.md), sections 2–3.
 
-<a id="23-envdmake-envd"></a>
 ### 2.3 Envd (`make envd`)
 
 `deps/build-envd.sh` extracts the e2b-dev/runtime source tarball into architecture-neutral `build/src/e2b-infra/` and builds `packages/envd` with `GOWORK=off GOOS=linux CGO_ENABLED=0 -trimpath -ldflags "-s -w"`, producing `bin/<arch>/envd`. GOARCH selects the target without a cross C toolchain.
@@ -226,7 +209,6 @@ The target invokes the fetch, patch-application and build stages of `deps/build-
 
 `deps/build-versitygw.sh` builds the configured gateway source for the selected Go architecture. This target is not in `build`. It is available for local/single-node `builder.files_storage` deployments that need an S3-compatible gateway rather than a cloud object store. Its source, hash and source-directory variables are `VERSITYGW_TARBALL`, `VERSITYGW_TARBALL_SHA256` and `VERSITYGW_SRC`.
 
-<a id="3-patch-开发循环vmlinux"></a>
 ## 3. Kernel patch development
 
 The STAGE dispatcher in `deps/build-vmlinux.sh` manages vmlinux patches through these Make targets:
@@ -258,7 +240,6 @@ The patch-application sanity checks must **never silently overwrite work in prog
 
 The current kernel patch set is architecture-neutral and touches `drivers/virtio/virtio_balloon.c`; both architectures use the same patches and their own defconfig.
 
-<a id="4-交叉编译"></a>
 ## 4. Cross-compilation
 
 ### 4.1 TARGET_ARCH
@@ -274,7 +255,6 @@ The default is `uname -m`. When `HOST_ARCH != TARGET_ARCH`, cross-compilation is
 make TARGET_ARCH=aarch64 build
 ```
 
-<a id="42-工具链准备x86_64-host--aarch64-为例反向对称"></a>
 ### 4.2 Toolchain preparation (x86_64 host to aarch64)
 
 The reverse direction follows the same model.
@@ -291,16 +271,13 @@ sudo apt install libuuid1:arm64 uuid-dev:arm64
 
 Envd is pure Go with `CGO_ENABLED=0`; GOARCH cross-compiles it without these C packages. Scripts check missing toolchains (`${CROSS_PREFIX}gcc`, `uuid-dev:<arch>`) up front and print installation guidance instead of failing later with a large linker error.
 
-<a id="5-wsl2-注意"></a>
 ## 5. WSL2 notes
 
 A kernel source tree performs many small-file operations. WSL2 builds on `/mnt/<drive>/` (DrvFs) may incur extra filesystem overhead; no fixed slowdown factor is implied.
 
 For **vmlinux**, the Makefile detects a kernel release containing `microsoft` together with a working directory under `/mnt/`. If `$HOME/linux-build/src` exists, it defaults `LINUX_BUILD_SRC` and `LINUX_BUILD_OUT` under `$HOME/linux-build/`, allowing the build to use a Linux-native filesystem.
 
-<a id="documentation"></a>
-<a id="文档"></a>
 ## 6. See also
 
 - [vmlinux.md](../docs/vmlinux.md): kernel configuration, architecture differences and design decisions.
-- `kuasar-sandbox/docs/release.md`: independent runtime/vmlinux versions and aggregate releases. Runtime-required artifacts from this directory are collected through `kuasar-sandbox/release/bin-inputs.manifest` into shared `bin/`.
+- [Release](https://github.com/kuasar-sandbox/kuasar-sandbox/blob/main/docs/release.md): independent runtime/vmlinux versions and aggregate releases. Runtime-required artifacts from this directory are collected through `kuasar-sandbox/release/bin-inputs.manifest` into shared `bin/`.
