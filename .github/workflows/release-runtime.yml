@@ -167,7 +167,7 @@ jobs:
               | select(test("^https://api.github.com/repos/kuasar-sandbox/sandboxer/releases/assets/[0-9]+$"))
             ' sandboxer-release.json)
             curl --fail --show-error --silent --location \
-              --retry 4 --retry-all-errors --connect-timeout 10 --max-time 120 \
+              --retry 4 --retry-all-errors --connect-timeout 10 --max-time 600 \
               -H "Accept: application/octet-stream" \
               -H "Authorization: Bearer $GH_TOKEN" \
               -H "X-GitHub-Api-Version: 2022-11-28" \
