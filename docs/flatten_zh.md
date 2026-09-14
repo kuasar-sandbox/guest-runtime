@@ -6,7 +6,7 @@
 **tarstream 镜像工件**,供 `manifest-ctl` 或沙箱的只读根 `boot.root.base` 使用。
 正常导出的 `.img` 含名为 `image` 的 payload 和摘要 marker,不是可直接交给
 `mount -t erofs` 的裸文件系统。平台 reader 负责解封装;直接挂载前须先提取
-`image` payload(§2.6、§3.1)。
+`image` payload(§2.5、§3.1)。
 
 `flatten-ctl` 强调**确定性**——相同的不可变源、runtime config、工具版本与
 构建设置应产出相同的 payload 字节,使后续 chunk dedup、manifest content-key
@@ -31,7 +31,7 @@
 输入,三选一:
 
 - **远程 registry 镜像**——镜像引用如 `nginx:1.27`、`gcr.io/ns/app@sha256:...`;
-  `flatten-ctl` 直接拉取并展平(§2.4),拉取凭据经 `FLATTEN_REGISTRY_*` 环境变量注入,
+  `flatten-ctl` 直接拉取并展平(§2.3),拉取凭据经 `FLATTEN_REGISTRY_*` 环境变量注入,
   层 blob 落入可跨进程共享的本地 OCI-layout 缓存;
 - **Docker archive**(`docker save` 产物的 tar 流,stdin 或本地文件);
 - **已展平的 rootfs 目录**——位置参数是一个本地目录时,mkfs.erofs 直接就地读取
@@ -65,6 +65,8 @@ flowchart TD
 
 ## 2. 命令行接口
 
+CLI 不提供 `flatten-ctl verify` 双次导出比较命令. 确定性通过单元测试和可复现的 Manifest key 检查.
+
 七个子命令:`export`(展平为镜像工件,可选直接入库)、`referer`(OCI Referrers
 lookup/put 原子操作)、`info`(检视镜像工件 / `manifest://` 引用)、`cache`
 (检视/回收本地拉取缓存)、`config`(输出/校验 flatten 配置)、`tar`(通用 tar 提取/封装)、`mountpoint`(自 bind 造挂载点,
@@ -73,11 +75,11 @@ guest 内导出配套)。
 | 子命令 | 用途 |
 |--------|------|
 | `export` | registry 镜像 / docker-archive / rootfs 目录 → 确定性 EROFS 的 **tarstream 镜像工件**(条目 `image`,约定后缀 `.img`);`--upload` 时顺带 ingest 进 store 并打印 manifest key |
-| `referer` | `lookup` 查询源镜像是否已有可复用 manifest id;`put` 将宿主上传得到的 manifest id 回写到源 repo 的 OCI Referrers(§2.4) |
+| `referer` | `lookup` 查询源镜像是否已有可复用 manifest id;`put` 将宿主上传得到的 manifest id 回写到源 repo 的 OCI Referrers(§2.3) |
 | `info` | 读镜像工件(经信封)的 EROFS superblock + 末尾 ZIP 里的 OCI runtime config 并打印 |
-| `cache` | `cache info` 看缓存占用、`cache gc` 按 LRU 回收到上限(§2.5) |
+| `cache` | `cache info` 看缓存占用、`cache gc` 按 LRU 回收到上限(§2.4) |
 | `config` | 输出规范化的 flatten 配置(`--config`/`FLATTEN_CONFIG`,加载即校验),或 `--template` 骨架;`-o <file>` 写文件(默认 stdout) |
-| `tar` | 通用 tar 提取(全路径声明洞精确)与单文件封装(§2.6) |
+| `tar` | 通用 tar 提取(全路径声明洞精确)与单文件封装(§2.5) |
 | `mountpoint` | `mountpoint <dir>`:MkdirAll + 自 bind,使 `<dir>` 成为挂载点 → `export --skip-mounts` 自动排除之;guest 内导出自身 rootfs 时作 tmpdir/输出落点(防自吞,Linux only) |
 
 `export` 的输入是**位置参数**。先识别本地目录;目录源拒绝 registry/archive 强制
@@ -117,7 +119,7 @@ flatten-ctl export [flags] <ref|path|->
   --upload                展平后把 EROFS ingest 进 store,stdout 打印 manifest key
   --manifest-config <p>   manifest 配置 YAML(覆盖 MANIFEST_CONFIG env);--upload 必需
   --config <p>            flatten 配置 YAML(覆盖 FLATTEN_CONFIG env):tmpdir/platform/
-                          tls/cache/referer(详见 §2.4)
+                          tls/cache/referer(详见 §2.3)
   --platform <os/arch>    覆盖配置里的拉取 platform(os/arch[/variant])
   --tmpdir <dir>          覆盖配置 tmpdir(自动创建)。guest 内导出自身 rootfs 时
                           必须指向 mountpoint 子命令造出的挂载点(连同 mkfs 临时
@@ -125,7 +127,7 @@ flatten-ctl export [flags] <ref|path|->
   --insecure              registry 源:允许 plain HTTP;TLS 证书校验由配置中的 tls.* 独立控制
   --no-progress           禁用 stderr 进度输出
 
-  # 远程 registry 源(详见 §2.4)
+  # 远程 registry 源(详见 §2.3)
   --print-digest          stdout 打印解析后的源镜像 digest(repo@sha256:..);与 --output - 互斥
   --registry / --archive  强制把位置参数当 registry 引用 / 本地文件(消歧)
   # rootfs 目录源(位置参数是本地目录时;见下文)
@@ -188,12 +190,7 @@ flatten-ctl export --skip var/cache --runtime-config rc.json -output new.img /sr
 flatten-ctl export --skip-mounts --upload --manifest-config m.yaml /srv/rootfs
 ```
 
-### 2.2 (已移除)
-
-`flatten-ctl verify` 已移除:确定性由单元测试与 manifest key 的可复现性背书,
-双跑比对不再提供增量价值。(§ 编号保留占位,避免跨仓引用重排。)
-
-### 2.3 `flatten-ctl info` — 检视镜像
+### 2.2 `flatten-ctl info` — 检视镜像
 
 ```
 flatten-ctl info [--json] [--manifest-config <path>] <path|manifest://hex>
@@ -261,7 +258,7 @@ flatten-ctl info --json my-app.img | jq '.config.Entrypoint'
 
 直接使用 ZIP 工具时,先提取原始 `image` payload(§3.1)。
 
-### 2.4 远程拉取、本地缓存与 Referrers 回写
+### 2.3 远程拉取、本地缓存与 Referrers 回写
 
 位置参数判定为 registry 引用时(§2 判别规则),`flatten-ctl` 经 [go-containerregistry]
 直接拉取、展平,无需先 `docker save`。所有 registry 行为由 **`--config` YAML**
@@ -359,7 +356,7 @@ referrer(owner token / id / 时间)对能读该 repo 者可见——owner 经 HM
 
 [go-containerregistry]: https://github.com/google/go-containerregistry
 
-### 2.5 `flatten-ctl cache` — 检视/回收拉取缓存
+### 2.4 `flatten-ctl cache` — 检视/回收拉取缓存
 
 ```
 flatten-ctl cache info [--config <p>] [--cache-dir <D>]
@@ -373,7 +370,7 @@ flatten-ctl cache gc   [--config <p>] [--cache-dir <D>] [--cache-max-size <S>] [
 执行回收(`export` 每次拉取后也会顺带回收)。grace 期与并发写入仍可能使占用
 暂时超过目标,这不是即时文件系统配额。
 
-### 2.6 `flatten-ctl tar` — tar 流提取与单文件稀疏流
+### 2.5 `flatten-ctl tar` — tar 流提取与单文件稀疏流
 
 tar 工具面,两个方向都是**纯 Go、零 tar 二进制依赖**:
 
@@ -420,7 +417,7 @@ stdin 报错引导)。`..` 成员跳过告警,穿 symlink 写出是硬错误;条
 取 `uid:gid`:数字直用,**名字**则按解包目标根的 `/etc/passwd`/`/etc/group` 解析
 (Docker `COPY --chown=name` 同款;CGO 关,os/user 直读文件不经 NSS);`user`(无组)
 取该用户主组,纯数字 `1000` 镜像为 `1000:1000`。node-ctl 的 COPY step 即以
-`extract --dense --chown` 把上下文 tar 摊进 guest rootfs(见 [模板构建(target-aware、最多三阶段的流水线,构建在沙箱内进行)](https://github.com/kuasar-sandbox/orchestrator/blob/main/docs/node-build_zh.md#12-模板构建target-aware最多三阶段的流水线构建在沙箱内进行))。
+`extract --dense --chown` 把上下文 tar 摊进 guest rootfs(见 [按目标执行与发布](https://github.com/kuasar-sandbox/orchestrator/blob/main/docs/node-build_zh.md#5-按目标执行与发布))。
 
 **stream** 把**一个文件**封装为 tarstream(一个稀疏 payload +
 `.kuasar.digest.<hex>` marker metadata,`accelerator/pkg/tarstream`)。writer 在写 payload
@@ -553,7 +550,7 @@ override 在上的合并,`Volumes` 并入 `mounts`。因此 image config 有 Ent
 - **docker-archive**:输入 tar 内含 `manifest.json`(层顺序 + image config 路径)与
   各层 tarball;先解到临时目录,按 `manifest.json` 顺序逐层打开(gzip 层透明解压);
 - **registry**([accelerator/pkg/remote](https://github.com/kuasar-sandbox/accelerator/tree/main/pkg/remote)):层 blob 经本地 OCI-layout 缓存,按媒体类型解压
-  (gzip/zstd)成同样的未压缩 tar 流(§2.4)。
+  (gzip/zstd)成同样的未压缩 tar 流(§2.3)。
 
 `Build` 把每层 tar entry 流式应用到磁盘上的临时 staging rootfs:上层 entry 覆盖下层
 同路径 entry;每个 entry 落盘后按 tar 头 chown+chmod 保留属主与权限位(含
@@ -666,7 +663,7 @@ OCI image config 字段繁多,大量与启动无关:`created` / `author` / `hist
 
 ### 5.5 不实现 / 暂不实现的功能
 
-- **任意 OCI layout 目录直读**:支持 registry 拉取(§2.4),缓存也使用 OCI layout,
+- **任意 OCI layout 目录直读**:支持 registry 拉取(§2.3),缓存也使用 OCI layout,
   但不把任意该格式目录解码为 OCI 镜像。可先用
   `skopeo copy oci:./dir docker-archive:x.tar` 转换,或用 crane 推到 registry 后拉取。
   直接传普通本地目录会选择 rootfs 导出,不会识别 OCI layout。
@@ -684,7 +681,7 @@ OCI image config 字段繁多,大量与启动无关:`created` / `author` / `hist
 1 GiB/3–5 秒或 ZIP 小于 10 ms 保证。
 
 确定性自检:用相同配置/工具链对不可变输入导出两次,按目标比较 payload/工件
-hash,或复现 manifest key。单元测试覆盖确定性转换;`verify` 子命令已移除(§2.2)。
+hash,或复现 manifest key。单元测试覆盖确定性转换;`verify` 子命令已移除(§2)。
 
 `flatten-ctl info` 不解压或读取整个 EROFS,只经对应 payload reader 读 superblock
 (128 字节)、扫描 ZIP 尾部并解析单个 stored entry。manifest 路径可能触发网络/

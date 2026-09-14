@@ -6,10 +6,8 @@
 
 This document defines image packaging, filesystem layout, versioning and consumption. The startup rootfs assembly, vsock control plane, stdio MUX and exec/attach/quiesce ABI of `sandbox-init` are maintained in [the sandboxer guest ABI specification](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/sandbox-init.md).
 
-<a id="1-概述"></a>
 ## 1. Overview
 
-<a id="11-职责边界"></a>
 ### 1.1 Ownership boundaries
 
 | Component | Responsibility |
@@ -21,7 +19,6 @@ This document defines image packaging, filesystem layout, versioning and consump
 
 `sandbox-runtime.bundle` does not contain the user rootfs, user dependencies, guest kernel or Cloud Hypervisor. The user rootfs comes from `boot.root.base`/`boot.disks[]`. The kernel is published in the vmlinux package; the VMM is published by sandboxer.
 
-<a id="12-系统位置"></a>
 ### 1.2 Place in the system
 
 ```text
@@ -37,7 +34,6 @@ This document defines image packaging, filesystem layout, versioning and consump
 
 The image is a node-shared artifact. Sandboxes using the same version on a node map the same host file through virtio-pmem and DAX instead of copying runtime file pages independently.
 
-<a id="13-设计目标"></a>
 ### 1.3 Design goals
 
 - **One image:** the E2B and builder runtimes share one runtime image.
@@ -46,7 +42,6 @@ The image is a node-shared artifact. Sandboxes using the same version on a node 
 - **Clear ownership:** sandboxer owns the PID 1 protocol; guest-runtime owns image packaging and guest payload.
 - **Independent releases:** the runtime bundle can be published through the repository's dedicated release line and selected independently for rollback.
 
-<a id="2-镜像布局"></a>
 ## 2. Image layout
 
 The image root contains:
@@ -98,7 +93,6 @@ Raw EROFS starts at offset 0. The trailing ZIP contains only one zero-size marke
 
 The `digest:` identity covers every byte before the ZIP, including EROFS and alignment padding. The builder computes carrier identity while copying EROFS, then writes the marker. Run/restore reads the marker at EOF without rescanning EROFS. Final bundle size is aligned to 2 MiB, so Cloud Hypervisor can map it directly without offset support; EROFS uses its own superblock to ignore trailing padding and ZIP.
 
-<a id="3-构建"></a>
 ## 3. Build
 
 Common entry points:
@@ -124,14 +118,12 @@ The target's input and build sequence is:
 
 See [the native-build workflow](../native-deps/README.md) for mkfs.erofs/Envd builds and the [sandboxer guest ABI](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/sandbox-init.md) for sandbox-init.
 
-<a id="31-架构"></a>
 ### 3.1 Architectures
 
 The runtime image is built for the target architecture. Its build-directory filename is always `sandbox-runtime.bundle`. `/sbin/init`, `envd`, `flatten-ctl` and `mkfs.erofs` inside the EROFS prefix must all be executable files for that same target architecture.
 
 `TARGET_ARCH=amd64` normalizes to `x86_64`; `TARGET_ARCH=arm64` normalizes to `aarch64`. Cross-builds do not update host-architecture symlinks, avoiding host entry points to non-runnable binaries. The host packing tool remains separate from this target payload.
 
-<a id="4-运行期消费契约"></a>
 ## 4. Runtime consumption contract
 
 `sandbox-ctl` supplies `sandbox-runtime.bundle` to Cloud Hypervisor as a read-only virtio-pmem device. The guest kernel mounts the pmem image and executes `/sbin/init`, which is sandbox-init.
@@ -145,7 +137,6 @@ Key constraints:
 
 `sandbox-runtime.bundle` does not participate in deriving manifest keys, API keys or access tokens. Those keys are managed by orchestrator/placer/providers and Manifest configuration; the runtime image carries execution tools only.
 
-<a id="5-发布件"></a>
 ## 5. Release artifacts
 
 The trusted `Runtime Release` workflow on this repository's main branch independently publishes the runtime image from the source branch and exact SHA pinned by the coordinator. Component `main` is used for the development line; `release/vX.Y.x` is used for runtime maintenance. Runtime, aggregate and vmlinux versions are independent:
@@ -170,10 +161,8 @@ The project repository's `release-vX.Y.Z` aggregate release uploads the platform
 
 Envd is already embedded in the image and is not published separately as `bin/envd`. `fsck.erofs` is a source-tree diagnostic/test helper, not part of the general component packages.
 
-<a id="6-可靠性与升级"></a>
 ## 6. Reliability and upgrades
 
-<a id="61-节点升级"></a>
 ### 6.1 Node upgrades
 
 A node can keep multiple runtime images, for example:
@@ -185,17 +174,14 @@ A node can keep multiple runtime images, for example:
 
 New sandboxes use the new version; running sandboxes retain their original pmem file. Before deleting an old image, ensure no running VM or snapshot awaiting restore depends on it.
 
-<a id="62-整机重启"></a>
 ### 6.2 Host reboot
 
 Sandboxes do not automatically resume after a host reboot. On node startup, the runtime image must still exist in the deployment directory for subsequent sandbox creation.
 
-<a id="63-回滚"></a>
 ### 6.3 Rollback
 
 Point configuration back to an old runtime file and restart node-ctl, or have the scheduling layer stop placing new sandboxes on the node. Already running sandboxes are unaffected by the new configuration.
 
-<a id="7-排错"></a>
 ## 7. Troubleshooting
 
 | Symptom | Check |

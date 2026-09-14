@@ -1,18 +1,12 @@
 [English](flatten.md) | [简体中文](flatten_zh.md)
 
-<a id="flatten--容器镜像展平工具"></a>
-
 # flatten — container-image flattening tool
 
-Merge the layers of an OCI/Docker image into one EROFS filesystem payload, packaged as a **tarstream image artifact** for `manifest-ctl` or the sandbox's read-only `boot.root.base`. A normal `.img` export contains a payload named `image` plus a digest marker; it is not a bare filesystem suitable for direct `mount -t erofs`. Platform readers unwrap it. For a direct filesystem mount, first extract the `image` payload (§2.6, §3.1).
+Merge the layers of an OCI/Docker image into one EROFS filesystem payload, packaged as a **tarstream image artifact** for `manifest-ctl` or the sandbox's read-only `boot.root.base`. A normal `.img` export contains a payload named `image` plus a digest marker; it is not a bare filesystem suitable for direct `mount -t erofs`. Platform readers unwrap it. For a direct filesystem mount, first extract the `image` payload (§2.5, §3.1).
 
 `flatten-ctl` emphasizes **determinism**: the same immutable source, runtime configuration, tool versions and build settings are intended to produce identical payload bytes, keeping downstream chunk deduplication and manifest content keys stable. The payload **embeds the OCI runtime configuration** in a trailing ZIP, so sandbox startup obtains Entrypoint, Env, WorkingDir and other launch settings without a separate index file.
 
-<a id="1-概述"></a>
-
 ## 1. Overview
-
-<a id="11-为什么要展平"></a>
 
 ### 1.1 Why flatten images
 
@@ -22,13 +16,11 @@ Container images contain several tar layers. A container runtime normally merges
 - Sandboxes can share immutable backing data through the host data/cache paths. The amount of sharing depends on that path and the workload; flattening alone does not guarantee a particular memory-density gain.
 - EROFS is read-only and immutable, matching the manifest layer's chunk and content-key addressing.
 
-<a id="12-输入与输出"></a>
-
 ### 1.2 Inputs and output
 
 Choose one of three inputs:
 
-- **Remote registry image:** a reference such as `nginx:1.27` or `gcr.io/ns/app@sha256:...`. `flatten-ctl` pulls and flattens it directly (§2.4). `FLATTEN_REGISTRY_*` environment variables supply credentials, and layer blobs use a local OCI-layout cache that can be shared across processes.
+- **Remote registry image:** a reference such as `nginx:1.27` or `gcr.io/ns/app@sha256:...`. `flatten-ctl` pulls and flattens it directly (§2.3). `FLATTEN_REGISTRY_*` environment variables supply credentials, and layer blobs use a local OCI-layout cache that can be shared across processes.
 - **Docker archive:** a tar stream produced by `docker save`, supplied on stdin or from a local file.
 - **Already-flattened rootfs directory:** if the positional argument is a local directory, mkfs.erofs reads it in place without a staging-tree copy or source mutation (§2.1). This still reads source data and writes the output.
 
@@ -37,8 +29,6 @@ Arbitrary OCI-layout directories are not accepted as OCI image sources; see §5.
 The output is **one tarstream artifact**: an `image` payload containing `EROFS + trailing ZIP`, followed by the platform digest marker (§3). The ZIP contains the projected OCI runtime configuration. Registry and docker-archive layers feed the same flattening sink; equivalent uncompressed layers and runtime configuration, built with the same tools/settings, produce the same EROFS payload. Directory export is also deterministic for an unchanged tree and configuration: `-T0 --ignore-mtime` normalizes timestamps in mkfs without modifying the tree. Artifact reproducibility additionally includes the authoritative sparse map and wrapper encoding.
 
 Flattening itself does not sign, encrypt or content-address the data. Optional `--upload` invokes the next manifest-ingest stage, which handles encryption and deduplication; see [manifest.md](https://github.com/kuasar-sandbox/accelerator/blob/main/docs/manifest.md). Do not infer an image-signature verification step from manifest integrity or encryption.
-
-<a id="13-在系统中的位置"></a>
 
 ### 1.3 Position in the system
 
@@ -54,20 +44,20 @@ flowchart TD
   M --> B["sandbox-ctl: manifest:// base"]
 ```
 
-<a id="2-命令行接口"></a>
-
 ## 2. Command-line interface
+
+The CLI does not provide the `flatten-ctl verify` duplicate-export comparison command. Determinism is checked through unit tests and reproducible Manifest keys.
 
 There are seven subcommands: `export` creates an image artifact with optional upload; `referer` provides atomic OCI Referrers lookup/put operations; `info` inspects a local artifact or `manifest://` reference; `cache` inspects or reclaims the pull cache; `config` prints or validates flatten configuration; `tar` extracts archives or packages one file; and `mountpoint` creates a self bind mount for in-guest export.
 
 | Subcommand | Purpose |
 |---|---|
 | `export` | Registry image, docker-archive or rootfs directory → deterministic EROFS in a **tarstream image artifact** (`image` entry, conventional `.img` suffix); `--upload` also ingests it into the store and prints the manifest key. |
-| `referer` | `lookup` checks for a reusable manifest ID associated with the source image; `put` writes a host-uploaded manifest ID to the source repository's OCI Referrers (§2.4). |
+| `referer` | `lookup` checks for a reusable manifest ID associated with the source image; `put` writes a host-uploaded manifest ID to the source repository's OCI Referrers (§2.3). |
 | `info` | Read the payload's EROFS superblock and trailing OCI configuration ZIP through the artifact envelope. |
-| `cache` | `cache info` reports occupancy; `cache gc` reclaims by LRU to the requested limit (§2.5). |
+| `cache` | `cache info` reports occupancy; `cache gc` reclaims by LRU to the requested limit (§2.4). |
 | `config` | Print normalized, validated configuration from `--config`/`FLATTEN_CONFIG`, or a `--template` skeleton; `-o <file>` writes a file instead of stdout. |
-| `tar` | General tar extraction with exact declared-hole handling, and single-file packaging (§2.6). |
+| `tar` | General tar extraction with exact declared-hole handling, and single-file packaging (§2.5). |
 | `mountpoint` | `mountpoint <dir>` performs MkdirAll and a self bind mount, letting `export --skip-mounts` exclude it. Use it for scratch/output when a guest exports its own rootfs, preventing self-inclusion. Linux only; mounting requires the corresponding privilege. |
 
 `export` uses a **positional input argument**. It first recognizes a local directory; directory input rejects the registry/archive forcing flags. Otherwise the default classification is:
@@ -100,7 +90,7 @@ flatten-ctl export [flags] <ref|path|->
   --upload                Ingest the payload into the store and print its manifest key.
   --manifest-config <p>   Manifest YAML, overriding MANIFEST_CONFIG; needed for --upload.
   --config <p>            Flatten YAML, overriding FLATTEN_CONFIG: tmpdir/platform/
-                          tls/cache/referer (§2.4).
+                          tls/cache/referer (§2.3).
   --platform <os/arch>    Override the pull platform (os/arch[/variant]).
   --tmpdir <dir>          Override scratch parent; created if missing. For in-guest root
                           export, use a mountpoint-created directory, so --skip-mounts
@@ -109,7 +99,7 @@ flatten-ctl export [flags] <ref|path|->
                           separately by tls.* in the configuration.
   --no-progress           Disable stderr progress.
 
-  # Remote registry source (§2.4)
+  # Remote registry source (§2.3)
   --print-digest          Print resolved source repo@sha256:... to stdout;
                           mutually exclusive with --output -.
   --registry / --archive  Force registry / local-archive interpretation.
@@ -167,15 +157,7 @@ flatten-ctl export --skip var/cache --runtime-config rc.json -output new.img /sr
 flatten-ctl export --skip-mounts --upload --manifest-config m.yaml /srv/rootfs
 ```
 
-<a id="22-已移除"></a>
-
-### 2.2 (Removed)
-
-`flatten-ctl verify` has been removed. Determinism is checked through unit tests and reproducible manifest keys; the CLI no longer offers the duplicate-export comparison subcommand. The section number is retained to preserve cross-repository references.
-
-<a id="23-flatten-ctl-info--检视镜像"></a>
-
-### 2.3 `flatten-ctl info` — inspect an image
+### 2.2 `flatten-ctl info` — inspect an image
 
 ```text
 flatten-ctl info [--json] [--manifest-config <path>] <path|manifest://hex>
@@ -241,9 +223,7 @@ flatten-ctl info --json my-app.img | jq '.config.Entrypoint'
 
 To use a ZIP tool directly, extract the raw `image` payload first (§3.1).
 
-<a id="24-远程拉取本地缓存与-referrers-回写"></a>
-
-### 2.4 Remote pulling, local caching and Referrers writeback
+### 2.3 Remote pulling, local caching and Referrers writeback
 
 For a registry input (§2), `flatten-ctl` uses [go-containerregistry] to pull and flatten directly, without `docker save`. Registry behavior comes from **`--config` YAML** or `FLATTEN_CONFIG`; credentials stay outside the file:
 
@@ -273,8 +253,6 @@ The artifact type is fixed at `application/vnd.kuasar.flatten-manifest.v1` and c
 **Multiple architectures:** a registry reference can resolve to a manifest index. `platform` selects its concrete image before flattening. `Architecture` and `Os` are copied into config.json (§3.2); flattening itself does not validate that the resulting application can execute on the selected sandbox.
 
 **Determinism:** tags are mutable, including `:latest`; pin `@sha256:` for a reproducible source. `export` reports the resolved `repo@sha256:...` on stderr unless `--no-progress` is set; `--print-digest` also writes it to stdout. A digest pins source bytes, while complete output reproducibility additionally requires the same configuration, toolchain and build settings (§3.3). A tag is only as stable as its current target.
-
-<a id="referrers-原子操作referer-lookup--referer-put"></a>
 
 #### Atomic Referrers operations (`referer lookup` / `referer put`)
 
@@ -313,9 +291,7 @@ The host normally computes the owner token as `HMAC-SHA256(key = tenant MANIFEST
 
 [go-containerregistry]: https://github.com/google/go-containerregistry
 
-<a id="25-flatten-ctl-cache--检视回收拉取缓存"></a>
-
-### 2.5 `flatten-ctl cache` — inspect and reclaim the pull cache
+### 2.4 `flatten-ctl cache` — inspect and reclaim the pull cache
 
 ```text
 flatten-ctl cache info [--config <p>] [--cache-dir <D>]
@@ -324,9 +300,7 @@ flatten-ctl cache gc   [--config <p>] [--cache-dir <D>] [--cache-max-size <S>] [
 
 `cache` manages a **persistent** cache with explicit `cache.dir`. The default temporary cache is removed after export and needs no separate GC. `cache info` reports directory, blob count, occupancy and limit. `cache gc` takes flock and reclaims by LRU to the configured or overridden `--cache-max-size` limit; explicit GC with `"0"` empties it except for entries in the grace period. `--cache-dir` overrides the configuration's directory. A long-running installation can schedule GC periodically; export also performs reclamation after pulling. The grace period and concurrent writes mean this is a reclamation policy, not an instantaneous filesystem quota.
 
-<a id="26-flatten-ctl-tar--tar-流提取与单文件稀疏流"></a>
-
-### 2.6 `flatten-ctl tar` — tar extraction and single-file sparse streams
+### 2.5 `flatten-ctl tar` — tar extraction and single-file sparse streams
 
 Both directions use **pure Go and require no tar executable**:
 
@@ -357,7 +331,7 @@ Rule syntax is `path-in-tar[:destination]`:
 | `dir/:` | Extract into the current directory. |
 | `:dir/` | Map the whole archive root into `dir/`. |
 
-Without rules, extract all entries into the current directory. `--chown` and `--chmod` override ownership or permissions for each written entry; `--no-chown` skips ownership restoration. `--chown` accepts `uid:gid`; numeric values are used directly, while names are resolved against the extraction target's `/etc/passwd` and `/etc/group`, as in Docker `COPY --chown=name`. With CGO disabled, the file-based lookup does not use NSS. A username without a group uses that user's primary group; numeric `1000` maps to `1000:1000`. The node-ctl COPY step uses `extract --dense --chown` to unpack the context tar into guest rootfs; see [Template builds (target-aware, up to three phases, inside Sandboxes)](https://github.com/kuasar-sandbox/orchestrator/blob/main/docs/node-build.md#12-template-builds-target-aware-up-to-three-phases-inside-sandboxes).
+Without rules, extract all entries into the current directory. `--chown` and `--chmod` override ownership or permissions for each written entry; `--no-chown` skips ownership restoration. `--chown` accepts `uid:gid`; numeric values are used directly, while names are resolved against the extraction target's `/etc/passwd` and `/etc/group`, as in Docker `COPY --chown=name`. With CGO disabled, the file-based lookup does not use NSS. A username without a group uses that user's primary group; numeric `1000` maps to `1000:1000`. The node-ctl COPY step uses `extract --dense --chown` to unpack the context tar into guest rootfs; see [Target-aware execution and publication](https://github.com/kuasar-sandbox/orchestrator/blob/main/docs/node-build.md#5-target-aware-execution-and-publication).
 
 **`stream`** wraps **one file** as a tarstream: a sparse payload plus `.kuasar.digest.<hex>` marker metadata, implemented by [accelerator/pkg/tarstream](https://github.com/kuasar-sandbox/accelerator/tree/main/pkg/tarstream). The writer computes the digest while writing the payload, without a second data read. File-source holes come from filesystem metadata (SEEK_HOLE). Stdin **requires `--size N`**, because the tar header precedes data and must contain the size. It streams directly without disk staging and is encoded densely: a one-shot stream has no authoritative hole map, and content is not scanned to invent one. `--size` is only valid for stdin; file size comes from the filesystem.
 
@@ -386,11 +360,7 @@ gen-disk | flatten-ctl tar stream --size $((16<<20)) disk.img:- | flatten-ctl ta
 
 The programmatic API in `accelerator/pkg/tarstream` includes `WriteTo` (any `sparse.Source`, returning the digest computed during writing), `ReadFrom` / `ReadSeekFrom` (exact sparse-map round trips and random access within tar), `SourceFrom` (open a stream as a `sparse.Source` for manifest ingest and other consumers), and `SourceAt` (random access; complete platform artifacts expose their marker through optional `Digester`). This repository and downstream repositories can import it.
 
-<a id="3-镜像格式"></a>
-
 ## 3. Image format
-
-<a id="31-字节布局"></a>
 
 ### 3.1 Byte layout
 
@@ -440,8 +410,6 @@ Healthcheck      *Healthcheck,omitempty   (Test/Interval/Timeout/StartPeriod/Ret
 
 Unlisted fields such as `OnBuild`, `ArgsEscaped`, `Domainname`, `Hostname`, `AttachStdin`, `Tty` and `MacAddress` are silently discarded because they are not part of this sandbox launch projection.
 
-<a id="33-跨次确定性来源"></a>
-
 ### 3.3 Sources of determinism
 
 The ZIP portion uses:
@@ -455,28 +423,20 @@ EROFS metadata normalization is described in §4.3.
 
 Equal runtime projections produce equal JSON and ZIP bytes. **Equal config alone does not imply equal whole-image hashes**: the rootfs data and metadata, selected build tools/options, and artifact sparse map/wrapper must also match. Preserve these inputs when comparing payload hashes or manifest keys.
 
-<a id="34-沙箱怎么用-configjson"></a>
-
 ### 3.4 How sandbox startup uses config.json
 
 Before starting the application, `sandbox-ctl run` reads the trailing ZIP through the `boot.root.base` payload view and uses the projection as a LaunchSpec fallback. Explicit `sandbox.yaml` `launch.*` settings take precedence. Image Env is merged below overrides, and Volumes contribute mounts. With a suitable image Entrypoint/Cmd, `launch.exec` can be omitted. The host consumer implementation is [image-default merging](https://github.com/kuasar-sandbox/sandboxer/blob/main/pkg/sandbox/imageconf.go).
 
-<a id="4-算法"></a>
-
 ## 4. Algorithm
-
-<a id="41-layer-迭代"></a>
 
 ### 4.1 Layer iteration
 
 The flattening engine's `Source` supplies bottom-to-top layers, each as an **uncompressed tar stream**, plus raw OCI image-config JSON. Two implementations share the deterministic `Build` sink:
 
 - **Docker archive:** its outer tar contains manifest.json, which gives layer order and config path, plus the layer tarballs. Extract into a temporary directory, then open layers in manifest order; gzip layers are transparently decoded.
-- **Registry:** [accelerator/pkg/remote](https://github.com/kuasar-sandbox/accelerator/tree/main/pkg/remote) reads blobs through the OCI-layout cache and decodes gzip/zstd according to media type into the same uncompressed layer stream (§2.4).
+- **Registry:** [accelerator/pkg/remote](https://github.com/kuasar-sandbox/accelerator/tree/main/pkg/remote) reads blobs through the OCI-layout cache and decodes gzip/zstd according to media type into the same uncompressed layer stream (§2.3).
 
 `Build` applies each layer's entries to a temporary staging rootfs. Upper entries replace lower entries at the same path. Tar ownership and mode, including setuid/setgid/sticky, are restored using chown followed by chmod, because chown can clear setuid/setgid. This requires root/CAP_CHOWN (§2). The image configuration is projected (§3.2) and appended as ZIP after filesystem generation. Directory sources use the separate in-place `BuildFromDir` path (§2.1).
-
-<a id="42-whiteout-处理"></a>
 
 ### 4.2 Whiteouts
 
@@ -486,8 +446,6 @@ OCI layers express deletion with special names:
 - `.wh..wh..opq` makes its directory opaque, hiding lower-layer entries beneath it.
 
 The merge engine recognizes these markers, removes the corresponding staged entries, and omits the markers themselves. The final EROFS contains the merged visible filesystem.
-
-<a id="43-元数据归一化确定性的关键"></a>
 
 ### 4.3 Metadata normalization
 
@@ -503,8 +461,6 @@ These rules keep output reproducible:
 | Extended attributes | Not written: `-x-1` disables them, and layer tar xattrs are not applied. This also means file capabilities or security labels stored in xattrs are not preserved by this path. |
 
 The generated EROFS features depend on mkfs.erofs. The native build pins erofs-utils **v1.9.1** and its source digest. To compare builds across nodes, use the same pinned executable and settings; the `MKFS_EROFS_PATH`/PATH override mechanism can otherwise select a different version.
-
-<a id="44-mkfserofs-调用"></a>
 
 ### 4.4 mkfs.erofs invocation
 
@@ -527,11 +483,7 @@ Build mkfs.erofs from the guest-runtime root with `make -C native-deps erofs`. `
 
 The filesystem format supports creation on a different host architecture. That does not translate application executables or remove the guest kernel's EROFS feature requirements.
 
-<a id="5-设计决策"></a>
-
 ## 5. Design decisions
-
-<a id="51-为什么是-erofs-而非-ext4--squashfs"></a>
 
 ### 5.1 Why EROFS rather than ext4 or squashfs
 
@@ -541,15 +493,11 @@ The filesystem format supports creation on a different host architecture. That d
 - **Squashfs comparison:** the platform selects uncompressed, chunk-oriented EROFS for its data and deduplication path. Squashfs can also share immutable backing data; there is no evidence here for a universal density disadvantage.
 - **Ext4 comparison:** ext4 supplies the writable upper layer in this platform. A mutable filesystem requires an isolation/COW strategy when used across sandboxes and has its own maintenance considerations, such as fsck. This is the reason for the current EROFS-base/ext4-upper split, not a universal benchmark proving one format denser than every alternative.
 
-<a id="52-为什么离线合并而非运行时-overlayfs"></a>
-
 ### 5.2 Why merge offline instead of stacking container layers at runtime
 
 Offline merging removes the need to assemble the original container layer stack separately for each sandbox. The platform exposes one immutable base through its data path; writable sandboxes may still mount guest overlayfs over that base. It does **not** rely on one host EROFS mount being shared as the guest mount, and no host mount-count density bound is established here.
 
 The cost is an image-build step when the source changes. That work can be performed once in a CI/CD image pipeline and reused by many sandboxes.
-
-<a id="53-为什么-configjson-内嵌而不是边车文件"></a>
 
 ### 5.3 Why embed config.json instead of using a sidecar
 
@@ -559,8 +507,6 @@ A separate `app.erofs.config.json` introduces two problems:
 - **Separate manifest lookup:** a manifest exposes one payload reader, so a sidecar would need its own key and fetch.
 
 ZIP-at-end keeps the filesystem payload self-describing within the one delivered artifact. `manifest-ctl store` can ingest it together, and sandbox startup obtains launch configuration from the same payload. EROFS's self-described extent and ZIP's backward EOCD scan allow the two inner formats to coexist; the outer tarstream supplies the platform artifact envelope.
-
-<a id="54-为什么投影而不是原样转发"></a>
 
 ### 5.4 Why project configuration instead of forwarding it verbatim
 
@@ -572,21 +518,17 @@ OCI image config has many non-launch fields. `created`, `author` and `history` a
 
 An explicit projection makes the supported launch fields predictable for downstream consumers.
 
-<a id="55-不实现--暂不实现的功能"></a>
-
 ### 5.5 Unsupported or deferred features
 
-- **Direct arbitrary OCI-layout input:** registry pulling is supported (§2.4), and the pull cache uses OCI layout, but export does not interpret an arbitrary OCI-layout directory as an image source. Convert it with `skopeo copy oci:./dir docker-archive:x.tar`, or push with crane and pull from the registry. Passing that directory as a normal local directory would select rootfs export, not OCI-layout decoding.
+- **Direct arbitrary OCI-layout input:** registry pulling is supported (§2.3), and the pull cache uses OCI layout, but export does not interpret an arbitrary OCI-layout directory as an image source. Convert it with `skopeo copy oci:./dir docker-archive:x.tar`, or push with crane and pull from the registry. Passing that directory as a normal local directory would select rootfs export, not OCI-layout decoding.
 - **Image signing/encryption in flattening:** encryption and content addressing belong to the [manifest stage](https://github.com/kuasar-sandbox/accelerator/blob/main/docs/manifest.md). This does not establish an image-signature verification workflow.
 - **Layer preservation:** the output merges all layers into one EROFS payload. Downstream manifest chunk deduplication can reuse unchanged content, but it does not preserve the original layer structure.
-
-<a id="6-性能特征"></a>
 
 ## 6. Performance characteristics
 
 Build work generally grows with input bytes and file count. Major costs are layer download/decompression, filesystem entry application and mkfs.erofs; cache state, metadata distribution, storage, CPU and tool versions all matter. Appending one uncompressed ZIP entry is small relative to a typical image build, but the repository does not establish a universal 1 GiB/3–5 second or sub-10 ms result.
 
-Check determinism by exporting an immutable input twice with the same configuration/toolchain and comparing payload/artifact hashes as appropriate, or reproducing manifest keys. Unit tests cover deterministic conversion; `verify` is no longer a CLI command (§2.2).
+Check determinism by exporting an immutable input twice with the same configuration/toolchain and comparing payload/artifact hashes as appropriate, or reproducing manifest keys. Unit tests cover deterministic conversion; `verify` is no longer a CLI command (§2).
 
 `flatten-ctl info` does not decompress or load the full EROFS filesystem. It reads the superblock (128 bytes), scans the ZIP tail and decodes the single stored entry through the relevant payload reader. Manifest input can require network/chunk fetches, so latency is not universally sub-millisecond.
 
