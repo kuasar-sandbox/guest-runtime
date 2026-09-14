@@ -48,6 +48,13 @@ class SelectedSandboxInitTests(unittest.TestCase):
         self.assertEqual(self.output.read_bytes(), self.payload)
         self.assertEqual(self.output.stat().st_mode & 0o777, 0o755)
 
+    def test_installs_exact_bytes_from_a_numbered_preview(self):
+        self.version += ".1"
+        self.archive = self.root / f"sandboxer-{self.version}-linux-x86_64.tar.gz"
+        self.write_archive()
+        self.prepare()
+        self.assertEqual(self.output.read_bytes(), self.payload)
+
     def test_rejects_wrong_selection_and_publication_state(self):
         original = copy.deepcopy(self.release)
         for key, value in (("tag_name", "v1.2.2"), ("target_commitish", "b" * 40),

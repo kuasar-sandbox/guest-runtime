@@ -5,7 +5,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: Kernel version in vmlinux-vX.Y.Z or vmlinux-vX.Y.Z-preview.YYYYMMDD form
+        description: Kernel version in vmlinux-vX.Y.Z or vmlinux-vX.Y.Z-preview.YYYYMMDD[.N] form
         required: true
         type: string
       source_ref:
@@ -70,8 +70,8 @@ jobs:
           RELEASE_KIND: vmlinux
         run: |
           set -euo pipefail
-          [[ "$VERSION" =~ ^vmlinux-v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-preview\.[0-9]{8})?$ ]] \
-            || { echo "version must match vmlinux-vX.Y.Z or vmlinux-vX.Y.Z-preview.YYYYMMDD" >&2; exit 1; }
+          [[ "$VERSION" =~ ^vmlinux-v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-preview\.[0-9]{8}(\.[1-9][0-9]*)?)?$ ]] \
+            || { echo "version must match vmlinux-vX.Y.Z or vmlinux-vX.Y.Z-preview.YYYYMMDD[.N]" >&2; exit 1; }
           bash scripts/validate-release-source.sh \
             "$SOURCE_REF" "$SOURCE_SHA" "$VERSION" vmlinux
           bash scripts/validate-preview-line.sh \
