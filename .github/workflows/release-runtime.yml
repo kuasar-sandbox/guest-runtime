@@ -161,17 +161,57 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p selected-sandboxer
+          headers=$(mktemp)
+          trap 'rm -f "$headers"' EXIT
           for name in "sandboxer-${SANDBOXER_VERSION}-linux-${TARGET_ARCH}.tar.gz" SHA256SUMS; do
             url=$(jq -er --arg name "$name" '
               [.assets[] | select(.name == $name)] | select(length == 1) | .[0].url
               | select(test("^https://api.github.com/repos/kuasar-sandbox/sandboxer/releases/assets/[0-9]+$"))
             ' sandboxer-release.json)
-            curl --fail --show-error --silent --location \
-              --retry 4 --retry-all-errors --connect-timeout 10 --max-time 600 \
-              -H "Accept: application/octet-stream" \
-              -H "Authorization: Bearer $GH_TOKEN" \
-              -H "X-GitHub-Api-Version: 2022-11-28" \
-              "$url" --output "selected-sandboxer/$name"
+            output="selected-sandboxer/$name"
+            : > "$output"
+            # A new curl process recalculates the resume offset after each failure.
+            for attempt in 1 2 3 4 5; do
+              if curl --fail --show-error --silent --location \
+                --continue-at - --connect-timeout 10 --max-time 600 --dump-header "$headers" \
+                -H "Accept: application/octet-stream" \
+                -H "Authorization: Bearer $GH_TOKEN" \
+                -H "X-GitHub-Api-Version: 2022-11-28" \
+                "$url" --output "$output"; then
+                break
+              fi
+              if [[ "$attempt" == 5 ]]; then
+                echo "release: asset download failed after $attempt attempts: $name" >&2
+                exit 1
+              fi
+              delay=$(python3 - "$headers" "$attempt" <<'PY'
+          import email.utils
+          import math
+          import pathlib
+          import sys
+          import time
+
+          retry_after = ""
+          for line in pathlib.Path(sys.argv[1]).read_text(encoding="iso-8859-1").splitlines():
+              if line.startswith("HTTP/"):
+                  retry_after = ""
+              name, separator, value = line.partition(":")
+              if separator and name.lower() == "retry-after":
+                  retry_after = value.strip()
+          delay = 1 << (int(sys.argv[2]) - 1)
+          try:
+              if retry_after.isascii() and retry_after.isdecimal():
+                  requested = int(retry_after)
+              else:
+                  requested = math.ceil(email.utils.parsedate_to_datetime(retry_after).timestamp() - time.time())
+              delay = max(delay, requested)
+          except (ValueError, TypeError, OverflowError):
+              pass
+          print(delay)
+          PY
+              )
+              sleep "$delay"
+            done
           done
 
       - name: Check out exact guest-runtime source
