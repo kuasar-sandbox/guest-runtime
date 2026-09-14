@@ -22,7 +22,7 @@ def digest(path):
 
 
 def prepare(release, directory, version, source_sha, output):
-    require(re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+(?:-preview\.[0-9]{8})?", version), "invalid sandboxer version")
+    require(re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+(?:-preview\.[0-9]{8}(?:\.[1-9][0-9]*)?)?", version), "invalid sandboxer version")
     require(re.fullmatch(r"[0-9a-f]{40}", source_sha), "invalid sandboxer source SHA")
     require(release["tag_name"] == version and release["target_commitish"] == source_sha,
             "sandboxer Release does not match the selected tag/source")
