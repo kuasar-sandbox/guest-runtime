@@ -114,3 +114,39 @@ for mutation in duplicate malformed mismatch mode; do
 done
 printf 'test-native-materials: no withdrawn inventory quota; structure and consistency retained PASS\n'
 )
+
+# The existing link-map collector must carry OpenSSL archives, source identity
+# and actual notice texts without adding a separate dependency/license manager.
+(
+root="$test_root/openssl-inventory"
+mkdir -p "$root/lib" "$root/notices" "$root/erofs"
+for input in libc.a libuuid.a libcrypto.a libssl.a crtbeginT.o; do
+  printf 'fixture %s\n' "$input" > "$root/lib/$input"
+  printf 'LOAD %s/lib/%s\n' "$root" "$input"
+done > "$root/erofs/mkfs.map"
+printf 'fixture OpenSSL copyright and license\n' > "$root/notices/LICENSE"
+dpkg-query() { return 1; }
+rpm() {
+  case "$1" in
+    -qf) printf 'fixture-devel\t3.0-test\tfixture-source-3.0-test.src.rpm\n' ;;
+    -qa) printf 'fixture-devel.x86_64\tfixture-source-3.0-test.src.rpm\n' ;;
+    -ql) printf '%s/notices/LICENSE\n' "$root" ;;
+    *) return 1 ;;
+  esac
+}
+release_materials_init "$root/stage" "$root/work" runtime
+payload=bin/mkfs.erofs,bin/sandbox-runtime.bundle:/opt/sandbox-runtime/bin/mkfs.erofs
+release_native_erofs_inputs "$root/erofs/mkfs.map" "$root/erofs" "$payload"
+for input in libcrypto.a libssl.a; do
+  cmp "$root/notices/LICENSE" "$root/stage/share/licenses/runtime/system/$input/${root#/}/notices/LICENSE"
+  awk -F '\t' -v name="system:$input" '$2 == name && $4 == "rpm-source:fixture-source-3.0-test.src.rpm" {found=1} END {exit !found}' \
+    "$RELEASE_MATERIALS_WORK/sources" || fail "missing OpenSSL source record: $input"
+  grep -q "^$input" "$root/stage/share/sources/runtime/EROFS-INPUTS.tsv" || fail "OpenSSL archive omitted from inventory"
+done
+rm "$root/notices/LICENSE"
+if (release_native_erofs_inputs "$root/erofs/mkfs.map" "$root/erofs" "$payload" > "$root/missing.log" 2>&1); then
+  fail 'accepted missing linked-library license text'
+fi
+grep -qF 'native license material is missing' "$root/missing.log" || fail 'missing notice failed for unrelated reason'
+printf 'test-native-materials: OpenSSL link inputs, identities and notice texts PASS\n'
+)

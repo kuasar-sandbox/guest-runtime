@@ -24,6 +24,7 @@ PYTHONDONTWRITEBYTECODE=1 python3 "$ROOT/scripts/test-release-source-inventory.p
 PYTHONDONTWRITEBYTECODE=1 python3 "$ROOT/scripts/test-release-runtime-payloads.py" --prepare "$TMP/runtime-readers"
 bash "$ROOT/scripts/test-release-go-contexts.sh"
 bash "$ROOT/native-deps/deps/test-common.sh"
+bash "$ROOT/native-deps/deps/test-erofs.sh"
 bash "$ROOT/scripts/test-release-native-materials.sh"
 bash "$ROOT/scripts/test-release-rpm-enumeration.sh"
 
@@ -370,6 +371,9 @@ project_sha="$(git -C "$fixture_root" rev-parse HEAD)"
 mkdir "$TMP/release-build-bin" "$TMP/system-inputs"
 printf 'fixture libc archive\n' > "$TMP/system-inputs/libc.a"
 printf 'fixture libuuid archive\n' > "$TMP/system-inputs/libuuid.a"
+for input in libcrypto.a libssl.a; do
+  printf 'fixture OpenSSL archive\n' > "$TMP/system-inputs/$input"
+done
 printf 'fixture GCC runtime archive\n' > "$TMP/system-inputs/libgcc.a"
 printf 'fixture startup object\n' > "$TMP/system-inputs/crtbeginT.o"
 printf 'fixture native system license\n' > "$TMP/system-inputs/LICENSE"
@@ -416,7 +420,7 @@ mkfs.erofs --all-root -T0 -U 00000000-0000-0000-0000-000000000000 \
 PYTHONDONTWRITEBYTECODE=1 python3 "$ROOT/scripts/test-release-runtime-payloads.py" --pack \
   "$fixture_root/build/runtime.erofs" "$fixture_root/bin/x86_64/sandbox-runtime.bundle"
 mkdir -p "$fixture_root/native-deps/build/x86_64/src/erofs-utils/mkfs"
-for input in libc.a libuuid.a libgcc.a crtbeginT.o; do
+for input in libc.a libuuid.a libcrypto.a libssl.a libgcc.a crtbeginT.o; do
   printf 'LOAD %s/%s\n' "$TMP/system-inputs" "$input"
 done > "$fixture_root/native-deps/build/x86_64/src/erofs-utils/mkfs/mkfs.erofs.map"
 install -m 0644 "$ROOT/scripts/testdata/linux-COPYING" "$fixture_root/native-deps/build/src/linux/COPYING"
@@ -527,7 +531,7 @@ fi
 grep -Fq 'missing or inconsistent source record for guest-runtime-kernel-inputs' "$candidate/result.log" \
   || fail "Linux COPYING mutation failed for an unrelated reason"
 
-for input in libc.a libuuid.a libgcc.a crtbeginT.o; do
+for input in libc.a libuuid.a libcrypto.a libssl.a libgcc.a crtbeginT.o; do
   candidate="$TMP/omitted-native-$input"
   cp -a "$TMP/runtime-bundle" "$candidate"
   mkdir "$candidate/root"
@@ -767,7 +771,7 @@ done
 for kind in runtime vmlinux; do
   if [ "$kind" = runtime ]; then
     version=runtime-v1.2.3-preview.20260804
-    names=(guest-runtime sandboxer accelerator envd erofs-utils github.com/e2b-dev/infra/packages/shared system:libc.a system:libuuid.a)
+    names=(guest-runtime sandboxer accelerator envd erofs-utils github.com/e2b-dev/infra/packages/shared system:libc.a system:libuuid.a system:libcrypto.a system:libssl.a)
   else
     version=vmlinux-v2.3.4
     names=(guest-runtime-kernel-inputs linux)

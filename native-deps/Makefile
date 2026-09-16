@@ -133,8 +133,8 @@ all: build
 build: vmlinux erofs envd
 
 # --- erofs-utils (mkfs.erofs) ----------------------------------------------
-erofs: $(EROFS_BIN)
-$(EROFS_BIN):
+# Always consult the bounded recipe/input stamp, including on a restored cache.
+erofs:
 	$(DEPS_ENV) \
 	EROFS_TARBALL="$(EROFS_TARBALL)" \
 	EROFS_TARBALL_SHA256="$(EROFS_TARBALL_SHA256)" \
@@ -196,7 +196,8 @@ $(VMLINUX_BIN): $(VMLINUX_INPUTS)
 	STAGE=build $(LINUX_INVOKE) bash deps/build-vmlinux.sh
 
 test:
-	bash -n deps/*.sh
+	@for script in deps/*.sh; do bash -n "$$script" || exit; done
+	bash deps/test-erofs.sh
 
 clean:
 	# Preserve build/tarball/ (re-downloading source is expensive) and the
