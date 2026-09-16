@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/kuasar-sandbox/accelerator/pkg/image"
@@ -24,8 +25,8 @@ import (
 // mkfs/config environment changes never affect another test or the parent.
 func TestExportLifecycle(t *testing.T) {
 	cases := []struct {
-		name, mode, output, config, wantErr, wantFile string
-		upload, stream, mkfsFail, sharedScratch       bool
+		name, mode, output, config, wantErr, wantFile       string
+		upload, stream, mkfsFail, sharedScratch, brokenPipe bool
 	}{
 		{name: "mkfs-partial-output", output: "file", mkfsFail: true, wantErr: "flatten: mkfs.erofs: exit status 7: fake mkfs failure", wantFile: "previous"},
 		{name: "artifact-create", output: "directory", wantErr: "create artifact: open", wantFile: "previous"},
@@ -46,6 +47,10 @@ func TestExportLifecycle(t *testing.T) {
 		{name: "write-and-close", mode: "write-close-failure", upload: true, wantErr: "pack image artifact: injected write failure", wantFile: "previous"},
 		{name: "stdout-write", mode: "closed-stdout", output: "-", wantErr: "pack image artifact: write", wantFile: "previous"},
 		{name: "stdout-copy", mode: "closed-stdout", output: "-", upload: true, wantErr: "write to stdout: write", wantFile: "previous"},
+		{name: "broken-pipe-stream", output: "-", brokenPipe: true, wantErr: "pack image artifact:", wantFile: "previous"},
+		{name: "broken-pipe-copy", output: "-", upload: true, brokenPipe: true, wantErr: "write to stdout:", wantFile: "previous"},
+		{name: "broken-pipe-key", mode: "upload-success", upload: true, config: "empty", brokenPipe: true, wantErr: "write manifest key:", wantFile: "previous"},
+		{name: "broken-pipe-key-named-output", mode: "upload-success", output: "file", upload: true, config: "empty", brokenPipe: true, wantErr: "write manifest key:", wantFile: "artifact"},
 		{name: "terminal-output", mode: "terminal-stdout", output: "-", wantErr: "export: refusing to write an image artifact to a terminal", wantFile: "previous"},
 		{name: "file-success", output: "file", wantFile: "artifact"},
 		{name: "stdout-success", output: "-", stream: true, wantFile: "previous"},
@@ -112,7 +117,7 @@ func TestExportLifecycle(t *testing.T) {
 				}
 			}
 			args = append(args, f.source)
-			stdout, stderr, code := f.run(t, tc.mode, args...)
+			stdout, stderr, code := f.run(t, tc.mode, tc.brokenPipe, args...)
 			wantCode := 0
 			if tc.wantErr != "" {
 				wantCode = 1
@@ -125,11 +130,14 @@ func TestExportLifecycle(t *testing.T) {
 			if code != wantCode {
 				t.Errorf("exit = %d, want %d; stderr: %s", code, wantCode, stderr)
 			}
+			if tc.brokenPipe && !strings.Contains(stderr, "broken pipe") {
+				t.Errorf("stderr = %q, want broken pipe diagnostic", stderr)
+			}
 			var wantStdout []byte
 			if tc.stream {
 				wantStdout = append(wantStdout, wantArtifact...)
 			}
-			if tc.mode == "upload-success" {
+			if tc.mode == "upload-success" && !tc.brokenPipe {
 				wantStdout = append(wantStdout, strings.Repeat("a", 64)+"\n"...)
 			}
 			if !bytes.Equal(stdout, wantStdout) {
@@ -174,9 +182,37 @@ func TestExportFlagExit(t *testing.T) {
 		t.Run(tc.arg, func(t *testing.T) {
 			t.Parallel()
 			f := newExportFixture(t)
-			_, stderr, code := f.run(t, "", tc.arg)
+			_, stderr, code := f.run(t, "", false, tc.arg)
 			if code != tc.code || !strings.Contains(stderr, tc.message) {
 				t.Fatalf("exit=%d stderr=%q", code, stderr)
+			}
+			assertExportScratch(t, f.scratch, nil)
+		})
+	}
+}
+
+func TestExportRestoresSIGPIPE(t *testing.T) {
+	for _, outcome := range []string{"success", "error"} {
+		t.Run(outcome, func(t *testing.T) {
+			t.Parallel()
+			f := newExportFixture(t)
+			output := f.output
+			wantFile := expectedExportArtifact(t)
+			if outcome == "error" {
+				output = f.source // Artifact creation fails after raw output exists.
+				wantFile = []byte("previous user artifact\n")
+			}
+			_, stderr, code := f.run(t, "restore-sigpipe-"+outcome, true,
+				"--no-progress", "--tmpdir", f.scratch, "--config", f.config, "--output", output, f.source)
+			// The worker has returned and cleaned up before the helper writes to
+			// the broken pipe. That later write must have normal SIGPIPE behavior.
+			if code != -int(syscall.SIGPIPE) || stderr != "" {
+				t.Errorf("exit = %d, want SIGPIPE; stderr: %s", code, stderr)
+			}
+			assertExportFile(t, filepath.Join(f.root, "export-returned"), []byte("returned\n"))
+			assertExportFile(t, f.output, wantFile)
+			for path, data := range f.retained {
+				assertExportFile(t, path, data)
 			}
 			assertExportScratch(t, f.scratch, nil)
 		})
@@ -192,6 +228,15 @@ func TestExportProcess(t *testing.T) {
 	}
 	mode, root := os.Args[i+1], os.Args[i+2]
 	args := os.Args[i+3:]
+	if strings.HasPrefix(mode, "restore-sigpipe-") {
+		err := runExport(args, exportIO{})
+		if (err == nil) != (mode == "restore-sigpipe-success") {
+			t.Fatalf("unexpected export result: %v", err)
+		}
+		writeExportFile(t, filepath.Join(root, "export-returned"), []byte("returned\n"))
+		fmt.Fprintln(os.Stdout, "after export")
+		t.Fatal("write to broken stdout survived after export returned")
+	}
 	if mode == "" || mode == "closed-stdout" || mode == "terminal-stdout" {
 		if mode == "closed-stdout" {
 			if err := os.Stdout.Close(); err != nil {
@@ -344,7 +389,7 @@ func newExportFixture(t *testing.T) exportFixture {
 	return f
 }
 
-func (f exportFixture) run(t *testing.T, mode string, args ...string) ([]byte, string, int) {
+func (f exportFixture) run(t *testing.T, mode string, brokenPipe bool, args ...string) ([]byte, string, int) {
 	t.Helper()
 	exe, err := os.Executable()
 	if err != nil {
@@ -354,12 +399,29 @@ func (f exportFixture) run(t *testing.T, mode string, args ...string) ([]byte, s
 	cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "TMPDIR=" + f.scratch, "MKFS_EROFS_PATH=" + f.mkfs, "GOMAXPROCS=2"}
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	if brokenPipe {
+		reader, writer, err := os.Pipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer writer.Close()
+		// Close the reader before launch so the child's first stdout write
+		// reliably gets EPIPE; no scheduling, sleeps or injected signals.
+		if err := reader.Close(); err != nil {
+			t.Fatal(err)
+		}
+		cmd.Stdout = writer
+	}
 	err = cmd.Run()
 	var exitErr *exec.ExitError
 	if err != nil && !errors.As(err, &exitErr) {
 		t.Fatal(err)
 	}
-	return stdout.Bytes(), stderr.String(), cmd.ProcessState.ExitCode()
+	code := cmd.ProcessState.ExitCode()
+	if status, ok := cmd.ProcessState.Sys().(syscall.WaitStatus); ok && status.Signaled() {
+		code = -int(status.Signal())
+	}
+	return stdout.Bytes(), stderr.String(), code
 }
 
 func expectedExportArtifact(t *testing.T) []byte {

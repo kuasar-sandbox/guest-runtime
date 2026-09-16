@@ -205,7 +205,9 @@ Export 将原始 EROFS payload 写入 scratch 父目录下的 `flatten-erofs-*.i
 | 输入归档、源 rootfs、持久缓存、无关文件及 scratch 父目录 | export 的临时文件清理不会删除这些资源。持久缓存仍遵循正常的淘汰策略（§2.4）。 |
 
 操作错误会在所拥有的资源完成释放后才传给外层 CLI；CLI 随后向 stderr 输出
-`error: ...` 并以状态码 1 退出。工件字节和现有 stdout 模式保持不变，包括
+`error: ...` 并以状态码 1 退出。下游读取方关闭 stdout 时，export 会清理自己的
+临时文件，向 stderr 报告管道断开（broken pipe），并以状态码 1 退出。
+工件字节和现有 stdout 模式保持不变，包括
 `--upload --output -` 在工件后追加 key 的行为。`SIGKILL` 等突然终止不会执行
 Go defer，可能留下 scratch 文件；这里处理的是普通成功和失败时的清理，
 不提供崩溃恢复或陈旧文件扫描服务。
@@ -218,7 +220,8 @@ GOFLAGS=-p=2 GOMAXPROCS=2 go test ./cmd/flatten-ctl
 ```
 
 测试使用小型本地假 mkfs，以及每次调用独立的写入、关闭、上传替代实现，检查
-失败清理、ingest 前释放原始文件、用户文件保留、CLI 退出行为及测试夹具工件的
+失败清理、ingest 前释放原始文件、用户文件保留、CLI 退出行为（包括 stdout 管道
+读取端已关闭的情况及 SIGPIPE 行为恢复）及测试夹具工件的
 完整字节一致性。它们不验证真实 EROFS 构建或在线 registry/store 集成；这些内容
 仍由 [E2E 流程](../test/e2e/README.md) 覆盖（该流程文档当前仅提供英文版本）。
 

@@ -33,8 +33,10 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"os/signal"
 	"sort"
 	"strings"
+	"syscall"
 
 	"github.com/kuasar-sandbox/accelerator/pkg/flatten"
 	"github.com/kuasar-sandbox/accelerator/pkg/image"
@@ -207,6 +209,14 @@ func runExport(args []string, ops exportIO) error {
 		}
 	}
 
+	// Go otherwise exits on a broken stdout/stderr pipe before writes return
+	// EPIPE. Notify lets those writes return errors and unwind owned resources;
+	// the buffered channel needs no reader because the write reports the error.
+	// Register Stop first so it restores signal behavior after file cleanup.
+	sigpipe := make(chan os.Signal, 1)
+	signal.Notify(sigpipe, syscall.SIGPIPE)
+	defer signal.Stop(sigpipe)
+
 	// The raw erofs always lands in a scratch file first (mkfs.erofs
 	// needs a seekable output), then gets packed into the tarstream
 	// artifact (entry "image") — the platform container for images —
@@ -330,7 +340,9 @@ func runExport(args []string, ops exportIO) error {
 	if err != nil {
 		return err
 	}
-	fmt.Println(key)
+	if _, err := fmt.Println(key); err != nil {
+		return fmt.Errorf("write manifest key: %w", err)
+	}
 	return nil
 }
 
@@ -443,7 +455,9 @@ func runRemoteFlatten(ref, outputPath string, cfg *remote.Config, printDigest, n
 		fmt.Fprintf(os.Stderr, "resolved: %s\n", res.Digest)
 	}
 	if printDigest {
-		fmt.Println(res.Digest.String())
+		if _, err := fmt.Println(res.Digest.String()); err != nil {
+			return fmt.Errorf("write source digest: %w", err)
+		}
 	}
 	cache, cleanup, err := cfg.OpenCache()
 	if err != nil {
