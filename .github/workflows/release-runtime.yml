@@ -42,7 +42,7 @@ concurrency:
 
 jobs:
   preflight:
-    runs-on: [self-hosted, Linux, X64, kuasar-control]
+    runs-on: ubuntu-24.04
     permissions:
       actions: read
       contents: read
@@ -64,8 +64,26 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Check out pinned hosted bootstrap
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: kuasar-sandbox/kuasar-sandbox
+          # Publish this platform commit before activating the guest workflow pin.
+          ref: 3f7e0d6baf4a9187a5b365e7e072a5b08dce2d05
+          path: trusted/platform
+          sparse-checkout: |
+            ci/hosted
+            ci/native-cache
+          persist-credentials: false
+
+      - name: Bootstrap standard runner
+        run: bash trusted/platform/ci/hosted/bootstrap.sh --profile release-control
+
       - name: Install pinned GitHub CLI
         run: bash scripts/install-gh-cli.sh
+
+      - name: Validate hosted workflow contracts
+        run: python3 scripts/ci-test-workflows.py
 
       - name: Validate release request
         id: request
@@ -103,23 +121,38 @@ jobs:
 
   build:
     needs: preflight
-    runs-on:
-      - self-hosted
-      - Linux
-      - X64
-      - kuasar-e2e
-    timeout-minutes: 60
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
     permissions:
       contents: read
     env:
       TARGET_ARCH: x86_64
-      GOPROXY: https://goproxy.cn,direct
-      GOSUMDB: sum.golang.google.cn
-      GOTOOLCHAIN: local
       GOWORK: "off"
       ACCELERATOR_VERSION: ${{ needs.preflight.outputs.accelerator_version }}
       SANDBOXER_VERSION: ${{ needs.preflight.outputs.sandboxer_version }}
     steps:
+      - name: Check out trusted build checks
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          path: trusted/guest-runtime
+          persist-credentials: false
+
+      - name: Check out pinned hosted bootstrap
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: kuasar-sandbox/kuasar-sandbox
+          # Publish this platform commit before activating the guest workflow pin.
+          ref: 3f7e0d6baf4a9187a5b365e7e072a5b08dce2d05
+          path: trusted/platform
+          sparse-checkout: |
+            ci/hosted
+            ci/native-cache
+          persist-credentials: false
+
+      - name: Bootstrap standard runner
+        run: bash trusted/platform/ci/hosted/bootstrap.sh --profile runtime
+
       - name: Create read-only source token
         id: source-token
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
@@ -277,27 +310,6 @@ jobs:
           token: ${{ steps.source-token.outputs.token }}
           persist-credentials: false
 
-      - name: Check out pinned native cache tooling
-        id: checkout-platform
-        continue-on-error: true
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: kuasar-sandbox/kuasar-sandbox
-          ref: cf44107068e8f8e6aecb93113080a3e0adfb32c0
-          path: src/platform
-          token: ${{ steps.source-token.outputs.token }}
-          persist-credentials: false
-
-      - name: Retry native cache tooling checkout
-        if: steps.checkout-platform.outcome == 'failure'
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: kuasar-sandbox/kuasar-sandbox
-          ref: cf44107068e8f8e6aecb93113080a3e0adfb32c0
-          path: src/platform
-          token: ${{ steps.source-token.outputs.token }}
-          persist-credentials: false
-
       - name: Revoke source token before code execution
         if: ${{ always() && steps.source-token.outputs.token != '' }}
         env:
@@ -330,22 +342,35 @@ jobs:
       - name: Prepare native source caches
         run: |
           set -euo pipefail
-          install -d -m 0755 /var/cache/kuasar/tarballs
           mkdir -p src/guest-runtime/native-deps/build src/sandboxer/native-deps/build
-          ln -sfn /var/cache/kuasar/tarballs src/guest-runtime/native-deps/build/tarball
-          ln -sfn /var/cache/kuasar/tarballs src/sandboxer/native-deps/build/tarball
+          ln -sfn "$KUASAR_TARBALL_CACHE" src/guest-runtime/native-deps/build/tarball
+          ln -sfn "$KUASAR_TARBALL_CACHE" src/sandboxer/native-deps/build/tarball
 
       - name: Build runtime native inputs and retain their material sources
         # The binary cache lacks Envd module sources and the EROFS link map.
         # Use normal Makefile caching without rebuilding inside the packager.
-        run: make -C src/guest-runtime erofs envd
+        shell: bash
+        run: |
+          taskset -pc "$KUASAR_BUILD_CPUS" "$$" >/dev/null
+          make -C src/guest-runtime erofs envd
 
       - name: Build and test runtime image
+        shell: bash
         run: |
+          taskset -pc "$KUASAR_BUILD_CPUS" "$$" >/dev/null
           set -euo pipefail
           make -C src/guest-runtime test
           make -C src/guest-runtime vet
           make -C src/guest-runtime flatten-ctl sandbox-runtime
+
+      - name: Check the released Runtime ABI
+        run: |
+          python3 trusted/guest-runtime/scripts/ci-check-runtime-abi.py \
+            --static src/guest-runtime/bin/x86_64/flatten-ctl \
+            --static src/guest-runtime/native-deps/bin/x86_64/envd \
+            --static src/guest-runtime/native-deps/bin/x86_64/mkfs.erofs \
+            --static src/guest-runtime/native-deps/bin/x86_64/fsck.erofs \
+            src/sandboxer/bin/x86_64/sandbox-init
 
       - name: Package runtime release
         working-directory: src/guest-runtime
@@ -371,7 +396,7 @@ jobs:
     needs:
       - preflight
       - build
-    runs-on: [self-hosted, Linux, X64, kuasar-control]
+    runs-on: ubuntu-24.04
     permissions:
       actions: read
       contents: write
@@ -380,6 +405,21 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      - name: Check out pinned hosted bootstrap
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: kuasar-sandbox/kuasar-sandbox
+          # Publish this platform commit before activating the guest workflow pin.
+          ref: 3f7e0d6baf4a9187a5b365e7e072a5b08dce2d05
+          path: trusted/platform
+          sparse-checkout: |
+            ci/hosted
+            ci/native-cache
+          persist-credentials: false
+
+      - name: Bootstrap standard runner
+        run: bash trusted/platform/ci/hosted/bootstrap.sh --profile runtime-publish
 
       - name: Install pinned GitHub CLI
         run: bash scripts/install-gh-cli.sh
@@ -410,7 +450,7 @@ jobs:
 
   cleanup:
     needs: publish
-    runs-on: [self-hosted, Linux, X64, kuasar-control]
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
       actions: write
@@ -420,6 +460,21 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      - name: Check out pinned hosted bootstrap
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: kuasar-sandbox/kuasar-sandbox
+          # Publish this platform commit before activating the guest workflow pin.
+          ref: 3f7e0d6baf4a9187a5b365e7e072a5b08dce2d05
+          path: trusted/platform
+          sparse-checkout: |
+            ci/hosted
+            ci/native-cache
+          persist-credentials: false
+
+      - name: Bootstrap standard runner
+        run: bash trusted/platform/ci/hosted/bootstrap.sh --profile control
 
       - name: Install pinned GitHub CLI
         run: bash scripts/install-gh-cli.sh

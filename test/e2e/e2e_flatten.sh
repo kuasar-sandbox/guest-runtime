@@ -1,39 +1,21 @@
 #!/usr/bin/env bash
-#
-# End-to-end test for flatten-ctl's registry path against a real OCI 1.1
-# registry (zot). Unlike the unit tests (which use an in-memory ggcr registry
-# that only does the tag-schema referrers fallback), zot implements the real
-# /v2/<name>/referrers/<digest> API — so this exercises the genuine
-# pull -> flatten -> ingest -> referrer-writeback -> idempotent-skip flow end
-# to end, through the actual flatten-ctl binary.
-#
-# Seeds a locally-cached docker image (default python:3.12-alpine; override
-# with E2E_IMAGE) into zot via `docker push`, so no synthetic image tooling is
-# needed and the layers have real, readable file modes.
-#
-# Requirements: docker, mkfs.erofs, curl, flatten-ctl, store-ctl, and zot. When
-# REQUIRE_GUEST_RUNTIME=1, missing prerequisites fail the e2e instead of
-# skipping.
-#
-# Env knobs:
-#   FLATTEN_CTL, STORE_CTL, ZOT_BIN   binary paths (default: look up on PATH)
-#   E2E_IMAGE                          cached image to seed (python:3.12-alpine)
-#   E2E_KEEP=1                         keep the work dir / processes for debug
-set -uo pipefail
+# Real Docker -> zot OCI 1.1 -> flatten-ctl/EROFS -> store-ctl -> referrers.
+# The default workload is assembled locally; no workload image is pulled.
+set -euo pipefail
 
-# The e2e only talks to localhost (zot, store-ctl, docker, curl); keep any
-# ambient proxy out of that path. zot is supplied by ZOT_BIN, PATH, or the
-# platform umbrella bin/.
-export NO_PROXY=127.0.0.1,localhost no_proxy=127.0.0.1,localhost
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=common.sh
+source "$SCRIPT_DIR/common.sh"
+for helper in fixture.py assertions.py process.py; do
+    [ -r "$SCRIPT_DIR/$helper" ] || die "incomplete E2E package: missing $helper"
+done
 
-# --------------------------------------------------------------------------
-# config
-# --------------------------------------------------------------------------
 FLATTEN_CTL="${FLATTEN_CTL:-flatten-ctl}"
 STORE_CTL="${STORE_CTL:-store-ctl}"
 ZOT_BIN="${ZOT_BIN:-zot}"
-E2E_IMAGE="${E2E_IMAGE:-python:3.12-alpine}"
-# 32-byte hex customer key — also the referrer owner HMAC key. Test fixture.
+MKFS_EROFS_PATH="${MKFS_EROFS_PATH:-mkfs.erofs}"
+export MKFS_EROFS_PATH
+# Public test data, never caller credentials.
 MANIFEST_KEY_A="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 MANIFEST_KEY_B="fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
 OWNER_A="owner-a e2e-owner"
@@ -41,476 +23,287 @@ OWNER_B="owner-b e2e-owner"
 AUTH_USER="e2euser"
 AUTH_PASS="e2epass"
 
-FAILS=0
-PIDS=()
-DOCKER_TAGS=()
-AUTH_LOGGED_IN=""
-
-# --------------------------------------------------------------------------
-# helpers
-# --------------------------------------------------------------------------
-log()  { printf '\n=== %s ===\n' "$*"; }
-ok()   { printf '  [ ok ] %s\n' "$*"; }
-bad()  { printf '  [FAIL] %s\n' "$*"; FAILS=$((FAILS + 1)); }
-skip() {
-	if [ "${REQUIRE_GUEST_RUNTIME:-0}" = "1" ]; then
-		printf '[FAIL] %s\n' "$*" >&2
-		exit 1
-	fi
-	printf '[SKIP] %s\n' "$*"
-	exit 0
-}
-have() { command -v "$1" >/dev/null 2>&1; }
-json_bool_true() { grep -q "\"$2\":true" "$1"; }
-json_string() { sed -n "s/.*\"$2\":\"\\([^\"]*\\)\".*/\\1/p" "$1"; }
-
-# port_free PORT -> 0 if nothing is listening on 127.0.0.1:PORT
-port_free() { ! (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null; }
-free_port() {
-	local p
-	for _ in $(seq 1 100); do
-		p=$(((RANDOM % 20000) + 20000))
-		if port_free "$p"; then printf '%s' "$p"; return 0; fi
-	done
-	echo "e2e: no free port" >&2
-	return 1
-}
-wait_port() { # host port label
-	local i
-	for i in $(seq 1 150); do
-		if (exec 3<>"/dev/tcp/$1/$2") 2>/dev/null; then exec 3>&-; return 0; fi
-		sleep 0.2
-	done
-	echo "e2e: timed out waiting for $3 ($1:$2)" >&2
-	return 1
-}
-
-stop_pid() {
-	local pid="$1"
-	if kill -0 "$pid" 2>/dev/null; then
-		kill "$pid" 2>/dev/null || true
-		for _ in $(seq 1 20); do
-			kill -0 "$pid" 2>/dev/null || break
-			sleep 0.1
-		done
-		kill -KILL "$pid" 2>/dev/null || true
-	fi
-	wait "$pid" 2>/dev/null || true
-}
-
-forget_pid() {
-	local target="$1" pid
-	local kept=()
-	for pid in "${PIDS[@]}"; do
-		[ "$pid" = "$target" ] || kept+=("$pid")
-	done
-	PIDS=("${kept[@]}")
-}
-
-dump_zot_start_failure() {
-	local dir="$1"
-	echo "zot config:" >&2
-	cat "$dir/zot-config.json" >&2 2>/dev/null || true
-	echo "zot logs:" >&2
-	cat "$dir/zot.stdout" "$dir/zot.log" >&2 2>/dev/null || true
-}
-
-cleanup() {
-	[ -n "${E2E_KEEP:-}" ] && { echo "E2E_KEEP set — leaving $WORK and processes"; return; }
-	local pid
-	for pid in "${PIDS[@]:-}"; do [ -n "$pid" ] && kill "$pid" 2>/dev/null || true; done
-	local t
-	for t in "${DOCKER_TAGS[@]:-}"; do [ -n "$t" ] && docker rmi -f "$t" >/dev/null 2>&1 || true; done
-	[ -n "$AUTH_LOGGED_IN" ] && docker logout "$AUTH_LOGGED_IN" >/dev/null 2>&1 || true
-	[ -n "${WORK:-}" ] && rm -rf "$WORK"
-}
-trap cleanup EXIT
-
-# start_zot DIR PORT [HTPASSWD] -> writes config, starts zot, waits ready
-start_zot() {
-	local dir="$1" port="$2" htp="${3:-}" cfg="$1/zot-config.json" auth=""
-	local pid status deadline
-	mkdir -p "$dir"
-	[ -n "$htp" ] && auth=", \"auth\": {\"htpasswd\": {\"path\": \"$htp\"}}"
-	cat >"$cfg" <<EOF
-{
-  "storage": { "rootDirectory": "$dir/data", "dedupe": false, "gc": false },
-  "http": { "address": "127.0.0.1", "port": "$port", "compat": ["docker2s2"]$auth },
-  "log": { "level": "${ZOT_LOG_LEVEL:-warn}", "output": "$dir/zot.log" }
-}
-EOF
-	"$ZOT_BIN" serve "$cfg" >"$dir/zot.stdout" 2>&1 &
-	pid=$!
-	PIDS+=("$pid")
-	deadline=$((SECONDS + 30))
-	while [ "$SECONDS" -lt "$deadline" ]; do
-		if ! kill -0 "$pid" 2>/dev/null; then
-			if wait "$pid"; then status=0; else status=$?; fi
-			forget_pid "$pid"
-			echo "zot startup attempt exited before readiness on 127.0.0.1:$port (status $status)" >&2
-			dump_zot_start_failure "$dir"
-			return 1
-		fi
-		status="$(curl -sS --max-time 1 -o /dev/null -w '%{http_code}' \
-			"http://127.0.0.1:$port/v2/" 2>/dev/null || true)"
-		case "$status" in
-			200|401) return 0 ;;
-		esac
-		sleep 0.2
-	done
-	echo "zot startup attempt timed out on 127.0.0.1:$port (pid $pid)" >&2
-	ps -o pid=,stat=,etime=,cmd= -p "$pid" >&2 || true
-	stop_pid "$pid"
-	forget_pid "$pid"
-	dump_zot_start_failure "$dir"
-	return 1
-}
-
-# start_zot_with_retry DIR PORT_VAR [HTPASSWD] -> retries once on a fresh port
-start_zot_with_retry() {
-	local root="$1" port_var="$2" htp="${3:-}" attempt port
-	for attempt in 1 2; do
-		port="$(free_port)" || return 1
-		if start_zot "$root/attempt-$attempt" "$port" "$htp"; then
-			printf -v "$port_var" '%s' "$port"
-			return 0
-		fi
-		[ "$attempt" -eq 2 ] || echo "e2e: retrying zot startup on a fresh port" >&2
-	done
-	echo "e2e: zot failed to start after 2 attempts" >&2
-	return 1
-}
-
-# seed IMAGE REGHOST/REPO:TAG -> docker tag + push (assumes insecure 127.0.0.1)
-seed() {
-	local src="$1" ref="$2"
-	docker tag "$src" "$ref"
-	DOCKER_TAGS+=("$ref")
-	docker push "$ref" >/dev/null 2>"$WORK/push.err" || {
-		echo "e2e: docker push $ref failed:" >&2
-		cat "$WORK/push.err" >&2
-		return 1
-	}
-}
-
-is_hex64() { [[ "$1" =~ ^[0-9a-f]{64}$ ]]; }
-
-# --------------------------------------------------------------------------
-# preflight
-# --------------------------------------------------------------------------
-# flatten-ctl preserves the image's real uid/gid (chown), which needs root —
-# re-exec under sudo so the flattened rootfs keeps ownership (e.g. /home/<user>).
+log preflight
+[ "$(uname -s)" = Linux ] || missing "E2E requires Linux"
+for tool in python3 curl docker timeout "$FLATTEN_CTL" "$STORE_CTL" "$ZOT_BIN" "$MKFS_EROFS_PATH"; do
+    have "$tool" || missing "prerequisite not found: $tool"
+done
+# The real layer extractor must preserve non-root ownership. Pass only the
+# suite's explicit knobs across sudo, without the caller's credential env.
 if [ "$(id -u)" -ne 0 ]; then
-	command -v sudo >/dev/null 2>&1 || skip "not root and sudo unavailable (flatten preserves ownership; needs root)"
-	exec sudo -nE bash "$0" "$@"
+    if ! have sudo || ! sudo -n true 2>/dev/null; then
+        missing "root or passwordless sudo is required to preserve layer ownership"
+    fi
+    exec sudo -n env "PATH=$PATH" "TMPDIR=${TMPDIR:-/tmp}" \
+        "FLATTEN_CTL=$FLATTEN_CTL" "STORE_CTL=$STORE_CTL" "ZOT_BIN=$ZOT_BIN" \
+        "MKFS_EROFS_PATH=$MKFS_EROFS_PATH" "E2E_IMAGE=${E2E_IMAGE:-}" \
+        "E2E_KEEP=${E2E_KEEP:-0}" "REQUIRE_GUEST_RUNTIME=${REQUIRE_GUEST_RUNTIME:-0}" \
+        "ZOT_LOG_LEVEL=${ZOT_LOG_LEVEL:-warn}" bash "$SCRIPT_DIR/e2e_flatten.sh" "$@"
 fi
-log "preflight"
-have curl || skip "curl not found"
-have docker || skip "docker not found"
-docker info >/dev/null 2>&1 || skip "docker not usable (daemon down or no permission)"
-docker image inspect "$E2E_IMAGE" >/dev/null 2>&1 || {
-	echo "seed image $E2E_IMAGE not cached; trying docker pull (respects ambient proxy)…"
-	docker pull "$E2E_IMAGE" >/dev/null 2>&1 || skip "seed image $E2E_IMAGE unavailable (set E2E_IMAGE to a cached image)"
+
+init_work
+echo "  work dir: $WORK"
+run docker info >/dev/null 2>&1 || missing "docker daemon is not usable"
+for tool in "$FLATTEN_CTL" "$STORE_CTL" "$ZOT_BIN"; do
+    run "$tool" --help >"$WORK/preflight.log" 2>&1 || missing "prerequisite is not runnable: $tool"
+done
+run "$MKFS_EROFS_PATH" --version >"$WORK/mkfs-version.log" 2>&1 || missing "mkfs.erofs is not runnable: $MKFS_EROFS_PATH"
+
+capture() { # label command...; retain output and fail before dependent assertions
+    local label="$1"
+    shift
+    if ! run "$@" >"$WORK/$label.out" 2>"$WORK/$label.err"; then
+        cat "$WORK/$label.err" >&2
+        die "$label failed (output in $WORK/$label.out)"
+    fi
 }
-"$FLATTEN_CTL" --help >/dev/null 2>&1 || skip "flatten-ctl not runnable ($FLATTEN_CTL)"
-"$STORE_CTL" --help >/dev/null 2>&1 || skip "store-ctl not runnable ($STORE_CTL)"
-"$ZOT_BIN" --help >/dev/null 2>&1 || skip "zot not runnable ($ZOT_BIN)"
-if [ -z "${MKFS_EROFS_PATH:-}" ] && ! have mkfs.erofs; then
-	skip "mkfs.erofs not found (set MKFS_EROFS_PATH or add to PATH)"
+
+wait_service() { # supervisor-pid port label [HTTP status]
+    local pid="$1" port="$2" label="$3" expected="${4:-}" status deadline=$((SECONDS + 30))
+    while [ "$SECONDS" -lt "$deadline" ] && kill -0 "$pid" 2>/dev/null; do
+        if [ -n "$expected" ]; then
+            status="$(curl -q -sS --max-time 1 -o /dev/null -w '%{http_code}' \
+                "http://127.0.0.1:$port/v2/" 2>/dev/null || true)"
+            [ "$status" != "$expected" ] || return 0
+        elif (exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null; then
+            return 0
+        fi
+        sleep 0.1
+    done
+    echo "e2e: $label failed readiness on 127.0.0.1:$port" >&2
+    stop_owned "$pid"
+    return 1
+}
+
+start_zot() { # root output-port-variable [htpasswd]; bounded retry on fresh port
+    local root="$1" output_var="$2" htpasswd="${3:-}" attempt port dir zot_pid expected=200
+    [ -z "$htpasswd" ] || expected=401
+    for attempt in 1 2; do
+        port="$(free_port)"
+        dir="$root/attempt-$attempt"
+        mkdir -p "$dir"
+        python3 - "$dir" "$port" "$htpasswd" "${ZOT_LOG_LEVEL:-warn}" <<'PY'
+import json, pathlib, sys
+directory, port, htpasswd, level = sys.argv[1:]
+config = {"storage": {"rootDirectory": directory + "/data", "dedupe": False, "gc": False},
+          "http": {"address": "127.0.0.1", "port": port, "compat": ["docker2s2"]},
+          "log": {"level": level, "output": directory + "/zot.log"}}
+if htpasswd:
+    config["http"]["auth"] = {"htpasswd": {"path": htpasswd}}
+pathlib.Path(directory, "zot-config.json").write_text(json.dumps(config))
+PY
+        start_owned zot_pid 0 "$ZOT_BIN" serve "$dir/zot-config.json" >"$dir/zot.stdout" 2>&1
+        if wait_service "$zot_pid" "$port" zot "$expected"; then
+            printf -v "$output_var" '%s' "$port"
+            return 0
+        fi
+        cat "$dir/zot.stdout" >&2
+        [ ! -f "$dir/zot.log" ] || cat "$dir/zot.log" >&2
+    done
+    die "zot failed both startup attempts"
+}
+
+own_tag() {
+    if run docker image inspect "$1" >/dev/null 2>&1; then
+        die "refusing to replace an existing Docker tag: $1"
+    fi
+    # Register before load/tag so an interrupt or partial failure is cleaned.
+    DOCKER_TAGS+=("$1")
+}
+
+seed() {
+    own_tag "$1"
+    capture tag docker tag "$E2E_IMAGE" "$1"
+    capture push docker push "$1"
+}
+
+write_remote() { # file cache-directory
+    python3 - "$1" "$2" "$TMPDIR" <<'PY'
+import json, pathlib, sys
+pathlib.Path(sys.argv[1]).write_text(json.dumps({
+    "insecure": True, "pull_jobs": 4, "tmpdir": sys.argv[3],
+    "cache": {"dir": sys.argv[2], "max_size": "2GiB"}, "referer": {"validity": "24h"}}))
+PY
+}
+
+lookup() { # label owner config ref expected [manifest-id]
+    local label="$1" owner="$2" config="$3" ref="$4" expected="$5" fields=() id_args=()
+    [ "$#" -lt 6 ] || id_args=(--id "$6")
+    capture "$label" "$FLATTEN_CTL" referer lookup --json --owner "$owner" --config "$config" "$ref"
+    check_json lookup "$WORK/$label.out" --subject "${ref%:*}@$SUBJECT_DIGEST" \
+        --expect "$expected" "${id_args[@]}" >"$WORK/$label.fields"
+    mapfile -t fields <"$WORK/$label.fields"
+    LOOKUP_HIT="${fields[0]}"
+}
+
+put() { # label owner config subject manifest-id [extra flags]
+    local label="$1" owner="$2" config="$3" subject="$4" manifest_id="$5"
+    shift 5
+    capture "$label" "$FLATTEN_CTL" referer put --json --owner "$owner" --config "$config" \
+        --manifest-id "$manifest_id" "$@" "$subject"
+    check_json put "$WORK/$label.out" --subject "$subject" --id "$manifest_id"
+}
+
+upload() { # label key config ref output-id-variable
+    local label="$1" key="$2" config="$3" ref="$4" output_var="$5" manifest_id
+    MANIFEST_KEY="$key" capture "$label" "$FLATTEN_CTL" export --upload --no-progress \
+        --manifest-config "$WORK/manifest.yaml" --config "$config" "$ref"
+    manifest_id="$(<"$WORK/$label.out")"
+    [[ "$manifest_id" =~ ^[0-9a-f]{64}$ ]] || die "$label returned an invalid manifest ID"
+    printf -v "$output_var" '%s' "$manifest_id"
+}
+
+fetch_referrers() { # label port repository digest
+    capture "$1" curl -q -fsS --max-time 10 \
+        "http://127.0.0.1:$2/v2/$3/referrers/$4"
+}
+
+# The random tag is owned by this invocation; config and layer bytes are fixed.
+RUN_ID="${WORK##*.}"
+RUN_ID="${RUN_ID,,}"
+REPOSITORY="e2e-$RUN_ID/app"
+FIXTURE_ARCH=""
+if [ -z "${E2E_IMAGE:-}" ]; then
+    capture architecture docker info --format '{{.Architecture}}'
+    case "$(<"$WORK/architecture.out")" in
+        amd64|x86_64) FIXTURE_ARCH=amd64 ;;
+        arm64|aarch64) FIXTURE_ARCH=arm64 ;;
+        *) die "unsupported Docker server architecture" ;;
+    esac
+    E2E_IMAGE="guest-runtime-e2e:$RUN_ID"
+    own_tag "$E2E_IMAGE"
+    capture fixture python3 "$SCRIPT_DIR/fixture.py" "$WORK/fixture.tar" \
+        --tag "$E2E_IMAGE" --architecture "$FIXTURE_ARCH"
+    capture load docker load --input "$WORK/fixture.tar"
+else
+    run docker image inspect "$E2E_IMAGE" >/dev/null 2>&1 || missing "E2E_IMAGE must already be cached: $E2E_IMAGE (no automatic pull)"
 fi
-echo "  flatten-ctl: $FLATTEN_CTL"
-echo "  store-ctl:   $STORE_CTL"
-echo "  zot:         $ZOT_BIN ($("$ZOT_BIN" --version 2>/dev/null | head -1))"
-echo "  seed image:  $E2E_IMAGE"
 
-WORK="$(mktemp -d)"
-echo "  work dir:    $WORK"
-
-# --------------------------------------------------------------------------
-# bring up store-ctl (fs backend) + anonymous zot
-# --------------------------------------------------------------------------
-log "start store-ctl (fs backend)"
+log "start store-ctl and anonymous zot"
 STORE_PORT="$(free_port)"
 mkdir -p "$WORK/store"
-cat >"$WORK/store.yaml" <<EOF
-listen: 127.0.0.1:$STORE_PORT
-backend: fs
-fs:
-  root: $WORK/store
-  verify_content_key: true
-EOF
-"$STORE_CTL" init --config "$WORK/store.yaml" --generation G1 >"$WORK/store-init.log" 2>&1 || {
-	echo "store-ctl init failed:" >&2
-	cat "$WORK/store-init.log" >&2
-	exit 1
+python3 - "$WORK" "$STORE_PORT" <<'PY'
+import json, pathlib, sys
+work, port = sys.argv[1:]
+configs = {
+    "store.yaml": {"listen": "127.0.0.1:" + port, "backend": "fs",
+                   "fs": {"root": work + "/store", "verify_content_key": True}},
+    "manifest.yaml": {"manifest": {"key": ""},
+                      "store": {"endpoint": "127.0.0.1:" + port, "pool": 4, "timeout": "30s"},
+                      "cache": {"endpoint": ""},
+                      "chunker": {"mode": "cdc", "cdc": {"min": "128KiB", "avg": "512KiB", "max": "1MiB"}},
+                      "crypto": {"chunk": "aes", "manifest": "aes"}},
 }
-"$STORE_CTL" serve --config "$WORK/store.yaml" >"$WORK/store-serve.log" 2>&1 &
-PIDS+=("$!")
-wait_port 127.0.0.1 "$STORE_PORT" "store-ctl" || exit 1
-
-log "start zot (anonymous)"
-ZOT_PORT=""
-start_zot_with_retry "$WORK/zot-anon" ZOT_PORT || exit 1
-
-# --------------------------------------------------------------------------
-# configs
-# --------------------------------------------------------------------------
-cat >"$WORK/manifest.yaml" <<EOF
-manifest:
-  key: ""
-store:
-  endpoint: 127.0.0.1:$STORE_PORT
-  pool: 4
-  timeout: 30s
-cache:
-  endpoint: ""
-chunker:
-  mode: cdc
-  cdc:
-    min: 128KiB
-    avg: 512KiB
-    max: 1MiB
-crypto:
-  chunk: aes
-  manifest: aes
-EOF
-
-write_remote() { # file cachedir
-	cat >"$1" <<EOF
-insecure: true
-pull_jobs: 4
-cache:
-  dir: $2
-  max_size: 2GiB
-referer:
-  validity: 24h
-EOF
-}
+for name, config in configs.items():
+    pathlib.Path(work, name).write_text(json.dumps(config))
+PY
+capture store-init "$STORE_CTL" init --config "$WORK/store.yaml" --generation G1
+start_owned STORE_PID 0 "$STORE_CTL" serve --config "$WORK/store.yaml" >"$WORK/store-serve.log" 2>&1
+wait_service "$STORE_PID" "$STORE_PORT" store-ctl || { cat "$WORK/store-serve.log" >&2; die "store startup failed"; }
+start_zot "$WORK/zot-anon" ZOT_PORT
 write_remote "$WORK/remote.yaml" "$WORK/cache-anon"
+REF="127.0.0.1:$ZOT_PORT/$REPOSITORY:v1"
+seed "$REF"
 
-REF="127.0.0.1:$ZOT_PORT/e2e/app:v1"
-log "seed $E2E_IMAGE -> $REF"
-seed "$E2E_IMAGE" "$REF" || exit 1
-ok "image pushed to zot"
-
-# ==========================================================================
-# TEST 1 — pull + flatten + info (no store needed)
-# ==========================================================================
-log "TEST 1: pull + flatten + info"
-DIGEST_LINE="$("$FLATTEN_CTL" export --output "$WORK/out.erofs" --print-digest \
-	--config "$WORK/remote.yaml" --no-progress "$REF" 2>"$WORK/t1.err")" || {
-	echo "flatten-ctl export failed:" >&2
-	cat "$WORK/t1.err" >&2
-	bad "export --output"
-}
-SUBJECT_DIGEST="${DIGEST_LINE##*@}" # sha256:...
-if [ -s "$WORK/out.erofs" ]; then ok "EROFS produced ($(wc -c <"$WORK/out.erofs") bytes)"; else bad "EROFS missing/empty"; fi
-[[ "$SUBJECT_DIGEST" == sha256:* ]] && ok "resolved digest $SUBJECT_DIGEST" || bad "no resolved digest (got '$DIGEST_LINE')"
-if "$FLATTEN_CTL" info "$WORK/out.erofs" >"$WORK/info.txt" 2>&1; then
-	grep -q "EROFS image size" "$WORK/info.txt" && ok "flatten-ctl info reads the EROFS" || bad "info missing EROFS size"
-else
-	bad "flatten-ctl info failed"
-	cat "$WORK/info.txt" >&2
+log "TEST 1: registry export and real EROFS info"
+capture t1-export "$FLATTEN_CTL" export --output "$WORK/out.erofs" --print-digest \
+    --config "$WORK/remote.yaml" --no-progress "$REF"
+SUBJECT_REF="$(<"$WORK/t1-export.out")"
+SUBJECT_DIGEST="${SUBJECT_REF##*@}"
+if ! [[ "$SUBJECT_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] ||
+    [ "$SUBJECT_REF" != "${REF%:*}@$SUBJECT_DIGEST" ]; then
+    die "export returned an invalid subject digest"
 fi
+[ -s "$WORK/out.erofs" ] || die "EROFS artifact is missing or empty"
+capture t1-info "$FLATTEN_CTL" info --json "$WORK/out.erofs"
+info_args=()
+[ -z "$FIXTURE_ARCH" ] || info_args=(--fixture-arch "$FIXTURE_ARCH")
+check_json info "$WORK/t1-info.out" "${info_args[@]}"
+ok "export and info read real EROFS and the image runtime configuration"
 
-# ==========================================================================
-# TEST 2 — referer lookup + upload + put, idempotent skip, real Referrers API
-# ==========================================================================
-log "TEST 2: referer lookup + upload + put (idempotent)"
-"$FLATTEN_CTL" referer lookup --json --owner "$OWNER_A" --config "$WORK/remote.yaml" "$REF" >"$WORK/t2lookup1.json" 2>"$WORK/t2lookup1.err" || {
-	echo "first referer lookup failed:" >&2
-	cat "$WORK/t2lookup1.err" >&2
-	bad "first referer lookup"
-}
-json_bool_true "$WORK/t2lookup1.json" supported && ok "zot reports Referrers support" || bad "lookup did not report supported=true"
-if json_bool_true "$WORK/t2lookup1.json" hit; then bad "initial lookup unexpectedly hit"; else ok "initial lookup missed"; fi
-SUBJECT_REF="$(json_string "$WORK/t2lookup1.json" subject)"
-[[ "$SUBJECT_REF" == *@sha256:* ]] && ok "lookup returned subject $SUBJECT_REF" || bad "lookup missing subject ('$SUBJECT_REF')"
+log "TEST 2: OCI 1.1 lookup, upload, put and idempotent reuse"
+lookup t2-miss "$OWNER_A" "$WORK/remote.yaml" "$REF" miss
+upload t2-upload "$MANIFEST_KEY_A" "$WORK/remote.yaml" "$REF" ID1
+put t2-put "$OWNER_A" "$WORK/remote.yaml" "$SUBJECT_REF" "$ID1"
+lookup t2-hit "$OWNER_A" "$WORK/remote.yaml" "$REF" hit "$ID1"
+lookup t2-reuse "$OWNER_A" "$WORK/remote.yaml" "$REF" hit "$ID1"
+fetch_referrers t2-referrers "$ZOT_PORT" "$REPOSITORY" "$SUBJECT_DIGEST"
+check_json referrers "$WORK/t2-referrers.out" --owner "$OWNER_A" --id "$ID1" >"$WORK/t2-record"
+ok "supported miss -> put -> repeated hit with the same ID; real OCI artifact indexed"
 
-ID1="$(MANIFEST_KEY="$MANIFEST_KEY_A" "$FLATTEN_CTL" export --upload \
-	--manifest-config "$WORK/manifest.yaml" --config "$WORK/remote.yaml" "$REF" 2>"$WORK/t2a.err")" || {
-	echo "export upload run failed:" >&2
-	cat "$WORK/t2a.err" >&2
-	bad "export upload"
-}
-is_hex64 "$ID1" && ok "export printed manifest id ($ID1)" || bad "export: not a 64-hex id ('$ID1')"
-"$FLATTEN_CTL" referer put --owner "$OWNER_A" --manifest-id "$ID1" --config "$WORK/remote.yaml" "$SUBJECT_REF" >"$WORK/t2put.out" 2>"$WORK/t2put.err" || {
-	echo "referer put failed:" >&2
-	cat "$WORK/t2put.err" >&2
-	bad "referer put"
-}
-grep -q "written" "$WORK/t2put.out" && ok "referer put wrote owner/id annotation" || bad "referer put did not report written"
-
-"$FLATTEN_CTL" referer lookup --json --owner "$OWNER_A" --config "$WORK/remote.yaml" "$REF" >"$WORK/t2lookup2.json" 2>"$WORK/t2lookup2.err" || {
-	echo "second referer lookup failed:" >&2
-	cat "$WORK/t2lookup2.err" >&2
-	bad "second referer lookup"
-}
-ID2="$(json_string "$WORK/t2lookup2.json" manifest_id)"
-[ "$ID2" = "$ID1" ] && ok "2nd run reused the same manifest id (deterministic)" || bad "2nd run id differs ('$ID2' != '$ID1')"
-json_bool_true "$WORK/t2lookup2.json" hit && ok "2nd lookup hit the referrer and can skip re-export" || bad "2nd lookup did not hit"
-
-# Direct check of zot's OCI 1.1 Referrers API for the subject.
-if [ "$SUBJECT_DIGEST" != "${SUBJECT_DIGEST#sha256:}" ]; then
-	if curl -fsS "http://127.0.0.1:$ZOT_PORT/v2/e2e/app/referrers/$SUBJECT_DIGEST" >"$WORK/referrers.json" 2>/dev/null; then
-		grep -q "flatten-manifest" "$WORK/referrers.json" && ok "zot Referrers API lists our flatten-manifest artifact" || bad "referrers list missing our artifact"
-		grep -q "$ID1" "$WORK/referrers.json" && ok "referrer carries the manifest id annotation" || echo "  [info] manifest id not in descriptor annotations (registry-dependent)"
-	else
-		bad "zot referrers endpoint not reachable for $SUBJECT_DIGEST"
-	fi
-fi
-
-# ==========================================================================
-# TEST 3 — owner isolation: a different customer key must not reuse the referrer
-# ==========================================================================
-log "TEST 3: owner isolation (different MANIFEST_KEY)"
+log "TEST 3: owner and key isolation"
 write_remote "$WORK/remote-b.yaml" "$WORK/cache-b"
-"$FLATTEN_CTL" referer lookup --json --owner "$OWNER_B" --config "$WORK/remote-b.yaml" "$REF" >"$WORK/t3lookup.json" 2>"$WORK/t3lookup.err" || {
-	echo "owner-isolation lookup failed:" >&2
-	cat "$WORK/t3lookup.err" >&2
-	bad "owner-isolation lookup"
-}
-if json_bool_true "$WORK/t3lookup.json" hit; then bad "different owner unexpectedly hit an existing referrer"; else ok "different owner did not match existing referrer"; fi
-ID3="$(MANIFEST_KEY="$MANIFEST_KEY_B" "$FLATTEN_CTL" export --upload \
-	--manifest-config "$WORK/manifest.yaml" --config "$WORK/remote-b.yaml" "$REF" 2>"$WORK/t3.err")" || {
-	echo "owner-isolation run failed:" >&2
-	cat "$WORK/t3.err" >&2
-	bad "owner-isolation run"
-}
-[ -n "$ID3" ] && [ "$ID3" != "$ID1" ] && ok "different key -> different manifest id" || bad "different key produced same id ('$ID3')"
-"$FLATTEN_CTL" referer put --owner "$OWNER_B" --manifest-id "$ID3" --config "$WORK/remote-b.yaml" "$SUBJECT_REF" >/dev/null 2>"$WORK/t3put.err" || {
-	cat "$WORK/t3put.err" >&2
-	bad "owner-isolation referer put"
-}
+lookup t3-miss "$OWNER_B" "$WORK/remote-b.yaml" "$REF" miss
+upload t3-upload "$MANIFEST_KEY_B" "$WORK/remote-b.yaml" "$REF" ID3
+[ "$ID3" != "$ID1" ] || die "different key produced the same manifest ID"
+put t3-put "$OWNER_B" "$WORK/remote-b.yaml" "$SUBJECT_REF" "$ID3"
+lookup t3-owner-b "$OWNER_B" "$WORK/remote-b.yaml" "$REF" hit "$ID3"
+lookup t3-owner-a "$OWNER_A" "$WORK/remote.yaml" "$REF" hit "$ID1"
+ok "each owner reuses its own ID; different keys produce different IDs"
 
-# ==========================================================================
-# TEST 4 — expired referrers are filtered and returned as a miss
-# ==========================================================================
-log "TEST 4: expired referrer filtering"
-EXPIRED_REF="127.0.0.1:$ZOT_PORT/e2e/expired:v1"
+log "TEST 4: observe LIVE then EXPIRED while registry remains supported"
+EXPIRED_REPOSITORY="e2e-$RUN_ID/expired"
+EXPIRED_REF="127.0.0.1:$ZOT_PORT/$EXPIRED_REPOSITORY:v1"
+EXPIRED_SUBJECT="${EXPIRED_REF%:*}@$SUBJECT_DIGEST"
 EXPIRY_TTL_SECONDS=10
-seed "$E2E_IMAGE" "$EXPIRED_REF" || bad "seed expiry test image"
-"$FLATTEN_CTL" referer lookup --json --owner "$OWNER_A" --config "$WORK/remote.yaml" "$EXPIRED_REF" >"$WORK/t4lookup1.json" 2>"$WORK/t4lookup1.err" || {
-	cat "$WORK/t4lookup1.err" >&2
-	bad "expiry initial lookup"
-}
-EXPIRED_SUBJECT_REF="$(json_string "$WORK/t4lookup1.json" subject)"
-EXPIRED_SUBJECT_DIGEST="${EXPIRED_SUBJECT_REF##*@}"
-
-# A heavily loaded runner can suspend this shell across the entire validity
-# window. Republish in that case, but only accept the expiry transition after a
-# lookup has observed the same record as live.
-T4_LIVE=""
-for _ in $(seq 1 3); do
-	if ! "$FLATTEN_CTL" referer put --owner "$OWNER_A" --manifest-id "$ID1" --validity "${EXPIRY_TTL_SECONDS}s" \
-		--config "$WORK/remote.yaml" "$EXPIRED_SUBJECT_REF" >"$WORK/t4put.out" 2>"$WORK/t4put.err"; then
-		cat "$WORK/t4put.err" >&2
-		bad "expiry referer put"
-		break
-	fi
-	if ! "$FLATTEN_CTL" referer lookup --json --owner "$OWNER_A" --config "$WORK/remote.yaml" "$EXPIRED_REF" >"$WORK/t4lookup2.json" 2>"$WORK/t4lookup2.err"; then
-		cat "$WORK/t4lookup2.err" >&2
-		bad "expiry live lookup"
-		break
-	fi
-	if json_bool_true "$WORK/t4lookup2.json" hit; then
-		T4_LIVE=1
-		break
-	fi
+seed "$EXPIRED_REF"
+lookup t4-initial "$OWNER_A" "$WORK/remote.yaml" "$EXPIRED_REF" miss
+T4_LIVE=0
+for attempt in 1 2 3; do
+    put "t4-put-$attempt" "$OWNER_A" "$WORK/remote.yaml" "$EXPIRED_SUBJECT" "$ID1" \
+        --validity "${EXPIRY_TTL_SECONDS}s"
+    lookup "t4-live-$attempt" "$OWNER_A" "$WORK/remote.yaml" "$EXPIRED_REF" any
+    if [ "$LOOKUP_HIT" = hit ]; then
+        check_json lookup "$WORK/t4-live-$attempt.out" --subject "$EXPIRED_SUBJECT" --expect hit --id "$ID1" >/dev/null
+        T4_LIVE=1
+        break
+    fi
 done
-[ -n "$T4_LIVE" ] && ok "unexpired referrer is returned" || bad "could not observe a live expiring referrer"
-
-# Check the real OCI response as well as flatten-ctl's accepted live lookup.
-T4_INDEXED=""
-for _ in $(seq 1 50); do
-	if curl -fsS "http://127.0.0.1:$ZOT_PORT/v2/e2e/expired/referrers/$EXPIRED_SUBJECT_DIGEST" >"$WORK/t4referrers.json" 2>/dev/null &&
-		grep -q "$ID1" "$WORK/t4referrers.json" &&
-		grep -q "$OWNER_A" "$WORK/t4referrers.json" &&
-		grep -q "vnd.kuasar.flatten-manifest.valid_at" "$WORK/t4referrers.json"; then
-		T4_INDEXED=1
-		break
-	fi
-	sleep 0.1
+[ "$T4_LIVE" = 1 ] || die "could not observe a LIVE expiring referrer"
+fetch_referrers t4-index-live "$ZOT_PORT" "$EXPIRED_REPOSITORY" "$SUBJECT_DIGEST"
+check_json referrers "$WORK/t4-index-live.out" --owner "$OWNER_A" --id "$ID1" --expiring >"$WORK/t4-record"
+T4_RECORD="$(<"$WORK/t4-record")"
+deadline=$((SECONDS + EXPIRY_TTL_SECONDS + 10))
+while :; do
+    lookup t4-expiry "$OWNER_A" "$WORK/remote.yaml" "$EXPIRED_REF" any
+    [ "$LOOKUP_HIT" != miss ] || break
+    [ "$SECONDS" -lt "$deadline" ] || die "expired referrer was still returned"
+    sleep 0.2
 done
-[ -n "$T4_INDEXED" ] && ok "expiring referrer is indexed with owner/id/valid_at" || bad "expiring referrer was not indexed"
+fetch_referrers t4-index-expired "$ZOT_PORT" "$EXPIRED_REPOSITORY" "$SUBJECT_DIGEST"
+check_json referrers "$WORK/t4-index-expired.out" --owner "$OWNER_A" --id "$ID1" \
+    --record "$T4_RECORD" --expired >/dev/null
+ok "LIVE record became a supported miss; the same expired artifact remains indexed"
 
-T4_EXPIRED=""
-for _ in $(seq 1 "$((EXPIRY_TTL_SECONDS * 5 + 25))"); do
-	if ! "$FLATTEN_CTL" referer lookup --json --owner "$OWNER_A" --config "$WORK/remote.yaml" "$EXPIRED_REF" >"$WORK/t4lookup2.json" 2>"$WORK/t4lookup2.err"; then
-		cat "$WORK/t4lookup2.err" >&2
-		bad "expiry post-expiry lookup"
-		break
-	fi
-	if ! json_bool_true "$WORK/t4lookup2.json" hit; then
-		T4_EXPIRED=1
-		break
-	fi
-	sleep 0.2
-done
-json_bool_true "$WORK/t4lookup2.json" supported && ok "registry remains supported after expiry" || bad "post-expiry lookup lost supported state"
-[ -n "$T4_EXPIRED" ] && ok "expired referrer is filtered as a miss" || bad "expired referrer was returned"
-
-# ==========================================================================
-# TEST 5 — basic-auth registry: credentials via FLATTEN_REGISTRY_* env
-# ==========================================================================
-log "TEST 5: basic-auth registry"
-AUTH_PORT=""
-# Static bcrypt htpasswd line for AUTH_USER=e2euser, AUTH_PASS=e2epass.
-# Keeping this fixture in the script avoids a dependency on apache2-utils.
+log "TEST 5: auth denial, FLATTEN_REGISTRY_* credentials, authenticated post-put hit"
 cat >"$WORK/htpasswd" <<'EOF'
 e2euser:$2y$05$/Jvk/Gj8hT1jwrfwYfy89OeTyXpVOpkH3Bpy3UrFx0XnTG5rmy6eq
 EOF
-start_zot_with_retry "$WORK/zot-auth" AUTH_PORT "$WORK/htpasswd" \
-	|| { bad "auth zot start"; exit 1; }
-
-AUTH_REF="127.0.0.1:$AUTH_PORT/e2e/app:v1"
-docker login "127.0.0.1:$AUTH_PORT" -u "$AUTH_USER" --password-stdin <<<"$AUTH_PASS" >/dev/null 2>&1 \
-	&& AUTH_LOGGED_IN="127.0.0.1:$AUTH_PORT" || bad "docker login to auth zot"
-seed "$E2E_IMAGE" "$AUTH_REF" || bad "seed auth zot"
-docker logout "127.0.0.1:$AUTH_PORT" >/dev/null 2>&1 && AUTH_LOGGED_IN=""
-
+start_zot "$WORK/zot-auth" AUTH_PORT "$WORK/htpasswd"
+AUTH_REF="127.0.0.1:$AUTH_PORT/$REPOSITORY:v1"
+AUTH_SUBJECT="${AUTH_REF%:*}@$SUBJECT_DIGEST"
+# Write only our private push config. Never login/logout or read caller auth.
+write_docker_auth "$WORK/docker-auth/config.json" "127.0.0.1:$AUTH_PORT" "$AUTH_USER" "$AUTH_PASS"
+DOCKER_CONFIG="$WORK/docker-auth" seed "$AUTH_REF"
 write_remote "$WORK/remote-auth.yaml" "$WORK/cache-auth"
-
-# No credentials -> must fail (auth is actually enforced).
-if FLATTEN_REGISTRY_USERNAME="" FLATTEN_REGISTRY_PASSWORD="" \
-	"$FLATTEN_CTL" export --output "$WORK/auth-noauth.erofs" \
-	--config "$WORK/remote-auth.yaml" --no-progress "$AUTH_REF" >/dev/null 2>"$WORK/t4noauth.err"; then
-	bad "anonymous pull from auth registry unexpectedly succeeded"
+capture t5-http-denied curl -q -sS --max-time 10 -o "$WORK/t5-http-body" -w '%{http_code}' \
+    "http://127.0.0.1:$AUTH_PORT/v2/$REPOSITORY/manifests/v1"
+[ "$(<"$WORK/t5-http-denied.out")" = 401 ] || die "auth registry did not return HTTP 401"
+if run "$FLATTEN_CTL" export --output "$WORK/auth-noauth.erofs" --config "$WORK/remote-auth.yaml" \
+    --no-progress "$AUTH_REF" >"$WORK/t5-noauth.out" 2>"$WORK/t5-noauth.err"; then
+    die "anonymous export unexpectedly succeeded"
 else
-	ok "anonymous pull rejected by the authed registry"
+    status=$?
+    [ "$status" = 1 ] || die "anonymous export exited with unexpected status $status"
+    check_json auth-denied "$WORK/t5-noauth.err"
 fi
+ok "anonymous export failed with an authentication denial from the live registry"
 
-# With credentials -> full upload + referrer flow succeeds.
-FLATTEN_REGISTRY_USERNAME="$AUTH_USER" FLATTEN_REGISTRY_PASSWORD="$AUTH_PASS" \
-	"$FLATTEN_CTL" referer lookup --json --owner "$OWNER_A" --config "$WORK/remote-auth.yaml" "$AUTH_REF" >"$WORK/t4lookup.json" 2>"$WORK/t4lookup.err" || {
-	echo "authed lookup failed:" >&2
-	cat "$WORK/t4lookup.err" >&2
-	bad "authed referer lookup"
-}
-AUTH_SUBJECT_REF="$(json_string "$WORK/t4lookup.json" subject)"
-ID4="$(FLATTEN_REGISTRY_USERNAME="$AUTH_USER" FLATTEN_REGISTRY_PASSWORD="$AUTH_PASS" \
-	MANIFEST_KEY="$MANIFEST_KEY_A" "$FLATTEN_CTL" export --upload \
-	--manifest-config "$WORK/manifest.yaml" --config "$WORK/remote-auth.yaml" "$AUTH_REF" 2>"$WORK/t4.err")" || {
-	echo "authed run failed:" >&2
-	cat "$WORK/t4.err" >&2
-	bad "authed upload"
-}
-is_hex64 "$ID4" && ok "credentialed pull + flatten + upload succeeded ($ID4)" || bad "authed run: not a 64-hex id ('$ID4')"
-FLATTEN_REGISTRY_USERNAME="$AUTH_USER" FLATTEN_REGISTRY_PASSWORD="$AUTH_PASS" \
-	"$FLATTEN_CTL" referer put --owner "$OWNER_A" --manifest-id "$ID4" --config "$WORK/remote-auth.yaml" "$AUTH_SUBJECT_REF" >/dev/null 2>"$WORK/t4put.err" || {
-	echo "authed referer put failed:" >&2
-	cat "$WORK/t4put.err" >&2
-	bad "authed referer put"
-}
-ok "credentialed referer put succeeded"
+authed() { FLATTEN_REGISTRY_USERNAME="$AUTH_USER" FLATTEN_REGISTRY_PASSWORD="$AUTH_PASS" "$@"; }
+authed lookup t5-miss "$OWNER_A" "$WORK/remote-auth.yaml" "$AUTH_REF" miss
+authed upload t5-upload "$MANIFEST_KEY_A" "$WORK/remote-auth.yaml" "$AUTH_REF" ID4
+authed put t5-put "$OWNER_A" "$WORK/remote-auth.yaml" "$AUTH_SUBJECT" "$ID4"
+authed lookup t5-hit "$OWNER_A" "$WORK/remote-auth.yaml" "$AUTH_REF" hit "$ID4"
+ok "credentialed lookup, export/upload, put and post-put hit succeeded"
 
-# --------------------------------------------------------------------------
-# summary
-# --------------------------------------------------------------------------
-log "summary"
-if [ "$FAILS" -eq 0 ]; then
-	echo "ALL E2E CHECKS PASSED"
-	exit 0
-fi
-echo "E2E FAILED: $FAILS check(s)"
-exit 1
+log "ALL E2E ASSERTIONS PASSED (cleanup follows)"
