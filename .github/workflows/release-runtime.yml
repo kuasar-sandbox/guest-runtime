@@ -69,7 +69,7 @@ jobs:
         with:
           repository: kuasar-sandbox/kuasar-sandbox
           # Publish this platform commit before activating the guest workflow pin.
-          ref: 4311b8d6dc1226887ccd6168dff7bd6a423230b6
+          ref: 2723b6beb06d57fc2ca023311f4784eb95acf606
           path: trusted/platform
           sparse-checkout: |
             ci/hosted
@@ -143,7 +143,7 @@ jobs:
         with:
           repository: kuasar-sandbox/kuasar-sandbox
           # Publish this platform commit before activating the guest workflow pin.
-          ref: 4311b8d6dc1226887ccd6168dff7bd6a423230b6
+          ref: 2723b6beb06d57fc2ca023311f4784eb95acf606
           path: trusted/platform
           sparse-checkout: |
             ci/hosted
@@ -411,7 +411,7 @@ jobs:
         with:
           repository: kuasar-sandbox/kuasar-sandbox
           # Publish this platform commit before activating the guest workflow pin.
-          ref: 4311b8d6dc1226887ccd6168dff7bd6a423230b6
+          ref: 2723b6beb06d57fc2ca023311f4784eb95acf606
           path: trusted/platform
           sparse-checkout: |
             ci/hosted
@@ -466,7 +466,7 @@ jobs:
         with:
           repository: kuasar-sandbox/kuasar-sandbox
           # Publish this platform commit before activating the guest workflow pin.
-          ref: 4311b8d6dc1226887ccd6168dff7bd6a423230b6
+          ref: 2723b6beb06d57fc2ca023311f4784eb95acf606
           path: trusted/platform
           sparse-checkout: |
             ci/hosted
