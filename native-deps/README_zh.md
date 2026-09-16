@@ -10,7 +10,7 @@ native-deps 目录的构建工作流:从上游源码构建 kuasar-sandbox 平台
 网关目标,不包含在默认 build 中。
 
 公共流水线:按 URL pin 的上游 tarball(可选 SHA256 校验)→ 共享缓存与
-解压 → 本地补丁(vmlinux,`git am`)→ 构建 → `bin/<arch>/`。
+解压 → 本地补丁(EROFS 使用 `patch`，vmlinux 使用 `git am`)→ 构建 → `bin/<arch>/`。
 本文覆盖构建目标、patch 开发循环、交叉编译与缓存/清理约定;产物本身的设计契约不在
 本文:内核配置体系见 [Guest 内核规范](../docs/vmlinux_zh.md)。patched
 `cloud-hypervisor` 是 `sandbox-ctl` 的 VMM 运行件,构建与 patch 契约见
@@ -27,7 +27,7 @@ native-deps 目录的构建工作流:从上游源码构建 kuasar-sandbox 平台
 
 | 产物 | 上游(pin) | 本仓输入 | 消费方 |
 |---|---|---|---|
-| `mkfs.erofs` `fsck.erofs` | erofs-utils v1.9.1 | — | `accelerator`(展平)、`guest-runtime`(打 guest erofs)、源码树诊断 / accelerator 测试 |
+| `mkfs.erofs` `fsck.erofs` | erofs-utils v1.9.1 | [本地 chunk 索引补丁](deps/erofs-patches/) | `accelerator`(展平)、`guest-runtime`(打 guest erofs)、源码树诊断 / accelerator 测试 |
 | `vmlinux` | linux 6.1.169(LTS,cdn.kernel.org) | `deps/linux-patches/` + `deps/vmlinux/*.config` | `sandboxer`/`sandbox-ctl`(guest 内核) |
 | `envd` | e2b-dev/runtime 2026.22(源码 tarball) | — | `guest-runtime`(注入 `sandbox-runtime.bundle`) |
 | `versitygw`(可选) | versity/versitygw v1.5.0 | — | 按需用于本地/单节点 S3-compatible 文件存储集成 |
@@ -91,6 +91,10 @@ init、Envd、mkfs、flatten-ctl 读入固定私有文件。镜像内属主/权�
 flatten-ctl 必须分别等于外部对应载荷。不执行任何归档可执行文件。Kernel 验证
 不需要 EROFS 读取器、Runtime 载荷或依赖 checkout。
 
+Runtime 源码材料包含 `erofs-patches/`，并用 `guest-runtime-erofs-patches`
+记录绑定 guest-runtime 的精确提交。上游 v1.9.1 源码归档身份及许可证单独保留；
+可选磁盘索引来自本地下游补丁。
+
 匹配的 `mkfs.erofs` 链接映射把全部实际外部静态库及启动对象提供给
 `EROFS-INPUTS.tsv`。清单保留名称与文件摘要;来源行及每个输入的
 `system/<input>` 声明目录须精确覆盖整个集合,包括 libc、libuuid 和 GCC/CRT
@@ -151,9 +155,10 @@ build/
 
 ### 1.4 幂等与缓存
 
-- **产物复用**:erofs / envd 目标文件已存在时复用产物,需要强制重建时删除输出。
-  内核输出还受 tracked 输入依赖控制:构建脚本、common/arch 配置或 patch 变化会重新
-  求值配置并使用 Kbuild 增量重建,并非只检查产物存在就无条件跳过。
+- **产物复用**:每次 `make erofs` 检查源码归档、补丁顺序及内容、构建脚本和构建参数。
+  二进制目录及源码树必须具有匹配的构建指纹；输入变化会重新解压、应用补丁并编译。
+  仅存在二进制或 `.extracted` 不会绕过检查。envd 仍复用已有输出，删除其输出可强制重建。
+  内核输入变化会重新求值配置并使用 Kbuild 增量重建。
 - **tarball 缓存**:`build/tarball/` 按文件名缓存,命中即不再下载;解压以
   `.extracted` marker 幂等。
 - **`make clean`**:删除 `bin/` 与目标构建输出,**保留** tarball
@@ -168,6 +173,7 @@ make erofs      # mkfs.erofs + fsck.erofs
 make vmlinux    # guest 内核
 make envd       # e2b guest agent
 make versitygw  # 可选网关,不包含在 build 中
+make test       # 构建并测试原生 EROFS 候选，需要磁盘 scratch
 make clean      # 见 §1.4
 make help       # 列举目标
 ```
@@ -177,16 +183,54 @@ make help       # 列举目标
 ### 2.1 erofs(`make erofs`)
 
 `deps/build-erofs.sh`:解压 erofs-utils 到 `build/<arch>/src/erofs-utils/`(该 autotools
-路径不支持 out-of-source 构建,per-arch 各一棵)→ `autoreconf` + `configure`(关闭
+路径不支持 out-of-source 构建,per-arch 各一棵)→ 按 `deps/erofs-patches/series`
+显式应用补丁 → `autoreconf` + `configure`(关闭
 压缩 / fuse / 网络特性)→ 只编 `lib` + `mkfs` + `fsck` 三个子目录 → 产出
-`bin/<arch>/{mkfs.erofs,fsck.erofs}`。
+`bin/<arch>/{mkfs.erofs,fsck.erofs}`。默认编译并行度为 `JOBS=2`。
 
 - Runtime 工具构建跳过 `mount`/`dump`/`fuse` 子目录,同时避开 v1.9.1 的 mount.erofs
   在 `--disable-multithreading` 下的 pthread 链接问题。独立 bundle 验证另需安装
   可信主机 `dump.erofs` (§1.1)。
 - configure 期硬依赖 libuuid(无 `--without-uuid` 出口);交叉编译需 multi-arch 的
   `uuid-dev:<arch>`,脚本前置探测并打印 apt 安装指引(§4.2)。
-- host 构建依赖:`autoconf automake libtool pkg-config make gcc g++`。
+- host 构建依赖:`autoconf automake libtool pkg-config make gcc g++ patch`。
+
+#### 可选的磁盘支持 chunk 索引
+
+默认仍使用内存。原生 mkfs 只接收一个继承的选择变量
+`EROFS_INDEX_STORAGE=memory|disk`；未设置代表 `memory`，空值或未知值报错。
+使用本仓库带补丁的工具时，可显式启用：
+
+```bash
+EROFS_INDEX_STORAGE=disk flatten-ctl export --tmpdir /disk/scratch ...
+```
+
+`flatten-ctl` 已将 scratch 目录通过子进程 `TMPDIR` 传入。直接调用 mkfs 的磁盘
+模式必须显式设置 `TMPDIR`。不需要新增 accelerator/orchestrator 配置；内存模式
+仍使用堆索引，不增加 scratch 文件系统要求。
+
+磁盘模式把 chunk 记录放入地址稳定的 4 MiB 分段，把各代哈希桶和大 inode 引用
+数组放入独立映射，小数组保留在堆上。完整 SHA-256 匹配、首次出现位置、空洞、
+chunk 合并及镜像字节保持一致。索引由匿名内存转为可回收的文件页，但可能增加
+空间预留、缺页、回写和磁盘 I/O。RSS/cgroup 内存仍可能包含驻留文件页及其他构建
+数据，**不保证固定 RSS 上限**。大量同时存活的大 inode 数组仍消耗映射数量，
+达到 Linux `vm.max_map_count` 限制时会报告映射失败。
+
+scratch 文件系统必须支持 Linux `O_TMPFILE`、可检查的 `fallocate` 空间预留和
+可写 `MAP_SHARED` 映射。明确拒绝 tmpfs/ramfs；按能力检查而非文件系统白名单，
+本地验证覆盖 Linux x86_64/ext4。目录缺失、不支持相关操作、空间/配额耗尽或
+映射失败都会中止构建并给出具体诊断，不静默回退到堆，也没有具名文件回退。
+临时文件自创建起无目录项，映射后关闭 fd；旧哈希桶及释放的数组及时归还后备存储。
+预留在映射写入前发现普通分配失败，但不能保证后续存储介质不出错；scratch
+没有 fsync/msync 持久性契约。
+
+`make test` 运行真实候选和重新构建的原始 v1.9.1，对有界的稠密/重复/稀疏/尾块/
+链接/多文件输入做字节比较、fsck/提取，并检查选择变量错误、tmpfs 拒绝、分配故障
+注入、溢出、清理和构建指纹失效。需要原生 Linux 工具链、Python 3、`/proc`、
+`/dev/shm` 及磁盘构建目录；缺失条件会失败，不将跳过算作通过。v1.9.1 fsck 对强制
+chunk-index 格式的全空洞文件提取长度有问题；该可选格式与原始上游提取结果比较，
+普通 chunk 模式仍校验源内容和逻辑长度。大磁盘/cgroup、ARM64 和完整 guest 验证
+不属于此有界原生测试套件。
 
 ### 2.2 vmlinux(`make vmlinux`)
 

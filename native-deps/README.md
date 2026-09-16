@@ -5,7 +5,7 @@
 
 The native-deps directory builds upstream sources into three default artifact families consumed at runtime, not linked by the Go repositories: `mkfs.erofs`/`fsck.erofs` (erofs-utils), `vmlinux` (guest kernel) and `envd` (E2B guest agent). Their autotools/Kbuild/Go toolchains and independent upstream schedules are kept together in `guest-runtime/native-deps`. An additional `versitygw` gateway target is opt-in and not part of the default build.
 
-The common pipeline is: pinned upstream tarball URL with optional SHA256 verification → shared cache and extraction → local patches (vmlinux, using `git am`) → build → `bin/<arch>/`.
+The common pipeline is: pinned upstream tarball URL with optional SHA256 verification → shared cache and extraction → local patches (EROFS with `patch`, vmlinux with `git am`) → build → `bin/<arch>/`.
 
 This document covers targets, patch development, cross-compilation and cache/cleanup rules. Artifact-specific design belongs elsewhere: see [the kernel specification](../docs/vmlinux.md) for kernel configuration, and [Cloud Hypervisor](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/cloud-hypervisor.md) for the VMM and its patches.
 
@@ -17,7 +17,7 @@ Project-level aggregation runs `make -C kuasar-sandbox build`, which invokes thi
 
 | Artifact | Pinned upstream | Repository inputs | Consumers |
 | --- | --- | --- | --- |
-| `mkfs.erofs` / `fsck.erofs` | erofs-utils v1.9.1 | — | accelerator flattening, guest-runtime image construction, source diagnostics and accelerator tests |
+| `mkfs.erofs` / `fsck.erofs` | erofs-utils v1.9.1 | [Local chunk-index patch](deps/erofs-patches/) | accelerator flattening, guest-runtime image construction, source diagnostics and accelerator tests |
 | `vmlinux` | Linux 6.1.169 (LTS, cdn.kernel.org) | `deps/linux-patches/` and `deps/vmlinux/*.config` | sandboxer / sandbox-ctl guest kernel |
 | `envd` | e2b-dev/runtime 2026.22 source tarball | — | Guest agent in `sandbox-runtime.bundle` |
 | `versitygw` (opt-in) | versity/versitygw v1.5.0 | — | Local/single-node S3-compatible file-storage integration where required |
@@ -95,6 +95,11 @@ the selected Sandboxer commit. Embedded mkfs and flatten-ctl must equal their
 outer payloads. No archive executable is run. Kernel validation needs no EROFS
 reader, Runtime payload or dependency checkout.
 
+Runtime source material includes `erofs-patches/` and a
+`guest-runtime-erofs-patches` source record bound to the exact guest-runtime
+commit. The upstream v1.9.1 archive identity and licenses remain recorded
+separately; the optional index support is a downstream patch.
+
 The matching `mkfs.erofs` link map supplies every actual external archive and
 startup object to `EROFS-INPUTS.tsv`. The inventory retains their names and
 file digests; source rows and per-input `system/<input>` notice directories
@@ -160,7 +165,7 @@ Native builds (host = target) create `bin/<name> → <arch>/<name>` for their pu
 
 ### 1.4 Idempotency and caching
 
-- **Artifact reuse:** EROFS and Envd outputs are reused when their target files already exist; remove outputs to force those builds. Kernel output is also governed by tracked inputs: changes to its build script, common/architecture config fragments or patches trigger configuration reevaluation and incremental Kbuild rather than unconditional existence-only skipping.
+- **Artifact reuse:** EROFS checks the source archive, patch series/content, build scripts and build flags on every `make erofs`. Matching recipe stamps must accompany both the binaries and source tree; changed inputs trigger fresh extraction, patching and compilation. Existing binaries or `.extracted` alone cannot bypass this. Envd reuses existing target files; remove its output to force a build. Kernel input changes trigger configuration reevaluation and incremental Kbuild.
 - **Tarball cache:** `build/tarball/` caches by filename; hits avoid downloading. Extraction uses an `.extracted` marker for idempotency.
 - **`make clean`:** removes `bin/` and target build output while **retaining** tarball caches and architecture-neutral `build/src/*` source trees. Kernel source trees may contain unexported patch-development work and must not be silently discarded.
 
@@ -172,6 +177,7 @@ make erofs      # mkfs.erofs + fsck.erofs
 make vmlinux    # Guest kernel
 make envd       # E2B guest agent
 make versitygw  # Optional gateway; not part of build
+make test       # Build and test native EROFS candidate; requires disk scratch
 make clean      # See section 1.4
 make help       # List targets
 ```
@@ -180,11 +186,58 @@ Build duration depends on the host, toolchain and cache state; these commands do
 
 ### 2.1 EROFS (`make erofs`)
 
-`deps/build-erofs.sh` extracts erofs-utils into `build/<arch>/src/erofs-utils/`, keeping one tree per architecture because this autotools path does not support out-of-source builds. It runs `autoreconf` and `configure` with compression/FUSE/network features disabled, builds only the `lib`, `mkfs` and `fsck` subdirectories, and writes `bin/<arch>/{mkfs.erofs,fsck.erofs}`.
+`deps/build-erofs.sh` extracts erofs-utils into `build/<arch>/src/erofs-utils/`, keeping one tree per architecture because this autotools path does not support out-of-source builds. It explicitly applies `deps/erofs-patches/series`, runs `autoreconf` and `configure` with compression/FUSE/network features disabled, builds only the `lib`, `mkfs` and `fsck` subdirectories, and writes `bin/<arch>/{mkfs.erofs,fsck.erofs}`. Compilation defaults to `JOBS=2`.
 
 - The Runtime tool build skips the `mount`/`dump`/`fuse` subdirectories; it also avoids the v1.9.1 mount.erofs pthread-linking issue under `--disable-multithreading`. Standalone bundle validation separately requires a trusted host `dump.erofs` installation (§1.1).
 - Configure requires libuuid and has no `--without-uuid` path. Cross-compilation requires multiarch `uuid-dev:<arch>`; the script checks it first and prints apt guidance (§4.2).
-- Host build tools: `autoconf automake libtool pkg-config make gcc g++`.
+- Host build tools: `autoconf automake libtool pkg-config make gcc g++ patch`.
+
+#### Optional disk-backed chunk indexes
+
+Memory remains the default. The native mkfs tool accepts one inherited selector,
+`EROFS_INDEX_STORAGE=memory|disk`; an absent value means `memory`, while empty or
+unknown values fail. For the patched tool shipped here, opt in with:
+
+```bash
+EROFS_INDEX_STORAGE=disk flatten-ctl export --tmpdir /disk/scratch ...
+```
+
+`flatten-ctl` already passes its scratch directory as child `TMPDIR`. Direct
+mkfs use must set `TMPDIR` explicitly in disk mode. No additional accelerator or
+orchestrator configuration is required. Memory mode keeps heap indexes and has
+no new scratch-filesystem requirements.
+
+Disk mode stores chunk records in stable 4 MiB segments, hash bucket generations
+in separate mappings, and large inode reference arrays in separate mappings;
+small arrays stay on the heap. Full SHA-256 matching, first occurrence, holes,
+chunk merging and image bytes are preserved. This moves index storage from
+anonymous memory into reclaimable file-backed pages. It can add reservation,
+page faults, writeback and disk I/O; RSS and cgroup memory may still include
+resident file pages and other build data. It does **not** impose a hard RSS
+bound. Many live large inode arrays still consume mappings, and the Linux
+`vm.max_map_count` limit can cause a reported mapping failure.
+
+The scratch filesystem must support Linux `O_TMPFILE`, checked `fallocate`
+reservation and writable `MAP_SHARED` mappings. tmpfs/ramfs are explicitly
+rejected. Filesystem capabilities are tested, with no filesystem-name allowlist;
+local validation covers ext4 on Linux x86_64. Missing scratch, unsupported
+operations, space/quota exhaustion and mapping failures abort the build with
+specific diagnostics. There is no heap fallback or named-file fallback. Each
+scratch file is unlinked from creation, and its descriptor closes after mapping;
+retired buckets and released arrays return their backing storage. Reservation
+detects ordinary allocation failure before mapped writes but does not guarantee
+against later storage faults. Scratch has no fsync/msync durability contract.
+
+`make test` runs a real candidate and freshly built pristine v1.9.1 reference,
+bounded dense/duplicate/sparse/tail/link/many-file fixtures, byte comparisons,
+fsck/extraction, selector failures, tmpfs rejection, allocation fault injection,
+overflow/cleanup checks and recipe invalidation. It requires a native Linux
+toolchain, Python 3, `/proc`, `/dev/shm` and disk-backed build storage; missing
+prerequisites fail instead of reporting skipped tests as success. v1.9.1 fsck's
+forced-chunk-index extraction truncates fully sparse files; that optional-format
+test compares extraction with pristine upstream, while normal chunk-mode tests
+verify source contents and logical lengths. Large disk/cgroup, ARM64 and full
+guest validation remain separate from this bounded native suite.
 
 ### 2.2 vmlinux (`make vmlinux`)
 

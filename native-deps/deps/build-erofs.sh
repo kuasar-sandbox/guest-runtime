@@ -16,7 +16,7 @@
 # Inputs (env):
 #   EROFS_TARBALL         URL or local path; supports "url#filename" form.
 #                         Default: erofs/erofs-utils v1.9.1 github archive.
-#   EROFS_TARBALL_SHA256  Optional expected SHA256. Empty → skip verify.
+#   EROFS_TARBALL_SHA256  Expected SHA256 (default: pinned v1.9.1 archive).
 #   BUILD_DIR             Per-arch build directory (e.g. build/x86_64).
 #                         Source is extracted under $BUILD_DIR/src/erofs-utils
 #                         (per-arch — autotools doesn't support shared src).
@@ -24,8 +24,8 @@
 #   TARBALL_CACHE         Optional shared tarball cache (default $BUILD_DIR/tarball).
 #   CROSS_PREFIX          Optional GNU-triple prefix. Empty for native builds.
 #
-# Idempotent: if $BINDIR/mkfs.erofs already exists it exits 0 without
-# rebuilding. Delete it to force.
+# Idempotent only when source, patches and build recipe match both outputs.
+# JOBS limits parallel compilation (default: 2).
 
 set -euo pipefail
 
@@ -34,17 +34,31 @@ script_dir="$(cd "$(dirname "$0")" && pwd)"
 source "$script_dir/common.sh"
 
 : "${EROFS_TARBALL:=https://codeload.github.com/erofs/erofs-utils/tar.gz/refs/tags/v1.9.1#erofs-utils-v1.9.1.tar.gz}"
-: "${EROFS_TARBALL_SHA256:=}"
+: "${EROFS_TARBALL_SHA256:=a9ef5ab67c4b8d2d3e9ed71f39cd008bda653142a720d8a395a36f1110d0c432}"
 : "${BUILD_DIR:=$(pwd)/build}"
 : "${BINDIR:=$(pwd)/bin}"
 : "${CROSS_PREFIX:=}"
+: "${JOBS:=2}"
+[[ "$JOBS" =~ ^[1-9][0-9]*$ ]] || die "JOBS must be a positive integer"
+
+require_cmd sha256sum patch
+tarball="$(resolve_tarball "$EROFS_TARBALL" "$EROFS_TARBALL_SHA256")"
+# shellcheck disable=SC1091
+source "$script_dir/erofs-recipe.sh"
+recipe="$(erofs_recipe_digest)"
+src_dir="$BUILD_DIR/src/erofs-utils"
+recipe_stamp="$BINDIR/.erofs-recipe"
 
 out_mkfs="$BINDIR/mkfs.erofs"
 out_fsck="$BINDIR/fsck.erofs"
-if [ -x "$out_mkfs" ] && [ -x "$out_fsck" ]; then
-    log "already built: $out_mkfs + $out_fsck (delete one to force rebuild)"
+if [ -x "$out_mkfs" ] && [ -x "$out_fsck" ] \
+    && [ -f "$recipe_stamp" ] && [ -f "$src_dir/.erofs-recipe" ] \
+    && [ "$(cat "$recipe_stamp")" = "$recipe" ] \
+    && [ "$(cat "$src_dir/.erofs-recipe")" = "$recipe" ]; then
+    log "already built with matching erofs recipe: $out_mkfs + $out_fsck"
     exit 0
 fi
+rm -f "$recipe_stamp" "$src_dir/.extracted"
 
 require_cmd autoreconf make tar pkg-config
 if [ -n "$CROSS_PREFIX" ]; then
@@ -76,12 +90,11 @@ Install:
     fi
 fi
 
-tarball="$(resolve_tarball "$EROFS_TARBALL" "$EROFS_TARBALL_SHA256")"
 # autotools requires in-source build (no out-of-source support); use a
 # per-arch source tree under $BUILD_DIR/src/erofs-utils so x86_64 and
 # aarch64 builds don't collide.
-src_dir="$BUILD_DIR/src/erofs-utils"
 extract_tarball "$tarball" "$src_dir" >/dev/null
+erofs_apply_patches
 
 log "autoreconf (erofs-utils)"
 (cd "$src_dir" && ./autogen.sh >/dev/null 2>&1 || autoreconf -i)
@@ -137,15 +150,17 @@ log "make mkfs.erofs + fsck.erofs (mkfs + fsck subdirs; skips mount/dump/fuse)"
 # tests): the libtool link-mode flag for a fully static EXECUTABLE — plain
 # -static is consumed by libtool itself (= "prefer .a of libtool libs") and
 # never reaches the compiler driver.
-make -C "$src_dir/lib"  -j"$(nproc)"
-make -C "$src_dir/mkfs" -j"$(nproc)" \
+make -C "$src_dir/lib"  -j"$JOBS"
+make -C "$src_dir/mkfs" -j"$JOBS" \
     LDFLAGS="-all-static -Wl,-Map,$src_dir/mkfs/mkfs.erofs.map"
-make -C "$src_dir/fsck" -j"$(nproc)" LDFLAGS="-all-static"
+make -C "$src_dir/fsck" -j"$JOBS" LDFLAGS="-all-static"
 
 mkdir -p "$BINDIR"
 cp "$src_dir/mkfs/mkfs.erofs" "$out_mkfs"
 cp "$src_dir/fsck/fsck.erofs" "$out_fsck"
 chmod +x "$out_mkfs" "$out_fsck"
+printf '%s\n' "$recipe" > "$src_dir/.erofs-recipe"
+printf '%s\n' "$recipe" > "$recipe_stamp"
 
 log "built $out_mkfs + $out_fsck"
 # When cross-compiling, --help on the target binary won't run on the host;

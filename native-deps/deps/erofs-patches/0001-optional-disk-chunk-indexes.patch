@@ -1,0 +1,870 @@
+diff --git a/include/erofs/blobchunk.h b/include/erofs/blobchunk.h
+index 48fca63..9894a3c 100644
+--- a/include/erofs/blobchunk.h
++++ b/include/erofs/blobchunk.h
+@@ -24,6 +24,10 @@ int erofs_blob_write_chunked_file(struct erofs_inode *inode, int fd,
+ int erofs_write_zero_inode(struct erofs_inode *inode);
+ int tarerofs_write_chunkes(struct erofs_inode *inode, erofs_off_t data_offset);
+ int erofs_mkfs_dump_blobs(struct erofs_sb_info *sbi);
++int erofs_blob_init_chunkindexes(struct erofs_inode *inode,
++				 unsigned int chunkbits, unsigned int unit);
++void erofs_blob_free_chunkindexes(struct erofs_inode *inode);
++int erofs_blob_init_storage(void);
+ void erofs_blob_exit(void);
+ int erofs_blob_init(const char *blobfile_path, erofs_off_t chunksize);
+ 
+diff --git a/include/erofs/internal.h b/include/erofs/internal.h
+index 671880f..1fa8cbe 100644
+--- a/include/erofs/internal.h
++++ b/include/erofs/internal.h
+@@ -302,6 +302,8 @@ struct erofs_inode {
+ #define z_idata_size	idata_size
+ 		};
+ 	};
++	/* Original mapping length, independent of compacted extent_isize. */
++	size_t chunkindexes_mmap_size;
+ 	void *compressmeta;
+ 
+ #ifdef WITH_ANDROID
+diff --git a/lib/Makefile.am b/lib/Makefile.am
+index 77f6fd8..af40302 100644
+--- a/lib/Makefile.am
++++ b/lib/Makefile.am
+@@ -28,6 +28,7 @@ noinst_HEADERS = $(top_srcdir)/include/erofs_fs.h \
+       $(top_srcdir)/lib/liberofs_compress.h \
+       $(top_srcdir)/lib/liberofs_fragments.h \
+       $(top_srcdir)/lib/liberofs_private.h \
++      $(top_srcdir)/lib/liberofs_index.h \
+       $(top_srcdir)/lib/liberofs_rebuild.h \
+       $(top_srcdir)/lib/liberofs_xxhash.h \
+       $(top_srcdir)/lib/liberofs_gzran.h \
+@@ -41,7 +42,7 @@ liberofs_la_SOURCES = config.c io.c cache.c super.c inode.c xattr.c exclude.c \
+ 		      compress_hints.c hashmap.c sha256.c blobchunk.c dir.c \
+ 		      fragments.c dedupe.c uuid_unparse.c uuid.c tar.c \
+ 		      block_list.c rebuild.c diskbuf.c bitops.c dedupe_ext.c \
+-		      vmdk.c metabox.c global.c importer.c base64.c
++		      vmdk.c metabox.c global.c importer.c base64.c index.c
+ 
+ liberofs_la_CFLAGS = -Wall ${libuuid_CFLAGS} -I$(top_srcdir)/include
+ liberofs_la_LDFLAGS = ${libselinux_LIBS} ${libuuid_LIBS} ${liblz4_LIBS} \
+diff --git a/lib/blobchunk.c b/lib/blobchunk.c
+index 96c161b..b57669a 100644
+--- a/lib/blobchunk.c
++++ b/lib/blobchunk.c
+@@ -11,6 +11,7 @@
+ #include "erofs/importer.h"
+ #include "liberofs_cache.h"
+ #include "liberofs_private.h"
++#include "liberofs_index.h"
+ #include "sha256.h"
+ #include <unistd.h>
+ 
+@@ -37,14 +38,194 @@ struct erofs_blobchunk erofs_holechunk = {
+ };
+ static LIST_HEAD(unhashed_blobchunks);
+ 
++/* Large enough to avoid one VMA per record (and premature max_map_count
++ * exhaustion), without reserving a large arena for a small build.
++ */
++#define BLOB_RECORD_SEGMENT_SIZE (4U * 1024 * 1024)
++#define BLOB_INDEX_MMAP_MIN (16U * 1024)
++static int blob_index_fd = -1;
++static bool blob_storage_initialized;
++static struct blob_record_segment {
++	struct blob_record_segment *next;
++	struct erofs_blobchunk *chunks;
++	size_t used;
++} *blob_record_segments;
++
++int erofs_blob_init_storage(void)
++{
++	const char *value = getenv("EROFS_INDEX_STORAGE");
++	int fd;
++
++	if (blob_storage_initialized)
++		return 0;
++	if (value && strcmp(value, "memory")) {
++		if (strcmp(value, "disk")) {
++			erofs_err("EROFS_INDEX_STORAGE must be memory or disk");
++			return -EINVAL;
++		}
++		fd = erofs_index_open();
++		if (fd < 0)
++			return fd;
++		blob_index_fd = fd;
++	}
++	blob_storage_initialized = true;
++	return 0;
++}
++
++static struct erofs_blobchunk *blob_alloc_chunk(bool zero)
++{
++	struct blob_record_segment *seg = blob_record_segments;
++	struct erofs_blobchunk *chunk;
++
++	if (blob_index_fd < 0) {
++		chunk = zero ? calloc(1, sizeof(*chunk)) : malloc(sizeof(*chunk));
++		return chunk ? chunk : ERR_PTR(-ENOMEM);
++	}
++	if (!seg || seg->used == BLOB_RECORD_SEGMENT_SIZE / sizeof(*chunk)) {
++		seg = malloc(sizeof(*seg));
++		if (!seg)
++			return ERR_PTR(-ENOMEM);
++		seg->chunks = erofs_index_mmap(blob_index_fd, BLOB_RECORD_SEGMENT_SIZE);
++		if (IS_ERR(seg->chunks)) {
++			chunk = seg->chunks;
++			free(seg);
++			return chunk;
++		}
++		seg->used = 0;
++		seg->next = blob_record_segments;
++		blob_record_segments = seg;
++	}
++	/* New file pages are zeroed; published records never move or recycle. */
++	return seg->chunks + seg->used++;
++}
++
++static void blob_free_chunk(struct erofs_blobchunk *chunk)
++{
++	if (blob_index_fd < 0)
++		free(chunk);
++	/* Mapped records, including failed unpublished inserts, live until exit. */
++}
++
++void erofs_blob_free_chunkindexes(struct erofs_inode *inode)
++{
++	if (inode->chunkindexes_mmap_size)
++		erofs_index_munmap(inode->chunkindexes, inode->chunkindexes_mmap_size);
++	else
++		free(inode->chunkindexes);
++	inode->chunkindexes = NULL;
++	inode->chunkindexes_mmap_size = 0;
++}
++
++int erofs_blob_init_chunkindexes(struct erofs_inode *inode,
++				 unsigned int chunkbits, unsigned int unit)
++{
++	size_t stride = max(sizeof(struct erofs_inode_chunk_index), sizeof(void *));
++	erofs_off_t count;
++	size_t bytes;
++	void *p;
++
++	if (chunkbits >= 64 || !unit)
++		return -EOVERFLOW;
++	count = (inode->i_size >> chunkbits) +
++		!!(inode->i_size & ((1ULL << chunkbits) - 1));
++	/* extent_isize is unsigned int; pointer/serialized offsets use size_t. */
++	if (count > UINT_MAX / unit || count > PTRDIFF_MAX / stride)
++		return -EOVERFLOW;
++	bytes = count * stride;
++	inode->chunkindexes = NULL;
++	inode->chunkindexes_mmap_size = 0;
++	if (blob_index_fd >= 0 && bytes >= BLOB_INDEX_MMAP_MIN) {
++		p = erofs_index_mmap(blob_index_fd, bytes);
++		if (IS_ERR(p))
++			return PTR_ERR(p);
++		inode->chunkindexes_mmap_size = bytes;
++	} else {
++		/* Keep small arrays cheap, including empty files. */
++		p = calloc(1, bytes ?: 1);
++		if (!p)
++			return -ENOMEM;
++	}
++	inode->chunkindexes = p;
++	inode->extent_isize = count * unit;
++	return 0;
++}
++
++static struct hashmap_entry **blob_alloc_buckets(unsigned int count)
++{
++	struct hashmap_entry **table;
++	size_t bytes = (size_t)count * sizeof(*table);
++
++	if (!count || bytes / sizeof(*table) != count || bytes > PTRDIFF_MAX)
++		return ERR_PTR(-EOVERFLOW);
++	if (blob_index_fd >= 0)
++		return erofs_index_mmap(blob_index_fd, bytes);
++	table = calloc(count, sizeof(*table));
++	return table ? table : ERR_PTR(-ENOMEM);
++}
++
++static void blob_free_buckets(struct hashmap_entry **table, unsigned int count)
++{
++	if (blob_index_fd >= 0)
++		erofs_index_munmap(table, (size_t)count * sizeof(*table));
++	else
++		free(table);
++}
++
++/* Keep checked growth local to chunk indexing. The generic hashmap and its
++ * other users retain their original allocator and API. Match its 64-bucket
++ * start, 80% load, fourfold growth, insertion order and chain reversal.
++ */
++static int blob_hashmap_add(struct erofs_blobchunk *chunk)
++{
++	struct hashmap *map = &blob_hashmap;
++	struct hashmap_entry **table = NULL;
++	unsigned int size = map->tablesize, i;
++
++	if (map->size == UINT_MAX)
++		return -EOVERFLOW;
++	if (map->size + 1 > map->grow_at) {
++		if (size > UINT_MAX / 4)
++			return -EOVERFLOW;
++		table = blob_alloc_buckets(size * 4);
++		if (IS_ERR(table))
++			return PTR_ERR(table);
++	}
++	/* Reserve first, so failure leaves both the map and caller ownership
++	 * intact. Link before rehashing, exactly as the upstream hashmap does.
++	 */
++	i = chunk->ent.hash & (size - 1);
++	chunk->ent.next = map->table[i];
++	map->table[i] = &chunk->ent;
++	++map->size;
++	if (!table)
++		return 0;
++	for (i = 0; i < size; ++i) {
++		struct hashmap_entry *entry = map->table[i];
++
++		while (entry) {
++			struct hashmap_entry *next = entry->next;
++			unsigned int bucket = entry->hash & (size * 4 - 1);
++
++			entry->next = table[bucket];
++			table[bucket] = entry;
++			entry = next;
++		}
++	}
++	blob_free_buckets(map->table, size);
++	map->table = table;
++	map->tablesize = size * 4;
++	map->grow_at = (uint64_t)map->tablesize * 80 / 100;
++	return 0;
++}
++
+ struct erofs_blobchunk *erofs_get_unhashed_chunk(unsigned int device_id,
+ 		erofs_blk_t blkaddr, erofs_off_t sourceoffset)
+ {
+ 	struct erofs_blobchunk *chunk;
+ 
+-	chunk = calloc(1, sizeof(struct erofs_blobchunk));
+-	if (!chunk)
+-		return ERR_PTR(-ENOMEM);
++	chunk = blob_alloc_chunk(true);
++	if (IS_ERR(chunk))
++		return chunk;
+ 
+ 	chunk->device_id = device_id;
+ 	chunk->blkaddr = blkaddr;
+@@ -82,9 +263,9 @@ static struct erofs_blobchunk *erofs_blob_getchunk(struct erofs_sb_info *sbi,
+ 		}
+ 	}
+ 
+-	chunk = malloc(sizeof(struct erofs_blobchunk));
+-	if (!chunk)
+-		return ERR_PTR(-ENOMEM);
++	chunk = blob_alloc_chunk(false);
++	if (IS_ERR(chunk))
++		return chunk;
+ 
+ 	chunk->chunksize = chunksize;
+ 	memcpy(chunk->sha256, sha256, sizeof(sha256));
+@@ -113,12 +294,16 @@ static struct erofs_blobchunk *erofs_blob_getchunk(struct erofs_sb_info *sbi,
+ 	}
+ 
+ 	if (ret < 0) {
+-		free(chunk);
++		blob_free_chunk(chunk);
+ 		return ERR_PTR(ret);
+ 	}
+ 
+ 	hashmap_entry_init(&chunk->ent, hash);
+-	hashmap_add(&blob_hashmap, chunk);
++	ret = blob_hashmap_add(chunk);
++	if (ret) {
++		blob_free_chunk(chunk);
++		return ERR_PTR(ret);
++	}
+ 	return chunk;
+ }
+ 
+@@ -181,7 +366,8 @@ int erofs_write_chunk_indexes(struct erofs_inode *inode, struct erofs_vfile *vf,
+ 	erofs_blk_t extent_end = EROFS_NULL_ADDR, chunkblks, addrmask;
+ 	erofs_blk_t extent_start = EROFS_NULL_ADDR;
+ 	erofs_off_t source_offset;
+-	unsigned int dst, src, unit, zeroedlen;
++	size_t dst, src;
++	unsigned int unit, zeroedlen;
+ 	bool _48bit;
+ 
+ 	if (inode->u.chunkformat & EROFS_CHUNK_FORMAT_INDEXES)
+@@ -249,7 +435,8 @@ int erofs_blob_mergechunks(struct erofs_inode *inode, unsigned int chunkbits,
+ 			   unsigned int new_chunkbits)
+ {
+ 	struct erofs_sb_info *sbi = inode->sbi;
+-	unsigned int dst, src, unit, count;
++	size_t dst, src, count;
++	unsigned int unit;
+ 
+ 	if (new_chunkbits - sbi->blkszbits > EROFS_CHUNK_FORMAT_BLKBITS_MASK)
+ 		new_chunkbits = EROFS_CHUNK_FORMAT_BLKBITS_MASK + sbi->blkszbits;
+@@ -261,11 +448,12 @@ int erofs_blob_mergechunks(struct erofs_inode *inode, unsigned int chunkbits,
+ 	else
+ 		unit = EROFS_BLOCK_MAP_ENTRY_SIZE;
+ 
+-	count = round_up(inode->i_size, 1ULL << new_chunkbits) >> new_chunkbits;
++	count = (inode->i_size >> new_chunkbits) +
++		!!(inode->i_size & ((1ULL << new_chunkbits) - 1));
+ 	for (dst = src = 0; dst < count; ++dst) {
+ 		*((void **)inode->chunkindexes + dst) =
+ 			*((void **)inode->chunkindexes + src);
+-		src += 1U << (new_chunkbits - chunkbits);
++		src += 1ULL << (new_chunkbits - chunkbits);
+ 	}
+ 
+ 	DBG_BUGON(count * unit >= inode->extent_isize);
+@@ -305,7 +493,7 @@ int erofs_blob_write_chunked_file(struct erofs_inode *inode, int fd,
+ {
+ 	struct erofs_sb_info *sbi = inode->sbi;
+ 	unsigned int chunkbits = cfg.c_chunkbits;
+-	unsigned int count, unit;
++	unsigned int unit;
+ 	struct erofs_blobchunk *chunk, *lastch;
+ 	struct erofs_inode_chunk_index *idx;
+ 	erofs_off_t pos, len, chunksize, interval_start;
+@@ -313,6 +501,8 @@ int erofs_blob_write_chunked_file(struct erofs_inode *inode, int fd,
+ 	u8 *chunkdata;
+ 	int ret;
+ 
++	if (startoff > INT64_MAX || inode->i_size > INT64_MAX - startoff)
++		return -EOVERFLOW;
+ 	/* if the file is fully sparsed, use one big chunk instead */
+ 	if (lseek(fd, startoff, SEEK_DATA) < 0 && errno == ENXIO) {
+ 		chunkbits = ilog2(inode->i_size - 1) + 1;
+@@ -322,7 +512,6 @@ int erofs_blob_write_chunked_file(struct erofs_inode *inode, int fd,
+ 	if (chunkbits - sbi->blkszbits > EROFS_CHUNK_FORMAT_BLKBITS_MASK)
+ 		chunkbits = EROFS_CHUNK_FORMAT_BLKBITS_MASK + sbi->blkszbits;
+ 	chunksize = 1ULL << chunkbits;
+-	count = DIV_ROUND_UP(inode->i_size, chunksize);
+ 
+ 	if (sbi->extra_devices)
+ 		inode->u.chunkformat |= EROFS_CHUNK_FORMAT_INDEXES;
+@@ -331,16 +520,16 @@ int erofs_blob_write_chunked_file(struct erofs_inode *inode, int fd,
+ 	else
+ 		unit = EROFS_BLOCK_MAP_ENTRY_SIZE;
+ 
++	if (chunksize > PTRDIFF_MAX ||
++	    inode->i_size > INT64_MAX - chunksize)
++		return -EOVERFLOW;
+ 	chunkdata = malloc(chunksize);
+ 	if (!chunkdata)
+ 		return -ENOMEM;
+ 
+-	inode->extent_isize = count * unit;
+-	inode->chunkindexes = malloc(count * max(sizeof(*idx), sizeof(void *)));
+-	if (!inode->chunkindexes) {
+-		ret = -ENOMEM;
++	ret = erofs_blob_init_chunkindexes(inode, chunkbits, unit);
++	if (ret)
+ 		goto err;
+-	}
+ 	idx = inode->chunkindexes;
+ 	lastch = NULL;
+ 	minextblks = BLK_ROUND_UP(sbi, inode->i_size);
+@@ -430,8 +619,7 @@ int erofs_blob_write_chunked_file(struct erofs_inode *inode, int fd,
+ 	return erofs_blob_mergechunks(inode, chunkbits,
+ 				      ilog2(minextblks) + sbi->blkszbits);
+ err:
+-	free(inode->chunkindexes);
+-	inode->chunkindexes = NULL;
++	erofs_blob_free_chunkindexes(inode);
+ 	free(chunkdata);
+ 	return ret;
+ }
+@@ -440,7 +628,7 @@ int erofs_write_zero_inode(struct erofs_inode *inode)
+ {
+ 	struct erofs_sb_info *sbi = inode->sbi;
+ 	unsigned int chunkbits = ilog2(inode->i_size - 1) + 1;
+-	unsigned int count;
++	int ret;
+ 	erofs_off_t chunksize, len, pos;
+ 	struct erofs_inode_chunk_index *idx;
+ 
+@@ -452,13 +640,11 @@ int erofs_write_zero_inode(struct erofs_inode *inode)
+ 	inode->u.chunkformat |= chunkbits - sbi->blkszbits;
+ 
+ 	chunksize = 1ULL << chunkbits;
+-	count = DIV_ROUND_UP(inode->i_size, chunksize);
+ 
+-	inode->extent_isize = count * EROFS_BLOCK_MAP_ENTRY_SIZE;
+-	idx = calloc(count, max(sizeof(*idx), sizeof(void *)));
+-	if (!idx)
+-		return -ENOMEM;
+-	inode->chunkindexes = idx;
++	ret = erofs_blob_init_chunkindexes(inode, chunkbits, EROFS_BLOCK_MAP_ENTRY_SIZE);
++	if (ret)
++		return ret;
++	idx = inode->chunkindexes;
+ 
+ 	for (pos = 0; pos < inode->i_size; pos += len) {
+ 		struct erofs_blobchunk *chunk;
+@@ -466,8 +652,7 @@ int erofs_write_zero_inode(struct erofs_inode *inode)
+ 		len = min_t(erofs_off_t, inode->i_size - pos, chunksize);
+ 		chunk = erofs_get_unhashed_chunk(0, EROFS_NULL_ADDR, -1);
+ 		if (IS_ERR(chunk)) {
+-			free(inode->chunkindexes);
+-			inode->chunkindexes = NULL;
++			erofs_blob_free_chunkindexes(inode);
+ 			return PTR_ERR(chunk);
+ 		}
+ 
+@@ -481,7 +666,8 @@ int tarerofs_write_chunkes(struct erofs_inode *inode, erofs_off_t data_offset)
+ {
+ 	struct erofs_sb_info *sbi = inode->sbi;
+ 	unsigned int chunkbits = ilog2(inode->i_size - 1) + 1;
+-	unsigned int count, unit, device_id;
++	unsigned int unit, device_id;
++	int ret;
+ 	erofs_off_t chunksize, len, pos;
+ 	erofs_blk_t blkaddr;
+ 	struct erofs_inode_chunk_index *idx;
+@@ -506,13 +692,11 @@ int tarerofs_write_chunkes(struct erofs_inode *inode, erofs_off_t data_offset)
+ 		datablob_size += round_up(inode->i_size, erofs_blksiz(sbi));
+ 	}
+ 	chunksize = 1ULL << chunkbits;
+-	count = DIV_ROUND_UP(inode->i_size, chunksize);
+ 
+-	inode->extent_isize = count * unit;
+-	idx = calloc(count, max(sizeof(*idx), sizeof(void *)));
+-	if (!idx)
+-		return -ENOMEM;
+-	inode->chunkindexes = idx;
++	ret = erofs_blob_init_chunkindexes(inode, chunkbits, unit);
++	if (ret)
++		return ret;
++	idx = inode->chunkindexes;
+ 
+ 	for (pos = 0; pos < inode->i_size; pos += len) {
+ 		struct erofs_blobchunk *chunk;
+@@ -522,8 +706,7 @@ int tarerofs_write_chunkes(struct erofs_inode *inode, erofs_off_t data_offset)
+ 		chunk = erofs_get_unhashed_chunk(device_id, blkaddr,
+ 						 data_offset);
+ 		if (IS_ERR(chunk)) {
+-			free(inode->chunkindexes);
+-			inode->chunkindexes = NULL;
++			erofs_blob_free_chunkindexes(inode);
+ 			return PTR_ERR(chunk);
+ 		}
+ 
+@@ -601,31 +784,53 @@ int erofs_mkfs_dump_blobs(struct erofs_sb_info *sbi)
+ 
+ void erofs_blob_exit(void)
+ {
+-	struct hashmap_iter iter;
+-	struct hashmap_entry *e;
+ 	struct erofs_blobchunk *bc, *n;
++	unsigned int i;
+ 
+-	if (blobfile >= 0)
++	if (blobfile >= 0) {
+ 		close(blobfile);
+-
+-	/* Disable hashmap shrink, effectively disabling rehash.
+-	 * This way we can iterate over entire hashmap efficiently
+-	 * and safely by using hashmap_iter_next() */
+-	hashmap_disable_shrink(&blob_hashmap);
+-	e = hashmap_iter_first(&blob_hashmap, &iter);
+-	while (e) {
+-		bc = container_of((struct hashmap_entry *)e,
+-				  struct erofs_blobchunk, ent);
+-		DBG_BUGON(hashmap_remove(&blob_hashmap, e) != e);
+-		free(bc);
+-		e = hashmap_iter_next(&iter);
++		blobfile = -1;
+ 	}
+-	DBG_BUGON(hashmap_free(&blob_hashmap));
++	if (blob_hashmap.table) {
++		/* Disk records can be released a segment at a time, without
++		 * faulting every chain back in just to tear it down.
++		 */
++		if (blob_index_fd < 0) {
++			for (i = 0; i < blob_hashmap.tablesize; ++i) {
++				struct hashmap_entry *e = blob_hashmap.table[i];
++
++				while (e) {
++					struct hashmap_entry *next = e->next;
++
++					free(container_of(e, struct erofs_blobchunk, ent));
++					e = next;
++				}
++			}
++		}
++		blob_free_buckets(blob_hashmap.table, blob_hashmap.tablesize);
++	}
++	memset(&blob_hashmap, 0, sizeof(blob_hashmap));
++	if (blob_index_fd < 0) {
++		list_for_each_entry_safe(bc, n, &unhashed_blobchunks, list) {
++			list_del(&bc->list);
++			free(bc);
++		}
++	}
++	init_list_head(&unhashed_blobchunks);
++	while (blob_record_segments) {
++		struct blob_record_segment *seg = blob_record_segments;
+ 
+-	list_for_each_entry_safe(bc, n, &unhashed_blobchunks, list) {
+-		list_del(&bc->list);
+-		free(bc);
++		blob_record_segments = seg->next;
++		erofs_index_munmap(seg->chunks, BLOB_RECORD_SEGMENT_SIZE);
++		free(seg);
++	}
++	if (blob_index_fd >= 0) {
++		close(blob_index_fd);
++		blob_index_fd = -1;
+ 	}
++	blob_storage_initialized = false;
++	remapped_base = 0;
++	datablob_size = 0;
+ }
+ 
+ static int erofs_insert_zerochunk(erofs_off_t chunksize)
+@@ -643,9 +848,9 @@ static int erofs_insert_zerochunk(erofs_off_t chunksize)
+ 	erofs_sha256(zeros, chunksize, sha256);
+ 	free(zeros);
+ 	hash = memhash(sha256, sizeof(sha256));
+-	chunk = malloc(sizeof(struct erofs_blobchunk));
+-	if (!chunk)
+-		return -ENOMEM;
++	chunk = blob_alloc_chunk(false);
++	if (IS_ERR(chunk))
++		return PTR_ERR(chunk);
+ 
+ 	chunk->chunksize = chunksize;
+ 	/* treat chunk filled with zeros as hole */
+@@ -653,20 +858,50 @@ static int erofs_insert_zerochunk(erofs_off_t chunksize)
+ 	memcpy(chunk->sha256, sha256, sizeof(sha256));
+ 
+ 	hashmap_entry_init(&chunk->ent, hash);
+-	hashmap_add(&blob_hashmap, chunk);
++	ret = blob_hashmap_add(chunk);
++	if (ret)
++		blob_free_chunk(chunk);
+ 	return ret;
+ }
+ 
+ int erofs_blob_init(const char *blobfile_path, erofs_off_t chunksize)
+ {
+-	if (!blobfile_path)
++	struct hashmap_entry **table;
++	int ret;
++
++	if (blobfile >= 0 || blob_hashmap.table)
++		return -EBUSY;
++	ret = erofs_blob_init_storage();
++	if (ret)
++		return ret;
++	if (!blobfile_path) {
+ 		blobfile = erofs_tmpfile();
+-	else
++		ret = blobfile;
++	} else {
+ 		blobfile = open(blobfile_path, O_WRONLY | O_CREAT |
+ 						O_TRUNC | O_BINARY, 0666);
+-	if (blobfile < 0)
+-		return -errno;
++		ret = blobfile < 0 ? -errno : 0;
++	}
++	if (ret < 0)
++		goto fail;
+ 
+-	hashmap_init(&blob_hashmap, erofs_blob_hashmap_cmp, 0);
+-	return erofs_insert_zerochunk(chunksize);
++	table = blob_alloc_buckets(64);
++	if (IS_ERR(table)) {
++		ret = PTR_ERR(table);
++		goto fail;
++	}
++	blob_hashmap.table = table;
++	blob_hashmap.tablesize = 64;
++	blob_hashmap.grow_at = 64 * 80 / 100;
++	blob_hashmap.cmpfn = erofs_blob_hashmap_cmp;
++	if (chunksize > PTRDIFF_MAX) {
++		ret = -EOVERFLOW;
++		goto fail;
++	}
++	ret = erofs_insert_zerochunk(chunksize);
++	if (!ret)
++		return 0;
++fail:
++	erofs_blob_exit();
++	return ret;
+ }
+diff --git a/lib/index.c b/lib/index.c
+new file mode 100644
+index 0000000..5df929b
+--- /dev/null
++++ b/lib/index.c
+@@ -0,0 +1,136 @@
++// SPDX-License-Identifier: GPL-2.0+ OR Apache-2.0
++#define _GNU_SOURCE
++#include "erofs/defs.h"
++#include "erofs/print.h"
++#include "liberofs_index.h"
++#include <fcntl.h>
++#include <stdlib.h>
++#include <unistd.h>
++#ifdef HAVE_SYS_MMAN_H
++#include <sys/mman.h>
++#endif
++#ifdef __linux__
++#include <linux/magic.h>
++#include <sys/vfs.h>
++#endif
++
++int erofs_index_open(void)
++{
++#ifdef __linux__
++	const char *dir = getenv("TMPDIR");
++	struct statfs st;
++	int fd, err;
++
++	if (!dir || !*dir) {
++		erofs_err("EROFS_INDEX_STORAGE=disk requires TMPDIR on disk storage");
++		return -EINVAL;
++	}
++	fd = open(dir, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
++	if (fd < 0) {
++		err = -errno;
++		erofs_err("disk index directory %s: %s", dir, strerror(-err));
++		return err;
++	}
++	if (fstatfs(fd, &st)) {
++		err = -errno;
++		erofs_err("disk index filesystem check: %s", strerror(-err));
++		goto fail;
++	}
++	if (st.f_type == TMPFS_MAGIC || st.f_type == RAMFS_MAGIC) {
++		err = -EOPNOTSUPP;
++		erofs_err("disk index TMPDIR must not use tmpfs or ramfs: %s", dir);
++		goto fail;
++	}
++	return fd;
++fail:
++	close(fd);
++	return err;
++#else
++	erofs_err("EROFS_INDEX_STORAGE=disk requires Linux");
++	return -EOPNOTSUPP;
++#endif
++}
++
++static size_t erofs_index_mapsize(size_t bytes)
++{
++	long pagesize = sysconf(_SC_PAGESIZE);
++	size_t size;
++
++	if (pagesize <= 0 || !bytes || bytes > PTRDIFF_MAX ||
++	    bytes > SIZE_MAX - (pagesize - 1))
++		return 0;
++	size = (bytes + pagesize - 1) / pagesize * pagesize;
++	if (size > PTRDIFF_MAX || size > INT64_MAX ||
++	    sizeof(off_t) < sizeof(int64_t))
++		return 0;
++	return size;
++}
++
++void *erofs_index_mmap(int dirfd, size_t bytes)
++{
++#if defined(__linux__) && defined(HAVE_FALLOCATE) && defined(O_TMPFILE)
++	size_t size = erofs_index_mapsize(bytes);
++	const char *operation = "size";
++	void *p;
++	int fd = -1, err = -EOVERFLOW, ret;
++
++	if (!size)
++		goto fail;
++	operation = "create O_TMPFILE";
++	fd = openat(dirfd, ".", O_TMPFILE | O_RDWR | O_CLOEXEC, 0600);
++	if (fd < 0) {
++		err = -errno;
++		goto fail;
++	}
++	/* ftruncate would leave holes: reserve before exposing writable pages.
++	 * Probe capabilities, not filesystem names. Unsupported reservation is
++	 * fatal, as are ENOSPC and quota errors; there is no heap fallback.
++	 */
++	operation = "reserve";
++	do {
++		ret = fallocate(fd, 0, 0, size);
++	} while (ret && errno == EINTR);
++	if (ret) {
++		err = -errno;
++		goto fail;
++	}
++	operation = "mmap";
++	p = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
++	if (p == MAP_FAILED) {
++		err = -errno;
++		goto fail;
++	}
++	/* The mapping retains its unlinked file, without a descriptor per
++	 * allocation. Never extend/remap a live allocation. No durability or
++	 * protection against media faults is implied by successful reservation.
++	 */
++	if (close(fd)) {
++		err = -errno;
++		fd = -1;
++		operation = "close";
++		erofs_index_munmap(p, bytes);
++		goto fail;
++	}
++	return p;
++fail:
++	if (fd >= 0)
++		close(fd);
++	erofs_err("disk index %s (%zu bytes): %s", operation, bytes, strerror(-err));
++	return ERR_PTR(err);
++#else
++	erofs_err("disk indexes require Linux O_TMPFILE, fallocate and mmap support");
++	return ERR_PTR(-EOPNOTSUPP);
++#endif
++}
++
++void erofs_index_munmap(void *ptr, size_t bytes)
++{
++#ifdef HAVE_SYS_MMAN_H
++	size_t size = erofs_index_mapsize(bytes);
++
++	if (size && !munmap(ptr, size))
++		return;
++#endif
++	erofs_err("invalid disk index release (%zu bytes)", bytes);
++	abort();
++}
+diff --git a/lib/inode.c b/lib/inode.c
+index 2cfc6c5..1ed0b48 100644
+--- a/lib/inode.c
++++ b/lib/inode.c
+@@ -163,7 +163,7 @@ unsigned int erofs_iput(struct erofs_inode *inode)
+ 	}
+ 
+ 	if (inode->datalayout == EROFS_INODE_CHUNK_BASED)
+-		free(inode->chunkindexes);
++		erofs_blob_free_chunkindexes(inode);
+ 	free(inode);
+ 	return 0;
+ }
+diff --git a/lib/liberofs_index.h b/lib/liberofs_index.h
+new file mode 100644
+index 0000000..a4f791c
+--- /dev/null
++++ b/lib/liberofs_index.h
+@@ -0,0 +1,11 @@
++/* SPDX-License-Identifier: GPL-2.0+ OR Apache-2.0 */
++#ifndef __LIBEROFS_INDEX_H
++#define __LIBEROFS_INDEX_H
++#include "erofs/err.h"
++#include <stddef.h>
++
++/* Linux scratch mappings. Errors never fall back to heap allocation. */
++int erofs_index_open(void);
++void *erofs_index_mmap(int dirfd, size_t bytes);
++void erofs_index_munmap(void *ptr, size_t bytes);
++#endif
+diff --git a/lib/rebuild.c b/lib/rebuild.c
+index f89a17c..7abaaaa 100644
+--- a/lib/rebuild.c
++++ b/lib/rebuild.c
+@@ -157,7 +157,6 @@ static int erofs_rebuild_write_blob_index(struct erofs_sb_info *dst_sb,
+ 	int ret;
+ 	unsigned int count, unit, chunkbits, i;
+ 	struct erofs_inode_chunk_index *idx;
+-	erofs_off_t chunksize;
+ 	erofs_blk_t blkaddr;
+ 
+ 	/* TODO: fill data map in other layouts */
+@@ -181,15 +180,12 @@ static int erofs_rebuild_write_blob_index(struct erofs_sb_info *dst_sb,
+ 		return -EOPNOTSUPP;
+ 	}
+ 
+-	chunksize = 1ULL << chunkbits;
+-	count = DIV_ROUND_UP(inode->i_size, chunksize);
+-
+ 	unit = sizeof(struct erofs_inode_chunk_index);
+-	inode->extent_isize = count * unit;
+-	idx = calloc(count, max(sizeof(*idx), sizeof(void *)));
+-	if (!idx)
+-		return -ENOMEM;
+-	inode->chunkindexes = idx;
++	ret = erofs_blob_init_chunkindexes(inode, chunkbits, unit);
++	if (ret)
++		return ret;
++	count = inode->extent_isize / unit;
++	idx = inode->chunkindexes;
+ 
+ 	for (i = 0; i < count; i++) {
+ 		struct erofs_blobchunk *chunk;
+@@ -197,7 +193,7 @@ static int erofs_rebuild_write_blob_index(struct erofs_sb_info *dst_sb,
+ 			.buf = __EROFS_BUF_INITIALIZER,
+ 		};
+ 
+-		map.m_la = i << chunkbits;
++		map.m_la = (erofs_off_t)i << chunkbits;
+ 		ret = erofs_map_blocks(inode, &map, 0);
+ 		if (ret)
+ 			goto err;
+@@ -216,8 +212,7 @@ static int erofs_rebuild_write_blob_index(struct erofs_sb_info *dst_sb,
+ 	inode->u.chunkformat |= chunkbits - dst_sb->blkszbits;
+ 	return 0;
+ err:
+-	free(inode->chunkindexes);
+-	inode->chunkindexes = NULL;
++	erofs_blob_free_chunkindexes(inode);
+ 	return ret;
+ }
+ 
+diff --git a/mkfs/main.c b/mkfs/main.c
+index 58c18f9..99601d0 100644
+--- a/mkfs/main.c
++++ b/mkfs/main.c
+@@ -1322,7 +1322,7 @@ static int mkfs_parse_options_cfg(struct erofs_importer_params *params,
+ 				return -EINVAL;
+ 			}
+ 			cfg.c_chunkbits = ilog2(i);
+-			if ((1 << cfg.c_chunkbits) != i) {
++			if ((1ULL << cfg.c_chunkbits) != i) {
+ 				erofs_err("chunksize %s must be a power of two",
+ 					  optarg);
+ 				return -EINVAL;
+@@ -1845,6 +1845,10 @@ int main(int argc, char **argv)
+ 		goto exit;
+ 	}
+ 
++	err = erofs_blob_init_storage();
++	if (err)
++		goto exit;
++
+ 	err = parse_source_date_epoch();
+ 	if (err) {
+ 		fprintf(stderr, "Try '%s --help' for more information.\n", argv[0]);
+@@ -1976,7 +1980,7 @@ int main(int argc, char **argv)
+ 
+ 	cfg.c_dedupe = importer_params.dedupe;
+ 	if (cfg.c_chunkbits) {
+-		err = erofs_blob_init(cfg.c_blobdev_path, 1 << cfg.c_chunkbits);
++		err = erofs_blob_init(cfg.c_blobdev_path, 1ULL << cfg.c_chunkbits);
+ 		if (err)
+ 			goto exit;
+ 	}
+@@ -2132,8 +2136,7 @@ exit:
+ 		fclose(blklst);
+ 	erofs_cleanup_compress_hints();
+ 	erofs_cleanup_exclude_rules();
+-	if (cfg.c_chunkbits || source_mode == EROFS_MKFS_SOURCE_REBUILD)
+-		erofs_blob_exit();
++	erofs_blob_exit();
+ 	erofs_xattr_cleanup_name_prefixes();
+ 	erofs_rebuild_cleanup();
+ 	erofs_diskbuf_exit();
