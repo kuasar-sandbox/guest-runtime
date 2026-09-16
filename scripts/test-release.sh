@@ -291,6 +291,7 @@ install -m 0644 "$ROOT/scripts/testdata/linux-COPYING" "$fixture_root/scripts/te
 install -m 0755 "$ROOT/scripts/release-materials.sh" \
   "$fixture_root/scripts/release-materials.sh"
 mkdir -p "$fixture_root/native-deps/deps"
+cp -a "$ROOT/native-deps/deps/erofs-patches" "$fixture_root/native-deps/deps/"
 cat > "$fixture_root/native-deps/deps/common.sh" <<'EOF'
 # Synthetic envd source fixture, not a native source-authentication result.
 resolve_tarball() {
@@ -361,6 +362,7 @@ mkdir -p "$fixture_root/native-deps/deps/vmlinux"
 printf 'CONFIG_LOCALVERSION="-kuasar"\nCONFIG_LOCALVERSION_AUTO=y\n' \
   > "$fixture_root/native-deps/deps/vmlinux/sandbox-common.config"
 init_fixture_repo "$fixture_root" LICENSE LICENSES NOTICE .gitignore native-deps/.gitignore \
+  native-deps/deps/erofs-patches \
   native-deps/deps/vmlinux/sandbox-common.config \
   native-deps/Makefile native-deps/deps/common.sh scripts/release.sh scripts/release-materials.sh \
   scripts/release-native-materials.sh scripts/publish-release.sh \
@@ -491,6 +493,8 @@ for path in ./bin/sandbox-runtime.bundle ./bin/flatten-ctl ./bin/mkfs.erofs \
   ./share/sources/runtime/GO-BUILD-INFO.tsv \
   ./share/sources/runtime/GO-MODULES.tsv \
   ./share/sources/runtime/EROFS-INPUTS.tsv \
+  ./share/sources/runtime/erofs-patches/series \
+  ./share/sources/runtime/erofs-patches/0001-optional-disk-chunk-indexes.patch \
   ./share/sources/runtime/MATERIALS.sha256; do
   tar -tzf "$runtime_archive" | grep -Fx "$path" >/dev/null \
     || fail "runtime archive is missing $path"
@@ -767,7 +771,7 @@ done
 for kind in runtime vmlinux; do
   if [ "$kind" = runtime ]; then
     version=runtime-v1.2.3-preview.20260804
-    names=(guest-runtime sandboxer accelerator envd erofs-utils github.com/e2b-dev/infra/packages/shared system:libc.a system:libuuid.a)
+    names=(guest-runtime sandboxer accelerator envd erofs-utils guest-runtime-erofs-patches github.com/e2b-dev/infra/packages/shared system:libc.a system:libuuid.a)
   else
     version=vmlinux-v2.3.4
     names=(guest-runtime-kernel-inputs linux)
@@ -798,7 +802,7 @@ for kind in runtime vmlinux; do
     fi
     case "$name" in
       system:*) expected="unrecognized or inconsistent source inventory record" ;;
-      github.com/e2b-dev/infra/packages/shared) expected="missing or inconsistent source record for $name" ;;
+      github.com/e2b-dev/infra/packages/shared|erofs-utils|guest-runtime-erofs-patches) expected="missing or inconsistent source record for $name" ;;
       *) expected="unclaimed release license material" ;;
     esac
     grep -Fq "$expected" "$candidate/result.log" \

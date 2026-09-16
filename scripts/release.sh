@@ -162,7 +162,7 @@ validate_source_inventory() {
         if ($1 != "bin/sandbox-runtime.bundle:/opt/sandbox-runtime/bin/envd") exit 1
         next
       }
-      if ($2 == "erofs-utils") {
+      if ($2 == "erofs-utils" || $2 == "guest-runtime-erofs-patches") {
         if ($1 != "bin/mkfs.erofs,bin/sandbox-runtime.bundle:/opt/sandbox-runtime/bin/mkfs.erofs") exit 1
         next
       }
@@ -330,6 +330,20 @@ validate_bundle() {
       release_materials_require_source "$extract" "$kind" 'bin/mkfs.erofs,bin/sandbox-runtime.bundle:/opt/sandbox-runtime/bin/mkfs.erofs' 'erofs-utils' "v1.9.1" \
         'https://github.com/erofs/erofs-utils/archive/refs/tags/v1.9.1.tar.gz' \
         'sha256:a9ef5ab67c4b8d2d3e9ed71f39cd008bda653142a720d8a395a36f1110d0c432'
+      release_materials_require_source "$extract" "$kind" \
+        'bin/mkfs.erofs,bin/sandbox-runtime.bundle:/opt/sandbox-runtime/bin/mkfs.erofs' \
+        guest-runtime-erofs-patches "$version" \
+        "https://github.com/kuasar-sandbox/guest-runtime/tree/$selected_sha/native-deps/deps/erofs-patches" \
+        "git:$selected_sha"
+      [ -s "$extract/share/sources/runtime/erofs-patches/series" ] \
+        || fail "Runtime source material is missing the erofs patch series"
+      local erofs_patch
+      while IFS= read -r erofs_patch || [ -n "$erofs_patch" ]; do
+        case "$erofs_patch" in ''|'#'*) continue ;; esac
+        [[ "$erofs_patch" =~ ^[A-Za-z0-9._-]+\.patch$ ]] \
+          && [ -s "$extract/share/sources/runtime/erofs-patches/$erofs_patch" ] \
+          || fail "Runtime source material is missing an erofs patch from its series"
+      done < "$extract/share/sources/runtime/erofs-patches/series"
       release_materials_require_go_key "$extract" "$kind" 'bin/flatten-ctl'
       release_native_validate_erofs_inventory "$extract"
       release_materials_require_source "$extract" "$kind" \
@@ -385,7 +399,7 @@ package_release() {
     runtime)
       local sandboxer_source accelerator_source envd_source erofs_source
       local sandbox_init_bin envd_bin sandboxer_version accelerator_version
-      local sandboxer_sha accelerator_sha
+      local sandboxer_sha accelerator_sha patch_file
       sandboxer_source="${RELEASE_SANDBOXER_SOURCE_DIR:-$ROOT/../sandboxer}"
       accelerator_source="${RELEASE_ACCELERATOR_SOURCE_DIR:-$ROOT/../accelerator}"
       envd_source="${RELEASE_ENVD_SOURCE_DIR:-${ENVD_SRC:-$ROOT/native-deps/build/src/e2b-infra}}"
@@ -438,6 +452,13 @@ package_release() {
       release_materials_record_source 'bin/mkfs.erofs,bin/sandbox-runtime.bundle:/opt/sandbox-runtime/bin/mkfs.erofs' erofs-utils v1.9.1 \
         'https://github.com/erofs/erofs-utils/archive/refs/tags/v1.9.1.tar.gz' \
         'sha256:a9ef5ab67c4b8d2d3e9ed71f39cd008bda653142a720d8a395a36f1110d0c432' erofs-utils
+      for patch_file in "$ROOT"/native-deps/deps/erofs-patches/*; do
+        copy_file "${patch_file#"$ROOT/"}" "share/sources/runtime/erofs-patches/${patch_file##*/}"
+      done
+      release_materials_record_source 'bin/mkfs.erofs,bin/sandbox-runtime.bundle:/opt/sandbox-runtime/bin/mkfs.erofs' \
+        guest-runtime-erofs-patches "$version" \
+        "https://github.com/kuasar-sandbox/guest-runtime/tree/$project_sha/native-deps/deps/erofs-patches" \
+        "git:$project_sha" erofs-utils
       release_materials_add_go_binary "$STAGE/bin/flatten-ctl" bin/flatten-ctl
       release_materials_add_go_binary "$sandbox_init_bin" bin/sandbox-runtime.bundle:/sbin/init
       release_materials_add_go_binary "$envd_bin" bin/sandbox-runtime.bundle:/opt/sandbox-runtime/bin/envd

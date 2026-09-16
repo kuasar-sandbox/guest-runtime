@@ -403,6 +403,7 @@ release_materials_require_source() {
     "$unit"|guest-runtime|guest-runtime-kernel-inputs) label=project ;;
     accelerator|connector|sandboxer) label="$name" ;;
     envd|erofs-utils|linux) label="$name" ;;
+    guest-runtime-erofs-patches) label=erofs-utils ;;
     system:*) label="system/${name#system:}" ;;
     github.com/e2b-dev/infra/packages/shared) label=go/github.com/e2b-dev/infra/packages/shared@v0.0.0 ;;
   esac

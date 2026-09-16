@@ -133,8 +133,7 @@ all: build
 build: vmlinux erofs envd
 
 # --- erofs-utils (mkfs.erofs) ----------------------------------------------
-erofs: $(EROFS_BIN)
-$(EROFS_BIN):
+erofs:
 	$(DEPS_ENV) \
 	EROFS_TARBALL="$(EROFS_TARBALL)" \
 	EROFS_TARBALL_SHA256="$(EROFS_TARBALL_SHA256)" \
@@ -195,8 +194,17 @@ $(VMLINUX_BIN): $(VMLINUX_INPUTS)
 	STAGE=patches-apply $(LINUX_INVOKE) bash deps/build-vmlinux.sh
 	STAGE=build $(LINUX_INVOKE) bash deps/build-vmlinux.sh
 
-test:
+test: erofs
 	bash -n deps/*.sh
+	bash deps/test-common.sh
+	$(DEPS_ENV) \
+	EROFS_TARBALL="$(EROFS_TARBALL)" \
+	EROFS_TARBALL_SHA256="$(EROFS_TARBALL_SHA256)" \
+		bash deps/test-erofs-index.sh
+	$(DEPS_ENV) \
+	EROFS_TARBALL="$(EROFS_TARBALL)" \
+	EROFS_TARBALL_SHA256="$(EROFS_TARBALL_SHA256)" \
+		bash deps/test-erofs-recipe.sh
 
 clean:
 	# Preserve build/tarball/ (re-downloading source is expensive) and the
