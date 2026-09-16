@@ -50,7 +50,7 @@ jobs:
         with:
           repository: kuasar-sandbox/kuasar-sandbox
           # Publish this platform commit before activating the guest workflow pin.
-          ref: 3f7e0d6baf4a9187a5b365e7e072a5b08dce2d05
+          ref: 4311b8d6dc1226887ccd6168dff7bd6a423230b6
           path: trusted/platform
           sparse-checkout: |
             ci/hosted

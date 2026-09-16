@@ -72,7 +72,7 @@ def check():
     assert names.index("Revoke source token before code execution") < names.index("Verify and install the selected sandbox-init")
     assert runtime["Check out trusted build checks"]["with"]["ref"] == "${{ github.sha }}"
     native = runtime["Build runtime native inputs and retain their material sources"]
-    assert "make -C src/guest-runtime erofs envd" in native["run"]
+    assert "make -C src/guest-runtime erofs envd" in [line.strip() for line in native["run"].splitlines()]
     assert native["shell"] == "bash"
     assert 'taskset -pc "$KUASAR_BUILD_CPUS" "$$"' in native["run"]
     assert "ci/native-cache" not in native["run"]
