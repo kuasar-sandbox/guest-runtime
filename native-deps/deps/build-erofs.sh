@@ -10,9 +10,9 @@
 #
 # STATIC linking is required, not cosmetic: mkfs.erofs rides the builder guest
 # runtime (/opt/sandbox-runtime/bin, projected into ANY app rootfs — empty ones
-# included), where no dynamic loader exists. Needs target libuuid.a, libssl.a
-# and libcrypto.a (Debian/Ubuntu: uuid-dev, libssl-dev). SHA-256 uses the
-# existing upstream OpenSSL EVP backend, including its built-in provider.
+# included), where no dynamic loader exists. Needs target libuuid.a, libgcrypt.a
+# and libgpg-error.a plus their headers and pkg-config metadata. A maintained
+# patch explicitly selects full SHA-256 through Libgcrypt, without fallback.
 #
 # Inputs (env):
 #   EROFS_TARBALL         URL or local path; supports "url#filename" form.
@@ -25,10 +25,9 @@
 #   TARBALL_CACHE         Optional shared tarball cache (default $BUILD_DIR/tarball).
 #   CROSS_PREFIX          Optional GNU-triple prefix. Empty for native builds.
 #
-# Reuse requires both binaries and a matching .erofs-build-inputs stamp.
-# The stamp covers this recipe, source pin, flags, tools and selected static
-# link inputs, not the entire host filesystem. Delete either binary to force.
-# EROFS_BUILD_JOBS optionally bounds make parallelism (default: nproc).
+# One .erofs-recipe v2 stamp covers both outputs, source/patch/recipe bytes,
+# flags/tools and actual compiler/link dependencies. EROFS_BUILD_JOBS defaults
+# to JOBS, then 2; changing job count does not invalidate the recipe.
 
 set -euo pipefail
 
@@ -37,25 +36,28 @@ script_dir="$(cd "$(dirname "$0")" && pwd)"
 source "$script_dir/common.sh"
 
 : "${EROFS_TARBALL:=https://codeload.github.com/erofs/erofs-utils/tar.gz/refs/tags/v1.9.1#erofs-utils-v1.9.1.tar.gz}"
-: "${EROFS_TARBALL_SHA256:=}"
+: "${EROFS_TARBALL_SHA256=a9ef5ab67c4b8d2d3e9ed71f39cd008bda653142a720d8a395a36f1110d0c432}"
 : "${BUILD_DIR:=$(pwd)/build}"
 : "${BINDIR:=$(pwd)/bin}"
 : "${CROSS_PREFIX:=}"
 
 out_mkfs="$BINDIR/mkfs.erofs"
 out_fsck="$BINDIR/fsck.erofs"
-stamp="$BINDIR/.erofs-build-inputs"
+recipe_stamp="$BINDIR/.erofs-recipe"
 src_dir="$BUILD_DIR/src/erofs-utils"
-cc="${CROSS_PREFIX}gcc"
+: "${EROFS_BUILD_JOBS:=${JOBS:-2}}"
+[[ "$EROFS_BUILD_JOBS" =~ ^[1-9][0-9]*$ ]] || die "EROFS_BUILD_JOBS must be a positive integer"
+cc="${CC:-gcc}"
+[ -z "$CROSS_PREFIX" ] || cc="${CROSS_PREFIX}gcc"
+read -r -a compiler <<< "$cc"
+nm_tool="${NM:-${CROSS_PREFIX}nm}"
 : "${PKG_CONFIG:=pkg-config}"
-require_cmd autoreconf make tar sha256sum "$PKG_CONFIG" "$cc" "${CROSS_PREFIX}g++" \
-    "${CROSS_PREFIX}ar" "${CROSS_PREFIX}ranlib" readelf
+require_cmd sha256sum patch python3 "$PKG_CONFIG" "${compiler[0]}" readelf "$nm_tool"
 
-# Never let cross configure discover host .pc files by default. Explicit
-# pkg-config paths/sysroots remain available for non-Debian toolchains.
+# Cross builds never silently discover host .pc files.
 if [ -n "$CROSS_PREFIX" ]; then
-    multiarch="$("$cc" -print-multiarch)"
-    sysroot="$("$cc" -print-sysroot)"
+    multiarch="$("${compiler[@]}" -print-multiarch)"
+    sysroot="$("${compiler[@]}" -print-sysroot)"
     if [ -z "${PKG_CONFIG_LIBDIR+x}" ]; then
         [ -n "$multiarch" ] || die "cross erofs build requires target PKG_CONFIG_LIBDIR"
         export PKG_CONFIG_LIBDIR="${sysroot%/}/usr/lib/$multiarch/pkgconfig:${sysroot%/}/lib/$multiarch/pkgconfig:${sysroot%/}/usr/share/pkgconfig"
@@ -65,109 +67,84 @@ if [ -n "$CROSS_PREFIX" ]; then
 fi
 export PKG_CONFIG
 
-prerequisite_hint="erofs requires target static libcrypto, libssl and libuuid plus headers and pkg-config metadata.
-Debian/Ubuntu: install libssl-dev and uuid-dev for the target architecture
-(e.g. libssl-dev:arm64 uuid-dev:arm64 with gcc-aarch64-linux-gnu).
-RPM: openssl-devel (openssl-static if split), libuuid-devel and static libc/uuid.
-For a cross sysroot, set PKG_CONFIG_LIBDIR and PKG_CONFIG_SYSROOT_DIR to target paths."
-"$PKG_CONFIG" --exists openssl uuid || die "$prerequisite_hint"
-# Upstream uses the openssl module (libssl + libcrypto), not just libcrypto.
-# Supply private static dependencies too, for distributions where these include
-# -ldl/-pthread. No configure auto-detection or non-OpenSSL fallback is allowed.
-openssl_CFLAGS="$("$PKG_CONFIG" --cflags openssl)"
-openssl_LIBS="$("$PKG_CONFIG" --libs --static openssl)"
-libuuid_CFLAGS="$("$PKG_CONFIG" --cflags uuid)"
-libuuid_LIBS="$("$PKG_CONFIG" --libs --static uuid)"
-export openssl_CFLAGS openssl_LIBS libuuid_CFLAGS libuuid_LIBS
+# A local archive is an input, not a filename-based download-cache entry.
+case "$EROFS_TARBALL" in
+    http://*|https://*) tarball="$(resolve_tarball "$EROFS_TARBALL" "$EROFS_TARBALL_SHA256")" ;;
+    *) tarball="$(realpath -e "$EROFS_TARBALL")"
+       [ -z "$EROFS_TARBALL_SHA256" ] || \
+           [ "$(sha256sum < "$tarball" | cut -d ' ' -f1)" = "$EROFS_TARBALL_SHA256" ] \
+           || die "sha256 mismatch for $tarball" ;;
+esac
+# shellcheck disable=SC1091
+source "$script_dir/erofs-recipe.sh"
+# shellcheck disable=SC2034 # Read by the sourced helper.
+recipe="$(erofs_recipe_digest)"
+# Retire the previous standalone SHA stamp; it cannot authorize reuse.
+rm -f "$BINDIR/.erofs-build-inputs"
+if [ -x "$out_mkfs" ] && [ -x "$out_fsck" ] && erofs_recipe_matches; then
+    log "already built with matching erofs recipe: $out_mkfs + $out_fsck"
+    exit 0
+fi
+[ ! -e "$src_dir/.git" ] || die "refusing to replace an erofs source Git checkout: $src_dir"
+rm -f "$recipe_stamp" "$src_dir/.extracted"
+require_cmd autoreconf make tar "${CROSS_PREFIX}ar" "${CROSS_PREFIX}ranlib"
 
+prerequisite_hint="erofs requires target static libgcrypt, libgpg-error and libuuid plus headers and pkg-config metadata.
+Debian/Ubuntu: libgcrypt20-dev libgpg-error-dev uuid-dev for the target architecture.
+RPM devel packages may omit static archives (including openEuler); provision matching
+static builds with their source/relink materials before building this guest tool.
+For a cross sysroot, set PKG_CONFIG_LIBDIR and PKG_CONFIG_SYSROOT_DIR to target paths."
+"$PKG_CONFIG" --exists libgcrypt gpg-error uuid || die "$prerequisite_hint"
+gcrypt_cflags="$("$PKG_CONFIG" --cflags libgcrypt gpg-error)"
+gcrypt_libs="$("$PKG_CONFIG" --libs --static libgcrypt gpg-error)"
+libuuid_CFLAGS="${libuuid_CFLAGS-$("$PKG_CONFIG" --cflags uuid)}"
+libuuid_LIBS="${libuuid_LIBS-$("$PKG_CONFIG" --libs --static uuid)}"
+export libuuid_CFLAGS libuuid_LIBS
 mkdir -p "$BUILD_DIR"
 probe_dir="$(mktemp -d "$BUILD_DIR/erofs-link.XXXXXX")"
 trap 'rm -rf "$probe_dir"' EXIT
 cat > "$probe_dir/probe.c" <<'EOF'
-#include <openssl/evp.h>
-#include <openssl/ssl.h>
+#include <gcrypt.h>
 #include <uuid/uuid.h>
 int main(void)
 {
-    unsigned char digest[EVP_MAX_MD_SIZE];
-    unsigned int size;
+    unsigned char digest[32];
     uuid_t uuid;
-    SSL_CTX *ssl = SSL_CTX_new(TLS_method());
-    int ok = EVP_Digest("abc", 3, digest, &size, EVP_sha256(), 0);
+    if (!gcry_check_version(GCRYPT_VERSION) ||
+        gcry_control(GCRYCTL_DISABLE_SECMEM, 0) ||
+        gcry_control(GCRYCTL_INITIALIZATION_FINISHED, 0) ||
+        gcry_md_test_algo(GCRY_MD_SHA256))
+        return 1;
+    gcry_md_hash_buffer(GCRY_MD_SHA256, digest, "abc", 3);
     uuid_clear(uuid);
-    SSL_CTX_free(ssl);
-    return !(ok && size == 32 && uuid_is_null(uuid));
+    return !uuid_is_null(uuid);
 }
 EOF
-# Intentional shell word splitting for conventional compiler/pkg-config flags;
-# never eval them. The target linker is the architecture/static-archive check.
+# Conventional compiler/pkg-config flag splitting; never eval flags.
 # shellcheck disable=SC2086
-if ! "$cc" ${CPPFLAGS:-} ${CFLAGS:-} $openssl_CFLAGS $libuuid_CFLAGS \
+if ! "${compiler[@]}" ${CPPFLAGS:-} ${CFLAGS:-} $gcrypt_cflags $libuuid_CFLAGS \
     -c "$probe_dir/probe.c" -o "$probe_dir/probe.o" > "$probe_dir/link.log" 2>&1 \
-    || ! "$cc" ${CFLAGS:-} "$probe_dir/probe.o" ${LDFLAGS:-} -static -Wl,-Map,"$probe_dir/probe.map" \
-    $openssl_LIBS $libuuid_LIBS ${LIBS:-} -o "$probe_dir/probe" > "$probe_dir/link.log" 2>&1; then
+    || ! "${compiler[@]}" ${CFLAGS:-} "$probe_dir/probe.o" ${LDFLAGS:-} -static \
+    $gcrypt_libs $libuuid_LIBS ${LIBS:-} -o "$probe_dir/probe" >> "$probe_dir/link.log" 2>&1; then
     cat "$probe_dir/link.log" >&2
-    die "target static OpenSSL/uuid link check failed. $prerequisite_hint"
+    die "target static Libgcrypt/Libgpg-error/uuid link check failed. $prerequisite_hint"
 fi
-
-# Pinned URLs need no download on a warm binary cache. Local or unpinned
-# sources are hashed directly; a same-name local replacement cannot hide behind
-# common.sh's filename-based download cache.
-tarball=""
-case "$EROFS_TARBALL" in
-    http://*|https://*) source_digest="$EROFS_TARBALL_SHA256" ;;
-    *) tarball="$(realpath -e "$EROFS_TARBALL")"
-       source_digest="$(sha256sum "$tarball" | awk '{print $1}')"
-       [ -z "$EROFS_TARBALL_SHA256" ] || [ "$source_digest" = "$EROFS_TARBALL_SHA256" ] \
-           || die "sha256 mismatch for $tarball" ;;
-esac
-if [ -z "$source_digest" ]; then
-    tarball="$(resolve_tarball "$EROFS_TARBALL" "$EROFS_TARBALL_SHA256")"
-    source_digest="$(sha256sum "$tarball" | awk '{print $1}')"
-fi
-{
-    printf '%s\n' "$EROFS_TARBALL" "$source_digest" "$CROSS_PREFIX"
-    for name in CFLAGS CPPFLAGS CXXFLAGS LDFLAGS LIBS SOURCE_DATE_EPOCH \
-        PKG_CONFIG PKG_CONFIG_PATH PKG_CONFIG_LIBDIR PKG_CONFIG_SYSROOT_DIR; do
-        printf '%s=%s\n' "$name" "${!name-}"
-    done
-    (cd "$script_dir/.." && sha256sum Makefile deps/build-erofs.sh deps/common.sh)
-    for tool in "$cc" "${CROSS_PREFIX}ar" "${CROSS_PREFIX}ranlib" autoreconf make; do
-        "$tool" --version
-        sha256sum "$(command -v "$tool")"
-    done
-    "$cc" -dumpmachine
-    "$PKG_CONFIG" --modversion openssl uuid
-    printf '%s\n' "$openssl_CFLAGS" "$openssl_LIBS" "$libuuid_CFLAGS" "$libuuid_LIBS"
-    # Bounded by this one link, including libc and compiler startup objects.
-    while IFS= read -r input; do
-        [[ "$input" == "$probe_dir/"* ]] || sha256sum "$input"
-    done < <(
-        awk '$1 == "LOAD" && $2 ~ /\.(a|o)$/ {print $2}' "$probe_dir/probe.map" | LC_ALL=C sort -u
-    )
-} > "$probe_dir/inputs"
-input_hash="$(sha256sum "$probe_dir/inputs" | awk '{print $1}')"
-if [ -x "$out_mkfs" ] && [ -x "$out_fsck" ] && [ -f "$stamp" ] \
-    && [ "$(cat "$stamp")" = "$input_hash" ]; then
-    log "already built: $out_mkfs + $out_fsck (inputs unchanged)"
-    exit 0
-fi
-
-[ -n "$tarball" ] || tarball="$(resolve_tarball "$EROFS_TARBALL" "$EROFS_TARBALL_SHA256")"
-# This per-arch tree is generated build output. A recipe/source/flag change
-# must not reuse old configure results, objects or the extraction marker.
-[ ! -e "$src_dir/.git" ] || die "refusing to replace an EROFS source checkout: $src_dir"
-rm -f "$stamp" "$src_dir/.extracted"
 extract_tarball "$tarball" "$src_dir" >/dev/null
-
+erofs_apply_patches
 log "autoreconf (erofs-utils)"
 (cd "$src_dir"; if ! ./autogen.sh >/dev/null 2>&1; then autoreconf -i; fi)
 
 # Cross-compile arguments for autotools configure.
 configure_cross_args=()
+cxx="${CXX:-g++}"; ar="${AR:-ar}"; strip="${STRIP:-strip}"; ranlib="${RANLIB:-ranlib}"
+if [ -n "$CROSS_PREFIX" ]; then
+    cxx="${CROSS_PREFIX}g++"; ar="${CROSS_PREFIX}ar"
+    strip="${CROSS_PREFIX}strip"; ranlib="${CROSS_PREFIX}ranlib"
+fi
 configure_env=(
-    "CC=$cc" "CXX=${CROSS_PREFIX}g++" "AR=${CROSS_PREFIX}ar"
-    "STRIP=${CROSS_PREFIX}strip" "RANLIB=${CROSS_PREFIX}ranlib"
+    "CC=$cc" "CXX=$cxx" "AR=$ar" "STRIP=$strip" "RANLIB=$ranlib"
+    "CPPFLAGS=${CPPFLAGS:-} $gcrypt_cflags -DEROFS_USE_LIBGCRYPT_SHA256=1"
+    "LIBS=$gcrypt_libs ${LIBS:-}"
 )
 if [ -n "$CROSS_PREFIX" ]; then
     # Strip the trailing dash from CROSS_PREFIX to form --host triple.
@@ -185,7 +162,7 @@ if [ -n "$CROSS_PREFIX" ]; then
     log "cross-compile mode: --host=$host_triple --build=$build_triple"
 fi
 
-log "configure (OpenSSL SHA-256, no compression, no fuse)"
+log "configure (Libgcrypt SHA-256, no compression, no fuse)"
 (cd "$src_dir" && env "${configure_env[@]}" ./configure \
     "${configure_cross_args[@]}" \
     --disable-lz4 \
@@ -195,18 +172,16 @@ log "configure (OpenSSL SHA-256, no compression, no fuse)"
     --without-libdeflate \
     --without-xxhash \
     --without-libcurl \
-    --with-openssl \
+    --without-openssl \
     --without-libxml2 \
     --without-json-c \
     --without-libnl3 \
     --disable-multithreading)
 
-# v1.9.1 can miss headers despite --with-openssl. Check both switches used by
-# lib/sha256.h, so this build can never silently select the bundled fallback.
-for define in HAVE_OPENSSL HAVE_OPENSSL_EVP_H; do
-    grep -qx "#define $define 1" "$src_dir/config.h" \
-        || die "configure did not enable the required OpenSSL SHA-256 backend ($define)"
-done
+# Never allow ambient configure overrides to re-enable the OpenSSL backend.
+if grep -Eq '^#define HAVE_OPENSSL(_EVP_H)? 1$' "$src_dir/config.h"; then
+    die "configure enabled an unexpected OpenSSL backend"
+fi
 
 log "make mkfs.erofs + fsck.erofs (mkfs + fsck subdirs; skips mount/dump/fuse)"
 # Build lib first (mkfs/fsck depend on liberofs.a), then the two subdirs we ship.
@@ -217,10 +192,17 @@ log "make mkfs.erofs + fsck.erofs (mkfs + fsck subdirs; skips mount/dump/fuse)"
 # tests): the libtool link-mode flag for a fully static EXECUTABLE — plain
 # -static is consumed by libtool itself (= "prefer .a of libtool libs") and
 # never reaches the compiler driver.
-make -C "$src_dir/lib"  -j"${EROFS_BUILD_JOBS:-$(nproc)}"
-make -C "$src_dir/mkfs" -j"${EROFS_BUILD_JOBS:-$(nproc)}" \
+make -C "$src_dir/lib"  -j"$EROFS_BUILD_JOBS"
+# Verify the compiled SHA path, so a later -U in user flags cannot silently
+# select the bundled fallback even though the static prerequisite probe passed.
+"$nm_tool" -u "$src_dir/lib/liberofs_la-sha256.o" > "$probe_dir/sha-symbols"
+for symbol in gcry_md_hash_buffer gcry_md_open; do
+    grep -Eq "[[:space:]]U[[:space:]]+$symbol$" "$probe_dir/sha-symbols" \
+        || die "compiled SHA object did not select required Libgcrypt backend ($symbol)"
+done
+make -C "$src_dir/mkfs" -j"$EROFS_BUILD_JOBS" \
     LDFLAGS="${LDFLAGS:-} -all-static -Wl,-Map,$src_dir/mkfs/mkfs.erofs.map"
-make -C "$src_dir/fsck" -j"${EROFS_BUILD_JOBS:-$(nproc)}" LDFLAGS="${LDFLAGS:-} -all-static"
+make -C "$src_dir/fsck" -j"$EROFS_BUILD_JOBS" LDFLAGS="${LDFLAGS:-} -all-static -Wl,-Map,$src_dir/fsck/fsck.erofs.map"
 
 for binary in "$src_dir/mkfs/mkfs.erofs" "$src_dir/fsck/fsck.erofs"; do
     readelf -lW "$binary" > "$probe_dir/elf-programs"
@@ -234,7 +216,7 @@ mkdir -p "$BINDIR"
 cp "$src_dir/mkfs/mkfs.erofs" "$out_mkfs"
 cp "$src_dir/fsck/fsck.erofs" "$out_fsck"
 chmod +x "$out_mkfs" "$out_fsck"
-printf '%s\n' "$input_hash" > "$stamp"
+erofs_recipe_write_stamp
 
 log "built $out_mkfs + $out_fsck"
 # When cross-compiling, --help on the target binary won't run on the host;

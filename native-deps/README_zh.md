@@ -93,7 +93,7 @@ flatten-ctl 必须分别等于外部对应载荷。不执行任何归档可执�
 
 匹配的 `mkfs.erofs` 链接映射把全部实际外部静态库及启动对象提供给
 `EROFS-INPUTS.tsv`。清单保留名称与文件摘要;来源行及每个输入的
-`system/<input>` 声明目录须精确覆盖整个集合,包括 libc、libuuid、OpenSSL（libcrypto/libssl）和 GCC/CRT
+`system/<input>` 声明目录须精确覆盖整个集合,包括 libc、libuuid、Libgcrypt/Libgpg-error（libgcrypt/libgpg-error）和 GCC/CRT
 输入。打包记录已安装的 Debian/RPM 源包身份,复制其版权、许可和 NOTICE 文件,
 包括引用的公共许可正文。包名或 SPDX 标识本身不能代替正文。RPM 包列表和同源
 兄弟包文件列表须完整成功;部分输出不算完整覆盖。已安装包归属用于来源归类,
@@ -151,14 +151,9 @@ build/
 
 ### 1.4 幂等与缓存
 
-- **产物复用:** Envd 在目标文件已存在时复用。每次 EROFS 调用都会检查两个可执行文件及
-  `bin/<arch>/.erofs-build-inputs`：配方/Makefile/common helper、源码 pin 或本地 tarball
-  字节、编译/构建工具、参数、pkg-config 选择，以及静态链接探针实际选中的 archive/启动
-  对象共同决定复用。输入不变时复用；变化后重新解压自动生成的 per-arch EROFS 树并重建。
-  若该目录是 Git checkout 则拒绝覆盖，保留补丁开发。删除任一二进制也会触发重建。
-  构建并行度不影响复用。内核仍由跟踪的脚本、配置和补丁输入决定增量 Kbuild。
-- **tarball 缓存**:`build/tarball/` 按文件名缓存,命中即不再下载;解压以
-  `.extracted` marker 幂等。
+- **产物复用:** Envd 在目标文件已存在时复用。EROFS 使用唯一的 `bin/<arch>/.erofs-recipe` v2 stamp，记录两个输出的摘要、已验证的归档字节、根目录/native Makefile、build/common/recipe helper、完整有序补丁目录、编译/构建工具、选项及 pkg-config 元数据。编译器依赖文件记录实际外部头文件（包括强制包含的头文件）；两个链接映射记录实际选中的静态库和启动对象。输入改变或缺失会使复用失效并重新解压自动生成的 per-arch 源码树。拒绝覆盖 Git 源码 checkout。构建并行度不进入身份。内核仍根据脚本、配置和补丁执行增量 Kbuild。
+- **迁移与源码身份:** 相同归档字节随工作区迁移不会改变身份。工作区内的依赖标签使用相对路径，外部路径及具有语义的编译器/sysroot/选项值仍然有效。复用需要两个缓存输出和唯一 stamp；没有 stamp 的旧缓存会重建一次。普通根目录 Runtime 构建在使用仓库管理的 guest 工具前执行此检查；仍支持明确指定自定义 guest 可执行文件。
+- **tarball 缓存:** `build/tarball/` 中的下载按预期摘要校验。EROFS 直接读取本地归档，同名输入的字节改变不能被按文件名缓存所掩盖。明确设空 `EROFS_TARBALL_SHA256` 支持本地源码实验；未设置时仍使用生产 pin。配方不匹配时丢弃解压的 `.extracted` marker。
 - **`make clean`**:删除 `bin/` 与目标构建输出,**保留** tarball
   缓存与 `build/src/*` 源树。内核源树可能携带尚未 format 回 `deps/` 的 patch
   开发 WIP,不能静默丢弃。
@@ -187,25 +182,13 @@ make help       # 列举目标
 - Runtime 工具构建跳过 `mount`/`dump`/`fuse` 子目录,同时避开 v1.9.1 的 mount.erofs
   在 `--disable-multithreading` 下的 pthread 链接问题。独立 bundle 验证另需安装
   可信主机 `dump.erofs` (§1.1)。
-- `--with-openssl` 明确选择 v1.9.1 已有的 EVP SHA-256 后端。完整 SHA-256 去重、chunk
-  大小、不压缩布局及禁用多线程均保持不变。构建验证 upstream 的两个后端宏；头文件或库
-  不可用时拒绝构建，不退回其他后端。
-- 目标编译器必须能静态链接 OpenSSL（`libcrypto.a` 和 upstream configure 所需的
-  `libssl.a`）及 `libuuid.a`。Debian/Ubuntu：`libssl-dev uuid-dev`；openEuler 的
-  `openssl-devel` 提供两个 OpenSSL archive，uuid 沿用现有源码构建的静态库。其他 RPM
-  发行版可能单独提供 `openssl-static`。前置探针验证实际目标链接，包括 pkg-config 的
-  私有依赖，失败时打印依赖安装指引。
-- 两个输出 ELF 均不得含 `INTERP` 或 `NEEDED`。SHA-256 使用 OpenSSL 内置 provider，
-  guest 无需动态库、provider 模块或配置文件。新增发行版/工具链应在空根目录中进行小型
-  chunked 镜像字节对比。OpenSSL 可能链接未使用的加载器/NSS 代码并产生 glibc 静态
-  链接警告；这不代表 SHA-256 路径需要那些服务。
-- OpenSSL 来自目标发行版，本项目不 vendor 或单独升级。发布来源记录使用实际链接 map、
-  包/源码身份及匹配的已安装 copyright/license 文本（§1.1），包括 OpenSSL 3 的
-  Apache-2.0 声明。许可证材料缺失时打包失败。
-- 小型机器可用 `EROFS_BUILD_JOBS=2 make -j2 erofs` 限制每个 native 子构建；默认仍为
-  `nproc`。
-- host 构建依赖：`autoconf automake libtool pkg-config make gcc g++ binutils`
-  （包括 `readelf`）。
+- [维护的源码补丁](deps/erofs-patches/README_zh.md) 通过 `EROFS_USE_LIBGCRYPT_SHA256` 明确选择 Libgcrypt 的完整 SHA-256。Configure 禁用 OpenSSL 和多线程。完整 32 字节摘要、精确的 4 KiB chunk 去重、不压缩布局及原始 v1.9.1 归档 pin 保持不变；不包含分配器或读取路径变更。
+- 目标编译器必须能静态链接 `libgcrypt.a`、`libgpg-error.a` 和 `libuuid.a`。Debian/Ubuntu 软件包为 `libgcrypt20-dev libgpg-error-dev uuid-dev`。Ubuntu 24.04 验证使用 Libgcrypt `1.10.3-2ubuntu0.2` 和 Libgpg-error `1.47-3build2.1`；须使用实际目标发行版的版本、头文件及 pkg-config 元数据。前置探针检查包含静态私有依赖的实际目标链接，失败时给出配齐依赖的指引。
+- RPM devel 软件包不一定包含静态库。支持的 openEuler 24.03-LTS-SP4 源码包 `libgcrypt-1.10.2-4.oe2403sp4` 和 `libgpg-error-1.47-1.oe2403sp4` 明确使用 `--disable-static` 构建。须另行配齐匹配的静态源码构建及源码/重新链接/许可证材料；缺少它们时 runner 检查失败。仅安装 `libgcrypt-devel libgpg-error-devel` 不足以构建。本次没有引入面向整个发行版的新源码构建器。
+- 两个输出 ELF 均不得含 `INTERP` 或 `NEEDED`。SHA 路径必须能在没有 host 库、配置、`/proc` 或 `/dev` 的空根目录运行；每个新目标/工具链都应验证与基线完全一致的镜像字节及 fsck/解压结果。
+- Libgcrypt 和 Libgpg-error 库适用 LGPL-2.1-or-later，源码发行包还包含特定文件的声明。保留现有 EROFS 文件许可证，包括 GPL-2.0 hashmap 代码。发布来源记录使用实际链接输入及匹配的软件包/源码 copyright、LICENSE/COPYING/NOTICE 文本（§1.1）；材料缺失时打包失败。须保留配方、有序补丁、原始源码归档、EROFS 对象及精确的目标库源码/构建配置，以便重建或重新链接；不能用合成测试材料替代发布材料。
+- `EROFS_BUILD_JOBS=2 make -j2 erofs` 限制编译并行度，默认值依次取 `JOBS`、2。
+- host 构建依赖为 `autoconf automake libtool pkg-config make gcc g++ binutils patch python3`（Python 3.11 或更新版本；binutils 包括 `readelf`）。`make test` 覆盖 SHA 向量/失败路径、真实原版与候选镜像及解压、根目录调用、迁移和输入变更。
 
 ### 2.2 vmlinux(`make vmlinux`)
 
@@ -308,14 +291,14 @@ make TARGET_ARCH=aarch64 build
 # C 工具链(erofs-utils configure/链接 + kbuild CROSS_COMPILE)
 apt install gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
 
-# 目标静态 OpenSSL 与 libuuid，包括 pkg-config 元数据
+# 目标静态 Libgcrypt、Libgpg-error 与 libuuid，包括 pkg-config 元数据
 sudo dpkg --add-architecture arm64
 sudo apt update
-sudo apt install libssl-dev:arm64 uuid-dev:arm64
+sudo apt install libgcrypt20-dev:arm64 libgpg-error-dev:arm64 uuid-dev:arm64
 ```
 
 envd 是 `CGO_ENABLED=0` 的纯 Go 构建，GOARCH 即完成交叉，无须以上 C 包。EROFS
-脚本在 configure 前使用目标编译器做静态 OpenSSL/uuid 链接探针。交叉构建默认把
+脚本在 configure 前使用目标编译器做静态 Libgcrypt/Libgpg-error/uuid 链接探针。交叉构建默认把
 `PKG_CONFIG_LIBDIR` 设置为编译器 sysroot 内的 multiarch 目录，不搜索 host 库目录。
 其他目标 sysroot 可显式设置 `PKG_CONFIG_LIBDIR`、`PKG_CONFIG_SYSROOT_DIR`，必要时
 设置 `PKG_CONFIG_PATH`。这些覆盖值及解析出的库都属于构建/cache 输入；host `.pc`

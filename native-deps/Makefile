@@ -195,9 +195,13 @@ $(VMLINUX_BIN): $(VMLINUX_INPUTS)
 	STAGE=patches-apply $(LINUX_INVOKE) bash deps/build-vmlinux.sh
 	STAGE=build $(LINUX_INVOKE) bash deps/build-vmlinux.sh
 
-test:
+test: erofs
 	@for script in deps/*.sh; do bash -n "$$script" || exit; done
+	bash deps/test-common.sh
 	bash deps/test-erofs.sh
+	$(DEPS_ENV) EROFS_TARBALL="$(EROFS_TARBALL)" EROFS_TARBALL_SHA256="$(EROFS_TARBALL_SHA256)" bash deps/test-erofs-sha256.sh
+	$(DEPS_ENV) EROFS_TARBALL="$(EROFS_TARBALL)" EROFS_TARBALL_SHA256="$(EROFS_TARBALL_SHA256)" bash deps/test-erofs-real.sh
+	$(DEPS_ENV) EROFS_TARBALL="$(EROFS_TARBALL)" EROFS_TARBALL_SHA256="$(EROFS_TARBALL_SHA256)" bash deps/test-erofs-recipe.sh
 
 clean:
 	# Preserve build/tarball/ (re-downloading source is expensive) and the

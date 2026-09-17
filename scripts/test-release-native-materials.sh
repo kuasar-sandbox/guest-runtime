@@ -115,21 +115,94 @@ done
 printf 'test-native-materials: no withdrawn inventory quota; structure and consistency retained PASS\n'
 )
 
-# The existing link-map collector must carry OpenSSL archives, source identity
-# and actual notice texts without adding a separate dependency/license manager.
+# Legacy cache material can retain a linker map and notices without the EROFS
+# objects. External archives remain mandatory and fully inventoried.
 (
-root="$test_root/openssl-inventory"
+  release_materials_init "$test_root/legacy-stage" "$test_root/legacy-work" runtime
+  mkdir -p "$test_root/legacy-source/mkfs" "$test_root/legacy-inputs"
+  for name in libc.a libuuid.a; do printf 'fixture archive\n' > "$test_root/legacy-inputs/$name"; done
+  {
+    printf 'LOAD mkfs_erofs-main.o\nLOAD ../lib/.libs/liberofs.a\n'
+    printf 'LOAD %s\n' "$test_root/legacy-inputs/libc.a" "$test_root/legacy-inputs/libuuid.a"
+  } > "$test_root/legacy-source/mkfs/mkfs.erofs.map"
+  release_native_system_input() {
+    release_materials_record_source "$2" "system:${1##*/}" fixture fixture \
+      "sha256:$(sha256sum "$1" | awk '{print $1}')" "system/${1##*/}"
+  }
+  release_native_erofs_inputs "$test_root/legacy-source/mkfs/mkfs.erofs.map" \
+    "$test_root/legacy-source" bin/mkfs.erofs
+  [ "$(wc -l < "$RELEASE_MATERIALS_STAGE/share/sources/runtime/EROFS-INPUTS.tsv")" -eq 3 ]
+  rm "$test_root/legacy-inputs/libuuid.a"
+  if (release_native_erofs_inputs "$test_root/legacy-source/mkfs/mkfs.erofs.map" \
+      "$test_root/legacy-source" bin/mkfs.erofs > "$test_root/legacy-missing.log" 2>&1); then
+    fail 'legacy map accepted a missing external archive'
+  fi
+  grep -Fq 'linker map input no longer exists:' "$test_root/legacy-missing.log"
+  echo 'test-native-materials: legacy missing intermediates accepted; missing external input rejected PASS'
+)
+
+# Validate trusted-source structure as well as archive/source byte equality.
+(
+  source_root="$test_root/patch-source"
+  mkdir -p "$source_root/native-deps/deps"
+  cp -a "$ROOT/native-deps/deps/erofs-patches" "$source_root/native-deps/deps/"
+  git -C "$source_root" init -q
+  git -C "$source_root" add .
+  git -C "$source_root" -c user.name=Fixture -c user.email=fixture@example.invalid commit -qm fixture
+  ROOT="$source_root" WORK="$test_root/patch-work"
+  mkdir "$WORK"
+  selected="$(git -C "$ROOT" rev-parse HEAD)"
+  directory="$ROOT/native-deps/deps/erofs-patches"
+  release_native_validate_erofs_patches "$directory" "$selected"
+  # Worktree edits never become the reference, even if the index hides them.
+  git -C "$ROOT" update-index --assume-unchanged native-deps/deps/erofs-patches/series
+  printf '# altered worktree\n' >> "$directory/series"
+  if (release_native_validate_erofs_patches "$directory" "$selected" > "$WORK/altered.log" 2>&1); then
+    fail 'patch validation trusted edited worktree bytes'
+  fi
+  grep -Fq 'EROFS patch material differs from selected source:' "$WORK/altered.log"
+  git -C "$ROOT" update-index --no-assume-unchanged native-deps/deps/erofs-patches/series
+  git -C "$ROOT" show "$selected:native-deps/deps/erofs-patches/series" > "$directory/series"
+  for mutation in duplicate traversal unlisted sidecar hidden nested symlink; do
+    fixture="$test_root/patch-source-$mutation"
+    cp -a "$ROOT" "$fixture"
+    material="$fixture/native-deps/deps/erofs-patches"
+    case "$mutation" in
+      duplicate) cat "$directory/series" >> "$material/series" ;;
+      traversal) printf '../outside.patch\n' > "$material/series" ;;
+      unlisted) printf 'unlisted\n' > "$material/unlisted.patch" ;;
+      sidecar) rm "$material/0002-explicit-libgcrypt-sha256.patch.license" ;;
+      hidden) printf 'hidden\n' > "$material/.hidden" ;;
+      nested) mkdir "$material/nested"; printf 'nested\n' > "$material/nested/file" ;;
+      symlink) ln -s README.md "$material/LINK" ;;
+    esac
+    git -C "$fixture" add -A
+    git -C "$fixture" -c user.name=Fixture -c user.email=fixture@example.invalid commit -qm "$mutation"
+    sha="$(git -C "$fixture" rev-parse HEAD)"
+    if (ROOT="$fixture" release_native_validate_erofs_patches "$material" "$sha" > "$WORK/$mutation.log" 2>&1); then
+      fail "selected patch source accepted $mutation"
+    fi
+  done
+  if (release_native_validate_erofs_patches "$directory" 0000000000000000000000000000000000000000 > "$WORK/absent.log" 2>&1); then
+    fail 'unavailable selected source was accepted'
+  fi
+  grep -Fq 'selected source commit is unavailable' "$WORK/absent.log"
+  echo 'test-native-materials: selected Git bytes, safe patch structure and unavailable-source rejection PASS'
+)
+
+(
+root="$test_root/gcrypt-inventory"
 mkdir -p "$root/lib" "$root/notices" "$root/erofs"
-for input in libc.a libuuid.a libcrypto.a libssl.a crtbeginT.o; do
+for input in libc.a libuuid.a libgcrypt.a libgpg-error.a crtbeginT.o; do
   printf 'fixture %s\n' "$input" > "$root/lib/$input"
   printf 'LOAD %s/lib/%s\n' "$root" "$input"
 done > "$root/erofs/mkfs.map"
-printf 'fixture OpenSSL copyright and license\n' > "$root/notices/LICENSE"
+printf 'fixture Libgcrypt/Libgpg-error copyright and license\n' > "$root/notices/LICENSE"
 dpkg-query() { return 1; }
 rpm() {
   case "$1" in
-    -qf) printf 'fixture-devel\t3.0-test\tfixture-source-3.0-test.src.rpm\n' ;;
-    -qa) printf 'fixture-devel.x86_64\tfixture-source-3.0-test.src.rpm\n' ;;
+    -qf) printf 'fixture-devel\t1.10-test\tfixture-source-1.10-test.src.rpm\n' ;;
+    -qa) printf 'fixture-devel.x86_64\tfixture-source-1.10-test.src.rpm\n' ;;
     -ql) printf '%s/notices/LICENSE\n' "$root" ;;
     *) return 1 ;;
   esac
@@ -137,16 +210,16 @@ rpm() {
 release_materials_init "$root/stage" "$root/work" runtime
 payload=bin/mkfs.erofs,bin/sandbox-runtime.bundle:/opt/sandbox-runtime/bin/mkfs.erofs
 release_native_erofs_inputs "$root/erofs/mkfs.map" "$root/erofs" "$payload"
-for input in libcrypto.a libssl.a; do
+for input in libgcrypt.a libgpg-error.a; do
   cmp "$root/notices/LICENSE" "$root/stage/share/licenses/runtime/system/$input/${root#/}/notices/LICENSE"
-  awk -F '\t' -v name="system:$input" '$2 == name && $4 == "rpm-source:fixture-source-3.0-test.src.rpm" {found=1} END {exit !found}' \
-    "$RELEASE_MATERIALS_WORK/sources" || fail "missing OpenSSL source record: $input"
-  grep -q "^$input" "$root/stage/share/sources/runtime/EROFS-INPUTS.tsv" || fail "OpenSSL archive omitted from inventory"
+  awk -F '\t' -v name="system:$input" '$2 == name && $4 == "rpm-source:fixture-source-1.10-test.src.rpm" {found=1} END {exit !found}' \
+    "$RELEASE_MATERIALS_WORK/sources" || fail "missing Libgcrypt/Libgpg-error source record: $input"
+  grep -q "^$input" "$root/stage/share/sources/runtime/EROFS-INPUTS.tsv" || fail "Libgcrypt/Libgpg-error archive omitted from inventory"
 done
 rm "$root/notices/LICENSE"
 if (release_native_erofs_inputs "$root/erofs/mkfs.map" "$root/erofs" "$payload" > "$root/missing.log" 2>&1); then
   fail 'accepted missing linked-library license text'
 fi
 grep -qF 'native license material is missing' "$root/missing.log" || fail 'missing notice failed for unrelated reason'
-printf 'test-native-materials: OpenSSL link inputs, identities and notice texts PASS\n'
+printf 'test-native-materials: Libgcrypt/Libgpg-error link inputs, identities and notice texts PASS\n'
 )

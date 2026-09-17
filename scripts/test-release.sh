@@ -292,6 +292,7 @@ install -m 0644 "$ROOT/scripts/testdata/linux-COPYING" "$fixture_root/scripts/te
 install -m 0755 "$ROOT/scripts/release-materials.sh" \
   "$fixture_root/scripts/release-materials.sh"
 mkdir -p "$fixture_root/native-deps/deps"
+cp -a "$ROOT/native-deps/deps/erofs-patches" "$fixture_root/native-deps/deps/"
 cat > "$fixture_root/native-deps/deps/common.sh" <<'EOF'
 # Synthetic envd source fixture, not a native source-authentication result.
 resolve_tarball() {
@@ -362,6 +363,7 @@ mkdir -p "$fixture_root/native-deps/deps/vmlinux"
 printf 'CONFIG_LOCALVERSION="-kuasar"\nCONFIG_LOCALVERSION_AUTO=y\n' \
   > "$fixture_root/native-deps/deps/vmlinux/sandbox-common.config"
 init_fixture_repo "$fixture_root" LICENSE LICENSES NOTICE .gitignore native-deps/.gitignore \
+  native-deps/deps/erofs-patches \
   native-deps/deps/vmlinux/sandbox-common.config \
   native-deps/Makefile native-deps/deps/common.sh scripts/release.sh scripts/release-materials.sh \
   scripts/release-native-materials.sh scripts/publish-release.sh \
@@ -371,8 +373,8 @@ project_sha="$(git -C "$fixture_root" rev-parse HEAD)"
 mkdir "$TMP/release-build-bin" "$TMP/system-inputs"
 printf 'fixture libc archive\n' > "$TMP/system-inputs/libc.a"
 printf 'fixture libuuid archive\n' > "$TMP/system-inputs/libuuid.a"
-for input in libcrypto.a libssl.a; do
-  printf 'fixture OpenSSL archive\n' > "$TMP/system-inputs/$input"
+for input in libgcrypt.a libgpg-error.a; do
+  printf 'fixture crypto archive\n' > "$TMP/system-inputs/$input"
 done
 printf 'fixture GCC runtime archive\n' > "$TMP/system-inputs/libgcc.a"
 printf 'fixture startup object\n' > "$TMP/system-inputs/crtbeginT.o"
@@ -420,7 +422,7 @@ mkfs.erofs --all-root -T0 -U 00000000-0000-0000-0000-000000000000 \
 PYTHONDONTWRITEBYTECODE=1 python3 "$ROOT/scripts/test-release-runtime-payloads.py" --pack \
   "$fixture_root/build/runtime.erofs" "$fixture_root/bin/x86_64/sandbox-runtime.bundle"
 mkdir -p "$fixture_root/native-deps/build/x86_64/src/erofs-utils/mkfs"
-for input in libc.a libuuid.a libcrypto.a libssl.a libgcc.a crtbeginT.o; do
+for input in libc.a libuuid.a libgcrypt.a libgpg-error.a libgcc.a crtbeginT.o; do
   printf 'LOAD %s/%s\n' "$TMP/system-inputs" "$input"
 done > "$fixture_root/native-deps/build/x86_64/src/erofs-utils/mkfs/mkfs.erofs.map"
 install -m 0644 "$ROOT/scripts/testdata/linux-COPYING" "$fixture_root/native-deps/build/src/linux/COPYING"
@@ -483,6 +485,41 @@ RELEASE_KIND=vmlinux bash "$ROOT/scripts/test-publisher.sh" \
   "$project_sha" release/v2.3.x
 
 runtime_archive="$TMP/runtime-bundle/assets/sandbox-runtime-x86_64-v1.2.3-preview.20260804.tar.gz"
+# Regenerated archive/material checksums must not authorize altered downstream
+# source material. The fixture Git commit remains the independent reference.
+for mutation in patch series license readme extra missing traversal duplicate source; do
+  candidate="$TMP/patch-material-$mutation"
+  cp -a "$TMP/runtime-bundle" "$candidate"
+  mkdir "$candidate/root"
+  tar --same-permissions -xzf "$runtime_archive" -C "$candidate/root"
+  material="$candidate/root/share/sources/runtime/erofs-patches"
+  expected='EROFS patch material'
+  case "$mutation" in
+    patch) printf '\nchanged patch\n' >> "$material/0002-explicit-libgcrypt-sha256.patch" ;;
+    series) printf '# substituted series\n' > "$material/series" ;;
+    license) printf 'different license\n' > "$material/0002-explicit-libgcrypt-sha256.patch.license" ;;
+    readme) printf 'different provenance\n' >> "$material/README.md" ;;
+    extra) printf 'untracked material\n' > "$material/extra.patch"; chmod 0644 "$material/extra.patch" ;;
+    missing) rm "$material/0002-explicit-libgcrypt-sha256.patch.license" ;;
+    traversal) printf '../outside.patch\n' > "$material/series" ;;
+    duplicate) cat "$fixture_root/native-deps/deps/erofs-patches/series" >> "$material/series" ;;
+    source)
+      sed -i '/guest-runtime-erofs-patches/s/git:[0-9a-f]\{40\}/git:0000000000000000000000000000000000000000/' \
+        "$candidate/root/share/sources/runtime/SOURCES.tsv"
+      expected='missing or inconsistent source record for guest-runtime-erofs-patches' ;;
+  esac
+  release_materials_hash_tree "$candidate/root" runtime "$candidate/root/share/sources/runtime/MATERIALS.sha256"
+  tar --sort=name --owner=0 --group=0 --numeric-owner --mtime=@1700000000 \
+    -czf "$candidate/assets/$(basename "$runtime_archive")" -C "$candidate/root" .
+  (cd "$candidate/assets" && sha256sum "$(basename "$runtime_archive")" > SHA256SUMS)
+  if "$fixture_root/scripts/release.sh" validate runtime runtime-v1.2.3-preview.20260804 x86_64 "$candidate" > "$candidate/result.log" 2>&1; then
+    fail "validator accepted $mutation patch material with regenerated checksums"
+  fi
+  grep -Fq "$expected" "$candidate/result.log" \
+    || { cat "$candidate/result.log" >&2; fail "patch material $mutation failed for an unrelated reason"; }
+done
+printf 'test-release: selected-source patch bytes, sidecars, exact inventory and source association PASS\n'
+
 go_toolchain="$(go version | awk '{print $3}')"
 for path in ./bin/sandbox-runtime.bundle ./bin/flatten-ctl ./bin/mkfs.erofs \
   ./share/licenses/runtime/project/LICENSE \
@@ -495,12 +532,14 @@ for path in ./bin/sandbox-runtime.bundle ./bin/flatten-ctl ./bin/mkfs.erofs \
   ./share/sources/runtime/GO-BUILD-INFO.tsv \
   ./share/sources/runtime/GO-MODULES.tsv \
   ./share/sources/runtime/EROFS-INPUTS.tsv \
+  ./share/sources/runtime/erofs-patches/series \
+  ./share/sources/runtime/erofs-patches/0002-explicit-libgcrypt-sha256.patch \
   ./share/sources/runtime/MATERIALS.sha256; do
   tar -tzf "$runtime_archive" | grep -Fx "$path" >/dev/null \
     || fail "runtime archive is missing $path"
 done
 tar -xOf "$runtime_archive" ./share/sources/runtime/SOURCES.tsv \
-  | grep -Fq $'\tGo toolchain\t'"$go_toolchain"$'\t' \
+  | grep -F $'\tGo toolchain\t'"$go_toolchain"$'\t' > /dev/null \
   || fail "runtime archive does not associate its Go toolchain with license material"
 vmlinux_archive="$TMP/vmlinux-bundle/assets/vmlinux-x86_64-v2.3.4.tar.gz"
 for path in ./bin/vmlinux \
@@ -531,7 +570,7 @@ fi
 grep -Fq 'missing or inconsistent source record for guest-runtime-kernel-inputs' "$candidate/result.log" \
   || fail "Linux COPYING mutation failed for an unrelated reason"
 
-for input in libc.a libuuid.a libcrypto.a libssl.a libgcc.a crtbeginT.o; do
+for input in libc.a libuuid.a libgcrypt.a libgpg-error.a libgcc.a crtbeginT.o; do
   candidate="$TMP/omitted-native-$input"
   cp -a "$TMP/runtime-bundle" "$candidate"
   mkdir "$candidate/root"
@@ -771,7 +810,7 @@ done
 for kind in runtime vmlinux; do
   if [ "$kind" = runtime ]; then
     version=runtime-v1.2.3-preview.20260804
-    names=(guest-runtime sandboxer accelerator envd erofs-utils github.com/e2b-dev/infra/packages/shared system:libc.a system:libuuid.a system:libcrypto.a system:libssl.a)
+    names=(guest-runtime sandboxer accelerator envd erofs-utils guest-runtime-erofs-patches github.com/e2b-dev/infra/packages/shared system:libc.a system:libuuid.a system:libgcrypt.a system:libgpg-error.a)
   else
     version=vmlinux-v2.3.4
     names=(guest-runtime-kernel-inputs linux)
@@ -802,7 +841,7 @@ for kind in runtime vmlinux; do
     fi
     case "$name" in
       system:*) expected="unrecognized or inconsistent source inventory record" ;;
-      github.com/e2b-dev/infra/packages/shared) expected="missing or inconsistent source record for $name" ;;
+      github.com/e2b-dev/infra/packages/shared|erofs-utils|guest-runtime-erofs-patches) expected="missing or inconsistent source record for $name" ;;
       *) expected="unclaimed release license material" ;;
     esac
     grep -Fq "$expected" "$candidate/result.log" \
@@ -858,19 +897,30 @@ for kind in runtime vmlinux; do
   done
 done
 
-# Standalone validation must not need source checkouts, module downloads or a build.
+# Runtime patch authentication needs the selected local Git objects, not a
+# checkout, downloads or a build. Kernel validation still needs no Git objects.
 mkdir -p "$TMP/standalone-tools" "$TMP/standalone-bin"
 cp -a "$fixture_root/scripts" "$TMP/standalone-tools/scripts"
 for command in git curl wget cargo make gcc; do
   printf '#!/bin/sh\nexit 97\n' > "$TMP/standalone-bin/$command"
   chmod 0755 "$TMP/standalone-bin/$command"
 done
-env PATH="$TMP/standalone-bin:$PATH" GOPROXY=off GOSUMDB=off GOTOOLCHAIN=local \
+if env PATH="$TMP/standalone-bin:$PATH" GOPROXY=off GOSUMDB=off GOTOOLCHAIN=local \
   SOURCE_SHA="$project_sha" "$TMP/standalone-tools/scripts/release.sh" validate \
-  runtime runtime-v1.2.3-preview.20260804 x86_64 "$TMP/runtime-bundle"
+  runtime runtime-v1.2.3-preview.20260804 x86_64 "$TMP/runtime-bundle" > "$TMP/no-patch-source.log" 2>&1; then
+  fail 'standalone Runtime validation accepted an unavailable selected source'
+fi
+grep -Fq 'selected source commit is unavailable' "$TMP/no-patch-source.log" \
+  || { cat "$TMP/no-patch-source.log"; fail 'missing selected source failed for an unrelated reason'; }
 env PATH="$TMP/standalone-bin:$PATH" GOPROXY=off GOSUMDB=off GOTOOLCHAIN=local \
   SOURCE_SHA="$project_sha" "$TMP/standalone-tools/scripts/release.sh" validate \
   vmlinux vmlinux-v2.3.4 x86_64 "$TMP/vmlinux-bundle"
-echo "test-release: standalone validation without checkouts/downloads/build PASS"
+# The object database comes from the selected source fixture, never the archive.
+cp -a "$fixture_root/.git" "$TMP/standalone-tools/.git"
+rm "$TMP/standalone-bin/git"
+env PATH="$TMP/standalone-bin:$PATH" GOPROXY=off GOSUMDB=off GOTOOLCHAIN=local \
+  SOURCE_SHA="$project_sha" "$TMP/standalone-tools/scripts/release.sh" validate \
+  runtime runtime-v1.2.3-preview.20260804 x86_64 "$TMP/runtime-bundle"
+echo "test-release: standalone validation with selected local objects; no checkout/download/build PASS"
 
 echo "test-release: PASS"

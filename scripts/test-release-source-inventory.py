@@ -27,6 +27,8 @@ class SourceInventory(unittest.TestCase):
                 ("runtime", "bin/sandbox-runtime.bundle:/sbin/init", "sandboxer"),
                 ("runtime", "bin/sandbox-runtime.bundle:/opt/sandbox-runtime/bin/envd", "envd"),
                 ("runtime", "bin/flatten-ctl", "Go toolchain"),
+                ("runtime", EROFS, "erofs-utils"),
+                ("runtime", EROFS, "guest-runtime-erofs-patches"),
                 ("vmlinux", "bin/vmlinux", "linux"),
                 ("vmlinux", "bin/vmlinux", "guest-runtime-kernel-inputs")):
             row = [payload, name, "fixture", "fixture", "fixture", "fixture"]

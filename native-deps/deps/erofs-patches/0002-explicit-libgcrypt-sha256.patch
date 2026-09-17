@@ -1,0 +1,110 @@
+diff --git a/lib/sha256.h b/lib/sha256.h
+--- a/lib/sha256.h
++++ b/lib/sha256.h
+@@ -4,7 +4,13 @@
+ 
+ #include "erofs/defs.h"
+ 
+-#if defined(HAVE_OPENSSL) && defined(HAVE_OPENSSL_EVP_H)
++#if defined(EROFS_USE_LIBGCRYPT_SHA256)
++#include <gcrypt.h>
++struct sha256_state {
++	gcry_md_hd_t ctx;
++};
++#define __USE_LIBGCRYPT_SHA256
++#elif defined(HAVE_OPENSSL) && defined(HAVE_OPENSSL_EVP_H)
+ #include <openssl/evp.h>
+ struct sha256_state {
+ 	EVP_MD_CTX *ctx;
+diff --git a/lib/sha256.c b/lib/sha256.c
+--- a/lib/sha256.c
++++ b/lib/sha256.c
+@@ -7,7 +7,68 @@
+ #include "sha256.h"
+ #include <string.h>
+ 
+-#ifdef __USE_OPENSSL_SHA256
++#ifdef __USE_LIBGCRYPT_SHA256
++#include <stdio.h>
++#include <stdlib.h>
++
++/* This backend is built only for the single-threaded static guest tools.
++ * Initialize at the SHA entry points, before any Libgcrypt digest operation.
++ * Image chunks are not secrets, so no secure-memory pool is needed. */
++static void erofs_sha256_gcrypt_setup(void)
++{
++	static bool initialized;
++
++	if (initialized)
++		return;
++	if (!gcry_check_version(GCRYPT_VERSION) ||
++	    gcry_control(GCRYCTL_DISABLE_SECMEM, 0) ||
++	    gcry_control(GCRYCTL_INITIALIZATION_FINISHED, 0) ||
++	    gcry_md_test_algo(GCRY_MD_SHA256)) {
++		fputs("erofs: Libgcrypt SHA-256 initialization failed\n", stderr);
++		abort();
++	}
++	initialized = true;
++}
++
++void erofs_sha256_init(struct sha256_state *md)
++{
++	erofs_sha256_gcrypt_setup();
++	md->ctx = NULL;
++	/* The upstream void initializer cannot propagate allocation failure.
++	 * Never continue with an invalid digest and produce a corrupt image. */
++	if (gcry_md_open(&md->ctx, GCRY_MD_SHA256, 0)) {
++		fputs("erofs: Libgcrypt SHA-256 context allocation failed\n", stderr);
++		abort();
++	}
++}
++
++int erofs_sha256_process(struct sha256_state *md,
++		const unsigned char *in, unsigned long inlen)
++{
++	if (!md->ctx)
++		return -1;
++	gcry_md_write(md->ctx, in, inlen);
++	return 0;
++}
++
++int erofs_sha256_done(struct sha256_state *md, unsigned char *out)
++{
++	const unsigned char *digest;
++
++	if (!md->ctx)
++		return -1;
++	digest = gcry_md_read(md->ctx, GCRY_MD_SHA256);
++	if (!digest) {
++		gcry_md_close(md->ctx);
++		md->ctx = NULL;
++		return -1;
++	}
++	memcpy(out, digest, 32);
++	gcry_md_close(md->ctx);
++	md->ctx = NULL;
++	return 0;
++}
++#elif defined(__USE_OPENSSL_SHA256)
+ void erofs_sha256_init(struct sha256_state *md)
+ {
+ 	int ret;
+@@ -228,6 +289,10 @@
+ void erofs_sha256(const unsigned char *in, unsigned long in_size,
+ 		  unsigned char out[32])
+ {
++#ifdef __USE_LIBGCRYPT_SHA256
++	erofs_sha256_gcrypt_setup();
++	gcry_md_hash_buffer(GCRY_MD_SHA256, out, in, in_size);
++#else
+ 	struct sha256_state md;
+ 
+ 	erofs_sha256_init(&md);
+@@ -236,6 +301,7 @@
+ #endif
+ 	erofs_sha256_process(&md, in, in_size);
+ 	erofs_sha256_done(&md, out);
++#endif
+ }
+ 
+ #ifdef UNITTEST

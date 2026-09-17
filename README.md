@@ -86,7 +86,7 @@ GOWORK=off make build TARGET_ARCH=aarch64  # cross-build where documented depend
 - `bin/<arch>/flatten-ctl`;
 - `BUILD_MKFS_EROFS` as the host image packer.
 
-When `sandbox-init`, Envd, `flatten-ctl`, or the target-architecture guest `mkfs.erofs` is absent, the Makefile invokes its corresponding build target. The host `mkfs.erofs` is different: it must already be available on `PATH`, at a documented native-deps host path, or through `BUILD_MKFS_EROFS`; otherwise the Runtime build fails explicitly. A clean public build must use documented public source and download locations and must not depend on a developer's private package mirror or cache.
+When `sandbox-init`, Envd or `flatten-ctl` is absent, the Makefile invokes its corresponding build target. Every ordinary Runtime build also checks the EROFS recipe before consuming the repository-managed target-architecture guest `mkfs.erofs`, even if that executable already exists. An explicit `GUEST_MKFS_EROFS` override is used as supplied and must be executable. The host `mkfs.erofs` is different: it must already be available on `PATH`, at a documented native-deps host path, or through `BUILD_MKFS_EROFS`; otherwise the Runtime build fails explicitly. A clean public build must use documented public source and download locations and must not depend on a developer's private package mirror or cache.
 
 ## Outputs
 

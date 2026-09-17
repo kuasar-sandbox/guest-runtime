@@ -1,21 +1,29 @@
 #!/usr/bin/env bash
 # Offline recipe regression: stub the toolchain, exercise the real Make target.
 set -euo pipefail
+unset MAKEFLAGS MFLAGS MAKELEVEL
+unset PKG_CONFIG PKG_CONFIG_PATH PKG_CONFIG_LIBDIR PKG_CONFIG_SYSROOT_DIR
+unset CFLAGS CXXFLAGS CPPFLAGS LDFLAGS LIBS CROSS_PREFIX TARGET_ARCH BUILD_DIR BINDIR TARBALL_CACHE
 script_dir="$(cd "$(dirname "$0")" && pwd)"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 fail() { echo "test-erofs: $*" >&2; exit 1; }
 real_make="$(command -v make)"
 mkdir -p "$work/native/deps" "$work/tools" "$work/source" "$work/libs"
-cp "$script_dir"/{build-erofs.sh,common.sh} "$work/native/deps/"
+cp "$script_dir"/{build-erofs.sh,common.sh,erofs-recipe.sh} "$work/native/deps/"
 cp "$script_dir/../Makefile" "$work/native/"
+cp "$script_dir/../../Makefile" "$work/Makefile"
+mkdir -p "$work/native/deps/erofs-patches" "$work/include"
+printf '# synthetic recipe fixture\n' > "$work/native/deps/erofs-patches/series"
+printf '/* consumed header */\n' > "$work/include/consumed.h"
 export TEST_EROFS_WORK="$work"
-for lib in crypto ssl uuid; do printf '%s v1\n' "$lib" > "$work/libs/lib$lib.a"; done
+for lib in gcrypt gpg-error uuid; do printf '%s v1\n' "$lib" > "$work/libs/lib$lib.a"; done
 cat > "$work/tools/gcc" <<'TOOL'
 #!/usr/bin/env bash
 set -eu
 case "$1" in
     --version) echo 'fixture cc 1'; exit ;;
+    -print-prog-name=*) printf '%s\n' "$0"; exit ;;
     -dumpmachine|-print-multiarch) echo "${TEST_CC_TARGET:-x86_64}-linux-gnu"; exit ;;
     -print-sysroot) echo /target; exit ;;
 esac
@@ -39,7 +47,7 @@ case "$1" in
     --exists) exit "${TEST_PKG_FAIL:-0}" ;;
     --modversion) echo 1 ;;
     --cflags) echo "-I$TEST_EROFS_WORK/include" ;;
-    --libs) [ "$2" = --static ]; echo "-L$TEST_EROFS_WORK/libs -lssl -lcrypto -luuid -pthread" ;;
+    --libs|--static) echo "-L$TEST_EROFS_WORK/libs -lgcrypt -lgpg-error -luuid -pthread" ;;
     *) exit 1 ;;
 esac
 TOOL
@@ -48,13 +56,23 @@ cat > "$work/tools/make" <<'TOOL'
 set -eu
 if [ "$1" = --version ]; then echo 'fixture make 1'; exit; fi
 [ "$1" = -C ]
+mkdir -p "$2/.deps"
+printf 'fixture.o: %s/include/consumed.h\n' "$TEST_EROFS_WORK" > "$2/.deps/fixture.Po"
 case "$2" in
     */mkfs|*/fsck)
         printf '#!/bin/sh\nexit 0\n' > "$2/$(basename "$2").erofs"
         chmod +x "$2/$(basename "$2").erofs"
+        printf 'LOAD %s\n' "$TEST_EROFS_WORK"/libs/*.a > "$2/$(basename "$2").erofs.map"
         ;;
 esac
 TOOL
+cat > "$work/tools/nm" <<'TOOL'
+#!/usr/bin/env bash
+if [ "${TEST_WRONG_SHA:-0}" = 0 ]; then
+    printf ' U gcry_md_hash_buffer\n U gcry_md_open\n'
+fi
+TOOL
+ln -s nm "$work/tools/aarch64-linux-gnu-nm"
 cat > "$work/tools/readelf" <<'TOOL'
 #!/usr/bin/env bash
 if [ "${TEST_DYNAMIC:-0}" = 1 ]; then echo INTERP; fi
@@ -67,14 +85,15 @@ TOOL
 cat > "$work/source/configure" <<'TOOL'
 #!/usr/bin/env bash
 set -eu
-[[ " $* " == *' --with-openssl '* ]]
+[[ " $* " == *' --without-openssl '* ]]
 [[ " $* " == *' --disable-multithreading '* ]]
-[[ " $* " != *' --without-openssl '* ]]
-[[ "$openssl_LIBS" == *-pthread* ]]
+[[ " $* " != *' --with-openssl '* ]]
+[[ "$LIBS" == *-lgcrypt* ]]
+[[ "$CPPFLAGS" == *-DEROFS_USE_LIBGCRYPT_SHA256=1* ]]
 [ "$CC" = "${CROSS_PREFIX}gcc" ]
 echo configure >> "$TEST_EROFS_WORK/configured"
-printf '#define HAVE_OPENSSL 1\n' > config.h
-if [ "${TEST_NO_EVP:-0}" = 0 ]; then echo '#define HAVE_OPENSSL_EVP_H 1' >> config.h; fi
+: > config.h
+if [ "${TEST_UNEXPECTED_BACKEND:-0}" = 1 ]; then echo '#define HAVE_OPENSSL 1' >> config.h; fi
 mkdir lib mkfs fsck
 TOOL
 chmod +x "$work/tools/"* "$work/source/"*
@@ -94,7 +113,7 @@ EROFS_BUILD_JOBS=1 run
 printf unrelated > "$work/native/README.md"
 run
 [ "$(count)" = 1 ] || fail 'unrelated documentation invalidated binaries'
-for mutation in recipe common makefile flags library tarball missing-binary; do
+for mutation in recipe common makefile flags header library tarball missing-binary; do
     touch "$work/native/build/x86_64/src/erofs-utils/stale-object"
     before="$(count)"
     case "$mutation" in
@@ -102,9 +121,10 @@ for mutation in recipe common makefile flags library tarball missing-binary; do
         common) echo '# helper change' >> "$work/native/deps/common.sh" ;;
         makefile) echo '# make recipe change' >> "$work/native/Makefile" ;;
         flags) export CFLAGS=-O1 ;;
-        library) echo changed >> "$work/libs/libcrypto.a" ;;
+        header) echo changed >> "$work/include/consumed.h" ;;
+        library) echo changed >> "$work/libs/libgcrypt.a" ;;
         tarball) echo extra > "$work/source/extra"; tar -czf "$work/source.tgz" -C "$work" source ;;
-        missing-binary) rm "$work/native/bin/x86_64/fsck.erofs" ;;
+        missing-binary) rm -f "$work/native/bin/x86_64/fsck.erofs" ;;
     esac
     run
     [ "$(count)" -eq "$((before + 1))" ] || fail "$mutation did not rebuild"
@@ -112,16 +132,18 @@ for mutation in recipe common makefile flags library tarball missing-binary; do
     run
     [ "$(count)" -eq "$((before + 1))" ] || fail "$mutation repeated build"
 done
-for failure in pkg link backend dynamic; do
+for failure in pkg link backend symbols dynamic; do
+    rm -f "$work/native/bin/x86_64/fsck.erofs"
     case "$failure" in
         pkg) export TEST_PKG_FAIL=1; expected='erofs requires target static' ;;
-        link) export TEST_LINK_FAIL=1; expected='target static OpenSSL/uuid link check failed' ;;
-        backend) export TEST_NO_EVP=1; expected='did not enable the required OpenSSL SHA-256 backend'; rm "$work/native/bin/x86_64/fsck.erofs" ;;
+        link) export TEST_LINK_FAIL=1; expected='target static Libgcrypt/Libgpg-error/uuid link check failed' ;;
+        backend) export TEST_UNEXPECTED_BACKEND=1; expected='configure enabled an unexpected OpenSSL backend'; rm -f "$work/native/bin/x86_64/fsck.erofs" ;;
+        symbols) export TEST_WRONG_SHA=1; expected='compiled SHA object did not select required Libgcrypt backend' ;;
         dynamic) export TEST_DYNAMIC=1; expected='erofs output must be fully static' ;;
     esac
     if run > /dev/null 2>&1; then fail "accepted $failure"; fi
     grep -qF "$expected" "$work/run.log" || fail "$failure lacked actionable error"
-    unset TEST_PKG_FAIL TEST_LINK_FAIL TEST_NO_EVP TEST_DYNAMIC
+    unset TEST_PKG_FAIL TEST_LINK_FAIL TEST_UNEXPECTED_BACKEND TEST_WRONG_SHA TEST_DYNAMIC
 done
 # Missing cross metadata must fail before configure, never use host defaults.
 if TEST_CC_TARGET=aarch64 TEST_PKG_FAIL=1 run TARGET_ARCH=aarch64 > /dev/null 2>&1; then
