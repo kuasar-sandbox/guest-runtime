@@ -12,7 +12,7 @@
 
 SHELL := /bin/bash
 
-.PHONY: all build flatten-ctl sandbox-init sandbox-runtime native-deps erofs envd vmlinux test vet test-e2e release-runtime release-vmlinux test-release clean help
+.PHONY: all build flatten-ctl sandbox-init sandbox-runtime native-deps erofs envd vmlinux test vet test-e2e test-e2e-scripts release-runtime release-vmlinux test-release clean help
 
 # ---------------------------------------------------------------------------
 # Architecture selection (identical block across all kuasar-sandbox repos)
@@ -135,6 +135,7 @@ sandbox-runtime:
 	@echo "==> built $(BINDIR)/sandbox-runtime.bundle"
 
 test:
+	$(MAKE) test-e2e-scripts
 	$(MAKE) -C native-deps test
 	PYTHONPYCACHEPREFIX="$(abspath $(BUILD_DIR)/python-cache)" \
 		python3 -m py_compile scripts/guest-inspect.py
@@ -145,6 +146,10 @@ vet:
 
 test-e2e:
 	BIN="$(E2E_BIN)" ZOT_BIN="$(ZOT_BIN)" bash test/e2e/run_all.sh
+
+test-e2e-scripts:
+	bash -n test/e2e/e2e_flatten.sh test/e2e/run_all.sh test/e2e/common.sh
+	PYTHONDONTWRITEBYTECODE=1 python3 test/e2e/test_scripts.py
 
 RUNTIME_VERSION ?= runtime-v0.1.0
 VMLINUX_VERSION ?= vmlinux-v0.1.0
@@ -185,6 +190,7 @@ help:
 	@echo "  test               unit/static checks"
 	@echo "  vet                Go static analysis"
 	@echo "  test-e2e           full flatten-ctl registry/store e2e"
+	@echo "  test-e2e-scripts   fixture, assertion and lifecycle regressions (no Docker required)"
 	@echo "  release-runtime    package runtime-vX.Y.Z"
 	@echo "  release-vmlinux    package vmlinux-vX.Y.Z"
 	@echo "  test-release       test both independent release lines"
