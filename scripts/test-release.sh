@@ -228,8 +228,9 @@ for input in accelerator_version sandboxer_version; do
   [ "$(grep -Fc "ref: \${{ needs.preflight.outputs.$input }}" "$WORKFLOW")" -eq 2 ] \
     || fail "runtime release workflow does not pin preflight and build $input checkouts"
 done
-grep -Fq 'run: make -C src/guest-runtime erofs envd' "$WORKFLOW" \
-  || fail "runtime release must retain normal native sources and link records"
+# Validate the named native build step rather than YAML single-line formatting.
+python3 "$ROOT/scripts/ci-test-workflows.py" \
+  || fail "release workflow contracts do not preserve native inputs and trust boundaries"
 if grep -Fq 'connector_version' "$WORKFLOW" \
   || grep -Fq 'src/connector' "$WORKFLOW"; then
   fail "runtime release workflow retains connector outside its payload/build closure"

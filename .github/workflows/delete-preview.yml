@@ -36,7 +36,7 @@ concurrency:
 
 jobs:
   delete:
-    runs-on: [self-hosted, Linux, X64, kuasar-control]
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:
@@ -50,6 +50,21 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      - name: Check out pinned hosted bootstrap
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: kuasar-sandbox/kuasar-sandbox
+          # Publish this platform commit before activating the guest workflow pin.
+          ref: 2723b6beb06d57fc2ca023311f4784eb95acf606
+          path: trusted/platform
+          sparse-checkout: |
+            ci/hosted
+            ci/native-cache
+          persist-credentials: false
+
+      - name: Bootstrap standard runner
+        run: bash trusted/platform/ci/hosted/bootstrap.sh --profile release-control
 
       - name: Install pinned GitHub CLI
         run: bash scripts/install-gh-cli.sh

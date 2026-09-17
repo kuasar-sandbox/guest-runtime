@@ -157,6 +157,44 @@ flatten-ctl export --skip var/cache --runtime-config rc.json -output new.img /sr
 flatten-ctl export --skip-mounts --upload --manifest-config m.yaml /srv/rootfs
 ```
 
+#### Temporary files and failure handling
+
+Export puts its raw EROFS payload in `flatten-erofs-*.img` under the scratch parent
+selected by `--tmpdir`, configuration `tmpdir`, or the system temporary directory
+(`TMPDIR`, normally `/tmp`). It releases this file immediately after packing
+succeeds and the raw source and artifact writer close, before copying a packed
+artifact to stdout or starting upload.
+
+| Resource | Lifetime and failure behavior |
+|---|---|
+| Internal raw `flatten-erofs-*.img` | Removed after packing, or when export returns an error, including a mkfs failure after partial output. |
+| Internal artifact `flatten-image-*.img` | Used by `--upload` without `--output`, or by `--upload --output -`. Removed when export returns, on success or error, including invalid manifest configuration and ingest failures. |
+| Named `--output` | Kept on success and failure, including upload failure. Writing directly to this path still creates or truncates it; a packing/write/close failure may leave a partial artifact. Cleanup does not delete or restore it. |
+| Input archive, source rootfs, persistent cache, unrelated files and scratch parent | Never removed by export's temporary-file cleanup. The normal persistent-cache eviction policy still applies (§2.4). |
+
+Operational errors reach the outer CLI only after owned resources unwind; the CLI
+then prints `error: ...` to stderr and exits with status 1. When a downstream reader
+closes stdout, export cleans up its temporary files, reports the broken pipe on
+stderr and exits with status 1. Artifact bytes and the existing stdout modes are
+unchanged, including the appended key with
+`--upload --output -`. Abrupt termination such as `SIGKILL` does not run Go defers
+and can leave scratch files; this is cleanup for ordinary success and failure,
+not a crash-recovery or stale-file sweeping service.
+
+The maintained lifecycle regressions can be run without root, a registry/store,
+network access or a real mkfs executable (Go dependencies must already be cached):
+
+```bash
+GOFLAGS=-p=2 GOMAXPROCS=2 go test ./cmd/flatten-ctl
+```
+
+They use a small local fake mkfs and per-invocation write/close/upload substitutes
+to check failure cleanup, raw-file release before ingest, preserved user files,
+CLI exit behavior (including reader-closed stdout pipes and restoration of SIGPIPE
+behavior) and exact artifact bytes for the fixture. They do not validate
+real EROFS construction or live registry/store integration; those remain covered
+by the [E2E procedures](../test/e2e/README.md).
+
 ### 2.2 `flatten-ctl info` — inspect an image
 
 ```text

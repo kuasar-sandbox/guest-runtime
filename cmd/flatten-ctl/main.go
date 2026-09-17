@@ -33,8 +33,10 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"os/signal"
 	"sort"
 	"strings"
+	"syscall"
 
 	"github.com/kuasar-sandbox/accelerator/pkg/flatten"
 	"github.com/kuasar-sandbox/accelerator/pkg/image"
@@ -102,6 +104,28 @@ See `+"`flatten-ctl <command> -h`"+` for per-command flags.
 // ---------------------------------------------------------------------------
 
 func cmdExport(args []string) {
+	if err := runExport(args, exportIO{}); err != nil {
+		fatal("%v", err)
+	}
+}
+
+// exportIO holds the artifact writer and uploader for one export invocation.
+// Nil functions select the normal file and manifest implementations.
+type exportIO struct {
+	createArtifact func(string) (io.WriteCloser, error)
+	ingestArtifact func(string, *manifest.Config, bool) (string, error)
+}
+
+// runExport owns scratch files. Return errors through this scope so cleanup
+// finishes before cmdExport terminates the process. Flag parsing may exit, but
+// happens before any resources are acquired.
+func runExport(args []string, ops exportIO) error {
+	if ops.createArtifact == nil {
+		ops.createArtifact = func(path string) (io.WriteCloser, error) { return os.Create(path) }
+	}
+	if ops.ingestArtifact == nil {
+		ops.ingestArtifact = ingestEROFS
+	}
 	fs := flag.NewFlagSet("export", flag.ExitOnError)
 	output := fs.String("output", "", "tarstream image-artifact output path (- for stdout; required without --upload)")
 	configPath := fs.String("config", "", "flatten config YAML (overrides FLATTEN_CONFIG env): tmpdir/platform/cache/referer (registry sources)")
@@ -130,10 +154,10 @@ func cmdExport(args []string) {
 
 	cfg, err := remote.LoadConfig(*configPath, flattenConfigEnv)
 	if err != nil {
-		fatal("%v", err)
+		return err
 	}
 	if err := cfg.SetPlatform(*platform); err != nil {
-		fatal("%v", err)
+		return err
 	}
 	if *tmpDir != "" {
 		cfg.TmpDir = *tmpDir
@@ -143,14 +167,14 @@ func cmdExport(args []string) {
 	}
 	if cfg.TmpDir != "" {
 		if err := os.MkdirAll(cfg.TmpDir, 0o755); err != nil {
-			fatal("tmpdir: %v", err)
+			return fmt.Errorf("tmpdir: %w", err)
 		}
 	}
 	if !*upload && (*output == "" || *output == "/dev/null") {
-		fatal("--output is required when --upload is not set")
+		return fmt.Errorf("--output is required when --upload is not set")
 	}
 	if *forceRegistry && *forceArchive {
-		fatal("--registry and --archive are mutually exclusive")
+		return fmt.Errorf("--registry and --archive are mutually exclusive")
 	}
 	if dirSrc {
 		for flagName, set := range map[string]bool{
@@ -159,18 +183,18 @@ func cmdExport(args []string) {
 			"--platform":     *platform != "",
 		} {
 			if set {
-				fatal("%s does not apply to a rootfs-directory source", flagName)
+				return fmt.Errorf("%s does not apply to a rootfs-directory source", flagName)
 			}
 		}
 	} else if len(skips) > 0 || *skipMounts || *runtimeConfig != "" {
-		fatal("--skip / --skip-mounts / --runtime-config apply only to a rootfs-directory source")
+		return fmt.Errorf("--skip / --skip-mounts / --runtime-config apply only to a rootfs-directory source")
 	}
 	remoteSrc := !dirSrc && isRemoteSource(input, *forceRegistry, *forceArchive)
 	if *printDigest && !remoteSrc {
-		fatal("--print-digest applies only to registry sources")
+		return fmt.Errorf("--print-digest applies only to registry sources")
 	}
 	if *printDigest && *output == "-" {
-		fatal("--print-digest is incompatible with --output - (both write stdout)")
+		return fmt.Errorf("--print-digest is incompatible with --output - (both write stdout)")
 	}
 
 	// Preserving the source image's file ownership needs root/CAP_CHOWN
@@ -181,9 +205,17 @@ func cmdExport(args []string) {
 	// it only needs read access to the tree.
 	if !dirSrc {
 		if err := flatten.RequireOwnershipCap(); err != nil {
-			fatal("%v", err)
+			return err
 		}
 	}
+
+	// Go otherwise exits on a broken stdout/stderr pipe before writes return
+	// EPIPE. Notify lets those writes return errors and unwind owned resources;
+	// the buffered channel needs no reader because the write reports the error.
+	// Register Stop first so it restores signal behavior after file cleanup.
+	sigpipe := make(chan os.Signal, 1)
+	signal.Notify(sigpipe, syscall.SIGPIPE)
+	defer signal.Stop(sigpipe)
 
 	// The raw erofs always lands in a scratch file first (mkfs.erofs
 	// needs a seekable output), then gets packed into the tarstream
@@ -191,24 +223,30 @@ func cmdExport(args []string) {
 	// whether the destination is a file or stdout.
 	rawTmp, err := os.CreateTemp(cfg.TmpDir, "flatten-erofs-*.img")
 	if err != nil {
-		fatal("create temp output: %v", err)
+		return fmt.Errorf("create temp output: %w", err)
 	}
-	rawTmp.Close()
 	rawPath := rawTmp.Name()
-	defer os.Remove(rawPath)
+	defer func() {
+		if rawPath != "" {
+			os.Remove(rawPath)
+		}
+	}()
+	if err := rawTmp.Close(); err != nil {
+		return fmt.Errorf("close temp output: %w", err)
+	}
 
 	switch {
 	case dirSrc:
 		if err := runDirFlatten(input, rawPath, cfg.TmpDir, skips, *skipMounts, *runtimeConfig, *noProgress); err != nil {
-			fatal("%v", err)
+			return err
 		}
 	case remoteSrc:
 		if err := runRemoteFlatten(input, rawPath, cfg, *printDigest, *noProgress); err != nil {
-			fatal("%v", err)
+			return err
 		}
 	default:
 		if err := runFlatten(input, rawPath, cfg.TmpDir, *noProgress); err != nil {
-			fatal("%v", err)
+			return err
 		}
 	}
 
@@ -224,67 +262,88 @@ func cmdExport(args []string) {
 	switch *output {
 	case "-":
 		if st, err := os.Stdout.Stat(); err == nil && st.Mode()&os.ModeCharDevice != 0 {
-			fatal("export: refusing to write an image artifact to a terminal (use --output FILE or redirect stdout)")
+			return fmt.Errorf("export: refusing to write an image artifact to a terminal (use --output FILE or redirect stdout)")
 		}
 		artifactPath = ""
 		if *upload { // need a file for ingest too: pack once, copy to stdout
 			af, err := os.CreateTemp(cfg.TmpDir, "flatten-image-*.img")
 			if err != nil {
-				fatal("create temp artifact: %v", err)
+				return fmt.Errorf("create temp artifact: %w", err)
 			}
-			af.Close()
 			artifactPath = af.Name()
 			defer os.Remove(artifactPath)
+			if err := af.Close(); err != nil {
+				return fmt.Errorf("close temp artifact: %w", err)
+			}
 		}
 		if artifactPath == "" {
 			if err := packImageArtifact(rawPath, os.Stdout); err != nil {
-				fatal("%v", err)
+				return err
 			}
 		}
 	case "":
 		af, err := os.CreateTemp(cfg.TmpDir, "flatten-image-*.img")
 		if err != nil {
-			fatal("create temp artifact: %v", err)
+			return fmt.Errorf("create temp artifact: %w", err)
 		}
-		af.Close()
 		artifactPath = af.Name()
 		defer os.Remove(artifactPath)
+		if err := af.Close(); err != nil {
+			return fmt.Errorf("close temp artifact: %w", err)
+		}
 	}
 	if artifactPath != "" {
-		af, err := os.Create(artifactPath)
+		af, err := ops.createArtifact(artifactPath)
 		if err != nil {
-			fatal("create artifact: %v", err)
+			return fmt.Errorf("create artifact: %w", err)
 		}
 		if err := packImageArtifact(rawPath, af); err != nil {
 			af.Close()
-			fatal("%v", err)
+			return err
 		}
 		if err := af.Close(); err != nil {
-			fatal("close artifact: %v", err)
+			return fmt.Errorf("close artifact: %w", err)
 		}
-		if *output == "-" {
-			f, err := os.Open(artifactPath)
-			if err != nil {
-				fatal("re-open artifact: %v", err)
-			}
-			if _, err := io.Copy(os.Stdout, f); err != nil {
-				f.Close()
-				fatal("write to stdout: %v", err)
-			}
-			f.Close()
+	}
+
+	// Packing has closed the raw source and the artifact writer. Free the raw
+	// image before copying the artifact to stdout or starting a long upload.
+	if err := os.Remove(rawPath); err != nil {
+		return fmt.Errorf("remove temp output: %w", err)
+	}
+	rawPath = "" // the deferred cleanup must not remove a later file at this path
+
+	if *output == "-" && artifactPath != "" {
+		f, err := os.Open(artifactPath)
+		if err != nil {
+			return fmt.Errorf("re-open artifact: %w", err)
+		}
+		_, copyErr := io.Copy(os.Stdout, f)
+		closeErr := f.Close()
+		if copyErr != nil {
+			return fmt.Errorf("write to stdout: %w", copyErr)
+		}
+		if closeErr != nil {
+			return fmt.Errorf("close artifact: %w", closeErr)
 		}
 	}
 
 	if !*upload {
-		return
+		return nil
 	}
 
-	mcfg := loadManifestCfg(*manifestCfg)
-	key, err := ingestEROFS(artifactPath, mcfg, *noProgress)
+	mcfg, err := loadManifestCfg(*manifestCfg)
 	if err != nil {
-		fatal("%v", err)
+		return err
 	}
-	fmt.Println(key)
+	key, err := ops.ingestArtifact(artifactPath, mcfg, *noProgress)
+	if err != nil {
+		return err
+	}
+	if _, err := fmt.Println(key); err != nil {
+		return fmt.Errorf("write manifest key: %w", err)
+	}
+	return nil
 }
 
 // packImageArtifact wraps the raw erofs(+config ZIP) at rawPath as a
@@ -292,12 +351,16 @@ func cmdExport(args []string) {
 // container for images. Holes come from the filesystem (the raw file
 // is the live scratch source); the artifact itself is dense and
 // self-describing.
-func packImageArtifact(rawPath string, w io.Writer) error {
+func packImageArtifact(rawPath string, w io.Writer) (retErr error) {
 	f, err := os.Open(rawPath)
 	if err != nil {
 		return fmt.Errorf("open erofs: %w", err)
 	}
-	defer f.Close()
+	defer func() {
+		if err := f.Close(); retErr == nil && err != nil {
+			retErr = fmt.Errorf("close erofs: %w", err)
+		}
+	}()
 	st, err := f.Stat()
 	if err != nil {
 		return err
@@ -392,7 +455,9 @@ func runRemoteFlatten(ref, outputPath string, cfg *remote.Config, printDigest, n
 		fmt.Fprintf(os.Stderr, "resolved: %s\n", res.Digest)
 	}
 	if printDigest {
-		fmt.Println(res.Digest.String())
+		if _, err := fmt.Println(res.Digest.String()); err != nil {
+			return fmt.Errorf("write source digest: %w", err)
+		}
 	}
 	cache, cleanup, err := cfg.OpenCache()
 	if err != nil {
@@ -584,7 +649,10 @@ func cmdInfo(args []string) {
 
 	if strings.HasPrefix(input, "manifest://") {
 		hexKey := strings.TrimPrefix(input, "manifest://")
-		cfg := loadManifestCfg(*manifestCfg)
+		cfg, err := loadManifestCfg(*manifestCfg)
+		if err != nil {
+			fatal("%v", err)
+		}
 		fc, err := cfg.NewFetcher()
 		if err != nil {
 			fatal("fetcher: %v", err)
@@ -817,15 +885,15 @@ func cmdCacheGC(args []string) {
 // Common helpers
 // ---------------------------------------------------------------------------
 
-func loadManifestCfg(flagPath string) *manifest.Config {
+func loadManifestCfg(flagPath string) (*manifest.Config, error) {
 	cfg, err := manifest.LoadConfig(flagPath, manifestConfigEnv)
 	if err != nil {
 		if errors.Is(err, manifest.ErrConfigNotProvided) {
-			fatal("missing manifest config: pass --manifest-config <path> or set %s", manifestConfigEnv)
+			return nil, fmt.Errorf("missing manifest config: pass --manifest-config <path> or set %s", manifestConfigEnv)
 		}
-		fatal("load config: %v", err)
+		return nil, fmt.Errorf("load config: %w", err)
 	}
-	return cfg
+	return cfg, nil
 }
 
 func fatal(format string, args ...any) {
