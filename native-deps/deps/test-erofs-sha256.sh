@@ -4,8 +4,21 @@ script_dir="$(cd "$(dirname "$0")" && pwd)"
 : "${BUILD_DIR:?}"
 source "$script_dir/common.sh"
 src="$BUILD_DIR/src/erofs-utils"
+mkdir -p "$BUILD_DIR"
 work="$(mktemp -d "$BUILD_DIR/sha-test.XXXXXX")"
 trap 'rm -rf "$work"' EXIT
+# Native caches retain verified outputs/materials, not a complete source tree.
+# Keep the vector test self-contained on such hits without replacing the cached
+# tools or inflating the production cache with test-only compilation inputs.
+if [ ! -f "$src/lib/sha256.c" ] || [ ! -f "$src/config.h" ]; then
+    if ! BUILD_DIR="$work/native" BINDIR="$work/bin" \
+        EROFS_BUILD_JOBS="${EROFS_BUILD_JOBS:-2}" \
+        bash "$script_dir/build-erofs.sh" > "$work/source-build.log" 2>&1; then
+        cat "$work/source-build.log" >&2
+        die 'cannot prepare verified SHA test sources after a native cache hit'
+    fi
+    src="$work/native/src/erofs-utils"
+fi
 read -r -a compiler <<< "${CC:-gcc}"
 [ -z "${CROSS_PREFIX:-}" ] || compiler=("${CROSS_PREFIX}gcc")
 read -r -a cppflags <<< "${CPPFLAGS:-}"

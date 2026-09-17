@@ -20,6 +20,7 @@ mkdir -p "$fixture/native-deps/deps" "$fixture/native-deps/bin/$TARGET_ARCH" "$f
 cp "$original_dir/../../Makefile" "$fixture/Makefile"
 cp "$original_dir/../Makefile" "$fixture/native-deps/Makefile"
 cp "$original_dir/"{build-erofs.sh,common.sh,erofs-recipe.sh} "$fixture/native-deps/deps/"
+cp "$original_dir/"{test-erofs-sha256.sh,test-erofs-sha256.c} "$fixture/native-deps/deps/"
 cp -a "$original_dir/erofs-patches" "$fixture/native-deps/deps/"
 cp "$candidate_bin/"{mkfs.erofs,fsck.erofs,.erofs-recipe} "$fixture/native-deps/bin/$TARGET_ARCH/"
 cp "$archive" "$fixture/native-deps/build/tarball/source.tar.gz"
@@ -53,6 +54,17 @@ make -C "$fixture" build GO=true SANDBOX_INIT="$(type -P true)" ENVD="$(type -P 
     > "$work/root-hit.log" 2>&1 || { cat "$work/root-hit.log"; die "root cache fixture failed"; }
 grep -Fq 'already built with matching erofs recipe' "$work/root-hit.log"
 echo 'test-erofs-recipe: relocated cache and ordinary root build reuse PASS'
+
+# The shared native cache intentionally omits the complete upstream source tree.
+# SHA vector checks must still work and leave the verified cached pair intact.
+mkdir -p "$BUILD_DIR"
+cached_before="$(sha256sum "$BINDIR/"{mkfs.erofs,fsck.erofs,.erofs-recipe})"
+bash "$script_dir/test-erofs-sha256.sh" > "$work/cached-sha.log" 2>&1 \
+    || { cat "$work/cached-sha.log"; die 'SHA tests failed after native cache restoration'; }
+[ "$cached_before" = "$(sha256sum "$BINDIR/"{mkfs.erofs,fsck.erofs,.erofs-recipe})" ] \
+    || die 'SHA tests replaced the verified cached tools or stamp'
+[ ! -e "$src_dir" ] || die 'SHA tests populated the production cache source tree'
+echo 'test-erofs-recipe: SHA vectors after source-free cache restore preserve outputs PASS'
 
 # Exercise default-site hashing without touching host /usr/local. Only the
 # loaded fixture copy substitutes the two fixed Autoconf default locations.
