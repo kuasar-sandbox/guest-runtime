@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """Offline release/PR workflow and Runtime ABI migration contracts."""
 import importlib.util
+import os
 from pathlib import Path
 import re
 import subprocess
 import sys
+import tempfile
 from unittest.mock import patch
 
 import yaml
@@ -83,12 +85,58 @@ def check():
     assert abi.count("--static ") == 4
     assert "src/sandboxer/bin/x86_64/sandbox-init" in abi
     assert names.index("Check the released Runtime ABI") < names.index("Package runtime release")
+    publish = {s["name"]: s for s in workflows["release-runtime.yml"]["publish"]["steps"]}
+    objects = publish["Fetch selected source objects for material validation"]
+    assert objects["env"]["SOURCE_SHA"] == "${{ needs.preflight.outputs.source_sha }}"
+    assert list(publish).index("Fetch selected source objects for material validation") < list(publish).index("Publish runtime release")
+    check_publish_source_objects(objects["run"])
     kernel = workflows["release-vmlinux.yml"]["build"]
     assert all("create-github-app-token" not in s.get("uses", "") for s in kernel["steps"])
     kernel_steps = {s["name"]: s for s in kernel["steps"]}
     assert "trusted/platform/ci/native-cache/native-cache.sh restore-or-build vmlinux" in kernel_steps["Restore or build guest kernel"]["run"]
     assert kernel_steps["Validate native dependency scripts"]["run"] == "make -C src/guest-runtime/native-deps test"
     print("guest hosted workflows: runners, profiles, pins, trust boundary and native material preservation PASS")
+
+
+
+def check_publish_source_objects(script):
+    """Exercise the actual publish step against a shallow local source remote."""
+    with tempfile.TemporaryDirectory(prefix="runtime-source-objects-") as directory:
+        work = Path(directory)
+        origin, publisher = work / "origin", work / "publisher"
+        env = dict(os.environ, GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1")
+        for name in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES"):
+            env.pop(name, None)
+
+        def git(path, *args):
+            return subprocess.run(["git", "-C", str(path), *args], env=env,
+                                  text=True, capture_output=True, check=True).stdout.strip()
+
+        origin.mkdir()
+        git(origin, "init", "-q")
+        git(origin, "config", "user.name", "Runtime fixture")
+        git(origin, "config", "user.email", "runtime-fixture@example.invalid")
+        git(origin, "config", "commit.gpgsign", "false")
+        (origin / "source.txt").write_text("selected source\n")
+        git(origin, "add", "source.txt")
+        git(origin, "commit", "-qm", "selected source")
+        selected = git(origin, "rev-parse", "HEAD")
+        (origin / "source.txt").write_text("trusted publisher\n")
+        git(origin, "commit", "-qam", "publisher tooling")
+        subprocess.run(["git", "clone", "-q", "--depth=1", origin.as_uri(), str(publisher)], env=env, check=True)
+        before = git(publisher, "rev-parse", "HEAD")
+        missing = subprocess.run(["git", "-C", str(publisher), "cat-file", "-e", selected + "^{commit}"], env=env, capture_output=True)
+        assert missing.returncode != 0, "fixture must start without the selected commit"
+        for source, valid in (("invalid", False), (selected, True), (selected, True)):
+            result = subprocess.run(["bash", "-c", script], cwd=publisher,
+                                    env=dict(env, SOURCE_SHA=source), text=True,
+                                    capture_output=True, timeout=30)
+            assert (result.returncode == 0) == valid, result.stderr
+            assert git(publisher, "rev-parse", "HEAD") == before
+            assert git(publisher, "status", "--porcelain") == ""
+            assert (publisher / "source.txt").read_text() == "trusted publisher\n"
+        git(publisher, "cat-file", "-e", selected + "^{commit}")
+    print("Runtime publish: selected objects fetched without changing trusted checkout PASS")
 
 
 def check_abi():

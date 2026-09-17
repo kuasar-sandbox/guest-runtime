@@ -430,6 +430,20 @@ jobs:
           name: runtime-release-${{ needs.preflight.outputs.version }}-${{ github.run_id }}
           path: release-bundle
 
+      - name: Fetch selected source objects for material validation
+        env:
+          SOURCE_SHA: ${{ needs.preflight.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] \
+            || { echo "invalid selected source commit" >&2; exit 1; }
+          # Preserve the trusted publisher checkout; only immutable objects are
+          # needed to validate source-bound downstream patch material.
+          if ! git cat-file -e "$SOURCE_SHA^{commit}" 2>/dev/null; then
+            git fetch --no-tags --depth=1 origin "$SOURCE_SHA"
+          fi
+          git cat-file -e "$SOURCE_SHA^{commit}"
+
       - name: Publish runtime release
         env:
           GH_TOKEN: ${{ github.token }}
