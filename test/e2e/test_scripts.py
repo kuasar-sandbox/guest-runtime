@@ -369,6 +369,34 @@ DOCKER_CONFIG="$WORK/docker-auth" run docker push owned-two
         self.assertEqual(calls, [f"{work}/docker|info", f"{work}/docker-auth|push owned-two",
                                  f"{work}/docker|image rm owned-one", f"{work}/docker|image rm owned-two"])
 
+    def test_owned_proc_record_survives_concurrent_state_changes(self):
+        # The old per-line reads can tear PPid while proc regenerates a changing
+        # record. A single captured record must retain direct-child ownership.
+        script = r'''
+set -euo pipefail
+source "$1/common.sh"
+python3 - "$2/ready" <<'PY' &
+import ctypes, pathlib, sys, time
+libc = ctypes.CDLL(None)
+pathlib.Path(sys.argv[1]).touch()
+while True:
+    libc.prctl(15, b'a', 0, 0, 0)
+    time.sleep(.0005)
+    libc.prctl(15, b'long-child-name', 0, 0, 0)
+    time.sleep(.0005)
+PY
+child=$!
+trap 'kill -TERM "$child" 2>/dev/null || true; wait "$child" 2>/dev/null || true' EXIT
+for _ in $(seq 1 200); do
+    [ ! -e "$2/ready" ] || break
+    sleep .01
+done
+[ -e "$2/ready" ]
+for _ in $(seq 1 300); do owned_alive "$child" || exit 51; done
+'''
+        result = self.execute(["/bin/bash", "-c", script, "_", str(HERE), str(self.root)])
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_shell_traps_preserve_status_stop_services_and_repeat_with_keep(self):
         script = r'''
 set -euo pipefail

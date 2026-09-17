@@ -41,15 +41,13 @@ run() {
 }
 
 owned_alive() {
-    local field value rest
-    [ -r "/proc/$1/status" ] || return 1
-    while read -r field value rest; do
-        if [ "$field" = PPid: ]; then
-            # A bare return inside an EXIT trap inherits the pre-trap status,
-            # not the preceding test's status. Return ownership explicitly.
-            if [ "$value" = "$BASHPID" ]; then return 0; else return 1; fi
-        fi
-    done <"/proc/$1/status"
+    local status
+    # Capture the live proc record before parsing: repeated seek/read on that
+    # changing record can tear PPid (observed as Pid during concurrent exits).
+    status=$(cat -- "/proc/$1/status" 2>/dev/null) || return 1
+    if [[ "$status" =~ (^|$'\n')PPid:[[:blank:]]+([0-9]+)($|$'\n') ]]; then
+        if [ "${BASH_REMATCH[2]}" = "$BASHPID" ]; then return 0; else return 1; fi
+    fi
     return 1
 }
 
