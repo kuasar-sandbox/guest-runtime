@@ -133,8 +133,11 @@ make build TARGET_ARCH=aarch64
    委托 `make -C ../sandboxer sandbox-init`。
 3. 使用目标架构 `ENVD`(默认 `native-deps/bin/<arch>/envd`),缺失时触发构建。
 4. 使用本仓目标架构 `FLATTEN_CTL`(默认 `bin/<arch>/flatten-ctl`),缺失时触发构建。
-5. 使用目标架构 `GUEST_MKFS_EROFS`(默认 `native-deps/bin/<arch>/mkfs.erofs`),缺失时
-   触发 erofs 构建。组装 staging 后,使用另行解析的宿主 `BUILD_MKFS_EROFS` 生成临时 raw EROFS。
+5. 使用目标架构 `GUEST_MKFS_EROFS`(默认 `native-deps/bin/<arch>/mkfs.erofs`)。对于本仓管理的
+   默认路径,每次都会执行原生配方检查：已验证的输入不变时复用缓存工具；源码、补丁或实际
+   消费的依赖变化时重建。源码归档、配方 stamp 及目标构建元数据须按 Native Build 文档
+   保留。显式覆盖的 guest 可执行文件必须已存在,本仓不会替用户重建它。组装 staging 后,
+   使用另行解析的宿主 `BUILD_MKFS_EROFS` 生成临时 raw EROFS。
 6. host `runtime-bundle` 工具复制 EROFS、补齐 PMEM 对齐、计算 SHA256,
    追加空 marker ZIP,原子发布为 `bin/<arch>/sandbox-runtime.bundle`。
 

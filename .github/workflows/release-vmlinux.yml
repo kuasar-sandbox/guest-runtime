@@ -59,7 +59,7 @@ jobs:
         with:
           repository: kuasar-sandbox/kuasar-sandbox
           # Publish this platform commit before activating the guest workflow pin.
-          ref: 2723b6beb06d57fc2ca023311f4784eb95acf606
+          ref: 5b009f1509ff8b6bade4445d9a023ea8742f81cc
           path: trusted/platform
           sparse-checkout: |
             ci/hosted
@@ -115,7 +115,7 @@ jobs:
         with:
           repository: kuasar-sandbox/kuasar-sandbox
           # Publish this platform commit before activating the guest workflow pin.
-          ref: 2723b6beb06d57fc2ca023311f4784eb95acf606
+          ref: 5b009f1509ff8b6bade4445d9a023ea8742f81cc
           path: trusted/platform
           sparse-checkout: |
             ci/hosted
@@ -159,7 +159,7 @@ jobs:
           trusted/platform/ci/native-cache/native-cache.sh restore-or-build vmlinux
 
       - name: Validate native dependency scripts
-        run: make -C src/guest-runtime/native-deps test
+        run: make -C src/guest-runtime/native-deps test-scripts
 
       - name: Package vmlinux release
         working-directory: src/guest-runtime
@@ -200,7 +200,7 @@ jobs:
         with:
           repository: kuasar-sandbox/kuasar-sandbox
           # Publish this platform commit before activating the guest workflow pin.
-          ref: 2723b6beb06d57fc2ca023311f4784eb95acf606
+          ref: 5b009f1509ff8b6bade4445d9a023ea8742f81cc
           path: trusted/platform
           sparse-checkout: |
             ci/hosted
@@ -254,7 +254,7 @@ jobs:
         with:
           repository: kuasar-sandbox/kuasar-sandbox
           # Publish this platform commit before activating the guest workflow pin.
-          ref: 2723b6beb06d57fc2ca023311f4784eb95acf606
+          ref: 5b009f1509ff8b6bade4445d9a023ea8742f81cc
           path: trusted/platform
           sparse-checkout: |
             ci/hosted

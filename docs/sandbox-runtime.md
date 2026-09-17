@@ -113,7 +113,7 @@ The target's input and build sequence is:
 2. If the selected `SANDBOX_INIT` (default `../sandboxer/bin/<arch>/sandbox-init`) is absent, delegate to `make -C ../sandboxer sandbox-init`.
 3. Resolve target `ENVD` (default `native-deps/bin/<arch>/envd`), building it when missing.
 4. Resolve this repository's target `FLATTEN_CTL` (default `bin/<arch>/flatten-ctl`), building it when missing.
-5. Resolve target `GUEST_MKFS_EROFS` (default `native-deps/bin/<arch>/mkfs.erofs`), building it when missing. Assemble the staging tree and use the separate host `BUILD_MKFS_EROFS` to generate temporary raw EROFS.
+5. Resolve target `GUEST_MKFS_EROFS` (default `native-deps/bin/<arch>/mkfs.erofs`). For this repository-managed default, always invoke the native recipe check: unchanged verified inputs reuse the cached tools, while changed source, patches or consumed dependencies rebuild them. The archive, recipe stamp and target build metadata must remain available as described in the native-build guide. An explicitly overridden guest executable must already exist and is not rebuilt by this repository. Assemble the staging tree and use the separate host `BUILD_MKFS_EROFS` to generate temporary raw EROFS.
 6. The host `runtime-bundle` tool copies EROFS, adds PMEM alignment padding, computes SHA256 and appends the empty-marker ZIP, publishing `bin/<arch>/sandbox-runtime.bundle` atomically.
 
 See [the native-build workflow](../native-deps/README.md) for mkfs.erofs/Envd builds and the [sandboxer guest ABI](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/sandbox-init.md) for sandbox-init.

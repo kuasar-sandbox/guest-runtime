@@ -133,8 +133,8 @@ all: build
 build: vmlinux erofs envd
 
 # --- erofs-utils (mkfs.erofs) ----------------------------------------------
-erofs: $(EROFS_BIN)
-$(EROFS_BIN):
+# Always consult the bounded recipe/input stamp, including on a restored cache.
+erofs:
 	$(DEPS_ENV) \
 	EROFS_TARBALL="$(EROFS_TARBALL)" \
 	EROFS_TARBALL_SHA256="$(EROFS_TARBALL_SHA256)" \
@@ -195,8 +195,18 @@ $(VMLINUX_BIN): $(VMLINUX_INPUTS)
 	STAGE=patches-apply $(LINUX_INVOKE) bash deps/build-vmlinux.sh
 	STAGE=build $(LINUX_INVOKE) bash deps/build-vmlinux.sh
 
-test:
-	bash -n deps/*.sh
+test: test-scripts test-erofs
+
+.PHONY: test-scripts test-erofs
+test-scripts:
+	@for script in deps/*.sh; do bash -n "$$script" || exit; done
+	bash deps/test-common.sh
+	bash deps/test-erofs.sh
+
+test-erofs: erofs
+	$(DEPS_ENV) EROFS_TARBALL="$(EROFS_TARBALL)" EROFS_TARBALL_SHA256="$(EROFS_TARBALL_SHA256)" bash deps/test-erofs-sha256.sh
+	$(DEPS_ENV) EROFS_TARBALL="$(EROFS_TARBALL)" EROFS_TARBALL_SHA256="$(EROFS_TARBALL_SHA256)" bash deps/test-erofs-real.sh
+	$(DEPS_ENV) EROFS_TARBALL="$(EROFS_TARBALL)" EROFS_TARBALL_SHA256="$(EROFS_TARBALL_SHA256)" bash deps/test-erofs-recipe.sh
 
 clean:
 	# Preserve build/tarball/ (re-downloading source is expensive) and the
@@ -213,6 +223,8 @@ help:
 	@echo "  envd                  build the e2b guest agent (e2b-dev/runtime; pin via ENVD_TARBALL)"
 	@echo "  versitygw             build the S3 gateway (opt-in; for builder.files_storage on single-node/local)"
 	@echo "  linux-patches-format  extract HEAD linux commits back to deps/linux-patches/"
-	@echo "  test                  syntax-check native dependency build scripts"
+	@echo "  test                  script regressions and actual EROFS build/image tests"
+	@echo "  test-scripts          dependency-independent script regressions (kernel jobs)"
+	@echo "  test-erofs            actual EROFS SHA/image/recipe tests (runtime jobs)"
 	@echo "  clean                 wipe build artifacts (preserves tarball cache + source trees)"
 	@echo "  TARGET_ARCH           x86_64 (default) | aarch64; CROSS_PREFIX auto-derives"

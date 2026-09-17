@@ -98,7 +98,7 @@ reader, Runtime payload or dependency checkout.
 The matching `mkfs.erofs` link map supplies every actual external archive and
 startup object to `EROFS-INPUTS.tsv`. The inventory retains their names and
 file digests; source rows and per-input `system/<input>` notice directories
-must cover exactly that set, including libc, libuuid and GCC/CRT inputs.
+must cover exactly that set, including libc, libuuid, Libgcrypt/Libgpg-error (libgcrypt/libgpg-error) and GCC/CRT inputs.
 Packaging records installed Debian/RPM source-package identities and copies
 their copyright, license and NOTICE files, including referenced common-license
 texts. Package names or SPDX labels alone do not replace the texts. RPM package
@@ -112,6 +112,35 @@ checksum-verified util-linux source. Its provisioner retains `SOURCES.tsv`,
 copies them with the library into each prepared slot. Packaging checks this
 source-built library's inventory and digest. Missing, altered or unowned inputs
 need the actual matching materials, not fabricated source records.
+
+For openEuler 24.03-LTS-SP4 crypto, the paired
+[runner provider](https://github.com/kuasar-sandbox/kuasar-sandbox/blob/main/ci/runner/README.md#install)
+builds the exact `libgcrypt-1.10.2-4.oe2403sp4` and
+`libgpg-error-1.47-1.oe2403sp4` SRPM sources with their ordered patches, including
+Libgcrypt Patch2's CVE backport. It installs only `libgcrypt.a`, `libgpg-error.a`
+and `/usr/share/kuasar-ci/native-crypto/<build-id>/`; installed distro headers,
+shared libraries and services remain unchanged. Builds use at most two jobs and
+a private Libgpg-error dependency prefix. Configure options, actual compiler/tool
+identities, build logs and the static-link SHA-256 probe are retained. The
+static-only recipe disables shared-object HMAC generation, which requires a
+`.so`, and preserves the other relevant distro configure choices and source fixes.
+
+The collector checks the complete catalog against the actual linked archive
+bytes, independently pinned SRPM/contained-source/spec/patch digests and the
+recognized provider recipe. It rejects missing or altered notices, sources,
+recipes, build records and archives, unsafe paths, links and incomplete
+inventories. Original SRPMs, source archives, specs, ordered patches, auxiliary
+files, generated configuration/headers, build logs, tool identities and relink
+archives are copied once to
+`share/sources/runtime/native-crypto/<build-id>/`. Per-archive notice texts stay
+under `share/licenses/runtime/system/<archive>/`; large source/binary files are
+not repeated there. `SOURCES.tsv` binds each linked archive to its catalog ID.
+Standalone Runtime validation rechecks catalog contents, source claims and notice
+copies without executing a catalog recipe. The paired validator files and the
+provider digest must be updated together when the supported recipe changes.
+Ubuntu target dev packages continue through the installed Debian source-package
+and copyright path. There is no synthetic package registration, permissive
+fallback or additional written-offer commitment.
 
 The publisher supplies the selected project `SOURCE_SHA` to validation before
 Tag/Release writes, uses the bundle's `release-notes.md` body and appends the
@@ -160,8 +189,9 @@ Native builds (host = target) create `bin/<name> → <arch>/<name>` for their pu
 
 ### 1.4 Idempotency and caching
 
-- **Artifact reuse:** EROFS and Envd outputs are reused when their target files already exist; remove outputs to force those builds. Kernel output is also governed by tracked inputs: changes to its build script, common/architecture config fragments or patches trigger configuration reevaluation and incremental Kbuild rather than unconditional existence-only skipping.
-- **Tarball cache:** `build/tarball/` caches by filename; hits avoid downloading. Extraction uses an `.extracted` marker for idempotency.
+- **Artifact reuse:** Envd outputs are reused when their target files already exist. EROFS uses one `bin/<arch>/.erofs-recipe` v2 stamp for both output hashes, the verified archive bytes, root/native Makefiles, build/common/recipe helpers, the entire ordered patch directory, compiler/build tools, flags and pkg-config metadata. Compiler depfiles record actual external headers (including forced includes); both link maps record the selected archives and startup objects. Changed or missing inputs invalidate reuse and re-extract the generated per-architecture tree. A Git source checkout is refused. Build parallelism is not an input. Kernel still uses its tracked scripts/configuration/patches for incremental Kbuild.
+- **Relocation and source identity:** identical archive bytes may move with the workspace without changing identity. Dependency labels inside the workspace are relative; external paths and meaningful compiler/sysroot/flag values remain significant. Both cached outputs and the sole stamp are required; legacy caches without it rebuild once. Ordinary root Runtime builds consult this check before consuming the repository-managed guest tool. Explicit custom guest executables remain supported.
+- **Tarball cache:** downloads in `build/tarball/` are verified against the expected digest. EROFS reads a local archive directly, so a changed same-name input cannot hide behind a filename-based cache. An explicitly empty `EROFS_TARBALL_SHA256` supports local source experiments; an unset value retains the production pin. Extraction uses an `.extracted` marker that is discarded on recipe mismatch.
 - **`make clean`:** removes `bin/` and target build output while **retaining** tarball caches and architecture-neutral `build/src/*` source trees. Kernel source trees may contain unexported patch-development work and must not be silently discarded.
 
 ## 2. Build targets
@@ -183,8 +213,13 @@ Build duration depends on the host, toolchain and cache state; these commands do
 `deps/build-erofs.sh` extracts erofs-utils into `build/<arch>/src/erofs-utils/`, keeping one tree per architecture because this autotools path does not support out-of-source builds. It runs `autoreconf` and `configure` with compression/FUSE/network features disabled, builds only the `lib`, `mkfs` and `fsck` subdirectories, and writes `bin/<arch>/{mkfs.erofs,fsck.erofs}`.
 
 - The Runtime tool build skips the `mount`/`dump`/`fuse` subdirectories; it also avoids the v1.9.1 mount.erofs pthread-linking issue under `--disable-multithreading`. Standalone bundle validation separately requires a trusted host `dump.erofs` installation (§1.1).
-- Configure requires libuuid and has no `--without-uuid` path. Cross-compilation requires multiarch `uuid-dev:<arch>`; the script checks it first and prints apt guidance (§4.2).
-- Host build tools: `autoconf automake libtool pkg-config make gcc g++`.
+- A [maintained source patch](deps/erofs-patches/README.md) explicitly selects Libgcrypt full SHA-256 through `EROFS_USE_LIBGCRYPT_SHA256`. Configure disables OpenSSL and multithreading. Full 32-byte digests, exact 4 KiB chunk deduplication, uncompressed layout and the original v1.9.1 archive pin remain unchanged; no allocator or read-path change is included.
+- The target compiler must statically link `libgcrypt.a`, `libgpg-error.a` and `libuuid.a`. Debian/Ubuntu packages are `libgcrypt20-dev libgpg-error-dev uuid-dev`. Ubuntu 24.04 validation used Libgcrypt `1.10.3-2ubuntu0.2` and Libgpg-error `1.47-3build2.1`; use the actual target distribution's versions, headers and pkg-config metadata. The preflight checks the real target link with private static dependencies and fails with provisioning guidance.
+- RPM devel packages do not necessarily ship static libraries. The supported openEuler 24.03-LTS-SP4 source packages `libgcrypt-1.10.2-4.oe2403sp4` and `libgpg-error-1.47-1.oe2403sp4` explicitly build with `--disable-static`. The paired runner provider supplies matching static builds and their validated source/build/relink/license catalogs during template preparation and slot updates (§1.1). Its disposable-root helper can be verified separately from the full provisioner. Installing `libgcrypt-devel libgpg-error-devel` alone is insufficient.
+- Both output ELFs must have no `INTERP` or `NEEDED` entries. The SHA path must execute in an empty root without host libraries, configuration, `/proc` or `/dev`; validate each new target/toolchain with exact baseline image comparison and fsck/extraction.
+- Libgcrypt and Libgpg-error library licenses are LGPL-2.1-or-later, with additional file-specific notices in their source distributions. Existing EROFS file licenses, including GPL-2.0 hashmap code, are preserved. Release provenance uses both actual linker inputs and matching package/source copyright, LICENSE/COPYING/NOTICE texts (§1.1). Missing materials fail packaging. Retain the recipe, ordered patches, original source archive, EROFS objects and exact target library sources/build configuration for rebuilding/relinking; do not substitute synthetic fixtures for release materials.
+- `EROFS_BUILD_JOBS=2 make -j2 erofs` bounds compilation. The default is `JOBS`, then 2.
+- Host build tools: `autoconf automake libtool pkg-config make gcc g++ binutils patch python3` (Python 3.11 or newer; binutils includes `readelf`). `make test` covers SHA vectors/failure paths, real pristine/candidate images and extraction, root dispatch, relocation and input mutation. A native binary-cache hit need not retain the complete EROFS source tree: the SHA test prepares verified sources in temporary storage when needed, without replacing the cached tools or stamp. Kernel-only jobs use the dependency-independent `test-scripts` target.
 
 ### 2.2 vmlinux (`make vmlinux`)
 
@@ -263,13 +298,13 @@ The reverse direction follows the same model.
 # C toolchain for erofs-utils configure/linking and Kbuild CROSS_COMPILE.
 apt install gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
 
-# Multiarch libuuid required by erofs-utils configure.
+# Target static Libgcrypt, Libgpg-error and libuuid, including pkg-config metadata.
 sudo dpkg --add-architecture arm64
 sudo apt update
-sudo apt install libuuid1:arm64 uuid-dev:arm64
+sudo apt install libgcrypt20-dev:arm64 libgpg-error-dev:arm64 uuid-dev:arm64
 ```
 
-Envd is pure Go with `CGO_ENABLED=0`; GOARCH cross-compiles it without these C packages. Scripts check missing toolchains (`${CROSS_PREFIX}gcc`, `uuid-dev:<arch>`) up front and print installation guidance instead of failing later with a large linker error.
+Envd is pure Go with `CGO_ENABLED=0`; GOARCH cross-compiles it without these C packages. The script uses the target compiler for a static Libgcrypt/Libgpg-error/uuid link probe before configuring. Cross builds default `PKG_CONFIG_LIBDIR` to the compiler's multiarch directories inside its sysroot, excluding host library directories. Set `PKG_CONFIG_LIBDIR`, `PKG_CONFIG_SYSROOT_DIR` and, if needed, `PKG_CONFIG_PATH` explicitly for other target sysroots. These overrides and resolved libraries are build/cache inputs; a host `.pc` file cannot make an incompatible target archive link successfully.
 
 ## 5. WSL2 notes
 

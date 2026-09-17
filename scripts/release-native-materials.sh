@@ -54,9 +54,38 @@ release_native_source_built_uuid() {
   release_materials_record_source "$payload" system:libuuid.a "$version" "$source" "$integrity" system/libuuid.a
 }
 
+release_native_source_built_crypto() {
+  local input="$1" payload="$2" catalog="$3" build_id file name version source integrity licenses
+  local helper="$ROOT/scripts/static-crypto-catalog.py" row
+  build_id="$(python3 -B "$helper" collect --catalog "$catalog" --libraries "$(dirname "$input")" \
+    --destination "$RELEASE_MATERIALS_STAGE/share/sources/$RELEASE_MATERIALS_UNIT/native-crypto")" \
+    || fail "source-built crypto material validation failed"
+  name="$(basename "$input")"
+  row="$(awk -F '\t' -v name="$name" '$1 == name {print}' "$catalog/SOURCES.tsv")"
+  [ -n "$row" ] || fail "missing source-built crypto archive record"
+  IFS=$'\t' read -r file name version source integrity licenses <<< "$row"
+  while IFS= read -r name; do
+    release_native_copy_file "$name" "system/$file" "${name#"$catalog/$licenses/"}"
+  done < <(find "$catalog/$licenses" -type f -print | LC_ALL=C sort)
+  release_materials_record_source "$payload" "system:$file" "$version" "$source" \
+    "$integrity;crypto-catalog:$build_id" "system/$file"
+}
+
 release_native_system_input() {
   local input="$1" payload="$2" query owner source_name version label copyright common
   local source_id rpm_source sibling file count=0
+  # Keep the original path for the provider's symlink checks before realpath.
+  case "$input" in
+    /usr/lib64/libgcrypt.a|/usr/lib64/libgpg-error.a)
+      if [ -e /usr/lib64/.kuasar-crypto-build-id ] || [ -L /usr/lib64/.kuasar-crypto-build-id ]; then
+        local crypto_catalog
+        crypto_catalog="$(python3 -B "$ROOT/scripts/static-crypto-catalog.py" installed --root /)" \
+          || fail "installed source-built crypto material is invalid"
+        release_native_source_built_crypto "$input" "$payload" "$crypto_catalog"
+        return
+      fi
+      ;;
+  esac
   input="$(realpath -e "$input")" || fail "native link input is missing"
   label="system/$(basename "$input")"
   if [ "$input" = /usr/lib64/libuuid.a ] && [ -f /usr/lib64/.kuasar-libuuid-build-id ]; then
@@ -132,10 +161,14 @@ release_native_erofs_inputs() {
   while IFS= read -r input; do
     [ -n "$input" ] || continue
     if [[ "$input" != /* ]]; then input="$(dirname "$map")/$input"; fi
-    canonical="$(realpath -e "$input")" || fail "linker map input no longer exists: $input"
+    # Legacy cache exports may retain the map and source notices without
+    # in-tree intermediate objects. Resolve lexically before excluding those
+    # covered by the pinned EROFS source; every external input must still exist.
+    canonical="$(realpath -m "$input")" || fail "invalid linker map input: $input"
     case "$canonical" in
       "$erofs_source"/*) continue ;; # Covered by exact erofs-utils source material.
     esac
+    [ -f "$canonical" ] || fail "linker map input no longer exists: $input"
     name="$(basename "$canonical")"
     if [ -n "${selected_inputs[$name]:-}" ] && [ "${selected_inputs[$name]}" != "$canonical" ]; then
       fail "distinct native link inputs share a material name: $name"
@@ -182,4 +215,59 @@ release_native_validate_erofs_inventory() {
   ' "$source/SOURCES.tsv" > "$actual" || fail "invalid EROFS source input identity"
   LC_ALL=C sort -o "$actual" "$actual"
   cmp -s "$expected" "$actual" || fail "EROFS source records omit or alter collected linker inputs"
+  python3 -B "$ROOT/scripts/static-crypto-catalog.py" release --root "$1" \
+    || fail "source-built crypto release material is invalid"
+}
+
+# Archive hashes only establish internal consistency. The selected commit's
+# local Git objects are the independent reference for downstream patch material.
+release_native_validate_erofs_patches() {
+  local directory="$1" selected_sha="$2" prefix=native-deps/deps/erofs-patches
+  local entry metadata path name mode type object patch count=0
+  local expected="$WORK/expected-erofs-patches" actual="$WORK/actual-erofs-patches"
+  local tree="$WORK/erofs-patch-tree" reference="$WORK/erofs-patch-reference"
+  local -A names=() seen=()
+  [[ "$selected_sha" =~ ^[0-9a-f]{40}$ ]] \
+    && git -C "$ROOT" cat-file -e "$selected_sha^{commit}" 2>/dev/null \
+    || fail "selected source commit is unavailable for EROFS patch validation"
+  git -C "$ROOT" ls-tree -rz --full-tree "$selected_sha" -- "$prefix/" > "$tree" \
+    || fail "cannot read selected EROFS patch tree"
+  [ -d "$directory" ] && [ ! -L "$directory" ] \
+    || fail "missing or unsafe EROFS patch directory"
+  : > "$expected"
+  while IFS= read -r -d '' entry; do
+    metadata="${entry%%$'\t'*}"; path="${entry#*$'\t'}"; name="${path#"$prefix/"}"
+    read -r mode type object <<< "$metadata"
+    [[ "$name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] \
+      && [ "$type" = blob ] && [ "$mode" = 100644 ] \
+      || fail "unsafe selected EROFS patch material: $name"
+    [ -f "$directory/$name" ] && [ ! -L "$directory/$name" ] \
+      || fail "missing or unsafe EROFS patch material: $name"
+    git -C "$ROOT" cat-file blob "$object" > "$reference" \
+      || fail "cannot read selected EROFS patch material: $name"
+    cmp -s "$reference" "$directory/$name" \
+      || fail "EROFS patch material differs from selected source: $name"
+    names[$name]=1
+    printf '%s\n' "$name" >> "$expected"
+  done < "$tree"
+  find "$directory" -mindepth 1 -maxdepth 1 -printf '%f\n' | LC_ALL=C sort > "$actual"
+  LC_ALL=C sort -o "$expected" "$expected"
+  cmp -s "$expected" "$actual" || fail "EROFS patch material inventory differs from selected source"
+  [ -s "$directory/series" ] || fail "selected EROFS patch series is missing"
+  while IFS= read -r patch || [ -n "$patch" ]; do
+    case "$patch" in ''|'#'*) continue ;; esac
+    [[ "$patch" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*\.patch$ ]] \
+      && [ -z "${seen[$patch]:-}" ] && [ -n "${names[$patch]:-}" ] \
+      && [ -s "$directory/$patch" ] && [ -s "$directory/$patch.license" ] \
+      || fail "invalid selected EROFS patch series or missing license: $patch"
+    seen[$patch]=1
+    count=$((count + 1))
+  done < "$directory/series"
+  [ "$count" -gt 0 ] || fail "selected EROFS patch series is empty"
+  for name in "${!names[@]}"; do
+    case "$name" in
+      *.patch) [ -n "${seen[$name]:-}" ] || fail "unlisted selected EROFS patch: $name" ;;
+      *.patch.license) [ -n "${seen[${name%.license}]:-}" ] || fail "unclaimed EROFS patch license: $name" ;;
+    esac
+  done
 }

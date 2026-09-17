@@ -82,7 +82,7 @@ GOWORK=off make build TARGET_ARCH=aarch64  # 在依赖支持的范围内交叉�
 - `bin/<arch>/flatten-ctl`;
 - 作为 Host image packer 的 `BUILD_MKFS_EROFS`。
 
-缺少 `sandbox-init`、Envd、`flatten-ctl` 或目标架构 guest `mkfs.erofs` 时,Makefile 会调用对应构建 target。Host `mkfs.erofs` 不同:它必须已在 `PATH`、有文档记录的 native-deps Host 路径中,或由 `BUILD_MKFS_EROFS` 指定;否则 Runtime 构建明确失败。干净的公开构建必须使用有文档记录的公开 source/download location,不得依赖开发者私有 package mirror 或 cache。
+缺少 `sandbox-init`、Envd 或 `flatten-ctl` 时，Makefile 会调用对应构建 target。每次普通 Runtime 构建在使用仓库管理的目标架构 guest `mkfs.erofs` 前也会检查 EROFS 配方，即使可执行文件已经存在。明确指定 `GUEST_MKFS_EROFS` 时直接使用该覆盖值，文件必须可执行。Host `mkfs.erofs` 不同:它必须已在 `PATH`、有文档记录的 native-deps Host 路径中,或由 `BUILD_MKFS_EROFS` 指定;否则 Runtime 构建明确失败。干净的公开构建必须使用有文档记录的公开 source/download location,不得依赖开发者私有 package mirror 或 cache。
 
 ## 输出
 

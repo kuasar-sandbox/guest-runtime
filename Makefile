@@ -101,7 +101,11 @@ sandbox-runtime:
 	@[ -x "$(SANDBOX_INIT)" ] || $(MAKE) sandbox-init
 	@[ -x "$(ENVD)" ] || $(MAKE) envd
 	@[ -x "$(FLATTEN_CTL)" ] || $(MAKE) flatten-ctl
-	@[ -x "$(GUEST_MKFS_EROFS)" ] || $(MAKE) erofs
+	@if [ "$(GUEST_MKFS_EROFS)" = "native-deps/$(BINDIR)/mkfs.erofs" ]; then \
+	    $(MAKE) erofs; \
+	else \
+	    test -x "$(GUEST_MKFS_EROFS)"; \
+	fi
 	rm -rf $(BUILD_DIR)/sandbox-runtime
 	mkdir -p $(BUILD_DIR)/sandbox-runtime/sbin $(BUILD_DIR)/sandbox-runtime/proc \
 	         $(BUILD_DIR)/sandbox-runtime/sys $(BUILD_DIR)/sandbox-runtime/dev \
