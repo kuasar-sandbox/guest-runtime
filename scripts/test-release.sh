@@ -26,6 +26,7 @@ bash "$ROOT/scripts/test-release-go-contexts.sh"
 bash "$ROOT/native-deps/deps/test-common.sh"
 bash "$ROOT/native-deps/deps/test-erofs.sh"
 bash "$ROOT/scripts/test-release-native-materials.sh"
+python3 -B "$ROOT/scripts/test-static-crypto.py"
 bash "$ROOT/scripts/test-release-rpm-enumeration.sh"
 
 init_fixture_repo() {
@@ -314,6 +315,7 @@ extract_tarball() {
 EOF
 install -m 0755 "$ROOT/scripts/release-native-materials.sh" \
   "$fixture_root/scripts/release-native-materials.sh"
+install -m 0644 "$ROOT/scripts/static-crypto-catalog.py" "$fixture_root/scripts/static-crypto-catalog.py"
 mkdir -p "$fixture_root/cmd/flatten-ctl" "$fixture_root/cmd/other-tool"
 printf 'module github.com/kuasar-sandbox/guest-runtime\n\ngo 1.24\n' > "$fixture_root/go.mod"
 printf 'package main\nfunc main() {}\n' > "$fixture_root/cmd/flatten-ctl/main.go"
@@ -367,7 +369,7 @@ init_fixture_repo "$fixture_root" LICENSE LICENSES NOTICE .gitignore native-deps
   native-deps/deps/erofs-patches \
   native-deps/deps/vmlinux/sandbox-common.config \
   native-deps/Makefile native-deps/deps/common.sh scripts/release.sh scripts/release-materials.sh \
-  scripts/release-native-materials.sh scripts/publish-release.sh \
+  scripts/release-native-materials.sh scripts/static-crypto-catalog.py scripts/publish-release.sh \
   scripts/release-runtime-payloads.py scripts/test-release-runtime-payloads.py \
   scripts/validate-preview-line.sh scripts/testdata/linux-COPYING go.mod cmd >/dev/null
 project_sha="$(git -C "$fixture_root" rev-parse HEAD)"

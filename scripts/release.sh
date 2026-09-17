@@ -196,6 +196,15 @@ validate_source_inventory() {
         }
         next
       }
+      if ((name == "libgcrypt.a" || name == "libgpg-error.a") && split($5, fields, ";") == 4) {
+        if ($4 !~ /^https:\/\/[^[:space:]]+[.]src[.]rpm$/ || fields[1] !~ /^sha256:/ ||
+            fields[2] !~ /^srpm-sha256:/ || fields[3] !~ /^tarball-sha256:/ || fields[4] !~ /^crypto-catalog:/) exit 1
+        for (i=1; i<=4; i++) {
+          digest=fields[i]; sub(/^[^:]+:/, "", digest)
+          if (length(digest) != 64 || digest ~ /[^0-9a-f]/) exit 1
+        }
+        next
+      }
       if (split($5, fields, ";") != 2 || fields[1] !~ /^sha256:/ || fields[2] !~ /^package:/) exit 1
       digest=substr(fields[1], 8); package=substr(fields[2], 9)
       if (length(digest) != 64 || digest ~ /[^0-9a-f]/ || package !~ /^[A-Za-z0-9][A-Za-z0-9.+_-]*$/) exit 1

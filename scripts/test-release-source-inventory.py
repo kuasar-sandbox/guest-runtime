@@ -75,5 +75,21 @@ class SourceInventory(unittest.TestCase):
             self.assertNotEqual(self.validate("runtime", changed).returncode, 0)
 
 
+    def test_pinned_crypto_source_catalog_shape(self):
+        for name in ("libgcrypt.a", "libgpg-error.a"):
+            row = [EROFS, "system:" + name, "1.10.2-4.oe2403sp4",
+                   "https://mirrors.huaweicloud.com/pinned.src.rpm",
+                   "sha256:" + "a" * 64 + ";srpm-sha256:" + "b" * 64 +
+                   ";tarball-sha256:" + "c" * 64 + ";crypto-catalog:" + "d" * 64,
+                   "share/licenses/runtime/system/" + name]
+            self.assertEqual(self.validate("runtime", row).returncode, 0)
+            for column, value in ((1, "system:libother.a"), (3, "file:///unverified.src.rpm"),
+                                  (4, row[4].replace("d" * 64, "invalid")),
+                                  (4, row[4] + ";extra:field"), (5, "share/licenses/runtime/project")):
+                changed = list(row)
+                changed[column] = value
+                self.assertNotEqual(self.validate("runtime", changed).returncode, 0)
+
+
 if __name__ == "__main__":
     unittest.main()

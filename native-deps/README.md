@@ -113,6 +113,35 @@ copies them with the library into each prepared slot. Packaging checks this
 source-built library's inventory and digest. Missing, altered or unowned inputs
 need the actual matching materials, not fabricated source records.
 
+For openEuler 24.03-LTS-SP4 crypto, the paired
+[runner provider](https://github.com/kuasar-sandbox/kuasar-sandbox/blob/main/ci/runner/README.md#install)
+builds the exact `libgcrypt-1.10.2-4.oe2403sp4` and
+`libgpg-error-1.47-1.oe2403sp4` SRPM sources with their ordered patches, including
+Libgcrypt Patch2's CVE backport. It installs only `libgcrypt.a`, `libgpg-error.a`
+and `/usr/share/kuasar-ci/native-crypto/<build-id>/`; installed distro headers,
+shared libraries and services remain unchanged. Builds use at most two jobs and
+a private Libgpg-error dependency prefix. Configure options, actual compiler/tool
+identities, build logs and the static-link SHA-256 probe are retained. The
+static-only recipe disables shared-object HMAC generation, which requires a
+`.so`, and preserves the other relevant distro configure choices and source fixes.
+
+The collector checks the complete catalog against the actual linked archive
+bytes, independently pinned SRPM/contained-source/spec/patch digests and the
+recognized provider recipe. It rejects missing or altered notices, sources,
+recipes, build records and archives, unsafe paths, links and incomplete
+inventories. Original SRPMs, source archives, specs, ordered patches, auxiliary
+files, generated configuration/headers, build logs, tool identities and relink
+archives are copied once to
+`share/sources/runtime/native-crypto/<build-id>/`. Per-archive notice texts stay
+under `share/licenses/runtime/system/<archive>/`; large source/binary files are
+not repeated there. `SOURCES.tsv` binds each linked archive to its catalog ID.
+Standalone Runtime validation rechecks catalog contents, source claims and notice
+copies without executing a catalog recipe. The paired validator files and the
+provider digest must be updated together when the supported recipe changes.
+Ubuntu target dev packages continue through the installed Debian source-package
+and copyright path. There is no synthetic package registration, permissive
+fallback or additional written-offer commitment.
+
 The publisher supplies the selected project `SOURCE_SHA` to validation before
 Tag/Release writes, uses the bundle's `release-notes.md` body and appends the
 existing source/Preview markers. Producer-supplied notes may not contain those
@@ -186,7 +215,7 @@ Build duration depends on the host, toolchain and cache state; these commands do
 - The Runtime tool build skips the `mount`/`dump`/`fuse` subdirectories; it also avoids the v1.9.1 mount.erofs pthread-linking issue under `--disable-multithreading`. Standalone bundle validation separately requires a trusted host `dump.erofs` installation (§1.1).
 - A [maintained source patch](deps/erofs-patches/README.md) explicitly selects Libgcrypt full SHA-256 through `EROFS_USE_LIBGCRYPT_SHA256`. Configure disables OpenSSL and multithreading. Full 32-byte digests, exact 4 KiB chunk deduplication, uncompressed layout and the original v1.9.1 archive pin remain unchanged; no allocator or read-path change is included.
 - The target compiler must statically link `libgcrypt.a`, `libgpg-error.a` and `libuuid.a`. Debian/Ubuntu packages are `libgcrypt20-dev libgpg-error-dev uuid-dev`. Ubuntu 24.04 validation used Libgcrypt `1.10.3-2ubuntu0.2` and Libgpg-error `1.47-3build2.1`; use the actual target distribution's versions, headers and pkg-config metadata. The preflight checks the real target link with private static dependencies and fails with provisioning guidance.
-- RPM devel packages do not necessarily ship static libraries. The supported openEuler 24.03-LTS-SP4 source packages `libgcrypt-1.10.2-4.oe2403sp4` and `libgpg-error-1.47-1.oe2403sp4` explicitly build with `--disable-static`. Matching static source builds and their source/relink/license materials must be provisioned separately; the runner check fails while they are absent. Installing `libgcrypt-devel libgpg-error-devel` alone is insufficient. No new distribution-wide source builder is introduced here.
+- RPM devel packages do not necessarily ship static libraries. The supported openEuler 24.03-LTS-SP4 source packages `libgcrypt-1.10.2-4.oe2403sp4` and `libgpg-error-1.47-1.oe2403sp4` explicitly build with `--disable-static`. The paired runner provider supplies matching static builds and their validated source/build/relink/license catalogs during template preparation and slot updates (§1.1). Its disposable-root helper can be verified separately from the full provisioner. Installing `libgcrypt-devel libgpg-error-devel` alone is insufficient.
 - Both output ELFs must have no `INTERP` or `NEEDED` entries. The SHA path must execute in an empty root without host libraries, configuration, `/proc` or `/dev`; validate each new target/toolchain with exact baseline image comparison and fsck/extraction.
 - Libgcrypt and Libgpg-error library licenses are LGPL-2.1-or-later, with additional file-specific notices in their source distributions. Existing EROFS file licenses, including GPL-2.0 hashmap code, are preserved. Release provenance uses both actual linker inputs and matching package/source copyright, LICENSE/COPYING/NOTICE texts (§1.1). Missing materials fail packaging. Retain the recipe, ordered patches, original source archive, EROFS objects and exact target library sources/build configuration for rebuilding/relinking; do not substitute synthetic fixtures for release materials.
 - `EROFS_BUILD_JOBS=2 make -j2 erofs` bounds compilation. The default is `JOBS`, then 2.

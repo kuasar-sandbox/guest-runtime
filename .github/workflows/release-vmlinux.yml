@@ -159,7 +159,7 @@ jobs:
           trusted/platform/ci/native-cache/native-cache.sh restore-or-build vmlinux
 
       - name: Validate native dependency scripts
-        run: make -C src/guest-runtime/native-deps test
+        run: make -C src/guest-runtime/native-deps test-scripts
 
       - name: Package vmlinux release
         working-directory: src/guest-runtime

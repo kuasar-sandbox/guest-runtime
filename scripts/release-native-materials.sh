@@ -54,9 +54,38 @@ release_native_source_built_uuid() {
   release_materials_record_source "$payload" system:libuuid.a "$version" "$source" "$integrity" system/libuuid.a
 }
 
+release_native_source_built_crypto() {
+  local input="$1" payload="$2" catalog="$3" build_id file name version source integrity licenses
+  local helper="$ROOT/scripts/static-crypto-catalog.py" row
+  build_id="$(python3 -B "$helper" collect --catalog "$catalog" --libraries "$(dirname "$input")" \
+    --destination "$RELEASE_MATERIALS_STAGE/share/sources/$RELEASE_MATERIALS_UNIT/native-crypto")" \
+    || fail "source-built crypto material validation failed"
+  name="$(basename "$input")"
+  row="$(awk -F '\t' -v name="$name" '$1 == name {print}' "$catalog/SOURCES.tsv")"
+  [ -n "$row" ] || fail "missing source-built crypto archive record"
+  IFS=$'\t' read -r file name version source integrity licenses <<< "$row"
+  while IFS= read -r name; do
+    release_native_copy_file "$name" "system/$file" "${name#"$catalog/$licenses/"}"
+  done < <(find "$catalog/$licenses" -type f -print | LC_ALL=C sort)
+  release_materials_record_source "$payload" "system:$file" "$version" "$source" \
+    "$integrity;crypto-catalog:$build_id" "system/$file"
+}
+
 release_native_system_input() {
   local input="$1" payload="$2" query owner source_name version label copyright common
   local source_id rpm_source sibling file count=0
+  # Keep the original path for the provider's symlink checks before realpath.
+  case "$input" in
+    /usr/lib64/libgcrypt.a|/usr/lib64/libgpg-error.a)
+      if [ -e /usr/lib64/.kuasar-crypto-build-id ] || [ -L /usr/lib64/.kuasar-crypto-build-id ]; then
+        local crypto_catalog
+        crypto_catalog="$(python3 -B "$ROOT/scripts/static-crypto-catalog.py" installed --root /)" \
+          || fail "installed source-built crypto material is invalid"
+        release_native_source_built_crypto "$input" "$payload" "$crypto_catalog"
+        return
+      fi
+      ;;
+  esac
   input="$(realpath -e "$input")" || fail "native link input is missing"
   label="system/$(basename "$input")"
   if [ "$input" = /usr/lib64/libuuid.a ] && [ -f /usr/lib64/.kuasar-libuuid-build-id ]; then
@@ -186,6 +215,8 @@ release_native_validate_erofs_inventory() {
   ' "$source/SOURCES.tsv" > "$actual" || fail "invalid EROFS source input identity"
   LC_ALL=C sort -o "$actual" "$actual"
   cmp -s "$expected" "$actual" || fail "EROFS source records omit or alter collected linker inputs"
+  python3 -B "$ROOT/scripts/static-crypto-catalog.py" release --root "$1" \
+    || fail "source-built crypto release material is invalid"
 }
 
 # Archive hashes only establish internal consistency. The selected commit's

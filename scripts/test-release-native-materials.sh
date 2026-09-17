@@ -223,3 +223,34 @@ fi
 grep -qF 'native license material is missing' "$root/missing.log" || fail 'missing notice failed for unrelated reason'
 printf 'test-native-materials: Libgcrypt/Libgpg-error link inputs, identities and notice texts PASS\n'
 )
+
+# The installed Ubuntu package route remains independent of source-built catalogs.
+(
+  root="$test_root/ubuntu-packages"
+  mkdir -p "$root/lib"
+  for name in libgcrypt.a libgpg-error.a; do printf 'fixture archive\n' > "$root/lib/$name"; done
+  dpkg-query() {
+    case "$1" in
+      -S) printf 'fixture-dev:amd64: %s\n' "$2" ;;
+      -W) printf 'fixture-source\t1.2-3ubuntu1\n' ;;
+      *) return 1 ;;
+    esac
+  }
+  rpm() { fail 'Ubuntu package inputs reached RPM fallback'; }
+  release_native_source_built_crypto() { fail 'Ubuntu package input reached source-built provider'; }
+  release_native_copy_file() {
+    [ "$1" = /usr/share/doc/fixture-dev/copyright ] || fail 'wrong Ubuntu notice lookup'
+    printf '%s\n' "$2" >> "$root/notices-collected"
+  }
+  grep() { return 1; } # Fixture copyright has no common-license references.
+  release_materials_init "$root/stage" "$root/work" runtime
+  for name in libgcrypt.a libgpg-error.a; do
+    release_native_system_input "$root/lib/$name" bin/mkfs.erofs
+    awk -F '\t' -v name="system:$name" '$2 == name && $3 == "1.2-3ubuntu1" &&
+      $4 == "deb-source:fixture-source@1.2-3ubuntu1" && $5 ~ /;package:fixture-source$/ {found=1}
+      END {exit !found}' "$RELEASE_MATERIALS_WORK/sources" || fail 'Ubuntu package identity changed'
+  done
+  [ "$(wc -l < "$root/notices-collected")" -eq 2 ]
+  [ ! -e "$root/stage/share/sources/runtime/native-crypto" ]
+  printf 'test-native-materials: package-only Ubuntu crypto collection PASS\n'
+)

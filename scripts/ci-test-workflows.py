@@ -94,7 +94,7 @@ def check():
     assert all("create-github-app-token" not in s.get("uses", "") for s in kernel["steps"])
     kernel_steps = {s["name"]: s for s in kernel["steps"]}
     assert "trusted/platform/ci/native-cache/native-cache.sh restore-or-build vmlinux" in kernel_steps["Restore or build guest kernel"]["run"]
-    assert kernel_steps["Validate native dependency scripts"]["run"] == "make -C src/guest-runtime/native-deps test"
+    assert kernel_steps["Validate native dependency scripts"]["run"] == "make -C src/guest-runtime/native-deps test-scripts"
     print("guest hosted workflows: runners, profiles, pins, trust boundary and native material preservation PASS")
 
 

@@ -54,6 +54,36 @@ make -C "$fixture" build GO=true SANDBOX_INIT="$(type -P true)" ENVD="$(type -P 
 grep -Fq 'already built with matching erofs recipe' "$work/root-hit.log"
 echo 'test-erofs-recipe: relocated cache and ordinary root build reuse PASS'
 
+# Exercise default-site hashing without touching host /usr/local. Only the
+# loaded fixture copy substitutes the two fixed Autoconf default locations.
+mkdir -p "$work/config-sites"
+printf 'first configure default\n' > "$work/config-sites/share.site"
+printf 'second configure default\n' > "$work/config-sites/etc.site"
+python3 - "$script_dir/erofs-recipe.sh" "$work" <<'PY_SITE'
+from pathlib import Path
+import sys
+original, work = Path(sys.argv[1]), Path(sys.argv[2])
+text = original.read_text()
+text = text.replace('/usr/local/share/config.site', str(work / 'config-sites/share.site'))
+text = text.replace('/usr/local/etc/config.site', str(work / 'config-sites/etc.site'))
+(work / 'config-site-recipe.sh').write_text(text)
+PY_SITE
+site_digest() (
+    if [ "$1" = unset ]; then unset CONFIG_SITE; else export CONFIG_SITE=''; fi
+    # shellcheck disable=SC1091
+    source "$work/config-site-recipe.sh"
+    erofs_recipe_digest
+)
+for site_mode in unset empty; do
+    for site_file in "$work/config-sites/share.site" "$work/config-sites/etc.site"; do
+        before="$(site_digest "$site_mode")"
+        printf 'changed configure default\n' >> "$site_file"
+        [ "$(site_digest "$site_mode")" != "$before" ] \
+            || die "changed default config.site hidden with CONFIG_SITE=$site_mode"
+    done
+done
+echo 'test-erofs-recipe: both default config.site files tracked when unset or empty PASS'
+
 # For cheap invalidation tests stop before compilation. This fixture header is
 # deliberately synthesized AFTER installing the stubs; it is not a build claim.
 mkdir -p "$work/tools"

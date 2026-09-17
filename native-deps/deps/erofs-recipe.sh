@@ -29,7 +29,7 @@ erofs_recipe_tool() {
 
 erofs_recipe_digest() (
     set -euo pipefail
-    local file name tool command program output variable site
+    local file name tool command program output variable site config_sites
     local -a compiler pkgconfig packages=(uuid libgcrypt gpg-error)
     {
         printf 'erofs-recipe-v2\n'
@@ -95,7 +95,9 @@ erofs_recipe_digest() (
             output="$("${pkgconfig[@]}" --variable=pcfiledir "$name" 2>/dev/null)" || output=''
             [ ! -f "$output/$name.pc" ] || erofs_recipe_file "pkg/$name.pc" "$output/$name.pc"
         done
-        for site in ${CONFIG_SITE-'/usr/local/share/config.site /usr/local/etc/config.site'}; do
+        config_sites="${CONFIG_SITE:-/usr/local/share/config.site /usr/local/etc/config.site}"
+        # Autoconf splits its site list and uses defaults for unset OR empty.
+        for site in $config_sites; do
             [ ! -f "$site" ] || erofs_recipe_file config.site "$site"
         done
     } | sha256sum | cut -d ' ' -f1
