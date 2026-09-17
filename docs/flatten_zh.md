@@ -190,6 +190,41 @@ flatten-ctl export --skip var/cache --runtime-config rc.json -output new.img /sr
 flatten-ctl export --skip-mounts --upload --manifest-config m.yaml /srv/rootfs
 ```
 
+#### 临时文件与失败处理
+
+Export 将原始 EROFS payload 写入 scratch 父目录下的 `flatten-erofs-*.img`。
+父目录按 `--tmpdir`、配置中的 `tmpdir`、系统临时目录（`TMPDIR`，通常为 `/tmp`）
+的优先级选择。封装成功且原始源文件和工件写入句柄均关闭后，立即删除该文件，
+然后才将已封装工件复制到 stdout 或开始上传。
+
+| 资源 | 生命周期与失败行为 |
+|---|---|
+| 内部原始文件 `flatten-erofs-*.img` | 封装完成后删除；export 返回错误时也会删除，包括 mkfs 写出部分内容后失败的情况。 |
+| 内部工件 `flatten-image-*.img` | 用于未指定 `--output` 的 `--upload`，或 `--upload --output -`。export 返回时无论成功还是失败都会删除，包括 manifest 配置无效和 ingest 失败。 |
+| 指定路径的 `--output` | 成功和失败时均保留，包括上传失败。仍然直接创建或截断该路径；封装、写入或关闭失败可能留下不完整工件。清理不会删除或恢复该文件。 |
+| 输入归档、源 rootfs、持久缓存、无关文件及 scratch 父目录 | export 的临时文件清理不会删除这些资源。持久缓存仍遵循正常的淘汰策略（§2.4）。 |
+
+操作错误会在所拥有的资源完成释放后才传给外层 CLI；CLI 随后向 stderr 输出
+`error: ...` 并以状态码 1 退出。下游读取方关闭 stdout 时，export 会清理自己的
+临时文件，向 stderr 报告管道断开（broken pipe），并以状态码 1 退出。
+工件字节和现有 stdout 模式保持不变，包括
+`--upload --output -` 在工件后追加 key 的行为。`SIGKILL` 等突然终止不会执行
+Go defer，可能留下 scratch 文件；这里处理的是普通成功和失败时的清理，
+不提供崩溃恢复或陈旧文件扫描服务。
+
+维护中的生命周期回归测试无需 root、registry/store、网络访问或真实的 mkfs
+可执行文件即可运行（Go 依赖须已缓存）：
+
+```bash
+GOFLAGS=-p=2 GOMAXPROCS=2 go test ./cmd/flatten-ctl
+```
+
+测试使用小型本地假 mkfs，以及每次调用独立的写入、关闭、上传替代实现，检查
+失败清理、ingest 前释放原始文件、用户文件保留、CLI 退出行为（包括 stdout 管道
+读取端已关闭的情况及 SIGPIPE 行为恢复）及测试夹具工件的
+完整字节一致性。它们不验证真实 EROFS 构建或在线 registry/store 集成；这些内容
+仍由 [E2E 流程](../test/e2e/README.md) 覆盖（该流程文档当前仅提供英文版本）。
+
 ### 2.2 `flatten-ctl info` — 检视镜像
 
 ```
