@@ -577,3 +577,6 @@ Check determinism by exporting an immutable input twice with the same configurat
 - [sandboxer/docs/sandbox.md](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/sandbox.md) `boot.root.base`: select a flattened image as the read-only base.
 - [Native-build guide](../native-deps/README.md): build mkfs.erofs with `make -C native-deps erofs`; build the CLI with `make flatten-ctl`. The CLI resolves mkfs.erofs through the explicit environment override, sibling executable or PATH.
 - [Project system overview](https://github.com/kuasar-sandbox/kuasar-sandbox/blob/main/docs/kuasar-sandbox.md) §2.2 / §3.1: flattening's role and goals.
+
+
+Image packing uses `accelerator/pkg/tailzip` to split the EROFS payload and configuration suffix before writing the tarstream envelope. The declared payload commitment covers the EROFS prefix; the suffix has its own metadata commitment. The logical image bytes and deterministic configuration ZIP remain unchanged, while existing artifacts are read with their original declared identities.

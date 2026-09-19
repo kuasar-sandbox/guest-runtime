@@ -735,3 +735,6 @@ chunk 拉取,不能保证普适的亚毫秒延迟。
   CLI 按显式环境覆盖、同目录可执行文件、PATH 的顺序定位 mkfs.erofs。
 - [系统总览](https://github.com/kuasar-sandbox/kuasar-sandbox/blob/main/docs/kuasar-sandbox_zh.md) §2.2 / §3.1:
   展平在系统中的位置和目标。
+
+
+Image 打包使用 `accelerator/pkg/tailzip` 分离 EROFS payload 与配置后缀，再写入 tarstream envelope。声明的 payload commitment 覆盖 EROFS prefix，后缀使用独立的 metadata commitment。逻辑镜像字节与确定性配置 ZIP 保持不变，已有工件按原有声明身份读取。

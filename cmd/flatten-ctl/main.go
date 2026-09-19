@@ -45,6 +45,7 @@ import (
 	"github.com/kuasar-sandbox/accelerator/pkg/manifest/ingest"
 	"github.com/kuasar-sandbox/accelerator/pkg/remote"
 	"github.com/kuasar-sandbox/accelerator/pkg/sparse"
+	"github.com/kuasar-sandbox/accelerator/pkg/tailzip"
 	"github.com/kuasar-sandbox/accelerator/pkg/tarstream"
 	"github.com/kuasar-sandbox/guest-runtime/internal/util"
 )
@@ -372,6 +373,20 @@ func packImageArtifact(rawPath string, w io.Writer) (retErr error) {
 	src, err := sparse.NewSource(f, uint64(st.Size()), holes)
 	if err != nil {
 		return err
+	}
+	tail, boundary, err := tailzip.Read(f, st.Size(), tailzip.Options{})
+	if err != nil && !errors.Is(err, tailzip.ErrNotFound) {
+		return fmt.Errorf("image tail: %w", err)
+	}
+	if err == nil {
+		payload, err := tailzip.Prefix(src, uint64(boundary.Offset))
+		if err != nil {
+			return err
+		}
+		src, err = tailzip.Append(payload, tail, tailzip.Options{})
+		if err != nil {
+			return err
+		}
 	}
 	if _, _, err := tarstream.WriteTo(context.Background(), w, "image", src); err != nil {
 		return fmt.Errorf("pack image artifact: %w", err)

@@ -435,10 +435,11 @@ func expectedExportArtifact(t *testing.T) []byte {
 	if err != nil {
 		t.Fatal(err)
 	}
-	src, err := sparse.NewSource(bytes.NewReader(payload), uint64(len(payload)), nil)
+	logical, err := sparse.NewSource(bytes.NewReader(payload), uint64(len(payload)), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
+	src := exportBoundarySource{Source: logical, boundary: uint64(len("fake EROFS bytes\x00tail\n"))}
 	var artifact bytes.Buffer
 	if _, _, err := tarstream.WriteTo(context.Background(), &artifact, "image", src); err != nil {
 		t.Fatal(err)
@@ -477,5 +478,44 @@ func assertExportScratch(t *testing.T, path string, want map[string][]byte) {
 			continue
 		}
 		assertExportFile(t, filepath.Join(path, entry.Name()), data)
+	}
+}
+
+// Expected envelopes use the independently known raw payload length.
+type exportBoundarySource struct {
+	sparse.Source
+	boundary uint64
+}
+
+func (s exportBoundarySource) PayloadCommitment() (uint64, [32]byte, bool) {
+	return s.boundary, [32]byte{}, false
+}
+func (s exportBoundarySource) TarStreamDigest(string) ([32]byte, bool) { return [32]byte{}, false }
+
+func TestPackedImageDeclaresOriginalPayloadBoundary(t *testing.T) {
+	raw := filepath.Join(t.TempDir(), "image.raw")
+	payload := []byte("bounded image payload")
+	writeExportFile(t, raw, payload)
+	if err := image.AppendConfigZip(raw, &image.RuntimeConfig{Cmd: []string{"/bin/test"}}); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := packImageArtifact(raw, &out); err != nil {
+		t.Fatal(err)
+	}
+	source, _, err := tarstream.SourceAt(bytes.NewReader(out.Bytes()), int64(out.Len()), "image")
+	if err != nil {
+		t.Fatal(err)
+	}
+	boundary, _, ok := source.(tarstream.IdentityProvider).PayloadCommitment()
+	if !ok || boundary != uint64(len(payload)) {
+		t.Fatalf("payload boundary=%d valid=%v", boundary, ok)
+	}
+	all := make([]byte, source.Size())
+	if _, err = source.ReadAt(context.Background(), all, 0); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(all[:len(payload)], payload) {
+		t.Fatal("payload changed")
 	}
 }
