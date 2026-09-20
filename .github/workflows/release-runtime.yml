@@ -69,7 +69,7 @@ jobs:
         with:
           repository: kuasar-sandbox/kuasar-sandbox
           # Publish this platform commit before activating the guest workflow pin.
-          ref: 5b009f1509ff8b6bade4445d9a023ea8742f81cc
+          ref: 17a3469a33b4859ec13bb8399b81b657495d120f
           path: trusted/platform
           sparse-checkout: |
             ci/hosted
@@ -79,8 +79,11 @@ jobs:
       - name: Bootstrap standard runner
         run: bash trusted/platform/ci/hosted/bootstrap.sh --profile release-control
 
-      - name: Install pinned GitHub CLI
-        run: bash scripts/install-gh-cli.sh
+      - name: Check environment GitHub CLI
+        run: |
+          gh --version
+          gh_help="$(gh api --help)"
+          [[ "$gh_help" == *--slurp* ]] || { echo "environment gh must support api --slurp" >&2; exit 1; }
 
       - name: Validate hosted workflow contracts
         run: python3 scripts/ci-test-workflows.py
@@ -143,7 +146,7 @@ jobs:
         with:
           repository: kuasar-sandbox/kuasar-sandbox
           # Publish this platform commit before activating the guest workflow pin.
-          ref: 5b009f1509ff8b6bade4445d9a023ea8742f81cc
+          ref: 17a3469a33b4859ec13bb8399b81b657495d120f
           path: trusted/platform
           sparse-checkout: |
             ci/hosted
@@ -411,7 +414,7 @@ jobs:
         with:
           repository: kuasar-sandbox/kuasar-sandbox
           # Publish this platform commit before activating the guest workflow pin.
-          ref: 5b009f1509ff8b6bade4445d9a023ea8742f81cc
+          ref: 17a3469a33b4859ec13bb8399b81b657495d120f
           path: trusted/platform
           sparse-checkout: |
             ci/hosted
@@ -421,8 +424,11 @@ jobs:
       - name: Bootstrap standard runner
         run: bash trusted/platform/ci/hosted/bootstrap.sh --profile runtime-publish
 
-      - name: Install pinned GitHub CLI
-        run: bash scripts/install-gh-cli.sh
+      - name: Check environment GitHub CLI
+        run: |
+          gh --version
+          gh_help="$(gh api --help)"
+          [[ "$gh_help" == *--slurp* ]] || { echo "environment gh must support api --slurp" >&2; exit 1; }
 
       - name: Download validated runtime bundle
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -480,7 +486,7 @@ jobs:
         with:
           repository: kuasar-sandbox/kuasar-sandbox
           # Publish this platform commit before activating the guest workflow pin.
-          ref: 5b009f1509ff8b6bade4445d9a023ea8742f81cc
+          ref: 17a3469a33b4859ec13bb8399b81b657495d120f
           path: trusted/platform
           sparse-checkout: |
             ci/hosted
@@ -490,8 +496,11 @@ jobs:
       - name: Bootstrap standard runner
         run: bash trusted/platform/ci/hosted/bootstrap.sh --profile control
 
-      - name: Install pinned GitHub CLI
-        run: bash scripts/install-gh-cli.sh
+      - name: Check environment GitHub CLI
+        run: |
+          gh --version
+          gh_help="$(gh api --help)"
+          [[ "$gh_help" == *--slurp* ]] || { echo "environment gh must support api --slurp" >&2; exit 1; }
 
       - name: Delete release workflow artifacts
         env:

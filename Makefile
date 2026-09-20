@@ -139,6 +139,7 @@ sandbox-runtime:
 	@echo "==> built $(BINDIR)/sandbox-runtime.bundle"
 
 test:
+	PYTHONDONTWRITEBYTECODE=1 python3 scripts/test-environment-tools.py
 	$(MAKE) test-e2e-scripts
 	$(MAKE) -C native-deps test
 	PYTHONPYCACHEPREFIX="$(abspath $(BUILD_DIR)/python-cache)" \
@@ -175,6 +176,7 @@ release-vmlinux: vmlinux
 		$(BUILD_DIR)/release-vmlinux-bundle
 
 test-release:
+	PYTHONDONTWRITEBYTECODE=1 python3 scripts/test-environment-tools.py
 	bash scripts/test-release.sh
 
 clean:
