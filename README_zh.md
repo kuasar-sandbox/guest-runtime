@@ -54,6 +54,8 @@ Runtime 不将它新增为发行输入。独立 Kernel target 使用自己的 Na
 
 ## 构建前置
 
+构建使用环境提供的 Go，并继承 `GOROOT`、`GOTOOLCHAIN` 等工具链选择；发布自动化需要环境在 `PATH` 中提供支持 `api --slurp` 的 `gh`。项目不下载、替换或按固定二进制摘要认证这些环境工具。 EROFS 工具继续按项目源码、补丁及配方构建。
+
 构建 `sandbox-runtime.bundle` 需要**宿主架构**的 `mkfs.erofs` executable。在构建 Host 安装 `erofs-utils`,或设置:
 
 ```bash

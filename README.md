@@ -58,6 +58,8 @@ actual SHAs when reporting a build or test result.
 
 ## Build prerequisites
 
+Builds use environment-provided Go and inherit its `GOROOT` and `GOTOOLCHAIN` selection. Release automation requires a working `gh` with `api --slurp` support on `PATH`; the project does not install, replace, or authenticate these environment tools against fixed binary digests. EROFS tools remain built from the project-selected sources, patches, and recipes.
+
 Building `sandbox-runtime.bundle` requires a **host-architecture** `mkfs.erofs` executable. Install `erofs-utils` on the build host or set:
 
 ```bash

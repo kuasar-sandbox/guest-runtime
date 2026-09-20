@@ -301,8 +301,8 @@ release_materials_finish() {
         then .[] else error("missing selected compiler context") end
       ' "$RELEASE_MATERIALS_GO_ENV")" || fail "Go payload has no recorded build compiler context"
     else
-      toolchain_roots="$(GOWORK=off GOENV=off GOTOOLCHAIN=local command go env GOROOT)"
-      installed_toolchain="$(GOWORK=off GOENV=off GOTOOLCHAIN=local command go env GOVERSION)"
+      toolchain_roots="$(command go -C "${ROOT:-$PWD}" env GOROOT)"
+      installed_toolchain="$(command go -C "${ROOT:-$PWD}" env GOVERSION)"
       [ "$installed_toolchain" = "$toolchain" ] \
         || fail "resolved Go toolchain $installed_toolchain does not match $toolchain"
     fi

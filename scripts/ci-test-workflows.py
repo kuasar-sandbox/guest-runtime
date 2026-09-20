@@ -50,7 +50,7 @@ def check():
                 if "actions/upload-artifact@" in step.get("uses", ""):
                     assert step["with"]["path"] == "src/guest-runtime/release-bundle"
                     assert step["with"]["retention-days"] == 1
-                if "Install pinned GitHub CLI" == step["name"]:
+                if "Check environment GitHub CLI" == step["name"]:
                     assert list(steps).index("Bootstrap standard runner") < list(steps).index(step["name"])
         for forbidden in ("self-hosted", "kuasar-control", "kuasar-e2e", "/var/cache/kuasar", "/var/lib/kuasar-ci", "goproxy.cn", "tsinghua.edu.cn", "GOTOOLCHAIN: local"):
             assert forbidden not in text, (filename, forbidden)

@@ -97,7 +97,11 @@ record_release_go_contexts() {
       envd) directory="$envd_root/packages/envd" ;;
     esac
     info="$WORK/go-context-$context.json"
-    GOWORK=off go -C "$directory" env -json GOROOT GOVERSION GOHOSTOS GOHOSTARCH > "$info"
+    if [ "$context" = envd ]; then
+      GOWORK=off go -C "$directory" env -json GOROOT GOVERSION GOHOSTOS GOHOSTARCH > "$info"
+    else
+      go -C "$directory" env -json GOROOT GOVERSION GOHOSTOS GOHOSTARCH > "$info"
+    fi
   done
   RELEASE_MATERIALS_GO_ENV="$WORK/go-build-toolchains.json"
   jq -s . "$WORK/go-context-runtime.json" "$WORK/go-context-sandboxer.json" "$WORK/go-context-envd.json" \
