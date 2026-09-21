@@ -24,9 +24,13 @@ def digest(path):
         return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
+def _archive_name(member):
+    return member.name[2:] if member.name.startswith("./") else member.name
+
+
 def _member(bundle, name):
     matches = [member for member in bundle.getmembers()
-               if member.name.lstrip("./") == name]
+               if _archive_name(member) == name]
     require(len(matches) == 1 and matches[0].isfile(),
             f"sandboxer archive must contain one regular {name}")
     return matches[0]
@@ -62,7 +66,7 @@ def prepare(release, directory, version, source_sha, output, go_toolchain_output
             "sandboxer SHA256SUMS does not match its archive")
     with tarfile.open(archive, "r:gz") as bundle:
         members = [member for member in bundle.getmembers()
-                   if member.name.lstrip("./") == "bin/sandbox-init"]
+                   if _archive_name(member) == "bin/sandbox-init"]
         require(len(members) == 1 and members[0].isfile() and members[0].mode & 0o111,
                 "sandboxer archive must contain one regular executable bin/sandbox-init")
         payload = bundle.extractfile(members[0]).read()
@@ -103,11 +107,11 @@ def prepare(release, directory, version, source_sha, output, go_toolchain_output
 
             prefix = license_directory + "/"
             notice_members = [member for member in bundle.getmembers()
-                              if member.name.lstrip("./").startswith(prefix)]
+                              if _archive_name(member).startswith(prefix)]
             require(notice_members, "sandbox-init Go toolchain notices are missing")
             files = []
             for member in notice_members:
-                name = member.name.lstrip("./")
+                name = _archive_name(member)
                 relative = name[len(prefix):]
                 require(relative and ".." not in Path(relative).parts,
                         "sandbox-init Go toolchain notice has an unsafe path")
