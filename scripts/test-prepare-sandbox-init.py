@@ -30,7 +30,8 @@ class SelectedSandboxInitTests(unittest.TestCase):
         self.write_archive()
 
     def write_archive(self, kind=tarfile.REGTYPE, duplicate=False,
-                      source_url=None, source_extra="", extra_notice=None):
+                      source_url=None, source_extra="", extra_notice=None,
+                      toolchain_record=None):
         with tarfile.open(self.archive, "w:gz") as bundle:
             for _ in range(2 if duplicate else 1):
                 entry = tarfile.TarInfo("./bin/sandbox-init")
@@ -42,7 +43,8 @@ class SelectedSandboxInitTests(unittest.TestCase):
                 materials = {
                     "share/sources/sandboxer/GO-BUILD-INFO.tsv":
                         ("payload\trecord\tname\tversion_or_value\tchecksum\n"
-                         f"bin/sandbox-init\ttoolchain\tgo\t{self.toolchain}\t-\n").encode(),
+                         f"bin/sandbox-init\ttoolchain\tgo\t"
+                         f"{toolchain_record or self.toolchain}\t-\n").encode(),
                     "share/sources/sandboxer/SOURCES.tsv":
                         ("payload\tname\tversion\tsource\tintegrity\tlicense_directory\n"
                          f"bin/sandbox-init\tGo toolchain\t{self.toolchain}\t"
@@ -160,6 +162,12 @@ class SelectedSandboxInitTests(unittest.TestCase):
                     self.prepare()
                 self.assertFalse(self.output.exists())
 
+    def test_normalizes_supported_go_experiment_suffix(self):
+        self.write_archive(toolchain_record=f"{self.toolchain} X:arenas")
+        self.prepare()
+        self.assertEqual(self.output.read_bytes(), self.payload)
+        self.assertTrue((self.go_materials / self.toolchain / "LICENSE").is_file())
+
     def test_rejects_binary_toolchain_mismatch(self):
         self.actual_toolchain = "go1.26.8"
         with self.assertRaisesRegex(ValueError, "binary Go toolchain"):
@@ -220,5 +228,3 @@ class SelectedSandboxInitTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
-[executed on device: VM-16-4-ubuntu (ece80c39-2a6a-48a6-8bca-2dd73fc629dd)]

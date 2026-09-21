@@ -46,9 +46,11 @@ def _verified_material(bundle, checksums, name):
 
 
 def _go_toolchain(value):
-    require(re.fullmatch(r"go1\.[0-9]+(?:(?:\.[0-9]+)|(?:beta|rc)[0-9]+)", value),
-            "sandbox-init Go toolchain record is invalid")
-    return value
+    match = re.fullmatch(
+        r"(go1\.[0-9]+(?:(?:\.[0-9]+)|(?:beta|rc)[0-9]+))(?: X:[A-Za-z0-9_,.-]+)?",
+        value)
+    require(match is not None, "sandbox-init Go toolchain record is invalid")
+    return match.group(1)
 
 
 def _binary_go_toolchain(payload, directory):
@@ -219,5 +221,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-[executed on device: VM-16-4-ubuntu (ece80c39-2a6a-48a6-8bca-2dd73fc629dd)]
