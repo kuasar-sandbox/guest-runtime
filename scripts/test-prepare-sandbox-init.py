@@ -146,6 +146,23 @@ class SelectedSandboxInitTests(unittest.TestCase):
         self.assertFalse(self.output.exists())
 
 
+    def test_rejects_parent_path_alias_for_sandbox_init(self):
+        with tarfile.open(self.archive, "w:gz") as bundle:
+            entry = tarfile.TarInfo("../bin/sandbox-init")
+            entry.mode, entry.size = 0o755, len(self.payload)
+            bundle.addfile(entry, io.BytesIO(self.payload))
+        sums = self.root / "SHA256SUMS"
+        sums.write_text(f"{helper.digest(self.archive)}  {self.archive.name}\n")
+        self.release["assets"] = [
+            {"name": path.name, "size": path.stat().st_size,
+             "digest": "sha256:" + helper.digest(path), "state": "uploaded"}
+            for path in (self.archive, sums)
+        ]
+        with self.assertRaisesRegex(ValueError, "one regular executable"):
+            self.prepare()
+        self.assertFalse(self.output.exists())
+
+
     def test_rejects_ambiguous_or_linked_archive_member(self):
         for kind, duplicate in ((tarfile.SYMTYPE, False), (tarfile.REGTYPE, True)):
             with self.subTest(kind=kind, duplicate=duplicate):
