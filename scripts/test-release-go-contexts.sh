@@ -46,7 +46,7 @@ for scenario in object array duplicate-roots two-roots two-versions missing-vers
       if (release_materials_finish > "$TMP/$scenario.log" 2>&1); then
         fail "accepted $scenario"
       fi
-      grep -Eq 'no recorded build compiler context|selected Go distribution has no LICENSE' "$TMP/$scenario.log" \
+      grep -Eq 'no recorded build compiler context|invalid recorded build compiler context|selected Go distribution has no LICENSE' "$TMP/$scenario.log" \
         || fail "$scenario failed for an unrelated reason" ;;
     *)
       release_materials_finish
