@@ -276,6 +276,29 @@ release_materials_copy_go_licenses() {
   done < "$notices"
 }
 
+release_materials_copy_preselected_go_licenses() {
+  local source="${1%/}" toolchain="$2" destination file relative
+  destination="$RELEASE_MATERIALS_STAGE/share/licenses/$RELEASE_MATERIALS_UNIT/go-toolchain/$toolchain"
+  [ -f "$source/LICENSE" ] || fail "selected Go release material has no LICENSE: $toolchain"
+  if find "$source" -type l -print -quit | grep -q .; then
+    fail "selected Go release material contains a symbolic link: $toolchain"
+  fi
+  mkdir -p "$destination"
+  while IFS= read -r -d '' file; do
+    relative="${file#"$source"/}"
+    release_materials_safe_relative "$relative" || fail "unsafe selected Go notice path"
+    [ "$(stat -c '%a' "$file")" = 644 ] \
+      || fail "selected Go release notice has unsafe mode: $relative"
+    mkdir -p "$destination/$(dirname "$relative")"
+    if [ -f "$destination/$relative" ]; then
+      cmp -s "$file" "$destination/$relative" \
+        || fail "conflicting Go notices for $toolchain: $relative"
+    else
+      install -m 0644 "$file" "$destination/$relative"
+    fi
+  done < <(find "$source" -type f -print0 | LC_ALL=C sort -z)
+}
+
 release_materials_hash_tree() {
   local root="$1" unit="$2" output="$3"
   (
@@ -293,13 +316,15 @@ release_materials_finish() {
   local toolchain_roots
   while IFS= read -r toolchain; do
     [ -n "$toolchain" ] || continue
+    local copied_toolchain=false selected_notice_root
     if [ -n "${RELEASE_MATERIALS_GO_ENV:-}" ]; then
-      toolchain_roots="$(jq -er --arg version "$toolchain" '
+      toolchain_roots="$(jq -r --arg version "$toolchain" '
         [if type == "array" then .[] else . end |
          select(.GOVERSION == $version) | .GOROOT] | unique |
-        if length > 0 and all(.[]; type == "string" and length > 0)
-        then .[] else error("missing selected compiler context") end
-      ' "$RELEASE_MATERIALS_GO_ENV")" || fail "Go payload has no recorded build compiler context"
+        if all(.[]; type == "string" and length > 0)
+        then .[] else error("invalid selected compiler context") end
+      ' "$RELEASE_MATERIALS_GO_ENV")" \
+        || fail "Go payload has an invalid recorded build compiler context"
     else
       toolchain_roots="$(command go -C "${ROOT:-$PWD}" env GOROOT)"
       installed_toolchain="$(command go -C "${ROOT:-$PWD}" env GOVERSION)"
@@ -307,8 +332,19 @@ release_materials_finish() {
         || fail "resolved Go toolchain $installed_toolchain does not match $toolchain"
     fi
     while IFS= read -r toolchain_root; do
+      [ -n "$toolchain_root" ] || continue
       release_materials_copy_go_licenses "$toolchain_root" "$toolchain"
+      copied_toolchain=true
     done <<< "$toolchain_roots"
+    if [ -n "${RELEASE_MATERIALS_GO_NOTICE_ROOT:-}" ]; then
+      selected_notice_root="${RELEASE_MATERIALS_GO_NOTICE_ROOT%/}/$toolchain"
+      if [ -d "$selected_notice_root" ]; then
+        release_materials_copy_preselected_go_licenses "$selected_notice_root" "$toolchain"
+        copied_toolchain=true
+      fi
+    fi
+    [ "$copied_toolchain" = true ] \
+      || fail "Go payload has no recorded build compiler context or selected release notices: $toolchain"
     source="https://go.dev/dl/#$toolchain"
     checksum=-
     while IFS= read -r payload; do

@@ -290,4 +290,26 @@ if grep -q ' ' "$RELEASE_MATERIALS_WORK/go-toolchains"; then
 fi
 release_materials_finish
 
+# A prebuilt component may have been compiled by a different environment Go
+# than the current package job. Its verified release notices must satisfy that
+# payload without pretending the current module selected the same compiler.
+release_materials_init "$TMP/selected-stage" "$TMP/selected-work" fixture
+mkdir -p "$TMP/selected-notices/go9.9.9"
+printf 'selected release compiler license\n' > "$TMP/selected-notices/go9.9.9/LICENSE"
+printf 'selected release compiler patents\n' > "$TMP/selected-notices/go9.9.9/PATENTS"
+chmod 0644 "$TMP/selected-notices/go9.9.9/LICENSE" "$TMP/selected-notices/go9.9.9/PATENTS"
+printf 'go9.9.9\n' > "$RELEASE_MATERIALS_WORK/go-toolchains"
+printf 'bin/tool\ttoolchain\tgo\tgo9.9.9\t-\n' > "$RELEASE_MATERIALS_WORK/go-build-info"
+printf '[{"GOVERSION":"go1.24.0","GOROOT":"/not-selected"}]\n' > "$TMP/selected-context.json"
+RELEASE_MATERIALS_GO_ENV="$TMP/selected-context.json" \
+RELEASE_MATERIALS_GO_NOTICE_ROOT="$TMP/selected-notices" \
+  release_materials_finish
+cmp "$TMP/selected-notices/go9.9.9/LICENSE" \
+  "$TMP/selected-stage/share/licenses/fixture/go-toolchain/go9.9.9/LICENSE"
+cmp "$TMP/selected-notices/go9.9.9/PATENTS" \
+  "$TMP/selected-stage/share/licenses/fixture/go-toolchain/go9.9.9/PATENTS"
+printf -v expected 'bin/tool\tGo toolchain\tgo9.9.9\thttps://go.dev/dl/#go9.9.9\t-\tshare/licenses/fixture/go-toolchain/go9.9.9'
+grep -Fqx "$expected" "$TMP/selected-stage/share/sources/fixture/SOURCES.tsv" \
+  || fail "selected release notices lost their Go toolchain source record"
+
 echo "test-release-materials: PASS (module checksum, effective replacement, Go experiment, notices and offline validation)"
