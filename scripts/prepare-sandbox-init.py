@@ -7,9 +7,10 @@ import hashlib
 import json
 import io
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 import shutil
+import subprocess
 import tarfile
 import tempfile
 
@@ -42,6 +43,35 @@ def _verified_material(bundle, checksums, name):
     require(checksums.get(name) == hashlib.sha256(payload).hexdigest(),
             f"sandboxer material checksum mismatch: {name}")
     return payload
+
+
+def _go_toolchain(value):
+    require(re.fullmatch(r"go1\.[0-9]+(?:(?:\.[0-9]+)|(?:beta|rc)[0-9]+)", value),
+            "sandbox-init Go toolchain record is invalid")
+    return value
+
+
+def _binary_go_toolchain(payload, directory):
+    with tempfile.NamedTemporaryFile(dir=directory, delete=False) as stream:
+        temporary = Path(stream.name)
+        try:
+            stream.write(payload)
+            stream.flush()
+            os.fchmod(stream.fileno(), 0o755)
+        finally:
+            stream.close()
+    try:
+        result = subprocess.run(
+            ["go", "version", "-m", str(temporary)],
+            check=False, capture_output=True, text=True)
+        require(result.returncode == 0 and result.stdout,
+                "cannot read sandbox-init Go build metadata")
+        first = result.stdout.splitlines()[0]
+        _, separator, version = first.partition(": ")
+        require(separator, "sandbox-init Go build metadata is malformed")
+        return _go_toolchain(version)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def prepare(release, directory, version, source_sha, output, go_toolchain_output=None):
@@ -93,17 +123,24 @@ def prepare(release, directory, version, source_sha, output, go_toolchain_output
                         and row["record"] == "toolchain" and row["name"] == "go"]
             require(len(selected) == 1,
                     "sandbox-init must declare exactly one Go toolchain")
-            match = re.fullmatch(r"(go[0-9][^ \\t-]*)(?:[ -]X:.*)?", selected[0])
-            require(match is not None, "sandbox-init Go toolchain record is invalid")
-            toolchain = match.group(1)
+            toolchain = _go_toolchain(selected[0])
+            require(_binary_go_toolchain(payload, directory) == toolchain,
+                    "sandbox-init binary Go toolchain does not match release metadata")
             license_directory = f"share/licenses/sandboxer/go-toolchain/{toolchain}"
             source_rows = list(csv.DictReader(io.StringIO(sources), delimiter="\t"))
-            require(any(row["payload"] == "bin/sandbox-init"
-                        and row["name"] == "Go toolchain"
-                        and row["version"] == toolchain
-                        and row["license_directory"] == license_directory
-                        for row in source_rows),
-                    "sandbox-init Go toolchain source record is missing")
+            selected_sources = [
+                row for row in source_rows
+                if row["payload"] == "bin/sandbox-init"
+                and row["name"] == "Go toolchain"
+            ]
+            require(len(selected_sources) == 1,
+                    "sandbox-init must declare exactly one Go toolchain source")
+            source = selected_sources[0]
+            require(source["version"] == toolchain
+                    and source["source"] == f"https://go.dev/dl/#{toolchain}"
+                    and source["integrity"] == "-"
+                    and source["license_directory"] == license_directory,
+                    "sandbox-init Go toolchain source record is not canonical")
 
             prefix = license_directory + "/"
             notice_members = [member for member in bundle.getmembers()
@@ -113,7 +150,10 @@ def prepare(release, directory, version, source_sha, output, go_toolchain_output
             for member in notice_members:
                 name = _archive_name(member)
                 relative = name[len(prefix):]
-                require(relative and ".." not in Path(relative).parts,
+                relative_path = PurePosixPath(relative)
+                require(relative and not relative_path.is_absolute()
+                        and ".." not in relative_path.parts
+                        and relative_path.as_posix() == relative,
                         "sandbox-init Go toolchain notice has an unsafe path")
                 require(member.isdir() or member.isreg(),
                         "sandbox-init Go toolchain notices must be regular files/directories")
@@ -135,7 +175,10 @@ def prepare(release, directory, version, source_sha, output, go_toolchain_output
             try:
                 target = temporary_root / toolchain
                 for relative, data in files:
-                    destination = target / relative
+                    destination = target.joinpath(*PurePosixPath(relative).parts)
+                    require(destination.parent == target
+                            or target in destination.parents,
+                            "sandbox-init Go toolchain notice escapes its target")
                     destination.parent.mkdir(parents=True, exist_ok=True)
                     destination.write_bytes(data)
                     destination.chmod(0o644)
@@ -176,3 +219,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+[executed on device: VM-16-4-ubuntu (ece80c39-2a6a-48a6-8bca-2dd73fc629dd)]
