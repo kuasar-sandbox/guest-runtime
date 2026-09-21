@@ -22,7 +22,7 @@ def check():
         jobs = yaml.safe_load(text)["jobs"]
         workflows[filename] = jobs
         for name, job in jobs.items():
-            assert job["runs-on"] == "ubuntu-24.04", (filename, name)
+            assert job["runs-on"] == "ubuntu-latest", (filename, name)
             assert "github.event.repository.visibility == 'public'" in job["if"]
             assert "github.event.repository.full_name == github.repository" in job["if"]
             assert job["permissions"].get("contents", "read") == ("write" if name in ("publish", "reconcile", "delete") else "read")
