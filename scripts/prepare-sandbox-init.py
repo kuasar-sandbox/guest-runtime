@@ -10,6 +10,7 @@ import os
 from pathlib import Path, PurePosixPath
 import re
 import shutil
+import struct
 import subprocess
 import tarfile
 import tempfile
@@ -76,32 +77,47 @@ def _binary_go_toolchain(payload, directory):
         temporary.unlink(missing_ok=True)
 
 
-def prepare(release, directory, version, source_sha, output, go_toolchain_output=None):
+def prepare(release, directory, version, source_sha, output, go_toolchain_output=None, arch="x86_64"):
+    require(arch in ("x86_64", "aarch64"), "invalid sandbox-init target architecture")
     require(re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+(?:-preview\.[0-9]{8}(?:\.[1-9][0-9]*)?)?", version), "invalid sandboxer version")
     require(re.fullmatch(r"[0-9a-f]{40}", source_sha), "invalid sandboxer source SHA")
     require(release["tag_name"] == version and release["target_commitish"] == source_sha,
             "sandboxer Release does not match the selected tag/source")
     require(release["draft"] is False and release["prerelease"] is ("-preview." in version),
             "sandboxer Release has the wrong publication state")
-    archive_name = f"sandboxer-{version}-linux-x86_64.tar.gz"
+    archive_name = f"sandboxer-{version}-linux-{arch}.tar.gz"
     assets = release["assets"]
-    require(len(assets) == 2 and {asset["name"] for asset in assets} == {archive_name, "SHA256SUMS"},
+    names = {asset["name"] for asset in assets}
+    native = f"sandboxer-{version}-linux-x86_64.tar.gz"
+    arm = f"sandboxer-{version}-linux-aarch64.tar.gz"
+    require(len(assets) == len(names) and names in ({native, "SHA256SUMS"}, {native, arm, "SHA256SUMS"})
+            and archive_name in names,
             "sandboxer Release has an unexpected asset set")
     for asset in assets:
+        if asset["name"] not in (archive_name, "SHA256SUMS"):
+            continue
         path = directory / asset["name"]
         require(asset["state"] == "uploaded" and path.stat().st_size == asset["size"],
                 f"sandboxer asset size/state mismatch: {asset['name']}")
         require(asset["digest"] == "sha256:" + digest(path),
                 f"sandboxer GitHub asset digest mismatch: {asset['name']}")
     archive = directory / archive_name
-    require((directory / "SHA256SUMS").read_text().splitlines() == [f"{digest(archive)}  {archive_name}"],
-            "sandboxer SHA256SUMS does not match its archive")
+    expected = {asset["name"]: asset["digest"].removeprefix("sha256:") for asset in assets if asset["name"] != "SHA256SUMS"}
+    checksums = {}
+    for line in (directory / "SHA256SUMS").read_text().splitlines():
+        match = re.fullmatch(r"([0-9a-f]{64})  ([^\r\n]+)", line)
+        require(match is not None and match[2] not in checksums, "sandboxer SHA256SUMS is malformed")
+        checksums[match[2]] = match[1]
+    require(checksums == expected and checksums[archive_name] == digest(archive), "sandboxer SHA256SUMS does not match its archive")
     with tarfile.open(archive, "r:gz") as bundle:
         members = [member for member in bundle.getmembers()
                    if _archive_name(member) == "bin/sandbox-init"]
         require(len(members) == 1 and members[0].isfile() and members[0].mode & 0o111,
                 "sandboxer archive must contain one regular executable bin/sandbox-init")
         payload = bundle.extractfile(members[0]).read()
+        require(len(payload) >= 64 and payload[:7] == b"\x7fELF\x02\x01\x01"
+                and struct.unpack_from("<H", payload, 18)[0] == {"x86_64": 62, "aarch64": 183}[arch],
+                "selected sandbox-init has the wrong architecture")
 
         if go_toolchain_output is not None:
             material_member = _member(bundle, "share/sources/sandboxer/MATERIALS.sha256")
@@ -211,10 +227,11 @@ def main():
     parser.add_argument("--source-sha", required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--go-toolchain-output", type=Path)
+    parser.add_argument("--arch", choices=("x86_64", "aarch64"), default="x86_64")
     args = parser.parse_args()
     try:
         prepare(json.loads(args.release_json.read_text()), args.directory,
-                args.version, args.source_sha, args.output, args.go_toolchain_output)
+                args.version, args.source_sha, args.output, args.go_toolchain_output, args.arch)
     except (ValueError, KeyError, OSError, tarfile.TarError) as error:
         parser.exit(1, f"release dependency: {error}\n")
 

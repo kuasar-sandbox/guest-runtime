@@ -132,7 +132,7 @@ sandbox-runtime:
 	    -x-1 \
 	    -U 00000000-0000-0000-0000-000000000000 \
 	    $(BUILD_DIR)/sandbox-runtime.erofs $(BUILD_DIR)/sandbox-runtime 2>/dev/null
-	$(GO) run ./cmd/runtime-bundle \
+	GOOS=linux GOARCH=$(shell $(GO) env GOHOSTARCH) CGO_ENABLED=0 $(GO) run ./cmd/runtime-bundle \
 	    -input $(BUILD_DIR)/sandbox-runtime.erofs \
 	    -output $(BINDIR)/sandbox-runtime.bundle
 	$(call link_bin,sandbox-runtime.bundle)
