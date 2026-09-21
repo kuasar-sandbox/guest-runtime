@@ -227,7 +227,7 @@ grep -Fq 'kuasar-preview-binding' "$ROOT/scripts/publish-release.sh" \
 for input in accelerator_version sandboxer_version; do
   grep -Fq "      $input:" "$WORKFLOW" \
     || fail "runtime release workflow is missing required $input input"
-  [ "$(grep -Fc "ref: \${{ needs.preflight.outputs.$input }}" "$WORKFLOW")" -eq 2 ] \
+  [ "$(grep -Fc "ref: \${{ needs.preflight.outputs.${input%_version}_sha }}" "$WORKFLOW")" -eq 2 ] \
     || fail "runtime release workflow does not pin preflight and build $input checkouts"
 done
 # Validate the named native build step rather than YAML single-line formatting.
@@ -237,9 +237,9 @@ if grep -Fq 'connector_version' "$WORKFLOW" \
   || grep -Fq 'src/connector' "$WORKFLOW"; then
   fail "runtime release workflow retains connector outside its payload/build closure"
 fi
-grep -Fq 'repositories: accelerator,guest-runtime,kuasar-sandbox,sandboxer' \
-  "$WORKFLOW" \
-  || fail "runtime source token repository set does not match the minimal closure"
+if grep -Fq 'create-github-app-token' "$WORKFLOW"; then
+  fail "public artifact builds must not receive the App key"
+fi
 grep -Fq "repos/kuasar-sandbox/\$repository/releases/tags/\$version" "$WORKFLOW" \
   || fail "runtime release workflow does not verify dependency releases"
 for workflow in release-runtime.yml release-vmlinux.yml delete-preview.yml; do
@@ -336,9 +336,9 @@ install -m 0755 "$TMP/tool" "$fixture_root/bin/x86_64/flatten-ctl"
 install -m 0755 "$TMP/tool" "$TMP/sandboxer/bin/x86_64/sandbox-init"
 install -m 0755 "$TMP/tool" "$fixture_root/native-deps/bin/x86_64/envd"
 printf 'runtime bundle\n' > "$fixture_root/bin/x86_64/sandbox-runtime.bundle"
-printf '#!/bin/sh\nexit 0\n' > "$fixture_root/native-deps/bin/x86_64/mkfs.erofs"
-printf 'kernel\n' > "$fixture_root/native-deps/bin/x86_64/vmlinux"
-chmod +x "$fixture_root/native-deps/bin/x86_64/mkfs.erofs"
+# Native fixture headers are inspected; their programs are never executed.
+install -m 0755 /bin/true "$fixture_root/native-deps/bin/x86_64/mkfs.erofs"
+install -m 0644 /bin/true "$fixture_root/native-deps/bin/x86_64/vmlinux"
 printf 'fixture sandboxer license\n' > "$TMP/sandboxer/LICENSE"
 printf 'fixture accelerator license\n' > "$TMP/accelerator/LICENSE"
 for dependency in accelerator sandboxer; do
@@ -652,9 +652,9 @@ if env "${common_env[@]}" "$fixture_root/scripts/release.sh" package \
   runtime v1.2.3 x86_64 "$TMP/invalid-version" >/dev/null 2>&1; then
   fail "packager accepted a runtime version without the runtime prefix"
 fi
-if env "${common_env[@]}" "$fixture_root/scripts/release.sh" package \
-  vmlinux vmlinux-v1.2.3 aarch64 "$TMP/invalid-arch" >/dev/null 2>&1; then
-  fail "packager accepted an unvalidated release architecture"
+if env "${common_env[@]}" RELEASE_NATIVE_BIN_DIR="$fixture_root/native-deps/bin/x86_64" \
+  "$fixture_root/scripts/release.sh" package vmlinux vmlinux-v1.2.3 aarch64 "$TMP/invalid-arch" >/dev/null 2>&1; then
+  fail "packager accepted x86_64 payloads as aarch64"
 fi
 env "${common_env[@]}" \
   RELEASE_BIN_DIR="$fixture_root/bin/x86_64" \
