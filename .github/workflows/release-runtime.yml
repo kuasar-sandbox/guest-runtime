@@ -340,7 +340,8 @@ jobs:
             --release-json sandboxer-release.json --directory selected-sandboxer \
             --version "$SANDBOXER_VERSION" \
             --source-sha "$(git -C src/sandboxer rev-parse HEAD)" \
-            --output "src/sandboxer/bin/$TARGET_ARCH/sandbox-init"
+            --output "src/sandboxer/bin/$TARGET_ARCH/sandbox-init" \
+            --go-toolchain-output "$GITHUB_WORKSPACE/selected-sandboxer-go"
 
       - name: Prepare native source caches
         run: |
@@ -379,6 +380,7 @@ jobs:
         working-directory: src/guest-runtime
         env:
           VERSION: ${{ needs.preflight.outputs.version }}
+          RELEASE_MATERIALS_GO_NOTICE_ROOT: ${{ github.workspace }}/selected-sandboxer-go
         run: |
           set -euo pipefail
           [ "$(git rev-parse HEAD)" = "${{ needs.preflight.outputs.source_sha }}" ]
