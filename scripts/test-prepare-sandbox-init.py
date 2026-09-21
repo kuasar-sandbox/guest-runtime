@@ -24,7 +24,7 @@ class SelectedSandboxInitTests(unittest.TestCase):
         self.archive = self.root / f"sandboxer-{self.version}-linux-x86_64.tar.gz"
         self.output = self.root / "bin/sandbox-init"
         self.go_materials = self.root / "selected-go"
-        self.payload = b"selected release binary; do not rebuild"
+        self.payload = b"\x7fELF\x02\x01\x01" + bytes(11) + b"\x3e\x00" + bytes(44) + b"selected release binary; do not rebuild"
         self.toolchain = "go1.26.7"
         self.actual_toolchain = self.toolchain
         self.write_archive()

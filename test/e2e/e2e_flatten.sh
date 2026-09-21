@@ -164,6 +164,7 @@ RUN_ID="${RUN_ID,,}"
 REPOSITORY="e2e-$RUN_ID/app"
 FIXTURE_ARCH=""
 if [ -z "${E2E_IMAGE:-}" ]; then
+    [ "${KUASAR_ARTIFACT_E2E:-0}" != 1 ] || missing "prepared E2E_IMAGE is required for artifact E2E"
     capture architecture docker info --format '{{.Architecture}}'
     case "$(<"$WORK/architecture.out")" in
         amd64|x86_64) FIXTURE_ARCH=amd64 ;;

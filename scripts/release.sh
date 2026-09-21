@@ -30,7 +30,8 @@ validate_version() {
 normalize_arch() {
   case "$1" in
     amd64|x86_64) printf 'x86_64\n' ;;
-    *) fail "unsupported release architecture: $1; current release target is x86_64" ;;
+    arm64|aarch64) printf 'aarch64\n' ;;
+    *) fail "unsupported release architecture: $1" ;;
   esac
 }
 
@@ -73,19 +74,60 @@ copy_root_script() {
   install -m 0755 "$ROOT/$source" "$STAGE/$destination"
 }
 
+# Inspect headers without executing target payloads on the build host.
+check_target_binary() {
+  local file="$1" machine
+  case "$2" in
+    x86_64) machine='Advanced Micro Devices X86-64' ;;
+    aarch64) machine='AArch64' ;;
+    *) fail "invalid target: $2" ;;
+  esac
+  LC_ALL=C readelf -h "$file" | awk -F: -v machine="$machine" '
+    { gsub(/^[ \t]+|[ \t]+$/, "", $1); gsub(/^[ \t]+|[ \t]+$/, "", $2) }
+    $1 == "Class" { class++; if ($2 != "ELF64") bad=1 }
+    $1 == "Data" { data++; if ($2 != "2\047s complement, little endian") bad=1 }
+    $1 == "Machine" { arch++; if ($2 != machine) bad=1 }
+    END { exit bad || class != 1 || data != 1 || arch != 1 }
+  ' || fail "${3:-payload} has the wrong ELF target ($2): $file"
+}
+
+validate_kernel_image() {
+  if [ "$2" = x86_64 ]; then
+    check_target_binary "$1" "$2"
+    return
+  fi
+  [ "$2" = aarch64 ] || fail "invalid kernel target: $2"
+  # Linux arm64 boot protocol: uncompressed Image, not an ELF executable.
+  # https://docs.kernel.org/arch/arm64/booting.html
+  python3 - "$1" <<'PY'
+import struct
+import sys
+with open(sys.argv[1], "rb") as image:
+    header = image.read(64)
+if len(header) != 64 or header[56:60] != b"ARM\x64":
+    raise SystemExit("release: expected an uncompressed AArch64 kernel Image")
+size, flags = struct.unpack_from("<QQ", header, 16)
+if size < 64 or flags & 1 or any(header[32:56]):
+    raise SystemExit("release: invalid little-endian AArch64 kernel Image header")
+PY
+}
+
 check_go_binary() {
   local file="$1" info
+  local target_arch="$2" go_arch
+  case "$target_arch" in x86_64) go_arch=amd64 ;; aarch64) go_arch=arm64 ;; *) fail "invalid target: $target_arch" ;; esac
   info="$(go version -m "$file" 2>/dev/null)" || fail "Go build info is missing from $file"
-  awk -F '\t' '
+  awk -F '\t' -v expected_arch="$go_arch" '
     $2 == "build" && $3 ~ /^GOOS=/ { os++; if ($3 != "GOOS=linux") bad=1 }
-    $2 == "build" && $3 ~ /^GOARCH=/ { arch++; if ($3 != "GOARCH=amd64") bad=1 }
+    $2 == "build" && $3 ~ /^GOARCH=/ { arch++; if ($3 != "GOARCH=" expected_arch) bad=1 }
     END { exit bad || os != 1 || arch != 1 }
-  ' <<< "$info" || fail "Go release payload must target linux/amd64: $file"
+  ' <<< "$info" || fail "Go release payload must target linux/$go_arch: $file"
   awk -F '\t' '
     $2 == "path" { paths++; if ($3 != "github.com/kuasar-sandbox/guest-runtime/cmd/flatten-ctl") bad=1 }
     $2 == "mod" { modules++; if ($3 != "github.com/kuasar-sandbox/guest-runtime") bad=1 }
     END { exit bad || paths != 1 || modules != 1 }
   ' <<< "$info" || fail "flatten-ctl must use the selected guest-runtime module and main package"
+  check_target_binary "$file" "$target_arch"
 }
 
 record_release_go_contexts() {
@@ -234,7 +276,8 @@ prepare_runtime_verifier() {
 }
 
 validate_runtime_payloads() {
-  local extract="$1" payloads="$WORK/runtime-payloads" sandboxer_sha binary package module info
+  local extract="$1" target_arch="$2" go_arch payloads="$WORK/runtime-payloads" sandboxer_sha binary package module info
+  case "$target_arch" in x86_64) go_arch=amd64 ;; aarch64) go_arch=arm64 ;; *) fail "invalid target: $target_arch" ;; esac
   prepare_runtime_verifier
   python3 "$ROOT/scripts/release-runtime-payloads.py" \
     "$extract/bin/sandbox-runtime.bundle" "$RUNTIME_FSCK" "$RUNTIME_DUMP" "$payloads" \
@@ -243,6 +286,9 @@ validate_runtime_payloads() {
     || fail "embedded mkfs.erofs differs from the shipped host payload"
   cmp -s "$payloads/flatten-ctl" "$extract/bin/flatten-ctl" \
     || fail "embedded flatten-ctl differs from the verified outer payload"
+  for binary in init envd flatten-ctl mkfs.erofs; do
+    check_target_binary "$payloads/$binary" "$target_arch" "embedded $binary"
+  done
   sandboxer_sha="$(awk -F '\t' '$2 == "sandboxer" { sub(/^git:/, "", $5); print $5 }' \
     "$extract/share/sources/runtime/SOURCES.tsv")"
   release_materials_require_go_revision "$payloads/init" "$sandboxer_sha"
@@ -252,11 +298,11 @@ validate_runtime_payloads() {
       envd) module=github.com/e2b-dev/infra/packages/envd; package="$module" ;;
     esac
     info="$(go version -m "$payloads/$binary" 2>/dev/null)" || fail "embedded Go build info is missing"
-    awk -F '\t' -v module="$module" -v package="$package" '
+    awk -F '\t' -v module="$module" -v package="$package" -v expected_arch="$go_arch" '
       $2 == "path" { paths++; if ($3 != package) bad=1 }
       $2 == "mod" { modules++; if ($3 != module) bad=1 }
       $2 == "build" && $3 ~ /^GOOS=/ { os++; if ($3 != "GOOS=linux") bad=1 }
-      $2 == "build" && $3 ~ /^GOARCH=/ { arch++; if ($3 != "GOARCH=amd64") bad=1 }
+      $2 == "build" && $3 ~ /^GOARCH=/ { arch++; if ($3 != "GOARCH=" expected_arch) bad=1 }
       END { exit bad || paths != 1 || modules != 1 || os != 1 || arch != 1 }
     ' <<< "$info" || fail "embedded $binary has the wrong Go main identity or target"
   done
@@ -310,7 +356,7 @@ validate_bundle() {
   tar -xzf "$bundle/assets/$archive" -C "$extract"
   local selected_sha="${SOURCE_SHA:-}" selected_url="" selected_integrity=""
   if [ "$kind" = runtime ]; then
-    check_go_binary "$extract/bin/flatten-ctl"
+    check_go_binary "$extract/bin/flatten-ctl" "$arch"
     if [ -z "$selected_sha" ]; then
       selected_sha="$(go version -m "$extract/bin/flatten-ctl" | \
         awk -F '\t' '$2 == "build" && $3 ~ /^vcs.revision=/ {print substr($3, 14)}')"
@@ -361,11 +407,12 @@ validate_bundle() {
         || fail "$archive is missing bin/sandbox-runtime.bundle"
       [ -x "$extract/bin/flatten-ctl" ] || fail "$archive is missing bin/flatten-ctl"
       [ -x "$extract/bin/mkfs.erofs" ] || fail "$archive is missing bin/mkfs.erofs"
-      check_go_binary "$extract/bin/flatten-ctl"
-      validate_runtime_payloads "$extract"
+      check_go_binary "$extract/bin/flatten-ctl" "$arch"
+      validate_runtime_payloads "$extract" "$arch"
       ;;
     vmlinux)
       [ -f "$extract/bin/vmlinux" ] || fail "$archive is missing bin/vmlinux"
+      validate_kernel_image "$extract/bin/vmlinux" "$arch"
       local linux_license_sha
       linux_license_sha="$(sha256sum "$extract/share/licenses/vmlinux/linux/COPYING" | awk '{print $1}')"
       release_materials_require_source "$extract" "$kind" 'bin/vmlinux' 'linux' "6.1.169" \
@@ -425,7 +472,7 @@ package_release() {
       copy_external_file "$bin_dir/sandbox-runtime.bundle" bin/sandbox-runtime.bundle
       copy_executable "$bin_dir/flatten-ctl" bin/flatten-ctl
       copy_executable "$native_bin_dir/mkfs.erofs" bin/mkfs.erofs
-      check_go_binary "$STAGE/bin/flatten-ctl"
+      check_go_binary "$STAGE/bin/flatten-ctl" "$arch"
       release_materials_require_go_revision "$STAGE/bin/flatten-ctl" "$project_sha"
       accelerator_version="$(release_materials_git_version "$accelerator_source" "$accelerator_version" "$accelerator_sha")"
       sandboxer_version="$(release_materials_git_version "$sandboxer_source" "$sandboxer_version" "$sandboxer_sha")"
@@ -472,6 +519,7 @@ package_release() {
     vmlinux)
       local linux_source linux_license_sha
       copy_external_file "$native_bin_dir/vmlinux" bin/vmlinux
+      validate_kernel_image "$STAGE/bin/vmlinux" "$arch"
       linux_source="${RELEASE_LINUX_SOURCE_DIR:-${LINUX_BUILD_SRC:-$ROOT/native-deps/build/src/linux}}"
       release_materials_copy_licenses "$linux_source" linux
       linux_license_sha="$(sha256sum "$linux_source/COPYING" | awk '{print $1}')"

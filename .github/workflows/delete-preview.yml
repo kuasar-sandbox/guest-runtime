@@ -1,7 +1,6 @@
 name: Delete Preview
 run-name: Delete ${{ inputs.version }} (${{ inputs.mode }})
-
-on:
+'on':
   workflow_dispatch:
     inputs:
       unit:
@@ -26,17 +25,14 @@ on:
         options:
           - incomplete
           - gc
-
 permissions:
   contents: read
-
 concurrency:
   group: component-mutation-${{ github.repository }}-${{ inputs.version }}
   cancel-in-progress: false
-
 jobs:
   delete:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
@@ -45,33 +41,27 @@ jobs:
           set -euo pipefail
           [ "$GITHUB_REF" = refs/heads/main ] \
             || { echo "Preview cleanup must run from main" >&2; exit 1; }
-
       - name: Check out trusted cleanup tooling
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
-
       - name: Check out pinned hosted bootstrap
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           repository: kuasar-sandbox/kuasar-sandbox
-          # Publish this platform commit before activating the guest workflow pin.
           ref: 17a3469a33b4859ec13bb8399b81b657495d120f
           path: trusted/platform
           sparse-checkout: |
             ci/hosted
             ci/native-cache
           persist-credentials: false
-
       - name: Bootstrap standard runner
         run: bash trusted/platform/ci/hosted/bootstrap.sh --profile release-control
-
       - name: Check environment GitHub CLI
         run: |
           gh --version
           gh_help="$(gh api --help)"
           [[ "$gh_help" == *--slurp* ]] || { echo "environment gh must support api --slurp" >&2; exit 1; }
-
       - name: Delete preview release, assets, and tag
         env:
           GH_TOKEN: ${{ github.token }}
@@ -80,3 +70,4 @@ jobs:
           SOURCE_SHA: ${{ inputs.source_sha }}
           MODE: ${{ inputs.mode }}
         run: bash scripts/delete-preview.sh "$UNIT" "$VERSION" "$SOURCE_SHA" "$MODE"
+    if: github.event.repository.visibility == 'public' && github.event.repository.full_name == github.repository

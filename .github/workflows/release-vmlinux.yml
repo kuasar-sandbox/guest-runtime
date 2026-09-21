@@ -1,7 +1,6 @@
 name: Vmlinux Release
 run-name: Release ${{ inputs.version }} @${{ inputs.source_sha }}
-
-on:
+'on':
   workflow_dispatch:
     inputs:
       version:
@@ -24,17 +23,14 @@ on:
         description: Platform commit selecting aggregate_version; required for a Preview
         required: false
         type: string
-
 permissions:
   contents: read
-
 concurrency:
   group: component-mutation-${{ github.repository }}-${{ inputs.version }}
   cancel-in-progress: false
-
 jobs:
   preflight:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     permissions:
       actions: read
       contents: read
@@ -42,42 +38,38 @@ jobs:
       source_ref: ${{ steps.request.outputs.source_ref }}
       source_sha: ${{ steps.request.outputs.source_sha }}
       version: ${{ steps.request.outputs.version }}
+      framework_sha: ${{ steps.framework.outputs.sha }}
     steps:
       - name: Require trusted release controller
         run: |
           set -euo pipefail
           [ "$GITHUB_REF" = refs/heads/main ] \
             || { echo "Vmlinux Release must run from main" >&2; exit 1; }
-
       - name: Check out trusted release tooling
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
-
-      - name: Check out pinned hosted bootstrap
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Check out trusted platform tooling
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           repository: kuasar-sandbox/kuasar-sandbox
-          # Publish this platform commit before activating the guest workflow pin.
-          ref: 17a3469a33b4859ec13bb8399b81b657495d120f
+          ref: main
           path: trusted/platform
-          sparse-checkout: |
-            ci/hosted
-            ci/native-cache
           persist-credentials: false
-
       - name: Bootstrap standard runner
-        run: bash trusted/platform/ci/hosted/bootstrap.sh --profile release-control
-
+        run: |
+          bash trusted/platform/ci/hosted/bootstrap.sh --profile release-control
+      - name: Record exact framework revision
+        id: framework
+        run: |
+          echo "sha=$(git -C trusted/platform rev-parse HEAD)" >> "$GITHUB_OUTPUT"
       - name: Check environment GitHub CLI
         run: |
           gh --version
           gh_help="$(gh api --help)"
           [[ "$gh_help" == *--slurp* ]] || { echo "environment gh must support api --slurp" >&2; exit 1; }
-
       - name: Validate hosted workflow contracts
         run: python3 scripts/ci-test-workflows.py
-
       - name: Validate release request
         id: request
         env:
@@ -87,7 +79,7 @@ jobs:
           AGGREGATE_VERSION: ${{ inputs.aggregate_version }}
           AGGREGATE_SHA: ${{ inputs.aggregate_sha }}
           VERSION: ${{ inputs.version }}
-          TARGET_ARCH: x86_64
+          TARGET_ARCH: all
           RELEASE_KIND: vmlinux
         run: |
           set -euo pipefail
@@ -103,56 +95,50 @@ jobs:
             echo "source_sha=$SOURCE_SHA"
             echo "version=$VERSION"
           } >> "$GITHUB_OUTPUT"
-
+    if: github.event.repository.visibility == 'public' && github.event.repository.full_name == github.repository
   build:
     needs: preflight
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 180
     permissions:
       contents: read
     env:
-      TARGET_ARCH: x86_64
+      TARGET_ARCH: ${{ matrix.arch }}
     steps:
-      - name: Check out pinned hosted bootstrap
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Check out trusted platform tooling
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           repository: kuasar-sandbox/kuasar-sandbox
-          # Publish this platform commit before activating the guest workflow pin.
-          ref: 17a3469a33b4859ec13bb8399b81b657495d120f
+          ref: ${{ needs.preflight.outputs.framework_sha }}
           path: trusted/platform
-          sparse-checkout: |
-            ci/hosted
-            ci/native-cache
           persist-credentials: false
-
-      - name: Bootstrap standard runner
-        run: bash trusted/platform/ci/hosted/bootstrap.sh --profile kernel
-
+      - name: Bootstrap native or cross build
+        run: |
+          profile=artifact-build
+          if [ "$TARGET_ARCH" = aarch64 ]; then profile=artifact-cross; fi
+          bash trusted/platform/ci/hosted/bootstrap.sh --profile "$profile"
       - name: Check out exact guest-runtime source
         id: checkout-guest-runtime
         continue-on-error: true
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           repository: kuasar-sandbox/guest-runtime
           ref: ${{ needs.preflight.outputs.source_sha }}
           path: src/guest-runtime
           persist-credentials: false
-
       - name: Retry exact guest-runtime source checkout
         if: steps.checkout-guest-runtime.outcome == 'failure'
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           repository: kuasar-sandbox/guest-runtime
           ref: ${{ needs.preflight.outputs.source_sha }}
           path: src/guest-runtime
           persist-credentials: false
-
       - name: Attach job-local source cache
         run: |
           set -euo pipefail
           mkdir -p src/guest-runtime/native-deps/build
           ln -sfn "$KUASAR_TARBALL_CACHE" src/guest-runtime/native-deps/build/tarball
-
       - name: Restore or build guest kernel
         env:
           KUASAR_WORKSPACE_ROOT: ${{ github.workspace }}/src
@@ -160,10 +146,8 @@ jobs:
         run: |
           taskset -pc "$KUASAR_BUILD_CPUS" "$$" >/dev/null
           trusted/platform/ci/native-cache/native-cache.sh restore-or-build vmlinux
-
       - name: Validate native dependency scripts
         run: make -C src/guest-runtime/native-deps test-scripts
-
       - name: Package vmlinux release
         working-directory: src/guest-runtime
         env:
@@ -175,61 +159,71 @@ jobs:
           SOURCE_DATE_EPOCH=$(git show -s --format=%ct "${{ needs.preflight.outputs.source_sha }}")
           bash scripts/release.sh package vmlinux "$VERSION" "$TARGET_ARCH" \
             release-bundle
-
       - name: Upload validated vmlinux bundle
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: vmlinux-release-${{ needs.preflight.outputs.version }}-${{ github.run_id }}
+          name: vmlinux-release-${{ needs.preflight.outputs.version }}-${{ matrix.arch }}-${{ github.run_id }}
           path: src/guest-runtime/release-bundle
           if-no-files-found: error
           retention-days: 1
-
+    if: github.event.repository.visibility == 'public' && github.event.repository.full_name == github.repository
+    strategy:
+      fail-fast: false
+      matrix:
+        arch:
+          - x86_64
+          - aarch64
   publish:
     needs:
       - preflight
       - build
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     permissions:
       actions: read
       contents: write
     steps:
       - name: Check out trusted publish tooling
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
-
-      - name: Check out pinned hosted bootstrap
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Check out trusted platform tooling
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           repository: kuasar-sandbox/kuasar-sandbox
-          # Publish this platform commit before activating the guest workflow pin.
-          ref: 17a3469a33b4859ec13bb8399b81b657495d120f
+          ref: ${{ needs.preflight.outputs.framework_sha }}
           path: trusted/platform
-          sparse-checkout: |
-            ci/hosted
-            ci/native-cache
           persist-credentials: false
-
       - name: Bootstrap standard runner
-        run: bash trusted/platform/ci/hosted/bootstrap.sh --profile release-control
-
+        run: |
+          bash trusted/platform/ci/hosted/bootstrap.sh --profile release-control
       - name: Check environment GitHub CLI
         run: |
           gh --version
           gh_help="$(gh api --help)"
           [[ "$gh_help" == *--slurp* ]] || { echo "environment gh must support api --slurp" >&2; exit 1; }
-
-      - name: Download validated vmlinux bundle
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - name: Download validated x86_64 bundle
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
-          name: vmlinux-release-${{ needs.preflight.outputs.version }}-${{ github.run_id }}
-          path: release-bundle
-
+          name: vmlinux-release-${{ needs.preflight.outputs.version }}-x86_64-${{ github.run_id }}
+          path: staged/x86_64
+      - name: Download validated aarch64 bundle
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: vmlinux-release-${{ needs.preflight.outputs.version }}-aarch64-${{ github.run_id }}
+          path: staged/aarch64
+      - name: Assemble the two validated architecture archives
+        env:
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ needs.preflight.outputs.version }}
+          SOURCE_SHA: ${{ needs.preflight.outputs.source_sha }}
+          RELEASE_KIND: vmlinux
+        run: |
+          bash scripts/publish-release.sh assemble "$VERSION" staged/x86_64 staged/aarch64 release-bundle
       - name: Publish vmlinux release
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ needs.preflight.outputs.version }}
-          TARGET_ARCH: x86_64
+          TARGET_ARCH: all
           RELEASE_KIND: vmlinux
           SOURCE_REF: ${{ needs.preflight.outputs.source_ref }}
           SOURCE_SHA: ${{ needs.preflight.outputs.source_sha }}
@@ -241,41 +235,38 @@ jobs:
             vmlinux "$VERSION" "$AGGREGATE_VERSION" "$AGGREGATE_SHA"
           bash scripts/publish-release.sh publish \
             "$VERSION" "$TARGET_ARCH" "$SOURCE_SHA" release-bundle "$SOURCE_REF"
-
+    if: github.event.repository.visibility == 'public' && github.event.repository.full_name == github.repository
   cleanup:
-    needs: publish
-    runs-on: ubuntu-24.04
+    needs:
+      - preflight
+      - publish
+    runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
       actions: write
       contents: read
     steps:
       - name: Check out trusted cleanup tooling
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
-
       - name: Check out pinned hosted bootstrap
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           repository: kuasar-sandbox/kuasar-sandbox
-          # Publish this platform commit before activating the guest workflow pin.
-          ref: 17a3469a33b4859ec13bb8399b81b657495d120f
+          ref: ${{ needs.preflight.outputs.framework_sha }}
           path: trusted/platform
           sparse-checkout: |
             ci/hosted
             ci/native-cache
           persist-credentials: false
-
       - name: Bootstrap standard runner
         run: bash trusted/platform/ci/hosted/bootstrap.sh --profile control
-
       - name: Check environment GitHub CLI
         run: |
           gh --version
           gh_help="$(gh api --help)"
           [[ "$gh_help" == *--slurp* ]] || { echo "environment gh must support api --slurp" >&2; exit 1; }
-
       - name: Delete release workflow artifacts
         env:
           GH_TOKEN: ${{ github.token }}
@@ -295,3 +286,4 @@ jobs:
               --silent
           done
           echo "deleted ${#artifact_ids[@]} release workflow artifact(s)"
+    if: github.event.repository.visibility == 'public' && github.event.repository.full_name == github.repository
