@@ -318,7 +318,7 @@ release_materials_finish() {
     [ -n "$toolchain" ] || continue
     local copied_toolchain=false selected_notice_root
     if [ -n "${RELEASE_MATERIALS_GO_ENV:-}" ]; then
-      toolchain_roots="$(jq -er --arg version "$toolchain" '
+      toolchain_roots="$(jq -r --arg version "$toolchain" '
         [if type == "array" then .[] else . end |
          select(.GOVERSION == $version) | .GOROOT] | unique |
         if all(.[]; type == "string" and length > 0)
