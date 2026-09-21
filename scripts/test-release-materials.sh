@@ -308,28 +308,8 @@ cmp "$TMP/selected-notices/go9.9.9/LICENSE" \
   "$TMP/selected-stage/share/licenses/fixture/go-toolchain/go9.9.9/LICENSE"
 cmp "$TMP/selected-notices/go9.9.9/PATENTS" \
   "$TMP/selected-stage/share/licenses/fixture/go-toolchain/go9.9.9/PATENTS"
-grep -Fqx "bin/tool"  "$TMP/selected-stage/share/sources/fixture/SOURCES.tsv" \
-  || fail "selected release notices lost their Go toolchain source record"
-
-echo "test-release-materials: PASS (module checksum, effective replacement, Go experiment, notices and offline validation)"
-\t'"Go toolchain"  "$TMP/selected-stage/share/sources/fixture/SOURCES.tsv" \
-  || fail "selected release notices lost their Go toolchain source record"
-
-echo "test-release-materials: PASS (module checksum, effective replacement, Go experiment, notices and offline validation)"
-\t'"go9.9.9"  "$TMP/selected-stage/share/sources/fixture/SOURCES.tsv" \
-  || fail "selected release notices lost their Go toolchain source record"
-
-echo "test-release-materials: PASS (module checksum, effective replacement, Go experiment, notices and offline validation)"
-\t'"https://go.dev/dl/#go9.9.9"  "$TMP/selected-stage/share/sources/fixture/SOURCES.tsv" \
-  || fail "selected release notices lost their Go toolchain source record"
-
-echo "test-release-materials: PASS (module checksum, effective replacement, Go experiment, notices and offline validation)"
-\t'"-"  "$TMP/selected-stage/share/sources/fixture/SOURCES.tsv" \
-  || fail "selected release notices lost their Go toolchain source record"
-
-echo "test-release-materials: PASS (module checksum, effective replacement, Go experiment, notices and offline validation)"
-\t'"share/licenses/fixture/go-toolchain/go9.9.9" \
-  "$TMP/selected-stage/share/sources/fixture/SOURCES.tsv" \
+printf -v expected 'bin/tool\tGo toolchain\tgo9.9.9\thttps://go.dev/dl/#go9.9.9\t-\tshare/licenses/fixture/go-toolchain/go9.9.9'
+grep -Fqx "$expected" "$TMP/selected-stage/share/sources/fixture/SOURCES.tsv" \
   || fail "selected release notices lost their Go toolchain source record"
 
 echo "test-release-materials: PASS (module checksum, effective replacement, Go experiment, notices and offline validation)"
