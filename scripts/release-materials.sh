@@ -209,6 +209,31 @@ release_materials_add_go_binary() {
     ' "$raw"
 }
 
+release_materials_record_go_contexts() {
+  [ "$#" -ge 2 ] \
+    || fail "release_materials_record_go_contexts requires output and at least one binary"
+  local output="$1" binary raw toolchain_full toolchain context index=0
+  shift
+  : > "$output"
+  for binary in "$@"; do
+    [ -f "$binary" ] || fail "Go release payload is missing: $binary"
+    raw="$(go version -m "$binary" 2>/dev/null)" \
+      || fail "Go build info is missing from $binary"
+    toolchain_full="$(awk 'NR == 1 { sub(/^.*: /, ""); print; exit }' <<< "$raw")"
+    toolchain="${toolchain_full%% *}"
+    toolchain="${toolchain%%-X:*}"
+    [[ "$toolchain" =~ ^go[0-9] ]] || fail "cannot read the Go toolchain from $binary"
+    context="$RELEASE_MATERIALS_WORK/go-context-$index.json"
+    GOTOOLCHAIN="$toolchain" go env -json GOROOT GOVERSION GOHOSTOS GOHOSTARCH > "$context" \
+      || fail "cannot resolve the recorded Go compiler $toolchain"
+    [ "$(jq -er '.GOVERSION' "$context")" = "$toolchain" ] \
+      || fail "resolved Go compiler does not match the payload: $binary"
+    index=$((index + 1))
+  done
+  jq -s 'unique_by([.GOVERSION, .GOROOT])' "$RELEASE_MATERIALS_WORK"/go-context-*.json \
+    > "$output"
+}
+
 release_materials_require_go_revision() {
   local binary="$1" sha="$2" revision modified info
   info="$(go version -m "$binary" 2>/dev/null)" \

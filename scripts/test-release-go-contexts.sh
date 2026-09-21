@@ -8,6 +8,39 @@ fail() { printf 'test-release-go-contexts: %s\n' "$*" >&2; exit 1; }
 # shellcheck source=scripts/release-materials.sh
 source "$ROOT/scripts/release-materials.sh"
 
+# Resolve compiler distributions from the actual release binaries. Component
+# source directories can select a different Go patch release when an already
+# published dependency was built independently.
+mkdir -p "$TMP/bin" "$TMP/fake-tools"
+printf 'fixture\n' > "$TMP/bin/one"
+printf 'fixture\n' > "$TMP/bin/two"
+cat > "$TMP/fake-tools/go" <<'EOF'
+#!/bin/sh
+if [ "$1" = version ] && [ "$2" = -m ]; then
+  case "$3" in
+    */one) printf '%s: go1.24.0\n' "$3" ;;
+    */two) printf '%s: go1.25.0 X:fixture\n' "$3" ;;
+    *) exit 71 ;;
+  esac
+elif [ "$1" = env ] && [ "$2" = -json ]; then
+  case "${GOTOOLCHAIN-}" in
+    go1.24.0) version=go1.24.0; root="$FIXTURE_ROOT/one" ;;
+    go1.25.0) version=go1.25.0; root="$FIXTURE_ROOT/two" ;;
+    *) exit 72 ;;
+  esac
+  printf '{"GOROOT":"%s","GOVERSION":"%s","GOHOSTOS":"linux","GOHOSTARCH":"amd64"}\n' \
+    "$root" "$version"
+else
+  exit 73
+fi
+EOF
+chmod +x "$TMP/fake-tools/go"
+release_materials_init "$TMP/record/stage" "$TMP/record/work" runtime
+PATH="$TMP/fake-tools:$PATH" FIXTURE_ROOT="$TMP/roots" \
+  release_materials_record_go_contexts "$TMP/record/contexts.json" "$TMP/bin/one" "$TMP/bin/two"
+[ "$(jq -r 'map(.GOVERSION) | sort | join(" ")' "$TMP/record/contexts.json")" = 'go1.24.0 go1.25.0' ] \
+  || fail "actual payload compiler contexts were not recorded"
+
 # Real local notice trees; no compiler download or authentication fixture.
 for selected in one two; do
   mkdir -p "$TMP/roots/$selected/src/vendor/example"

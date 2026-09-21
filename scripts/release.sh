@@ -88,26 +88,6 @@ check_go_binary() {
   ' <<< "$info" || fail "flatten-ctl must use the selected guest-runtime module and main package"
 }
 
-record_release_go_contexts() {
-  local build_root="$1" sandboxer_root="$2" envd_root="$3" context directory info
-  for context in runtime sandboxer envd; do
-    case "$context" in
-      runtime) directory="$build_root" ;;
-      sandboxer) directory="$sandboxer_root" ;;
-      envd) directory="$envd_root/packages/envd" ;;
-    esac
-    info="$WORK/go-context-$context.json"
-    if [ "$context" = envd ]; then
-      GOWORK=off go -C "$directory" env -json GOROOT GOVERSION GOHOSTOS GOHOSTARCH > "$info"
-    else
-      go -C "$directory" env -json GOROOT GOVERSION GOHOSTOS GOHOSTARCH > "$info"
-    fi
-  done
-  RELEASE_MATERIALS_GO_ENV="$WORK/go-build-toolchains.json"
-  jq -s . "$WORK/go-context-runtime.json" "$WORK/go-context-sandboxer.json" "$WORK/go-context-envd.json" \
-    > "$RELEASE_MATERIALS_GO_ENV"
-}
-
 validate_archive_paths() {
   local archive="$1" kind="$2" listing="$WORK/listing"
   tar -tzf "$archive" > "$listing"
@@ -421,7 +401,9 @@ package_release() {
         "${RELEASE_SANDBOXER_SOURCE_SHA:-}" sandboxer)"
       accelerator_sha="$(release_materials_resolve_git_source "$accelerator_source" \
         "${RELEASE_ACCELERATOR_SOURCE_SHA:-}" accelerator)"
-      record_release_go_contexts "$ROOT" "$sandboxer_source" "$envd_source"
+      RELEASE_MATERIALS_GO_ENV="$WORK/go-build-toolchains.json"
+      release_materials_record_go_contexts "$RELEASE_MATERIALS_GO_ENV" \
+        "$bin_dir/flatten-ctl" "$sandbox_init_bin" "$envd_bin"
       copy_external_file "$bin_dir/sandbox-runtime.bundle" bin/sandbox-runtime.bundle
       copy_executable "$bin_dir/flatten-ctl" bin/flatten-ctl
       copy_executable "$native_bin_dir/mkfs.erofs" bin/mkfs.erofs
