@@ -104,7 +104,7 @@ flatten-ctl 必须分别等于外部对应载荷。不执行任何归档可执�
 归属时需要提供实际匹配的材料,不能编造来源记录。
 
 支持的 openEuler 24.03-LTS-SP4 构建 profile 需要外部
-[Runner 静态 crypto provider](https://github.com/kuasar-sandbox/kuasar-sandbox/blob/main/ci/runner/README_zh.md#安装)
+[Runner 静态 crypto provider](https://github.com/kuasar-sandbox/kuasar-sandbox/blob/d375effe12531b49f44368d33735c5b7b50b244c/ci/runner/README_zh.md#安装)
 提供匹配的静态 crypto 库及完整的源码/许可/重新链接材料。Provider 版本、配齐
 依赖的配方、目录布局及安装/复用行为以该归属章节为准。
 
@@ -199,7 +199,7 @@ make help       # 列举目标
   可信主机 `dump.erofs` (§1.1)。
 - [维护的源码补丁](deps/erofs-patches/README_zh.md) 通过 `EROFS_USE_LIBGCRYPT_SHA256` 明确选择 Libgcrypt 的完整 SHA-256。Configure 禁用 OpenSSL 和多线程。完整 32 字节摘要、精确的 4 KiB chunk 去重、不压缩布局及原始 v1.9.1 归档 pin 保持不变；不包含分配器或读取路径变更。
 - 目标编译器必须能静态链接 `libgcrypt.a`、`libgpg-error.a` 和 `libuuid.a`。Debian/Ubuntu 软件包为 `libgcrypt20-dev libgpg-error-dev uuid-dev`。Ubuntu 24.04 验证使用 Libgcrypt `1.10.3-2ubuntu0.2` 和 Libgpg-error `1.47-3build2.1`；须使用实际目标发行版的版本、头文件及 pkg-config 元数据。前置探针检查包含静态私有依赖的实际目标链接，失败时给出配齐依赖的指引。
-- RPM devel 软件包不一定包含静态库。openEuler 24.03-LTS-SP4 profile 需要[外部 Runner provider](https://github.com/kuasar-sandbox/kuasar-sandbox/blob/main/ci/runner/README_zh.md#安装)及 §1.1 所述的匹配材料。仅安装 `libgcrypt-devel libgpg-error-devel` 不足以构建。
+- RPM devel 软件包不一定包含静态库。openEuler 24.03-LTS-SP4 profile 需要[外部 Runner provider](https://github.com/kuasar-sandbox/kuasar-sandbox/blob/d375effe12531b49f44368d33735c5b7b50b244c/ci/runner/README_zh.md#安装)及 §1.1 所述的匹配材料。仅安装 `libgcrypt-devel libgpg-error-devel` 不足以构建。
 - 两个输出 ELF 均不得含 `INTERP` 或 `NEEDED`。SHA 路径必须能在没有 host 库、配置、`/proc` 或 `/dev` 的空根目录运行；每个新目标/工具链都应验证与基线完全一致的镜像字节及 fsck/解压结果。
 - Libgcrypt 和 Libgpg-error 库适用 LGPL-2.1-or-later，源码发行包还包含特定文件的声明。保留现有 EROFS 文件许可证，包括 GPL-2.0 hashmap 代码。发布来源记录使用实际链接输入及匹配的软件包/源码 copyright、LICENSE/COPYING/NOTICE 文本（§1.1）；材料缺失时打包失败。须保留配方、有序补丁、原始源码归档、EROFS 对象及精确的目标库源码/构建配置，以便重建或重新链接；不能用合成测试材料替代发布材料。
 - `EROFS_BUILD_JOBS=2 make -j2 erofs` 限制编译并行度，默认值依次取 `JOBS`、2。

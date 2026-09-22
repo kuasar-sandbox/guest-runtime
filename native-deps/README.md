@@ -112,7 +112,7 @@ digest. Missing, altered or unowned inputs need the actual matching materials,
 not fabricated source records.
 
 The supported openEuler 24.03-LTS-SP4 build profile requires the external
-[runner static-crypto provider](https://github.com/kuasar-sandbox/kuasar-sandbox/blob/main/ci/runner/README.md#install)
+[runner static-crypto provider](https://github.com/kuasar-sandbox/kuasar-sandbox/blob/d375effe12531b49f44368d33735c5b7b50b244c/ci/runner/README.md#install)
 for matching static crypto libraries and complete source/license/relink materials.
 See that owner section for provider versions, provisioning, catalog layout and
 install/reuse behavior.
@@ -204,7 +204,7 @@ Build duration depends on the host, toolchain and cache state; these commands do
 - The Runtime tool build skips the `mount`/`dump`/`fuse` subdirectories; it also avoids the v1.9.1 mount.erofs pthread-linking issue under `--disable-multithreading`. Standalone bundle validation separately requires a trusted host `dump.erofs` installation (§1.1).
 - A [maintained source patch](deps/erofs-patches/README.md) explicitly selects Libgcrypt full SHA-256 through `EROFS_USE_LIBGCRYPT_SHA256`. Configure disables OpenSSL and multithreading. Full 32-byte digests, exact 4 KiB chunk deduplication, uncompressed layout and the original v1.9.1 archive pin remain unchanged; no allocator or read-path change is included.
 - The target compiler must statically link `libgcrypt.a`, `libgpg-error.a` and `libuuid.a`. Debian/Ubuntu packages are `libgcrypt20-dev libgpg-error-dev uuid-dev`. Ubuntu 24.04 validation used Libgcrypt `1.10.3-2ubuntu0.2` and Libgpg-error `1.47-3build2.1`; use the actual target distribution's versions, headers and pkg-config metadata. The preflight checks the real target link with private static dependencies and fails with provisioning guidance.
-- RPM devel packages do not necessarily ship static libraries. The openEuler 24.03-LTS-SP4 profile requires the [external runner provider](https://github.com/kuasar-sandbox/kuasar-sandbox/blob/main/ci/runner/README.md#install) and matching materials described in §1.1. Installing `libgcrypt-devel libgpg-error-devel` alone is insufficient.
+- RPM devel packages do not necessarily ship static libraries. The openEuler 24.03-LTS-SP4 profile requires the [external runner provider](https://github.com/kuasar-sandbox/kuasar-sandbox/blob/d375effe12531b49f44368d33735c5b7b50b244c/ci/runner/README.md#install) and matching materials described in §1.1. Installing `libgcrypt-devel libgpg-error-devel` alone is insufficient.
 - Both output ELFs must have no `INTERP` or `NEEDED` entries. The SHA path must execute in an empty root without host libraries, configuration, `/proc` or `/dev`; validate each new target/toolchain with exact baseline image comparison and fsck/extraction.
 - Libgcrypt and Libgpg-error library licenses are LGPL-2.1-or-later, with additional file-specific notices in their source distributions. Existing EROFS file licenses, including GPL-2.0 hashmap code, are preserved. Release provenance uses both actual linker inputs and matching package/source copyright, LICENSE/COPYING/NOTICE texts (§1.1). Missing materials fail packaging. Retain the recipe, ordered patches, original source archive, EROFS objects and exact target library sources/build configuration for rebuilding/relinking; do not substitute synthetic fixtures for release materials.
 - `EROFS_BUILD_JOBS=2 make -j2 erofs` bounds compilation. The default is `JOBS`, then 2.
