@@ -479,7 +479,7 @@ RAM 字节相同比例作为发布门禁.
   模型、patch 范围
 - [sandbox-runtime_zh.md](sandbox-runtime_zh.md) —— 内核之上的 runtime 镜像打包与布局;
   [sandboxer Guest ABI 文档](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/sandbox-init_zh.md) 负责 rootfs 组装、应用拉起与 Guest ABI
-- [sandboxer 生命周期文档](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/sandbox_zh.md) §3.1 定义 `boot.kernel` 引用。自带 kernel 须满足本篇的内核能力、所选 Guest ABI 与 VMM 契约及 §6 的验证要求；[工件不兼容边界](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/sandbox-artifacts_zh.md#11-incompatibility) 另行说明被拒绝的 snapshot 格式。
+- [sandboxer 生命周期文档](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/sandbox_zh.md) §3.1 定义 `boot.kernel` 引用。自带 kernel 须满足本篇的内核能力、所选 Guest ABI 与 VMM 契约及 §6 的验证要求；[工件不兼容边界](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/sandbox_zh.md#artifact-compatibility) 另行说明被拒绝的 snapshot 格式。
 - [Native 构建指南](../native-deps/README_zh.md) —— `make vmlinux` 工作流、patch 开发循环、
   交叉编译
 - [系统总览](https://github.com/kuasar-sandbox/kuasar-sandbox/blob/main/docs/kuasar-sandbox_zh.md) §4 —— 模板父层与暂停/恢复的系统语义
