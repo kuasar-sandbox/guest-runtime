@@ -9,8 +9,7 @@ for helper in fixture.py assertions.py process.py; do
 done
 
 FLATTEN_CTL="${BIN:?BIN is required}/flatten-ctl"
-TEST_BIN="${TEST_BIN:-${E2E_WORKSPACE:?E2E_WORKSPACE is required}/helpers}"
-ZOT_BIN="$TEST_BIN/zot"
+ZOT_BIN="${ZOT_BIN:-${E2E_WORKSPACE:?E2E_WORKSPACE is required}/helpers/zot}"
 MKFS_EROFS_PATH="$BIN/mkfs.erofs"
 export MKFS_EROFS_PATH
 
@@ -99,9 +98,19 @@ pathlib.Path(sys.argv[1]).write_text(json.dumps({
 PY
 }
 
+fixture_arch() {
+    local image="$1" value
+    capture architecture docker image inspect "$image" --format '{{.Architecture}}'
+    value="$(<"$WORK/architecture.out")"
+    case "$value" in
+        amd64|x86_64) printf '%s' amd64 ;;
+        arm64|aarch64) printf '%s' arm64 ;;
+        *) die "unsupported prepared image architecture: $value" ;;
+    esac
+}
+
 RUN_ID="${WORK##*.}"
 RUN_ID="${RUN_ID,,}"
-FIXTURE_ARCH=""
 if [ -z "${E2E_IMAGE:-}" ]; then
     [ "${KUASAR_ARTIFACT_E2E:-0}" != 1 ] || die "prepared E2E_IMAGE is required"
     capture architecture docker info --format '{{.Architecture}}'
@@ -118,6 +127,7 @@ if [ -z "${E2E_IMAGE:-}" ]; then
 else
     run docker image inspect "$E2E_IMAGE" >/dev/null 2>&1 || \
         die "E2E_IMAGE must already be cached: $E2E_IMAGE (no automatic pull)"
+    FIXTURE_ARCH="$(fixture_arch "$E2E_IMAGE")"
 fi
 
 log "image.flatten: real registry image -> EROFS"
@@ -136,9 +146,7 @@ SUBJECT_DIGEST="${SUBJECT_REF##*@}"
 [ -s "$WORK/out.erofs" ] || die "EROFS artifact is missing or empty"
 
 capture info "$FLATTEN_CTL" info --json "$WORK/out.erofs"
-info_args=()
-[ -z "$FIXTURE_ARCH" ] || info_args=(--fixture-arch "$FIXTURE_ARCH")
-check_json info "$WORK/info.out" "${info_args[@]}"
+check_json info "$WORK/info.out" --fixture-arch "$FIXTURE_ARCH"
 ok "image.flatten preserved the real image runtime configuration in a valid EROFS artifact"
 
 log "image.flatten: PASS"
