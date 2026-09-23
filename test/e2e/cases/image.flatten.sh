@@ -24,9 +24,9 @@ AUTH_USER="e2euser"
 AUTH_PASS="e2epass"
 
 log preflight
-[ "$(uname -s)" = Linux ] || missing "E2E requires Linux"
+[ "$(uname -s)" = Linux ] || die "E2E requires Linux"
 for tool in python3 curl docker timeout "$FLATTEN_CTL" "$STORE_CTL" "$ZOT_BIN" "$MKFS_EROFS_PATH"; do
-    have "$tool" || missing "prerequisite not found: $tool"
+    have "$tool" || die "prerequisite not found: $tool"
 done
 # The real layer extractor must preserve non-root ownership. Pass only the
 # suite's explicit knobs across sudo, without the caller's credential env.
@@ -34,11 +34,11 @@ require_root
 
 init_work
 echo "  work dir: $WORK"
-run docker info >/dev/null 2>&1 || missing "docker daemon is not usable"
+run docker info >/dev/null 2>&1 || die "docker daemon is not usable"
 for tool in "$FLATTEN_CTL" "$STORE_CTL" "$ZOT_BIN"; do
-    run "$tool" --help >"$WORK/preflight.log" 2>&1 || missing "prerequisite is not runnable: $tool"
+    run "$tool" --help >"$WORK/preflight.log" 2>&1 || die "prerequisite is not runnable: $tool"
 done
-run "$MKFS_EROFS_PATH" --version >"$WORK/mkfs-version.log" 2>&1 || missing "mkfs.erofs is not runnable: $MKFS_EROFS_PATH"
+run "$MKFS_EROFS_PATH" --version >"$WORK/mkfs-version.log" 2>&1 || die "mkfs.erofs is not runnable: $MKFS_EROFS_PATH"
 
 capture() { # label command...; retain output and fail before dependent assertions
     local label="$1"
@@ -168,7 +168,7 @@ if [ -z "${E2E_IMAGE:-}" ]; then
         --tag "$E2E_IMAGE" --architecture "$FIXTURE_ARCH"
     capture load docker load --input "$WORK/fixture.tar"
 else
-    run docker image inspect "$E2E_IMAGE" >/dev/null 2>&1 || missing "E2E_IMAGE must already be cached: $E2E_IMAGE (no automatic pull)"
+    run docker image inspect "$E2E_IMAGE" >/dev/null 2>&1 || die "E2E_IMAGE must already be cached: $E2E_IMAGE (no automatic pull)"
 fi
 
 log "start store-ctl and anonymous zot"
