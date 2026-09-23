@@ -18,7 +18,7 @@ start_owned() { # output-pid-variable timeout-seconds command...
     shift 2
     python3 "$E2E_DIR/process.py" --parent "$parent_pid" --timeout "$limit" -- "$@" <&0 &
     PIDS+=("$!")
-    printf -v "$output_var '%s' "$!"
+    printf -v "$output_var" '%s' "$!"
 }
 
 forget_pid() {
