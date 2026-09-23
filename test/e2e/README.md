@@ -1,6 +1,6 @@
-# Registry and flattening E2E
-
 [English](README.md) | [简体中文](README_zh.md)
+
+# Registry and flattening E2E
 
 This suite drives real Docker, zot OCI 1.1 Referrers, `flatten-ctl`, EROFS and
 `store-ctl`. No remote workload image or private runner cache is required by

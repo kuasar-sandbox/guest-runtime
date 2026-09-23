@@ -1,6 +1,6 @@
-# Registry 与镜像展平 E2E
-
 [English](README.md) | [简体中文](README_zh.md)
+
+# Registry 与镜像展平 E2E
 
 本套件驱动真实 Docker、zot OCI 1.1 Referrers、`flatten-ctl`、EROFS 和
 `store-ctl`。默认夹具不依赖远端工作负载镜像或私有 runner 缓存。Working-set VM
