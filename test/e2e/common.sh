@@ -15,6 +15,9 @@ missing() {
     printf '[SKIP] %s (set REQUIRE_GUEST_RUNTIME=1 to require E2E)\n' "$*"
     exit 0
 }
+require_root() {
+    [ "$EUID" -eq 0 ] || die "guest-runtime E2E requires root"
+}
 
 start_owned() { # output-pid-variable timeout-seconds command...
     local output_var="$1" limit="$2" parent_pid="$BASHPID"
