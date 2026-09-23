@@ -47,7 +47,8 @@ wait_zot() {
         sleep 0.1
     done
     stop_owned "$pid" || true
-    die "zot failed readiness on 127.0.0.1:$port"
+    echo "e2e: zot failed readiness on 127.0.0.1:$port" >&2
+    return 1
 }
 
 start_zot() {
