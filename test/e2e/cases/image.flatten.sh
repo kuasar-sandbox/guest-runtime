@@ -9,7 +9,7 @@ for helper in fixture.py assertions.py process.py; do
 done
 
 FLATTEN_CTL="${BIN:?BIN is required}/flatten-ctl"
-ZOT_BIN="${ZOT_BIN:-${E2E_WORKSPACE:?E2E_WORKSPACE is required}/helpers/zot}"
+ZOT_BIN="${ZOT_BIN:?prepared ZOT_BIN is required}"
 MKFS_EROFS_PATH="$BIN/mkfs.erofs"
 FSCK_EROFS="${FSCK_EROFS:-fsck.erofs}"
 export MKFS_EROFS_PATH
