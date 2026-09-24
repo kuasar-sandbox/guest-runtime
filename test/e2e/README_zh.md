@@ -32,7 +32,7 @@ WORK=/tmp/kuasar-e2e
 
 产品用例只消费 prepared `BIN`、`E2E_WORKSPACE`、`E2E_LIB`、prepared fixture 和 prepared test helper。执行阶段不编译产品或 helper、不查找相邻源码仓库、不自动拉取兜底工作负载镜像，也不回退到源码路径。
 
-已选择的用例要求 Linux、root、Python 3、curl、可用 Docker daemon、GNU timeout、`mkfs.erofs`、`flatten-ctl`、`store-ctl` 和 prepared zot helper。缺少或不可用的前置条件会使已选择用例失败，不能以成功 skip 代替。架构和宿主机能力属于执行条件，不是 suite。
+已选择的用例要求 Linux、root、Python 3、curl、可用 Docker daemon、GNU timeout、`mkfs.erofs`、支持 `--extract` 的 `fsck.erofs`、`flatten-ctl`、`store-ctl` 和 prepared zot helper。缺少或不可用的前置条件会使已选择用例失败，不能以成功 skip 代替。架构和宿主机能力属于执行条件，不是 suite。
 
 Source/helper 回归保留在产品 E2E 之外，可通过以下命令运行：
 
@@ -44,10 +44,10 @@ make test-e2e-scripts
 
 | 用例 | 实际执行的断言 |
 | --- | --- |
-| `image.flatten.sh` | 导出有效 subject digest 和非空 EROFS；JSON info 保留 prepared 镜像的 Architecture、OS、User、WorkingDir、Entrypoint、Env；属主和层语义保持正确。 |
+| `image.flatten.sh` | 导出有效 subject digest 和非空 EROFS；JSON info 保留 prepared 镜像的 Architecture、OS、User、WorkingDir、Entrypoint、Env；从真实 flatten 产物提取出的文件系统继续保留层合并结果、whiteout、符号链接、可执行位和非 root 属主。 |
 | `image.registry.sh` | 支持的 miss、upload/put 与幂等命中；真实 OCI Referrers 记录；owner/key 隔离；有限有效期的过期行为；匿名认证拒绝与显式认证成功。 |
 
-Prepared fixture 是小型确定性双层 Docker 归档，包含非 root 属主、可执行内容、符号链接、删除 whiteout 和 opaque 目录。Source/helper 回归检查其字节和层合并语义；artifact E2E 直接消费 prepared fixture，不在执行阶段把重新生成 fixture 当作隐藏 fallback。
+Prepared fixture 是小型确定性双层 Docker 归档，包含非 root 属主、可执行内容、符号链接、删除 whiteout 和 opaque 目录。Artifact E2E 在真实 flatten 后的 EROFS 产物上验证这些语义；source/helper 回归单独验证 fixture 和断言 helper，不把产品 E2E 重新变成源码执行。
 
 ## 隔离与清理
 
