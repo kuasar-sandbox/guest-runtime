@@ -12,7 +12,7 @@
 
 SHELL := /bin/bash
 
-.PHONY: all build flatten-ctl sandbox-init sandbox-runtime native-deps erofs envd vmlinux test vet test-e2e test-e2e-scripts release-runtime release-vmlinux test-release clean help
+.PHONY: all build flatten-ctl sandbox-init sandbox-runtime native-deps erofs envd vmlinux test vet test-e2e-scripts release-runtime release-vmlinux test-release clean help
 
 # ---------------------------------------------------------------------------
 # Architecture selection (identical block across all kuasar-sandbox repos)
@@ -47,8 +47,6 @@ SANDBOX_INIT  ?= $(SANDBOXER_DIR)/$(BINDIR)/sandbox-init
 ENVD          ?= native-deps/$(BINDIR)/envd
 FLATTEN_CTL   ?= $(BINDIR)/flatten-ctl
 STORE_CTL     ?= ../accelerator/$(BINDIR)/store-ctl
-ZOT_BIN       ?= zot
-E2E_BIN       ?= $(abspath ../kuasar-sandbox/bin/$(TARGET_ARCH))
 
 # BUILD_MKFS_EROFS is the host executable that packs the raw runtime EROFS.
 # GUEST_MKFS_EROFS is the target-arch static binary shipped inside the guest
@@ -149,11 +147,8 @@ test:
 vet:
 	CGO_ENABLED=0 $(GO) vet ./...
 
-test-e2e:
-	BIN="$(E2E_BIN)" ZOT_BIN="$(ZOT_BIN)" bash test/e2e/run_all.sh
-
 test-e2e-scripts:
-	bash -n test/e2e/e2e_flatten.sh test/e2e/run_all.sh test/e2e/common.sh
+	bash -n test/e2e/cases/image.flatten.sh test/e2e/cases/image.registry.sh test/e2e/lib/common.sh
 	PYTHONDONTWRITEBYTECODE=1 python3 test/e2e/test_scripts.py
 
 RUNTIME_VERSION ?= runtime-v0.1.0
@@ -195,7 +190,6 @@ help:
 	@echo "  native-deps        build vmlinux / mkfs.erofs / fsck.erofs / envd"
 	@echo "  test               unit/static checks"
 	@echo "  vet                Go static analysis"
-	@echo "  test-e2e           full flatten-ctl registry/store e2e"
 	@echo "  test-e2e-scripts   fixture, assertion and lifecycle regressions (no Docker required)"
 	@echo "  release-runtime    package runtime-vX.Y.Z"
 	@echo "  release-vmlinux    package vmlinux-vX.Y.Z"
