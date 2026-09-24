@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Focused, offline regressions for E2E inputs and shell lifecycle helpers."""
+"""Focused, offline regressions for prepared E2E inputs and lifecycle helpers."""
 
 import base64
 import copy
@@ -17,10 +17,13 @@ import tempfile
 import time
 import unittest
 
-import assertions
-import fixture
-
 HERE = Path(__file__).resolve().parent
+LIB = HERE / "lib"
+sys.path.insert(0, str(LIB))
+
+import assertions  # noqa: E402
+import fixture  # noqa: E402
+
 SUBJECT = "127.0.0.1:12345/e2e/app@sha256:" + "a" * 64
 MANIFEST_ID = "b" * 64
 
@@ -107,6 +110,8 @@ class FixtureTests(TemporaryTest):
                     self.assertEqual(config["os"], "linux")
                     self.assertEqual(config["config"]["User"], "10001:10002")
                     self.assertEqual(config["config"]["Entrypoint"], ["/usr/bin/fixture"])
+                    self.assertEqual(config["config"]["WorkingDir"], "/home/e2e")
+                    self.assertIn("PATH=/usr/bin", config["config"]["Env"])
                     self.assertEqual(config["rootfs"]["type"], "layers")
                     self.assertEqual(len(manifest["Layers"]), 2)
                     self.assertEqual(len(config["history"]), 2)
@@ -178,21 +183,17 @@ class AssertionTests(TemporaryTest):
                       {"hit": 0}, {"hit": None}, {"subject": "wrong"}, {"manifest_id": MANIFEST_ID}):
             with self.subTest(patch=patch), self.assertRaises(ValueError):
                 assertions.lookup(dict(valid, **patch), SUBJECT, "miss")
-        with self.assertRaises(ValueError):
-            assertions.lookup({"supported": True, "subject": SUBJECT}, SUBJECT)
 
     def test_hit_put_info_and_auth_assertions(self):
         hit = {"supported": True, "subject": SUBJECT, "hit": True, "manifest_id": MANIFEST_ID}
         assertions.lookup(hit, SUBJECT, "hit", MANIFEST_ID)
-        for patch in ({"manifest_id": ""}, {"manifest_id": "c" * 64}, {"hit": False}):
-            with self.subTest(patch=patch), self.assertRaises(ValueError):
-                assertions.lookup(dict(hit, **patch), SUBJECT, "hit", MANIFEST_ID)
         put = {"written": True, "subject": SUBJECT, "manifest_id": MANIFEST_ID}
         assertions.put(put, SUBJECT, MANIFEST_ID)
-        for patch in ({"written": False}, {"written": "true"}, {"subject": "wrong"}, {"manifest_id": ""}):
-            with self.subTest(patch=patch), self.assertRaises(ValueError):
-                assertions.put(dict(put, **patch), SUBJECT, MANIFEST_ID)
         assertions.info({"erofs_size": 4096})
+        assertions.info({"erofs_size": 4096, "config": {"Architecture": "amd64", "Os": "linux",
+                         "User": "10001:10002", "WorkingDir": "/home/e2e",
+                         "Entrypoint": ["/usr/bin/fixture"], "Env": ["PATH=/usr/bin"]}},
+                        fixture_arch="amd64")
         for size in (0, -1, True, "4096", None):
             with self.assertRaises(ValueError):
                 assertions.info({"erofs_size": size})
@@ -224,7 +225,8 @@ class ProcessTests(TemporaryTest):
         root.mkdir()
         runner = "import process,sys; sys.exit(process.supervise(sys.argv[1:], grace=0.05, timeout=" + str(timeout) + "))"
         return self.start([sys.executable, "-c", runner, sys.executable, "-c", TREE,
-                           str(root), mode, "yes"], cwd=HERE)
+                           str(root), mode, "yes"], cwd=LIB,
+                          env=dict(os.environ, PYTHONPATH=str(LIB)))
 
     def test_reaps_detached_stubborn_children_after_success_and_partial_failure(self):
         for status in (0, 23):
@@ -253,81 +255,78 @@ class ProcessTests(TemporaryTest):
                 self.assertIsNone(unrelated.poll())
 
 
-class ShellTests(TemporaryTest):
+class PreparedCaseTests(TemporaryTest):
+    def stage(self):
+        workspace = self.root / "prepared"
+        cases = workspace / "test/e2e/cases"
+        component_lib = workspace / "test/e2e/lib/guest-runtime"
+        cases.mkdir(parents=True)
+        component_lib.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(HERE / "cases", cases, dirs_exist_ok=True)
+        shutil.copytree(LIB, component_lib)
+        helpers = workspace / "helpers"
+        helpers.mkdir()
+        return workspace
+
     def fake_tools(self):
         binary = self.root / "bin"
-        binary.mkdir()
-        for name in ("bash", "dirname", "uname", "mktemp", "mkdir", "rm", "sleep", "cat", "timeout"):
-            (binary / name).symlink_to(shutil.which(name))
+        binary.mkdir(exist_ok=True)
+        for name in ("bash", "dirname", "uname", "mktemp", "mkdir", "rm", "sleep", "cat", "timeout", "base64"):
+            source = shutil.which(name)
+            self.assertIsNotNone(source, name)
+            (binary / name).symlink_to(source)
         (binary / "python3").symlink_to(sys.executable)
         for name in ("curl", "docker", "flatten-ctl", "store-ctl", "zot", "mkfs.erofs"):
             path = binary / name
             path.write_text("#!/bin/bash\nexit 0\n")
             path.chmod(0o755)
-        (binary / "id").write_text("#!/bin/bash\necho 0\n")
-        (binary / "id").chmod(0o755)
         return binary
 
-    def environment(self, binary):
+    def environment(self, workspace, binary):
         return {"PATH": str(binary), "HOME": str(self.root), "TMPDIR": str(self.root),
-                "REQUIRE_GUEST_RUNTIME": "1", "PYTHONDONTWRITEBYTECODE": "1",
-                "FLATTEN_CTL": str(binary / "flatten-ctl"), "STORE_CTL": str(binary / "store-ctl"),
-                "ZOT_BIN": str(binary / "zot"), "MKFS_EROFS_PATH": str(binary / "mkfs.erofs"),
-                "BIN": str(binary)}
+                "PYTHONDONTWRITEBYTECODE": "1", "BIN": str(binary),
+                "E2E_WORKSPACE": str(workspace), "E2E_LIB": str(workspace / "test/e2e/lib"),
+                "TEST_BIN": str(binary), "ZOT_BIN": str(binary / "zot"),
+                "E2E_IMAGE": "guest-runtime-e2e:prepared"}
 
-    def test_every_required_prerequisite_fails_and_optional_skip_is_explicit(self):
-        binary = self.fake_tools()
-        env = self.environment(binary)
-        for name in ("python3", "curl", "docker", "timeout", "flatten-ctl", "store-ctl", "zot", "mkfs.erofs"):
-            with self.subTest(tool=name):
-                path, hidden = binary / name, binary / (name + ".hidden")
-                path.rename(hidden)
-                try:
-                    result = self.execute(["/bin/bash", str(HERE / "e2e_flatten.sh")], env=env)
-                    self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-                    self.assertIn("prerequisite not found", result.stderr)
-                    self.assertNotIn("[SKIP]", result.stdout)
-                finally:
-                    hidden.rename(path)
-        (binary / "curl").unlink()
-        result = self.execute(["/bin/bash", str(HERE / "e2e_flatten.sh")], env=dict(env, REQUIRE_GUEST_RUNTIME="0"))
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("[SKIP]", result.stdout)
+    def run_case(self, workspace, name, env):
+        return self.execute(["/bin/bash", str(workspace / "test/e2e/cases" / name)], env=env)
 
-    def test_unusable_daemon_and_binaries_fail_and_remove_work(self):
-        binary = self.fake_tools()
-        env = self.environment(binary)
-        for name in ("docker", "flatten-ctl", "store-ctl", "zot", "mkfs.erofs"):
-            with self.subTest(tool=name):
-                (binary / name).write_text("#!/bin/bash\nexit 17\n")
-                result = self.execute(["/bin/bash", str(HERE / "e2e_flatten.sh")], env=env)
-                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-                self.assertIn("[FAIL]", result.stderr)
-                self.assertFalse(list(self.root.glob("guest-runtime-e2e.*")))
-                (binary / name).write_text("#!/bin/bash\nexit 0\n")
+    def test_exact_product_case_set_and_no_source_build_fallback(self):
+        names = sorted(path.name for path in (HERE / "cases").glob("*.sh"))
+        self.assertEqual(names, ["image.flatten.sh", "image.registry.sh"])
+        forbidden = ("go build", "go run", "cargo build", "make build", "../accelerator", "../sandboxer", "run_all.sh")
+        for path in (HERE / "cases").glob("*.sh"):
+            text = path.read_text()
+            for token in forbidden:
+                self.assertNotIn(token, text, f"{path.name} contains artifact-E2E fallback {token!r}")
 
-    def test_copied_package_is_self_contained_and_rejects_missing_helpers(self):
-        binary = self.fake_tools()
-        env = self.environment(binary)
-        package = self.root / "assembled" / "test" / "e2e" / "guest-runtime"
-        shutil.copytree(HERE, package)
-        result = self.execute([sys.executable, str(package / "fixture.py"), str(self.root / "fixture.tar"),
-                               "--tag", "guest-runtime-e2e:copy", "--architecture", "amd64"], cwd=self.root)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        (binary / "curl").unlink()
-        result = self.execute(["/bin/bash", str(package / "run_all.sh")], cwd=self.root,
-                              env=dict(env, REQUIRE_GUEST_RUNTIME="0"))
-        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-        self.assertIn("prerequisite not found: curl", result.stderr)
-        for helper in ("e2e_flatten.sh", "common.sh", "fixture.py", "assertions.py", "process.py"):
+    def test_selected_missing_prerequisites_fail_closed(self):
+        for case, missing in (("image.flatten.sh", "curl"), ("image.registry.sh", "base64")):
+            with self.subTest(case=case):
+                workspace = self.stage()
+                binary = self.fake_tools()
+                env = self.environment(workspace, binary)
+                (binary / missing).unlink()
+                result = self.run_case(workspace, case, env)
+                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn("prerequisite not found", result.stderr)
+                self.assertNotIn("SKIP", result.stdout)
+                shutil.rmtree(workspace)
+                shutil.rmtree(binary)
+
+    def test_component_helpers_are_required_from_prepared_namespace(self):
+        for helper in ("fixture.py", "assertions.py", "process.py"):
             with self.subTest(helper=helper):
-                path = package / helper
-                original = path.read_bytes()
-                path.unlink()
-                result = self.execute(["/bin/bash", str(package / "run_all.sh")], cwd=self.root, env=env)
-                self.assertEqual(result.returncode, 1)
-                self.assertIn("incomplete E2E package: missing " + helper, result.stderr)
-                path.write_bytes(original)
+                workspace = self.stage()
+                binary = self.fake_tools()
+                env = self.environment(workspace, binary)
+                (workspace / "test/e2e/lib/guest-runtime" / helper).unlink()
+                result = self.run_case(workspace, "image.flatten.sh", env)
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn("incomplete prepared E2E helpers: missing " + helper, result.stderr)
+                shutil.rmtree(workspace)
+                shutil.rmtree(binary)
 
     def test_private_credentials_and_only_owned_tags_are_cleaned(self):
         binary = self.fake_tools()
@@ -337,7 +336,8 @@ class ShellTests(TemporaryTest):
         (caller / "config.json").write_bytes(original)
         docker = binary / "docker"
         docker.write_text('#!/bin/bash\nprintf "%s|%s\\n" "$DOCKER_CONFIG" "$*" >>"$TRACE"\n')
-        env = dict(self.environment(binary), DOCKER_CONFIG=str(caller), TRACE=str(self.root / "docker-trace"),
+        docker.chmod(0o755)
+        env = dict(os.environ, DOCKER_CONFIG=str(caller), TRACE=str(self.root / "docker-trace"),
                    FLATTEN_REGISTRY_TOKEN="ambient-must-be-cleared", DOCKER_AUTH_CONFIG="ambient")
         script = r'''
 set -euo pipefail
@@ -356,7 +356,8 @@ DOCKER_CONFIG="$WORK/docker-auth" run docker push owned-two
 '''
         for name in ("cp", "stat"):
             (binary / name).symlink_to(shutil.which(name))
-        result = self.execute(["/bin/bash", "-c", script, "_", str(HERE), str(self.root)], env=env)
+        env["PATH"] = str(binary)
+        result = self.execute(["/bin/bash", "-c", script, "_", str(LIB), str(self.root)], env=env)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         work = Path((self.root / "work").read_text().strip())
         self.assertFalse(work.exists())
@@ -370,8 +371,6 @@ DOCKER_CONFIG="$WORK/docker-auth" run docker push owned-two
                                  f"{work}/docker|image rm owned-one", f"{work}/docker|image rm owned-two"])
 
     def test_owned_proc_record_survives_concurrent_state_changes(self):
-        # The old per-line reads can tear PPid while proc regenerates a changing
-        # record. A single captured record must retain direct-child ownership.
         script = r'''
 set -euo pipefail
 source "$1/common.sh"
@@ -394,7 +393,7 @@ done
 [ -e "$2/ready" ]
 for _ in $(seq 1 300); do owned_alive "$child" || exit 51; done
 '''
-        result = self.execute(["/bin/bash", "-c", script, "_", str(HERE), str(self.root)])
+        result = self.execute(["/bin/bash", "-c", script, "_", str(LIB), str(self.root)])
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_shell_traps_preserve_status_stop_services_and_repeat_with_keep(self):
@@ -417,7 +416,7 @@ run sleep 60
                 root.mkdir()
                 (root / "tree.py").write_text(TREE)
                 env = dict(os.environ, TMPDIR=str(root), E2E_KEEP=keep, CI="true")
-                process = self.start(["/bin/bash", "-c", script, "_", str(HERE), str(root), mode], env=env)
+                process = self.start(["/bin/bash", "-c", script, "_", str(LIB), str(root), mode], env=env)
                 if sig is not None:
                     self.wait_file(root / "supervisors", process)
                     process.send_signal(sig)

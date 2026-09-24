@@ -10,11 +10,8 @@ log() { printf '\n=== %s ===\n' "$*"; }
 ok() { printf '  [ ok ] %s\n' "$*"; }
 die() { printf '[FAIL] %s\n' "$*" >&2; exit 1; }
 have() { command -v "$1" >/dev/null 2>&1; }
-missing() {
-    if [ "${REQUIRE_GUEST_RUNTIME:-0}" = 1 ]; then die "$*"; fi
-    printf '[SKIP] %s (set REQUIRE_GUEST_RUNTIME=1 to require E2E)\n' "$*"
-    exit 0
-}
+missing() { die "$*"; }
+require_root() { [ "$(id -u)" -eq 0 ] || die "root is required"; }
 
 start_owned() { # output-pid-variable timeout-seconds command...
     local output_var="$1" limit="$2" parent_pid="$BASHPID"
@@ -42,8 +39,6 @@ run() {
 
 owned_alive() {
     local status
-    # Capture the live proc record before parsing: repeated seek/read on that
-    # changing record can tear PPid (observed as Pid during concurrent exits).
     status=$(cat -- "/proc/$1/status" 2>/dev/null) || return 1
     if [[ "$status" =~ (^|$'\n')PPid:[[:blank:]]+([0-9]+)($|$'\n') ]]; then
         if [ "${BASH_REMATCH[2]}" = "$BASHPID" ]; then return 0; else return 1; fi
@@ -54,7 +49,6 @@ owned_alive() {
 stop_owned() {
     local pid="$1" attempt
     if owned_alive "$pid"; then kill -TERM "$pid" 2>/dev/null || true; fi
-    # The supervisor allows two seconds each for TERM and KILL/reaping.
     for ((attempt=0; attempt<60; attempt++)); do
         owned_alive "$pid" || break
         sleep 0.1
@@ -74,14 +68,12 @@ cleanup() {
     local status=$? pid tag cleanup_failed=0
     trap - EXIT
     trap '' INT TERM
-    # Signal all services first so their grace periods overlap.
     for pid in "${PIDS[@]}"; do
         if owned_alive "$pid"; then kill -TERM "$pid" 2>/dev/null || true; fi
     done
     for pid in "${PIDS[@]}"; do stop_owned "$pid" || cleanup_failed=1; done
     for tag in "${DOCKER_TAGS[@]}"; do
         if ! timeout --kill-after=1s 10s docker image rm "$tag" >"$WORK/remove.log" 2>&1; then
-            # A failed load/tag may never have created the registered tag.
             if ! timeout --kill-after=1s 10s docker info >/dev/null 2>&1 ||
                 timeout --kill-after=1s 10s docker image inspect "$tag" >/dev/null 2>&1; then
                 printf 'e2e: could not remove owned tag %s\n' "$tag" >&2
@@ -110,7 +102,6 @@ init_work() {
     export DOCKER_CONFIG="$WORK/docker" TMPDIR="$WORK/tmp"
     mkdir -p "$DOCKER_CONFIG" "$TMPDIR" "$WORK/docker-auth"
     printf '{"auths":{}}\n' >"$DOCKER_CONFIG/config.json"
-    # Only the test's static local-registry credentials are ever used.
     unset DOCKER_AUTH_CONFIG DOCKER_CONTEXT
     unset FLATTEN_REGISTRY_TOKEN FLATTEN_REGISTRY_USERNAME FLATTEN_REGISTRY_PASSWORD
     export NO_PROXY=127.0.0.1,localhost no_proxy=127.0.0.1,localhost
