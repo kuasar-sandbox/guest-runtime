@@ -11,11 +11,12 @@ done
 FLATTEN_CTL="${BIN:?BIN is required}/flatten-ctl"
 ZOT_BIN="${ZOT_BIN:-${E2E_WORKSPACE:?E2E_WORKSPACE is required}/helpers/zot}"
 MKFS_EROFS_PATH="$BIN/mkfs.erofs"
+FSCK_EROFS="${FSCK_EROFS:-fsck.erofs}"
 export MKFS_EROFS_PATH
 
 log preflight
 [ "$(uname -s)" = Linux ] || die "E2E requires Linux"
-for tool in python3 curl docker timeout "$FLATTEN_CTL" "$ZOT_BIN" "$MKFS_EROFS_PATH"; do
+for tool in python3 curl docker timeout readlink stat "$FLATTEN_CTL" "$ZOT_BIN" "$MKFS_EROFS_PATH" "$FSCK_EROFS"; do
     have "$tool" || die "prerequisite not found: $tool"
 done
 require_root
@@ -27,6 +28,8 @@ for tool in "$FLATTEN_CTL" "$ZOT_BIN"; do
     run "$tool" --help >"$WORK/preflight.log" 2>&1 || die "prerequisite is not runnable: $tool"
 done
 run "$MKFS_EROFS_PATH" --version >"$WORK/mkfs-version.log" 2>&1 || die "mkfs.erofs is not runnable: $MKFS_EROFS_PATH"
+FSCK_HELP="$($FSCK_EROFS --help 2>&1 || true)"
+grep -Fq -- '--extract' <<<"$FSCK_HELP" || die "fsck.erofs does not support --extract"
 
 capture() {
     local label="$1"
@@ -148,5 +151,29 @@ SUBJECT_DIGEST="${SUBJECT_REF##*@}"
 capture info "$FLATTEN_CTL" info --json "$WORK/out.erofs"
 check_json info "$WORK/info.out" --fixture-arch "$FIXTURE_ARCH"
 ok "image.flatten preserved the real image runtime configuration in a valid EROFS artifact"
+
+# The export is a tarstream bundle. Extract the actual EROFS payload and inspect
+# its resulting filesystem so this case proves layer/whiteout/symlink/ownership
+# semantics rather than only container metadata.
+capture payload "$FLATTEN_CTL" tar extract -f "$WORK/out.erofs" --dense --no-chown \
+    "image:$WORK/rootfs.erofs"
+[ -s "$WORK/rootfs.erofs" ] || die "flattened EROFS payload is missing or empty"
+mkdir -p "$WORK/rootfs"
+capture fsck "$FSCK_EROFS" --extract="$WORK/rootfs" "$WORK/rootfs.erofs"
+
+ROOTFS="$WORK/rootfs"
+[ "$(cat "$ROOTFS/home/e2e/message")" = "upper layer" ] || die "upper layer replacement content was not preserved"
+[ ! -e "$ROOTFS/home/e2e/remove-me" ] || die "whiteouted lower-layer file is still present"
+[ ! -e "$ROOTFS/home/e2e/opaque/old" ] || die "opaque whiteout did not hide lower-layer file"
+[ ! -e "$ROOTFS/home/e2e/opaque/nested" ] || die "opaque whiteout did not hide lower-layer subtree"
+[ "$(cat "$ROOTFS/home/e2e/opaque/new")" = "visible upper file" ] || die "upper file in opaque directory was not preserved"
+[ -L "$ROOTFS/home/e2e/current" ] || die "fixture symlink was not preserved"
+[ "$(readlink "$ROOTFS/home/e2e/current")" = "message" ] || die "fixture symlink target changed"
+[ "$(stat -c '%u:%g' "$ROOTFS/home/e2e")" = "10001:10002" ] || die "fixture directory ownership changed"
+[ "$(stat -c '%u:%g' "$ROOTFS/home/e2e/message")" = "10001:10002" ] || die "fixture file ownership changed"
+[ "$(stat -c '%u:%g' "$ROOTFS/home/e2e/current")" = "10001:10002" ] || die "fixture symlink ownership changed"
+[ -x "$ROOTFS/usr/bin/fixture" ] || die "lower-layer executable mode was not preserved"
+[ "$("$ROOTFS/usr/bin/fixture")" = "guest-runtime fixture" ] || die "lower-layer executable content changed"
+ok "image.flatten preserved merged filesystem contents, whiteouts, symlink and non-root ownership"
 
 log "image.flatten: PASS"
