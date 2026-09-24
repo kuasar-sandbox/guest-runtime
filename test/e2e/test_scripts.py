@@ -111,7 +111,7 @@ class FixtureTests(TemporaryTest):
                     self.assertEqual(config["config"]["User"], "10001:10002")
                     self.assertEqual(config["config"]["Entrypoint"], ["/usr/bin/fixture"])
                     self.assertEqual(config["config"]["WorkingDir"], "/home/e2e")
-                    self.assertIn("GUEST_RUNTIME_E2E=1", config["config"]["Env"])
+                    self.assertIn("PATH=/usr/bin", config["config"]["Env"])
                     self.assertEqual(config["rootfs"]["type"], "layers")
                     self.assertEqual(len(manifest["Layers"]), 2)
                     self.assertEqual(len(config["history"]), 2)
@@ -190,9 +190,9 @@ class AssertionTests(TemporaryTest):
         put = {"written": True, "subject": SUBJECT, "manifest_id": MANIFEST_ID}
         assertions.put(put, SUBJECT, MANIFEST_ID)
         assertions.info({"erofs_size": 4096})
-        assertions.info({"erofs_size": 4096, "config": {"architecture": "amd64", "os": "linux",
-                         "config": {"User": "10001:10002", "WorkingDir": "/home/e2e",
-                                    "Entrypoint": ["/usr/bin/fixture"], "Env": ["GUEST_RUNTIME_E2E=1"]}}},
+        assertions.info({"erofs_size": 4096, "config": {"Architecture": "amd64", "Os": "linux",
+                         "User": "10001:10002", "WorkingDir": "/home/e2e",
+                         "Entrypoint": ["/usr/bin/fixture"], "Env": ["PATH=/usr/bin"]}},
                         fixture_arch="amd64")
         for size in (0, -1, True, "4096", None):
             with self.assertRaises(ValueError):
