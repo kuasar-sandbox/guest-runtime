@@ -268,8 +268,15 @@ grep -Fq 'PYTHONPYCACHEPREFIX="$(abspath $(BUILD_DIR)/python-cache)"' \
   "$ROOT/Makefile" \
   || fail "make test writes Python bytecode outside the ignored build tree"
 
-[ "$(git -C "$ROOT" ls-files -s -- test/e2e/run_all.sh | awk '{print $1}')" = 100755 ] \
-  || fail "test/e2e/run_all.sh is not executable in the Git index"
+for case_path in test/e2e/cases/image.flatten.sh test/e2e/cases/image.registry.sh; do
+  [ "$(git -C "$ROOT" ls-files -s -- "$case_path" | awk '{print $1}')" = 100755 ] \
+    || fail "$case_path is not executable in the Git index"
+done
+for retired in test/e2e/run_all.sh test/e2e/e2e_flatten.sh test/e2e/common.sh; do
+  if git -C "$ROOT" ls-files --error-unmatch -- "$retired" >/dev/null 2>&1; then
+    fail "$retired is retired and must not remain in the Git index"
+  fi
+done
 
 fixture_root="$TMP/guest-runtime"
 mkdir -p "$TMP/src" "$TMP/sandboxer/bin/x86_64" "$TMP/accelerator" \
