@@ -10,8 +10,7 @@ done
 
 FLATTEN_CTL="${BIN:?BIN is required}/flatten-ctl"
 STORE_CTL="$BIN/store-ctl"
-TEST_BIN="${TEST_BIN:-${E2E_WORKSPACE:?E2E_WORKSPACE is required}/helpers}"
-ZOT_BIN="$TEST_BIN/zot"
+ZOT_BIN="${ZOT_BIN:?prepared ZOT_BIN is required}"
 MKFS_EROFS_PATH="$BIN/mkfs.erofs"
 export MKFS_EROFS_PATH
 MANIFEST_KEY_A="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
