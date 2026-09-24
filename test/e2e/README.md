@@ -32,7 +32,7 @@ WORK=/tmp/kuasar-e2e
 
 The product cases consume only prepared `BIN`, `E2E_WORKSPACE`, `E2E_LIB`, prepared fixture inputs and prepared test helpers. They do not build products or helpers, discover sibling source repositories, pull fallback workload images, or fall back to source during execution.
 
-The selected cases require Linux, root, Python 3, curl, a usable Docker daemon, GNU timeout, `mkfs.erofs`, `flatten-ctl`, `store-ctl`, and the prepared zot helper. Missing or unusable selected prerequisites fail the case; they are not reported as a successful skip. Architecture and host capabilities are execution conditions, not suites.
+The selected cases require Linux, root, Python 3, curl, a usable Docker daemon, GNU timeout, `mkfs.erofs`, `fsck.erofs` with `--extract`, `flatten-ctl`, `store-ctl`, and the prepared zot helper. Missing or unusable selected prerequisites fail the case; they are not reported as a successful skip. Architecture and host capabilities are execution conditions, not suites.
 
 Source/helper regressions remain outside product E2E and can be run with:
 
@@ -44,10 +44,10 @@ make test-e2e-scripts
 
 | Case | Executed assertions |
 | --- | --- |
-| `image.flatten.sh` | Export produces a valid subject digest and nonempty EROFS; JSON info preserves Architecture, OS, User, WorkingDir, Entrypoint and Env from the prepared image; ownership and layer semantics remain valid. |
+| `image.flatten.sh` | Export produces a valid subject digest and nonempty EROFS; JSON info preserves Architecture, OS, User, WorkingDir, Entrypoint and Env from the prepared image; the extracted flattened filesystem preserves merged contents, whiteouts, symlinks, executable mode and non-root ownership. |
 | `image.registry.sh` | Supported miss, upload/put and idempotent hits; live OCI Referrers records; owner/key isolation; finite-lifetime expiry behavior; anonymous authentication denial and explicit-auth success. |
 
-The prepared fixture is a small deterministic two-layer Docker archive, including non-root ownership, executable content, symlinks, deletion whiteouts and an opaque directory. Source/helper regressions validate those fixture bytes and merge semantics; artifact E2E consumes the prepared fixture instead of regenerating it as a hidden fallback.
+The prepared fixture is a small deterministic two-layer Docker archive, including non-root ownership, executable content, symlinks, deletion whiteouts and an opaque directory. Artifact E2E validates those semantics on the actual flattened EROFS output; source/helper regressions separately validate fixture and assertion helpers without turning product E2E back into source execution.
 
 ## Isolation and cleanup
 
