@@ -49,6 +49,8 @@ make test-e2e-scripts
 
 Prepared fixture 是小型确定性双层 Docker 归档，包含非 root 属主、可执行内容、符号链接、删除 whiteout 和 opaque 目录。Artifact E2E 在真实 flatten 后的 EROFS 产物上验证这些语义；source/helper 回归单独验证 fixture 和断言 helper，不把产品 E2E 重新变成源码执行。
 
+维护中的生成器位于本仓库的 `test/e2e/lib/fixture.py`。平台组装后将其放在 `test/e2e/lib/guest-runtime/fixture.py`；无论该 owner 来自已发布基线还是候选修订，prepare 都使用这个打包后的 helper。迁移后的包不包含已退役的 owner 根路径 `test/e2e/guest-runtime/fixture.py`。产品用例消费准备好的镜像归档，不自行定位或执行源码树中的生成器。
+
 ## 隔离与清理
 
 每个用例使用私有临时状态和独立 `DOCKER_CONFIG`，不读取调用者凭据、credential helper 或环境中的 registry 凭据。生成的 tag 和子进程都归本次调用所有。进程清理有界并回收后代，包括脱离会话的孙进程。INT/TERM 分别保留退出码 130/143；部分启动失败也会清理，不删除其他任务资源。`E2E_KEEP=1` 仅在自有服务和 tag 已停止、移除后保留证据。
