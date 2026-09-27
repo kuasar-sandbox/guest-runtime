@@ -49,6 +49,8 @@ make test-e2e-scripts
 
 The prepared fixture is a small deterministic two-layer Docker archive, including non-root ownership, executable content, symlinks, deletion whiteouts and an opaque directory. Artifact E2E validates those semantics on the actual flattened EROFS output; source/helper regressions separately validate fixture and assertion helpers without turning product E2E back into source execution.
 
+The maintained generator is `test/e2e/lib/fixture.py` in this repository. Platform assembly places it at `test/e2e/lib/guest-runtime/fixture.py`; preparation uses that packaged helper whether this owner comes from a released baseline or a candidate revision. The retired owner-root `test/e2e/guest-runtime/fixture.py` is not part of the migrated package. Product cases consume the prepared image archive and do not resolve or run a source-tree generator themselves.
+
 ## Isolation and cleanup
 
 Each case uses private temporary state and its own `DOCKER_CONFIG`. Caller credentials, credential helpers and ambient registry credentials are not used. Generated tags and child processes belong to the invocation. Process cleanup is bounded and reaps descendants, including detached grandchildren. INT/TERM preserve exit codes 130/143. Cleanup also runs after partial startup failures; unrelated resources are not removed. `E2E_KEEP=1` retains evidence only after owned services and tags have been stopped and removed.
