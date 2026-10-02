@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Exercise build-vmlinux's resolved-config guard without downloading a kernel."""
 import os
+import shutil
 from pathlib import Path
 import subprocess
 import tempfile
@@ -78,6 +79,25 @@ elif args[-1] in ('Image', 'vmlinux'):
                 self.assertIn('missing ' + missing, result.stderr)
                 self.assertFalse(compiled)
                 self.assertFalse(copied)
+
+    def test_arm_fragment_change_invalidates_existing_kernel_target(self):
+        with tempfile.TemporaryDirectory(prefix='kernel-inputs-') as directory:
+            root = Path(directory)
+            shutil.copytree(ROOT, root / 'deps')
+            shutil.copy2(ROOT.parent / 'Makefile', root / 'Makefile')
+            for path in sorted(root.rglob('*'), reverse=True):
+                os.utime(path, (1, 1))
+            binary = root / 'bin/aarch64/vmlinux'
+            binary.parent.mkdir(parents=True)
+            binary.write_bytes(b'previous-kernel-output')
+            os.utime(binary, (10, 10))
+            command = ['make', '-n', '-C', str(root), 'TARGET_ARCH=aarch64', 'vmlinux']
+            before = subprocess.run(command, capture_output=True, text=True, check=True, timeout=10)
+            self.assertNotIn('STAGE=build', before.stdout)
+            os.utime(root / 'deps/vmlinux/sandbox-arm64.config', (20, 20))
+            after = subprocess.run(command, capture_output=True, text=True, check=True, timeout=10)
+            self.assertIn('STAGE=build', after.stdout)
+            self.assertEqual(binary.read_bytes(), b'previous-kernel-output')
 
     def test_x86_does_not_require_arm_symbols(self):
         result, compiled, copied = self.run_build('x86_64', COMMON + X86)

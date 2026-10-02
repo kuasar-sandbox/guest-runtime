@@ -125,6 +125,8 @@ VIRTIO_BALLOON=y                host 内存回收(host 通过 vm.resize 推 infl
 VIRTIO_MEM=y                    host 主动 unplug 内存块
 LIBNVDIMM + ZONE_DEVICE +       virtio-pmem FS DAX 直接映射 host page cache;
 FS_DAX                          最终配置在 olddefconfig 后强制校验
+ARM64_PMEM=y(aarch64)           选入 PMEM 缓存维护 API 和 WB page mapping;
+                                仅有 FS_DAX 不足以使 ARM 原始 PMEM 支持 DAX
 EROFS_FS=y                      只读根文件系统
 EXT4_FS=y                       overlayfs 写层
 OVERLAY_FS=y                    EROFS lower + ext4 upper 合并出 / 视图
@@ -136,6 +138,12 @@ FUSE_FS=y                       沙箱经 s3fs 挂载 S3(用户态 FUSE;/dev/fus
                                 devtmpfs 自动创建)。mount.nfs / s3fs 等用户态
                                 工具在沙箱镜像内,内核只提供能力
 ```
+
+对随附 runtime，既要检查最终配置，也要检查 Guest 的实际挂载：
+`/opt/sandbox-runtime` 必须是带 `dax=always` 的只读 EROFS。仅传入
+`rootflags=dax=always` 不足以证明生效；EROFS 可能记录块设备不支持并回退。
+内核配置变化必须经过现有输入跟踪目标重新构建，不能把旧发布内核当作
+新配置的验证结果。
 
 启动 / 时间 / 调度:
 
