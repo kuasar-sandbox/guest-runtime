@@ -104,6 +104,8 @@ VIRTIO_BALLOON=y                Host memory reclamation through vm.resize inflat
 VIRTIO_MEM=y                    Driver for host-requested memory-block unplugging.
 LIBNVDIMM + ZONE_DEVICE +       Filesystem DAX on virtio-pmem maps host page-cache pages;
 FS_DAX                          required resolved symbols are checked after olddefconfig.
+ARM64_PMEM=y (aarch64)          Select PMEM cache-maintenance APIs and WB page mappings;
+                                FS_DAX alone cannot make raw ARM PMEM DAX-capable.
 EROFS_FS=y                      Read-only root filesystem.
 EXT4_FS=y                       Writable overlayfs upper layer.
 OVERLAY_FS=y                    Merge the EROFS lower and ext4 upper into the / view.
@@ -115,6 +117,13 @@ FUSE_FS=y                       FUSE for s3fs and similar guest clients; devtmpf
                                 /dev/fuse. The sandbox image supplies mount.nfs/s3fs;
                                 the kernel supplies the capability, not those tools.
 ```
+
+For the bundled runtime, validate the resolved configuration and the actual Guest
+mount: `/opt/sandbox-runtime` must be read-only EROFS with `dax=always`. Merely
+passing `rootflags=dax=always` is insufficient: EROFS can log an unsupported
+block device and fall back. Kernel configuration changes must rebuild the kernel
+through the normal input-tracked target; do not reuse an older published kernel
+as evidence for the changed preset.
 
 Boot, time and scheduling:
 

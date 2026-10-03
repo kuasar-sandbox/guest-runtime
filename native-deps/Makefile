@@ -201,6 +201,7 @@ test: test-scripts test-erofs
 test-scripts:
 	@for script in deps/*.sh; do bash -n "$$script" || exit; done
 	bash deps/test-common.sh
+	PYTHONDONTWRITEBYTECODE=1 python3 deps/test-vmlinux-config.py
 	bash deps/test-erofs.sh
 
 test-erofs: erofs

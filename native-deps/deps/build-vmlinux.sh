@@ -254,11 +254,14 @@ do_build() {
 
     # Check the resolved config rather than trusting the fragments: Kconfig
     # silently drops requested symbols when their dependency closure changes.
-    local required=(CONFIG_ZONE_DEVICE=y CONFIG_FS_DAX=y)
+    local required=(CONFIG_ZONE_DEVICE=y CONFIG_FS_DAX=y CONFIG_VIRTIO_PMEM=y CONFIG_BLK_DEV_PMEM=y)
     if [ "$KERNEL_ARCH" = x86_64 ]; then
         # Cloud Hypervisor emits Processor Local x2APIC (MADT type 9) entries.
         # Dropping X86_X2APIC leaves only the fallback boot CPU.
         required+=(CONFIG_SMP=y CONFIG_NR_CPUS=4 CONFIG_X86_X2APIC=y)
+    elif [ "$KERNEL_ARCH" = arm64 ]; then
+        # ARM raw PMEM needs a WB page mapping to advertise filesystem DAX.
+        required+=(CONFIG_ARM64_PMEM=y CONFIG_ARCH_HAS_PMEM_API=y CONFIG_ARCH_HAS_UACCESS_FLUSHCACHE=y)
     fi
     local expected
     for expected in "${required[@]}"; do
