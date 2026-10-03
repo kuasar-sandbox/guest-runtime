@@ -75,7 +75,7 @@ The `/sysdisks/` mountpoints are precreated by the current Makefile for data-dis
 | `/opt/sandbox-runtime/bin/flatten-ctl` | `bin/<arch>/flatten-ctl` | Pull/flatten OCI images inside the build sandbox. |
 | `/opt/sandbox-runtime/bin/mkfs.erofs` | `native-deps/bin/<arch>/mkfs.erofs` | Generate EROFS base images inside the build sandbox. |
 
-`fsck.erofs` is a diagnostic/test tool and is not included in the runtime image. `vmlinux` is not runtime-image content; it is released independently as `vmlinux-x86_64-vX.Y.Z.tar.gz`.
+`fsck.erofs` is a diagnostic/test tool and is not included in the runtime image. `vmlinux` is not runtime-image content; it is released independently as `vmlinux-<arch>-vX.Y.Z.tar.gz`.
 
 ### 2.2 Host bundle
 
@@ -143,7 +143,11 @@ The trusted `Runtime Release` workflow on this repository's main branch independ
 
 | Package | Contents | Release |
 | --- | --- | --- |
-| `sandbox-runtime-x86_64-vX.Y.Z.tar.gz` | Runtime image, `flatten-ctl` and `mkfs.erofs` | `runtime-vX.Y.Z` in guest-runtime |
+| `sandbox-runtime-<arch>-vX.Y.Z.tar.gz` | Runtime image, `flatten-ctl` and `mkfs.erofs` | `runtime-vX.Y.Z` in guest-runtime |
+
+Here `<arch>` is `x86_64` or `aarch64` when declared and published by the selected release.
+Do not infer another architecture's assets from source-build support or overwrite two architectures
+into the same extracted `bin/` directory.
 
 The runtime package contains:
 

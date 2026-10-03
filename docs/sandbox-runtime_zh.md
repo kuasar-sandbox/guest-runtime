@@ -87,7 +87,7 @@ DAX 映射同一份 host 文件,避免每个 sandbox 独立复制 runtime 文件
 | `/opt/sandbox-runtime/bin/mkfs.erofs` | `native-deps/bin/<arch>/mkfs.erofs` | build sandbox 内生成 EROFS base 镜像 |
 
 `fsck.erofs` 是诊断/测试工具,不进入 runtime 镜像。`vmlinux` 不是 runtime
-镜像内容,由 `vmlinux-x86_64-vX.Y.Z.tar.gz` 独立发布。
+镜像内容,由 `vmlinux-<arch>-vX.Y.Z.tar.gz` 独立发布。
 
 ### 2.2 host bundle
 
@@ -178,7 +178,10 @@ runtime 镜像由本仓 `main` 上受信任的 `Runtime Release` workflow 从调
 
 | 包 | 内容 | Release |
 |---|---|---|
-| `sandbox-runtime-x86_64-vX.Y.Z.tar.gz` | runtime 镜像、`flatten-ctl`、`mkfs.erofs` | `guest-runtime` 仓 `runtime-vX.Y.Z` |
+| `sandbox-runtime-<arch>-vX.Y.Z.tar.gz` | runtime 镜像、`flatten-ctl`、`mkfs.erofs` | `guest-runtime` 仓 `runtime-vX.Y.Z` |
+
+这里 `<arch>` 为所选版本实际声明和发布的 `x86_64` 或 `aarch64`。
+不要仅凭源码构建支持推断另一架构资产存在，也不要将两个架构覆盖解包到同一 `bin/`。
 
 runtime 专用包内同时放置:
 

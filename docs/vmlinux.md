@@ -35,7 +35,7 @@ bin/aarch64/vmlinux       PE-format Image, EFI stub + ACPI boot
 
 Both architectures use the filename `vmlinux`; the internal format differs by architecture. Cloud Hypervisor selects the matching supported boot path from the kernel format, while sandbox-ctl uses the same upper-level kernel-path interface. Measure the actual built/released file size; this document does not specify a universal image-size or boot-time result.
 
-The trusted `Vmlinux Release` workflow on this repository's `main` independently publishes `vmlinux-vX.Y.Z` from the source branch and exact SHA pinned by the dispatcher. Its archive is `vmlinux-x86_64-vX.Y.Z.tar.gz`. This release line is independent of `runtime-vX.Y.Z`: their version numbers need not match, and the platform aggregate explicitly selects each. Source support for aarch64 does not mean an aarch64 release archive or equivalent runtime validation has been published.
+The trusted `Vmlinux Release` workflow on this repository's `main` independently publishes `vmlinux-vX.Y.Z` from the source branch and exact SHA pinned by the dispatcher. Its archive is `vmlinux-<arch>-vX.Y.Z.tar.gz`. This release line is independent of `runtime-vX.Y.Z`: their version numbers need not match, and the platform aggregate explicitly selects each. Here `<arch>` is `x86_64` or `aarch64` as declared by the selected release. Check that release's actual assets and recorded native validation scope; source support alone is not runtime qualification, and historical releases retain their original architecture sets.
 
 ## 2. Build workflow
 
