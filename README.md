@@ -2,6 +2,14 @@
 
 # guest-runtime
 
+For the first cross-component sandbox or Demo, follow the project
+[Quick Start](https://github.com/kuasar-sandbox/kuasar-sandbox/blob/main/docs/quickstart.md)
+with the matching aggregate release and
+[workbench](https://github.com/kuasar-sandbox/kuasar-sandbox/blob/main/workbench/README.md).
+This component can still be built/deployed independently; workbench is not a
+production runtime dependency. Published architectures are specific to the
+selected release; source support does not imply all historical assets exist.
+
 `guest-runtime` builds the **guest kernel, runtime image, and image-building tools** used by [Kuasar Sandbox](https://github.com/kuasar-sandbox/kuasar-sandbox).
 
 The repository owns the guest environment and its build inputs, provenance, and release artifacts. Host-side MicroVM lifecycle, snapshot, restore, and `sandbox-init` source belong to [`sandboxer`](https://github.com/kuasar-sandbox/sandboxer). Shared Manifest, cache/store, OCI retrieval, and image-flattening libraries belong to [`accelerator`](https://github.com/kuasar-sandbox/accelerator).
@@ -104,12 +112,12 @@ When `sandbox-init`, Envd or `flatten-ctl` is absent, the Makefile invokes its c
 
 This repository does not publish a generic `guest-runtime-vX.Y.Z` release. It maintains two independent version lines:
 
-- **`runtime-vX.Y.Z`** — publishes `sandbox-runtime-x86_64-vX.Y.Z.tar.gz`, containing the runtime bundle, `flatten-ctl`, and the EROFS creation tool selected by the release contract;
-- **`vmlinux-vX.Y.Z`** — publishes `vmlinux-x86_64-vX.Y.Z.tar.gz`, containing the guest kernel at the stable `bin/vmlinux` path.
+- **`runtime-vX.Y.Z`** — publishes `sandbox-runtime-<arch>-vX.Y.Z.tar.gz`, containing the runtime bundle, `flatten-ctl`, and the EROFS creation tool selected by the release contract;
+- **`vmlinux-vX.Y.Z`** — publishes `vmlinux-<arch>-vX.Y.Z.tar.gz`, containing the guest kernel at the stable `bin/vmlinux` path.
 
 The two version numbers may advance independently. The project aggregate release selects an exact Runtime tag and an exact VMLinux tag; it does not assume that their version numbers match.
 
-Current GitHub component assets are published for Linux x86_64 from selected source refs and exact commits after their component build and packaging checks. The project aggregate release later selects exact Runtime, VMLinux, and other component tags and performs cross-component integration tests plus released-asset MicroVM validation for that composition. Source Makefiles may support another `TARGET_ARCH`, but source-build support does not by itself mean a prebuilt artifact is published for that architecture.
+GitHub component assets are published for the architectures declared by each selected release, from exact source refs/commits after component build and packaging checks. Here `<arch>` is `x86_64` or `aarch64` when that release publishes it. The project aggregate release later selects exact Runtime, VMLinux, and other component tags and performs cross-component integration tests plus released-asset MicroVM validation for that composition. Source Makefiles may support another `TARGET_ARCH`, but source-build support does not by itself mean a prebuilt artifact is published for that architecture.
 
 Runtime publication embeds `sandbox-init` from the selected sandboxer Release. It verifies the Release tag/source, asset sizes and GitHub digests, and `SHA256SUMS` before installing the binary; the selected sandboxer source remains available for provenance and license validation. Rebuilding the same commit can change Go build metadata or workspace-derived defaults, so a source rebuild does not establish byte identity with the published dependency.
 

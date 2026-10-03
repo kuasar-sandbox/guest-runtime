@@ -44,9 +44,9 @@ bin/aarch64/vmlinux       PE 格式 Image,EFI stub + ACPI 启动
 
 本仓通过 `main` 上受信任的 `Vmlinux Release` workflow 从调度器钉住的源码分支
 和精确 SHA 独立发布 `vmlinux-vX.Y.Z`,制品名为
-`vmlinux-x86_64-vX.Y.Z.tar.gz`。该版本线与 `runtime-vX.Y.Z` 独立,
-两者版本号不要求一致;平台聚合版本显式选择各自版本。源码支持 aarch64 不代表已经
-发布 aarch64 资产或完成了与 x86_64 等价的运行验证。
+`vmlinux-<arch>-vX.Y.Z.tar.gz`。该版本线与 `runtime-vX.Y.Z` 独立,
+两者版本号不要求一致;平台聚合版本显式选择各自版本。这里 `<arch>` 为所选发布版声明的 `x86_64` 或 `aarch64`。
+应核对该版本实际资产和原生验证范围；源码支持不等于运行验收，历史版本保留原有架构集合。
 
 ## 2. 构建工作流
 

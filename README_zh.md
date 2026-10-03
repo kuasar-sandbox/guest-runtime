@@ -2,6 +2,11 @@
 
 # guest-runtime
 
+首次运行跨组件沙箱或 Demo，推荐从项目[快速开始](https://github.com/kuasar-sandbox/kuasar-sandbox/blob/main/docs/quickstart_zh.md)
+使用匹配聚合版本的 [workbench](https://github.com/kuasar-sandbox/kuasar-sandbox/blob/main/workbench/README_zh.md)。
+本组件仍可独立构建和部署，workbench 不是生产运行的强制依赖。预构建架构以所选
+发布版的实际资产为准；源码支持某架构不意味着所有历史版本都提供该架构制品。
+
 `guest-runtime` 构建 [Kuasar Sandbox](https://github.com/kuasar-sandbox/kuasar-sandbox) 使用的 **guest kernel、Runtime image 和 image build tool**。
 
 本仓负责 guest 环境及其构建输入、provenance 与 Release artifact。Host 侧 MicroVM 生命周期、snapshot、restore 和 `sandbox-init` 源码属于 [`sandboxer`](https://github.com/kuasar-sandbox/sandboxer)。共享 Manifest、cache/store、OCI retrieval 和 image-flattening library 属于 [`accelerator`](https://github.com/kuasar-sandbox/accelerator)。
@@ -100,12 +105,12 @@ GOWORK=off make build TARGET_ARCH=aarch64  # 在依赖支持的范围内交叉�
 
 本仓不发布通用的 `guest-runtime-vX.Y.Z` Release,而是维护两条独立版本线:
 
-- **`runtime-vX.Y.Z`** - 发布 `sandbox-runtime-x86_64-vX.Y.Z.tar.gz`,包含 Runtime bundle、`flatten-ctl` 和 Release contract 选定的 EROFS creation tool;
-- **`vmlinux-vX.Y.Z`** - 发布 `vmlinux-x86_64-vX.Y.Z.tar.gz`,在稳定路径 `bin/vmlinux` 包含 guest kernel。
+- **`runtime-vX.Y.Z`** - 发布 `sandbox-runtime-<arch>-vX.Y.Z.tar.gz`,包含 Runtime bundle、`flatten-ctl` 和 Release contract 选定的 EROFS creation tool;
+- **`vmlinux-vX.Y.Z`** - 发布 `vmlinux-<arch>-vX.Y.Z.tar.gz`,在稳定路径 `bin/vmlinux` 包含 guest kernel。
 
 两者版本号可以独立演进。项目聚合 Release 精确选择一个 Runtime Tag 和一个 VMLinux Tag,不假定版本号相同。
 
-当前 GitHub 组件资产在组件 build/package 检查后从所选 source ref 和精确 commit 发布 Linux x86_64。项目聚合 Release 随后选择精确 Runtime、VMLinux 和其他组件 Tag,并对该组合执行跨组件集成测试及已发布资产的 MicroVM 验证。Source Makefile 支持其他 `TARGET_ARCH` 不等于已为该架构发布预构建 artifact。
+GitHub 组件资产在组件 build/package 检查后从所选 source ref 和精确 commit 发布，架构集合由各个所选 Release 声明。这里 `<arch>` 为该版本实际发布的 `x86_64` 或 `aarch64`。项目聚合 Release 随后选择精确 Runtime、VMLinux 和其他组件 Tag,并对该组合执行跨组件集成测试及已发布资产的 MicroVM 验证。Source Makefile 支持其他 `TARGET_ARCH` 不等于已为该架构发布预构建 artifact。
 
 Runtime 发布内嵌所选 sandboxer Release 中的 `sandbox-init`。安装该二进制前会校验 Release 的 Tag/源码、资产大小、GitHub 摘要及 `SHA256SUMS`；所选 sandboxer 源码仍用于来源和许可证校验。重新编译同一提交可能改变 Go 构建元数据或工作区派生的默认值，因此源码重编译不能证明与已发布依赖逐字节一致。
 
