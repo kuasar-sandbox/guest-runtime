@@ -113,7 +113,7 @@ When `sandbox-init`, Envd or `flatten-ctl` is absent, the Makefile invokes its c
 This repository does not publish a generic `guest-runtime-vX.Y.Z` release. It maintains two independent version lines:
 
 - **`runtime-vX.Y.Z`** — publishes `sandbox-runtime-<arch>-vX.Y.Z.tar.gz`, containing the runtime bundle, `flatten-ctl`, and the EROFS creation tool selected by the release contract;
-- **`vmlinux-vX.Y.Z`** — publishes `vmlinux-<arch>-vX.Y.Z.tar.gz`, containing the guest kernel at the stable `bin/vmlinux` path.
+- **`vmlinux-vX.Y.Z`** — publishes `vmlinux-<arch>-vX.Y.Z.tar.gz`, containing the guest kernel at the stable `bin/vmlinux` path and its raw-file SHA-256 at `bin/vmlinux.sha256`.
 
 The two version numbers may advance independently. The project aggregate release selects an exact Runtime tag and an exact VMLinux tag; it does not assume that their version numbers match.
 

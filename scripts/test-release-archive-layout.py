@@ -44,6 +44,13 @@ class ArchiveLayout(unittest.TestCase):
             result = self.validate(kind)
             self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_kernel_checksum_is_only_allowed_in_kernel_packages(self):
+        result = self.validate("vmlinux", ("./bin/vmlinux.sha256", False))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        result = self.validate("runtime", ("./bin/vmlinux.sha256", False))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("outside the exact", result.stderr)
+
     def test_foreign_directories_cannot_change_deployment_root_modes(self):
         for kind in ("runtime", "vmlinux"):
             for name in ("./root/", "./etc/", "./bin/extra/", "./share/licenses/foreign/", "./share/sources/foreign/"):

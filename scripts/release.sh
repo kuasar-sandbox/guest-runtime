@@ -174,7 +174,7 @@ validate_archive_paths() {
       }
       if (material) next
       if (unit == "runtime" && path ~ /^bin\/(sandbox-runtime[.]bundle|flatten-ctl|mkfs[.]erofs)$/) next
-      if (unit == "vmlinux" && path == "bin/vmlinux") next
+      if (unit == "vmlinux" && (path == "bin/vmlinux" || path == "bin/vmlinux.sha256")) next
       exit 1
     }
   ' "$listing" || fail "$archive contains an entry outside the exact $kind release layout"
@@ -413,6 +413,16 @@ validate_bundle() {
     vmlinux)
       [ -f "$extract/bin/vmlinux" ] || fail "$archive is missing bin/vmlinux"
       validate_kernel_image "$extract/bin/vmlinux" "$arch"
+      # Historical kernel packages have no sidecar. New packages always emit
+      # it, and a present record must exactly describe the shipped raw kernel.
+      # Compare with trusted output rather than letting archive text name files
+      # for sha256sum --check to open.
+      if [ -f "$extract/bin/vmlinux.sha256" ]; then
+        (cd "$extract/bin" && sha256sum -- vmlinux) > "$WORK/vmlinux.sha256" \
+          || fail "cannot checksum packaged bin/vmlinux"
+        cmp -s "$WORK/vmlinux.sha256" "$extract/bin/vmlinux.sha256" \
+          || fail "bin/vmlinux.sha256 does not match the packaged kernel"
+      fi
       local linux_license_sha
       linux_license_sha="$(sha256sum "$extract/share/licenses/vmlinux/linux/COPYING" | awk '{print $1}')"
       release_materials_require_source "$extract" "$kind" 'bin/vmlinux' 'linux' "6.1.169" \
@@ -520,6 +530,10 @@ package_release() {
       local linux_source linux_license_sha
       copy_external_file "$native_bin_dir/vmlinux" bin/vmlinux
       validate_kernel_image "$STAGE/bin/vmlinux" "$arch"
+      # Derive identity from the final staged bytes, never a possibly stale
+      # checksum beside the build input. The basename matches sandboxer #297.
+      (cd "$STAGE/bin" && sha256sum -- vmlinux > vmlinux.sha256) \
+        || fail "cannot generate bin/vmlinux.sha256"
       linux_source="${RELEASE_LINUX_SOURCE_DIR:-${LINUX_BUILD_SRC:-$ROOT/native-deps/build/src/linux}}"
       release_materials_copy_licenses "$linux_source" linux
       linux_license_sha="$(sha256sum "$linux_source/COPYING" | awk '{print $1}')"

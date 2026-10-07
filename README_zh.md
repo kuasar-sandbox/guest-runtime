@@ -106,7 +106,7 @@ GOWORK=off make build TARGET_ARCH=aarch64  # 在依赖支持的范围内交叉�
 本仓不发布通用的 `guest-runtime-vX.Y.Z` Release,而是维护两条独立版本线:
 
 - **`runtime-vX.Y.Z`** - 发布 `sandbox-runtime-<arch>-vX.Y.Z.tar.gz`,包含 Runtime bundle、`flatten-ctl` 和 Release contract 选定的 EROFS creation tool;
-- **`vmlinux-vX.Y.Z`** - 发布 `vmlinux-<arch>-vX.Y.Z.tar.gz`,在稳定路径 `bin/vmlinux` 包含 guest kernel。
+- **`vmlinux-vX.Y.Z`** - 发布 `vmlinux-<arch>-vX.Y.Z.tar.gz`,在稳定路径 `bin/vmlinux` 包含 guest kernel，并在 `bin/vmlinux.sha256` 携带原始内核文件的 SHA-256。
 
 两者版本号可以独立演进。项目聚合 Release 精确选择一个 Runtime Tag 和一个 VMLinux Tag,不假定版本号相同。
 

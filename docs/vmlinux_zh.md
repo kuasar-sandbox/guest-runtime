@@ -48,6 +48,25 @@ bin/aarch64/vmlinux       PE 格式 Image,EFI stub + ACPI 启动
 两者版本号不要求一致;平台聚合版本显式选择各自版本。这里 `<arch>` 为所选发布版声明的 `x86_64` 或 `aarch64`。
 应核对该版本实际资产和原生验证范围；源码支持不等于运行验收，历史版本保留原有架构集合。
 
+两个架构新生成的 Stable 和 Preview kernel 包均包含这一对文件：
+
+```text
+bin/vmlinux
+bin/vmlinux.sha256
+```
+
+打包时根据最终暂存的原始 kernel 生成 `vmlinux.sha256`，不使用压缩包摘要，也不复制
+构建输入旁可能过期的 checksum。sidecar 权限为 0644，内容严格为
+`<64 个小写十六进制字符>  vmlinux`，末尾带 LF 换行。发布包旁的 `SHA256SUMS`
+仍然校验各压缩包，不替代这一内核身份文件。解包后可执行
+`(cd bin && sha256sum --check vmlinux.sha256)` 校验文件对。
+
+验包流程重新计算原始 kernel 的摘要，并校验包内存在的 sidecar；仍接受没有 sidecar
+的历史包，但新生成的包一定携带它。Sandboxer 可以直接使用安装后的 sidecar 作为可信
+部署元数据，避免 Runtime 启动时重新扫描 kernel。部署时必须一起安装和保留 kernel
+与 sidecar，并在启动期间保持绑定稳定；sidecar 不是签名或运行时证明。该打包步骤
+不改变单独执行 `make vmlinux` 的构建输出。
+
 ## 2. 构建工作流
 
 `make vmlinux` 在输出缺失或受跟踪的内核输入更新时依次执行 fetch、patches-apply 和 build。
