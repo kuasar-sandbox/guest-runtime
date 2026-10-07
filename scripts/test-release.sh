@@ -21,6 +21,7 @@ PYTHONDONTWRITEBYTECODE=1 python3 "$ROOT/scripts/test-release-go-environment.py"
 bash "$ROOT/scripts/test-release-license-traversal.sh"
 bash "$ROOT/scripts/test-release-cleanup.sh"
 PYTHONDONTWRITEBYTECODE=1 python3 "$ROOT/scripts/test-release-archive-layout.py"
+PYTHONDONTWRITEBYTECODE=1 python3 "$ROOT/scripts/test-release-kernel-checksum.py"
 PYTHONDONTWRITEBYTECODE=1 python3 "$ROOT/scripts/test-release-source-inventory.py"
 PYTHONDONTWRITEBYTECODE=1 python3 "$ROOT/scripts/test-release-runtime-payloads.py" --prepare "$TMP/runtime-readers"
 bash "$ROOT/scripts/test-release-go-contexts.sh"
@@ -553,7 +554,7 @@ tar -xOf "$runtime_archive" ./share/sources/runtime/SOURCES.tsv \
   | grep -F $'\tGo toolchain\t'"$go_toolchain"$'\t' > /dev/null \
   || fail "runtime archive does not associate its Go toolchain with license material"
 vmlinux_archive="$TMP/vmlinux-bundle/assets/vmlinux-x86_64-v2.3.4.tar.gz"
-for path in ./bin/vmlinux \
+for path in ./bin/vmlinux ./bin/vmlinux.sha256 \
   ./share/licenses/vmlinux/project/LICENSE \
   ./share/licenses/vmlinux/linux/COPYING \
   ./share/licenses/vmlinux/linux/LICENSES/preferred/GPL-2.0 \
