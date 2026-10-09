@@ -324,7 +324,7 @@ jobs:
             --source-sha "$(git -C src/sandboxer rev-parse HEAD)" \
             --output "src/sandboxer/bin/$TARGET_ARCH/sandbox-init" \
             --go-toolchain-output "$GITHUB_WORKSPACE/src/selected-sandboxer-go"
-      - name: Build and test runtime image
+      - name: Build test and package runtime image
         uses: ./trusted/platform/.github/actions/workbench
         with:
           selection: workbench-selection/workbench.json
@@ -336,6 +336,7 @@ jobs:
             guest-runtime/native-deps/bin/${{ matrix.arch }}/mkfs.erofs
             guest-runtime/native-deps/bin/${{ matrix.arch }}/fsck.erofs
             sandboxer/bin/${{ matrix.arch }}/sandbox-init
+            guest-runtime/release-bundle
           arch: ${{ matrix.arch }}
           cpus: '2'
           memory-gib: '8'
@@ -347,26 +348,6 @@ jobs:
             if [ "$TARGET_ARCH" = x86_64 ]; then make -C guest-runtime test; make -C guest-runtime vet; fi
             make -C guest-runtime flatten-ctl
             make -C guest-runtime sandbox-runtime BUILD_MKFS_EROFS="/src/guest-runtime/native-deps/bin/$TARGET_ARCH/mkfs.erofs"
-      - name: Check the released Runtime ABI
-        run: |
-          python3 trusted/guest-runtime/scripts/ci-check-runtime-abi.py \
-            --static src/guest-runtime/bin/$TARGET_ARCH/flatten-ctl \
-            --static src/guest-runtime/native-deps/bin/$TARGET_ARCH/envd \
-            --static src/guest-runtime/native-deps/bin/$TARGET_ARCH/mkfs.erofs \
-            --static src/guest-runtime/native-deps/bin/$TARGET_ARCH/fsck.erofs \
-            src/sandboxer/bin/$TARGET_ARCH/sandbox-init
-      - name: Package runtime release
-        uses: ./trusted/platform/.github/actions/workbench
-        with:
-          selection: workbench-selection/workbench.json
-          sources: src
-          cache-coverage: release-runtime-package
-          outputs: guest-runtime/release-bundle
-          arch: ${{ matrix.arch }}
-          cpus: '2'
-          memory-gib: '8'
-          run: |
-            set -euo pipefail
             cd /src/guest-runtime
             export GOWORK=off
             export VERSION='${{ needs.preflight.outputs.version }}'
@@ -378,6 +359,14 @@ jobs:
             SOURCE_DATE_EPOCH=$(git show -s --format=%ct "${{ needs.preflight.outputs.source_sha }}")
             bash scripts/release.sh package runtime "$VERSION" "$TARGET_ARCH" release-bundle
             bash scripts/release.sh validate runtime "$VERSION" "$TARGET_ARCH" release-bundle
+      - name: Check the released Runtime ABI
+        run: |
+          python3 trusted/guest-runtime/scripts/ci-check-runtime-abi.py \
+            --static src/guest-runtime/bin/$TARGET_ARCH/flatten-ctl \
+            --static src/guest-runtime/native-deps/bin/$TARGET_ARCH/envd \
+            --static src/guest-runtime/native-deps/bin/$TARGET_ARCH/mkfs.erofs \
+            --static src/guest-runtime/native-deps/bin/$TARGET_ARCH/fsck.erofs \
+            src/sandboxer/bin/$TARGET_ARCH/sandbox-init
       - name: Upload validated runtime bundle
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:

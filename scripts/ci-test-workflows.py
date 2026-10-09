@@ -85,7 +85,7 @@ def check():
         assert all(s["with"]["ref"] == "${{ needs.preflight.outputs." + name + "_sha }}" for s in checkouts)
     assert '--arch "$TARGET_ARCH"' in runtime["Verify and install the selected sandbox-init"]["run"]
     assert "python3 trusted/guest-runtime/scripts/prepare-sandbox-init.py" in runtime["Verify and install the selected sandbox-init"]["run"]
-    build = runtime["Build and test runtime image"]
+    build = runtime["Build test and package runtime image"]
     assert build["uses"] == "./trusted/platform/.github/actions/workbench"
     assert build["with"]["cache-coverage"] == "release-runtime-build"
     assert build["with"]["outputs"].splitlines() == [
@@ -94,6 +94,7 @@ def check():
         "guest-runtime/native-deps/bin/${{ matrix.arch }}/mkfs.erofs",
         "guest-runtime/native-deps/bin/${{ matrix.arch }}/fsck.erofs",
         "sandboxer/bin/${{ matrix.arch }}/sandbox-init",
+        "guest-runtime/release-bundle",
     ]
     for component in ("erofs", "envd"):
         assert "bash /inputs/release/ci/native-cache/native-cache.sh restore-or-build " + component in build["with"]["run"]
@@ -101,18 +102,22 @@ def check():
     for goal in ("test", "vet", "flatten-ctl", "sandbox-runtime"):
         assert f"make -C guest-runtime {goal}" in build["with"]["run"]
     assert 'if [ "$TARGET_ARCH" = x86_64 ]; then make -C guest-runtime test; make -C guest-runtime vet; fi' in build["with"]["run"]
-    package = runtime["Package runtime release"]
-    assert package["uses"] == "./trusted/platform/.github/actions/workbench"
-    assert package["with"]["cache-coverage"] == "release-runtime-package"
-    assert package["with"]["outputs"] == "guest-runtime/release-bundle"
-    assert "make " not in package["with"]["run"]
-    assert 'scripts/release.sh package runtime "$VERSION" "$TARGET_ARCH"' in package["with"]["run"]
-    assert 'scripts/release.sh validate runtime "$VERSION" "$TARGET_ARCH"' in package["with"]["run"]
-    assert 'RELEASE_MATERIALS_GO_NOTICE_ROOT=/src/selected-sandboxer-go' in package["with"]["run"]
+    # Build and package retain the same private HOME and dependency caches.
+    # Source files alone survive a separate Workbench invocation.
+    invocations = [step for step in runtime.values()
+                   if step.get("uses") == "./trusted/platform/.github/actions/workbench"]
+    assert invocations == [build]
+    script = build["with"]["run"]
+    assert 'scripts/release.sh package runtime "$VERSION" "$TARGET_ARCH"' in script
+    assert 'scripts/release.sh validate runtime "$VERSION" "$TARGET_ARCH"' in script
+    assert 'RELEASE_MATERIALS_GO_NOTICE_ROOT=/src/selected-sandboxer-go' in script
+    assert script.index("make -C guest-runtime sandbox-runtime") < script.index("scripts/release.sh package runtime")
+    assert script.index("scripts/release.sh package runtime") < script.index("scripts/release.sh validate runtime")
     abi = runtime["Check the released Runtime ABI"]["run"]
     assert "trusted/guest-runtime/scripts/ci-check-runtime-abi.py" in abi and abi.count("--static ") == 4
     assert "src/sandboxer/bin/$TARGET_ARCH/sandbox-init" in abi
-    assert names.index("Check the released Runtime ABI") < names.index("Package runtime release")
+    assert names.index("Build test and package runtime image") < names.index("Check the released Runtime ABI")
+    assert names.index("Check the released Runtime ABI") < names.index("Upload validated runtime bundle")
     publish = {s["name"]: s for s in workflows["release-runtime.yml"]["publish"]["steps"]}
     assert '--profile release-control' in publish["Bootstrap standard runner"]["run"]
     readers = publish["Export verified Workbench Runtime readers"]
