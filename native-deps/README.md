@@ -197,6 +197,8 @@ make help       # List targets
 
 Build duration depends on the host, toolchain and cache state; these commands do not carry a fixed timing guarantee.
 
+Workbench jobs pass the positive integer `KUASAR_BUILD_JOBS` to each recipe. Kernel compilation uses it instead of the host processor count; Envd passes it explicitly to `go build -p` even when `ENVD_GOFLAGS` is set. EROFS uses it as the default for `EROFS_BUILD_JOBS`, including its test builds. CPU quota alone does not change the processor count reported by `nproc`.
+
 ### 2.1 EROFS (`make erofs`)
 
 `deps/build-erofs.sh` extracts erofs-utils into `build/<arch>/src/erofs-utils/`, keeping one tree per architecture because this autotools path does not support out-of-source builds. It runs `autoreconf` and `configure` with compression/FUSE/network features disabled, builds only the `lib`, `mkfs` and `fsck` subdirectories, and writes `bin/<arch>/{mkfs.erofs,fsck.erofs}`.
@@ -207,12 +209,12 @@ Build duration depends on the host, toolchain and cache state; these commands do
 - RPM devel packages do not necessarily ship static libraries. The openEuler 24.03-LTS-SP4 profile requires the [external runner provider](https://github.com/kuasar-sandbox/kuasar-sandbox/blob/d375effe12531b49f44368d33735c5b7b50b244c/ci/runner/README.md#install) and matching materials described in §1.1. Installing `libgcrypt-devel libgpg-error-devel` alone is insufficient.
 - Both output ELFs must have no `INTERP` or `NEEDED` entries. The SHA path must execute in an empty root without host libraries, configuration, `/proc` or `/dev`; validate each new target/toolchain with exact baseline image comparison and fsck/extraction.
 - Libgcrypt and Libgpg-error library licenses are LGPL-2.1-or-later, with additional file-specific notices in their source distributions. Existing EROFS file licenses, including GPL-2.0 hashmap code, are preserved. Release provenance uses both actual linker inputs and matching package/source copyright, LICENSE/COPYING/NOTICE texts (§1.1). Missing materials fail packaging. Retain the recipe, ordered patches, original source archive, EROFS objects and exact target library sources/build configuration for rebuilding/relinking; do not substitute synthetic fixtures for release materials.
-- `EROFS_BUILD_JOBS=2 make -j2 erofs` bounds compilation. The default is `JOBS`, then 2.
+- `EROFS_BUILD_JOBS=2 make -j2 erofs` bounds compilation. The default is `KUASAR_BUILD_JOBS`, then `JOBS`, then 2.
 - Host build tools: `autoconf automake libtool pkg-config make gcc g++ binutils patch python3` (Python 3.11 or newer; binutils includes `readelf`). `make test` covers SHA vectors/failure paths, real pristine/candidate images and extraction, root dispatch, relocation and input mutation. A native binary-cache hit need not retain the complete EROFS source tree: the SHA test prepares verified sources in temporary storage when needed, without replacing the cached tools or stamp. Kernel-only jobs use the dependency-independent `test-scripts` target.
 
 ### 2.2 vmlinux (`make vmlinux`)
 
-The target invokes the fetch, patch-application and build stages of `deps/build-vmlinux.sh` when its output needs rebuilding (§3). After applying `deps/linux-patches/*.patch`, it combines `deps/vmlinux/sandbox-common.config` with `sandbox-<arch>.config` into `arch/<kbuild_arch>/configs/sandbox_defconfig`, runs `make sandbox_defconfig` and `make olddefconfig` to resolve Kconfig dependencies, then `make -j$(nproc) <target>`, and copies out `bin/<arch>/vmlinux`.
+The target invokes the fetch, patch-application and build stages of `deps/build-vmlinux.sh` when its output needs rebuilding (§3). After applying `deps/linux-patches/*.patch`, it combines `deps/vmlinux/sandbox-common.config` with `sandbox-<arch>.config` into `arch/<kbuild_arch>/configs/sandbox_defconfig`, runs `make sandbox_defconfig` and `make olddefconfig` to resolve Kconfig dependencies, then `make -j<jobs> <target>`, and copies out `bin/<arch>/vmlinux`. `jobs` is `KUASAR_BUILD_JOBS` when set, otherwise `nproc`.
 
 - After `olddefconfig`, required DAX and architecture-specific options are checked. A requested critical option silently discarded by Kconfig fails the build.
 - Make dependencies include build scripts, common/architecture configuration and tracked kernel patches. Changing these inputs reevaluates configuration and uses incremental Kbuild.

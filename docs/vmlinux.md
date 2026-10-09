@@ -73,10 +73,14 @@ patches-apply Apply deps/linux-patches/*.patch with git am. The current platform
               an idempotent no-op; unformatted or divergent work is not overwritten.
 build         Concatenate sandbox-common.config + sandbox-<arch>.config into
               arch/<kbuild_arch>/configs/sandbox_defconfig; run make sandbox_defconfig
-              and make olddefconfig to resolve dependencies, then make -j$(nproc)
+              and make olddefconfig to resolve dependencies, then make -j<jobs>
               <kbuild_target> (x86_64: vmlinux ELF; arm64: Image PE), copying the output
               to bin/<arch>/vmlinux.
 ```
+
+`jobs` uses the positive integer `KUASAR_BUILD_JOBS` supplied by the task. Without an explicit task budget it defaults to `nproc`; a container CPU quota does not by itself constrain that value.
+
+Synthetic source-import author/committer timestamps and patch-application committer timestamps default to `SOURCE_DATE_EPOCH` (zero when unset). Explicit Git date overrides and patch author dates are preserved. These defaults apply only to the recipe's Git subprocesses, keeping SCM-derived kernel version strings reproducible without changing the kernel configuration or developer commits.
 
 Incrementality is input-aware: the native Makefile tracks the build/common scripts, both selected fragments, the patch directory and tracked patches. An existing output alone does not suppress a rebuild after those inputs change. Every explicit `linux-build` re-resolves configuration; Kbuild compilation remains incremental. Removing the output or cleaning before `make vmlinux` forces regeneration.
 

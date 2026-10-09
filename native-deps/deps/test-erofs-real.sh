@@ -18,9 +18,9 @@ extract_tarball "$archive" "$work/src" >/dev/null
     ./configure --disable-lz4 --disable-lzma --without-zlib --without-libzstd \
         --without-libdeflate --without-xxhash --without-libcurl --without-openssl \
         --without-libxml2 --without-json-c --without-libnl3 --disable-multithreading
-    make -j"${EROFS_BUILD_JOBS:-2}" -C lib
+    make -j"${EROFS_BUILD_JOBS:-${KUASAR_BUILD_JOBS:-2}}" -C lib
     for tool in mkfs fsck dump; do
-        make -j"${EROFS_BUILD_JOBS:-2}" -C "$tool" LDFLAGS="${LDFLAGS:-} -all-static"
+        make -j"${EROFS_BUILD_JOBS:-${KUASAR_BUILD_JOBS:-2}}" -C "$tool" LDFLAGS="${LDFLAGS:-} -all-static"
     done
 ) > "$BUILD_DIR/tests/pristine-build.log" 2>&1 || { cat "$BUILD_DIR/tests/pristine-build.log"; exit 1; }
 for tool in mkfs fsck dump; do

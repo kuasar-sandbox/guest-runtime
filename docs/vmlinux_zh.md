@@ -85,9 +85,13 @@ patches-apply git am deps/linux-patches/*.patch 到该树(平台对 guest 内核
 build         把 sandbox-common.config + sandbox-<arch>.config 拼接成
               arch/<kbuild_arch>/configs/sandbox_defconfig → make
               sandbox_defconfig + make olddefconfig(关键:让 kbuild 解析依赖
-              闭包并暴露 silent regression)→ make -j$(nproc) <kbuild_target>
+              闭包并暴露 silent regression)→ make -j<jobs> <kbuild_target>
               (x86_64: vmlinux ELF;arm64: Image PE)→ cp 到 bin/<arch>/vmlinux
 ```
+
+`jobs` 使用任务传入的正整数 `KUASAR_BUILD_JOBS`. 未设置任务预算时默认取 `nproc`; 容器 CPU quota 本身不会限制该值.
+
+合成源码 import 的 author/committer 时间及应用补丁时的 committer 时间默认取 `SOURCE_DATE_EPOCH` (未设置时为零). 保留显式 Git 日期参数和补丁 author 日期. 这些默认值只作用于配方的 Git 子进程, 使 SCM 派生的内核版本字符串可复现, 不改变内核配置或开发者提交.
 
 增量构建按输入决定:Native Makefile 跟踪 build/common 脚本、两份所选 fragment、patch
 目录及受跟踪的 patch。输入变化后,已有 `bin/<arch>/vmlinux` 不会阻止重新构建。

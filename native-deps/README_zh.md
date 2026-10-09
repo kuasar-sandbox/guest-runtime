@@ -187,6 +187,8 @@ make help       # 列举目标
 
 构建耗时取决于主机、工具链及缓存状态,以上命令不承诺固定耗时。
 
+Workbench 任务向配方传入正整数 `KUASAR_BUILD_JOBS`. 内核编译使用该预算代替宿主 CPU 数量; Envd 即使设置了 `ENVD_GOFLAGS`, 也通过 `go build -p` 显式传入预算. EROFS 及其测试构建将它用作 `EROFS_BUILD_JOBS` 的默认值. CPU quota 本身不会改变 `nproc` 报告的 CPU 数量.
+
 ### 2.1 erofs(`make erofs`)
 
 `deps/build-erofs.sh`:解压 erofs-utils 到 `build/<arch>/src/erofs-utils/`(该 autotools
@@ -202,7 +204,7 @@ make help       # 列举目标
 - RPM devel 软件包不一定包含静态库。openEuler 24.03-LTS-SP4 profile 需要[外部 Runner provider](https://github.com/kuasar-sandbox/kuasar-sandbox/blob/d375effe12531b49f44368d33735c5b7b50b244c/ci/runner/README_zh.md#安装)及 §1.1 所述的匹配材料。仅安装 `libgcrypt-devel libgpg-error-devel` 不足以构建。
 - 两个输出 ELF 均不得含 `INTERP` 或 `NEEDED`。SHA 路径必须能在没有 host 库、配置、`/proc` 或 `/dev` 的空根目录运行；每个新目标/工具链都应验证与基线完全一致的镜像字节及 fsck/解压结果。
 - Libgcrypt 和 Libgpg-error 库适用 LGPL-2.1-or-later，源码发行包还包含特定文件的声明。保留现有 EROFS 文件许可证，包括 GPL-2.0 hashmap 代码。发布来源记录使用实际链接输入及匹配的软件包/源码 copyright、LICENSE/COPYING/NOTICE 文本（§1.1）；材料缺失时打包失败。须保留配方、有序补丁、原始源码归档、EROFS 对象及精确的目标库源码/构建配置，以便重建或重新链接；不能用合成测试材料替代发布材料。
-- `EROFS_BUILD_JOBS=2 make -j2 erofs` 限制编译并行度，默认值依次取 `JOBS`、2。
+- `EROFS_BUILD_JOBS=2 make -j2 erofs` 限制编译并行度, 默认值依次取 `KUASAR_BUILD_JOBS`, `JOBS`, 2.
 - host 构建依赖为 `autoconf automake libtool pkg-config make gcc g++ binutils patch python3`（Python 3.11 或更新版本；binutils 包括 `readelf`）。`make test` 覆盖 SHA 向量/失败路径、真实原版与候选镜像及解压、根目录调用、迁移和输入变更。原生二进制缓存命中不要求保留完整的 EROFS 源码树：SHA 测试会在需要时于临时目录准备经过校验的源码，不替换缓存工具或 stamp。仅构建内核的任务使用不依赖原生库的 `test-scripts` 目标。
 
 ### 2.2 vmlinux(`make vmlinux`)
@@ -211,8 +213,8 @@ make help       # 列举目标
 阶段(§3)。应用 `deps/linux-patches/*.patch` 后,把
 `deps/vmlinux/sandbox-common.config` 与 `sandbox-<arch>.config` 拼接成
 `arch/<kbuild_arch>/configs/sandbox_defconfig`,`make sandbox_defconfig` +
-`make olddefconfig`(解析依赖闭包)→ `make -j$(nproc) <target>` → 拷出
-`bin/<arch>/vmlinux`。
+`make olddefconfig`(解析依赖闭包)→ `make -j<jobs> <target>` → 拷出
+`bin/<arch>/vmlinux`. `jobs` 使用已设置的 `KUASAR_BUILD_JOBS`, 否则取 `nproc`.
 
 - `olddefconfig` 后校验 DAX 必需项及 arch 专属关键项；Kconfig 静默丢弃请求的关键项时
   构建立刻失败。

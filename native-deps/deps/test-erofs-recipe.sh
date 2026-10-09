@@ -185,7 +185,8 @@ gcc -c "$fixture/inputs/consumed.c" -o "$fixture/inputs/consumed.o"
 ar cr "$fixture/inputs/libconsumed.a" "$fixture/inputs/consumed.o"
 export CPPFLAGS="${CPPFLAGS:-} -include $fixture/inputs/consumed.h"
 export LIBS="${LIBS:-} $fixture/inputs/libconsumed.a"
-EROFS_BUILD_JOBS=2 bash "$script_dir/build-erofs.sh" > "$work/consumed-build.log" 2>&1 \
+EROFS_BUILD_JOBS="$(( ${KUASAR_BUILD_JOBS:-2} < 2 ? ${KUASAR_BUILD_JOBS:-2} : 2 ))" \
+    bash "$script_dir/build-erofs.sh" > "$work/consumed-build.log" 2>&1 \
     || { cat "$work/consumed-build.log"; die 'private dependency build failed'; }
 cp "$recipe_stamp" "$work/consumed-stamp"
 grep -Fq $'workspace\tinputs/consumed.h' "$recipe_stamp" || die 'consumed header missing from stamp'

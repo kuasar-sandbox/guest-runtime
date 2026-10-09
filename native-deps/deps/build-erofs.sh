@@ -27,7 +27,8 @@
 #
 # One .erofs-recipe v2 stamp covers both outputs, source/patch/recipe bytes,
 # flags/tools and actual compiler/link dependencies. EROFS_BUILD_JOBS defaults
-# to JOBS, then 2; changing job count does not invalidate the recipe.
+# to KUASAR_BUILD_JOBS, JOBS, then 2; changing job count does not invalidate
+# the recipe.
 
 set -euo pipefail
 
@@ -45,7 +46,7 @@ out_mkfs="$BINDIR/mkfs.erofs"
 out_fsck="$BINDIR/fsck.erofs"
 recipe_stamp="$BINDIR/.erofs-recipe"
 src_dir="$BUILD_DIR/src/erofs-utils"
-: "${EROFS_BUILD_JOBS:=${JOBS:-2}}"
+: "${EROFS_BUILD_JOBS:=${KUASAR_BUILD_JOBS-${JOBS:-2}}}"
 [[ "$EROFS_BUILD_JOBS" =~ ^[1-9][0-9]*$ ]] || die "EROFS_BUILD_JOBS must be a positive integer"
 cc="${CC:-gcc}"
 [ -z "$CROSS_PREFIX" ] || cc="${CROSS_PREFIX}gcc"

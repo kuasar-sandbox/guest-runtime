@@ -63,6 +63,19 @@ jobs:
         id: framework
         run: |
           echo "sha=$(git -C trusted/platform rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - name: Select verified Workbench images once
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 trusted/platform/ci/hosted/workbench.py select \
+            --framework-sha "${{ steps.framework.outputs.sha }}" --output workbench.json
+      - name: Upload Workbench selection
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: vmlinux-workbench-${{ github.run_id }}
+          path: workbench.json
+          if-no-files-found: error
+          retention-days: 1
       - name: Check environment GitHub CLI
         run: |
           gh --version
@@ -98,7 +111,7 @@ jobs:
     if: github.event.repository.visibility == 'public' && github.event.repository.full_name == github.repository
   build:
     needs: preflight
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 180
     permissions:
       contents: read
@@ -112,11 +125,11 @@ jobs:
           ref: ${{ needs.preflight.outputs.framework_sha }}
           path: trusted/platform
           persist-credentials: false
-      - name: Bootstrap native or cross build
-        run: |
-          profile=artifact-build
-          if [ "$TARGET_ARCH" = aarch64 ]; then profile=artifact-cross; fi
-          bash trusted/platform/ci/hosted/bootstrap.sh --profile "$profile"
+      - name: Download Workbench selection
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: vmlinux-workbench-${{ github.run_id }}
+          path: workbench-selection
       - name: Check out exact guest-runtime source
         id: checkout-guest-runtime
         continue-on-error: true
@@ -134,31 +147,28 @@ jobs:
           ref: ${{ needs.preflight.outputs.source_sha }}
           path: src/guest-runtime
           persist-credentials: false
-      - name: Attach job-local source cache
-        run: |
-          set -euo pipefail
-          mkdir -p src/guest-runtime/native-deps/build
-          ln -sfn "$KUASAR_TARBALL_CACHE" src/guest-runtime/native-deps/build/tarball
-      - name: Restore or build guest kernel
-        env:
-          KUASAR_WORKSPACE_ROOT: ${{ github.workspace }}/src
-        shell: bash
-        run: |
-          taskset -pc "$KUASAR_BUILD_CPUS" "$$" >/dev/null
-          trusted/platform/ci/native-cache/native-cache.sh restore-or-build vmlinux
-      - name: Validate native dependency scripts
-        run: make -C src/guest-runtime/native-deps test-scripts
-      - name: Package vmlinux release
-        working-directory: src/guest-runtime
-        env:
-          VERSION: ${{ needs.preflight.outputs.version }}
-        run: |
-          set -euo pipefail
-          [ "$(git rev-parse HEAD)" = "${{ needs.preflight.outputs.source_sha }}" ]
-          export SOURCE_DATE_EPOCH
-          SOURCE_DATE_EPOCH=$(git show -s --format=%ct "${{ needs.preflight.outputs.source_sha }}")
-          bash scripts/release.sh package vmlinux "$VERSION" "$TARGET_ARCH" \
-            release-bundle
+      - name: Build test and package vmlinux release
+        uses: ./trusted/platform/.github/actions/workbench
+        with:
+          selection: workbench-selection/workbench.json
+          sources: src
+          cache-coverage: release-vmlinux
+          outputs: guest-runtime/release-bundle
+          arch: ${{ matrix.arch }}
+          cpus: '2'
+          memory-gib: '8'
+          run: |
+            set -euo pipefail
+            export GOWORK=off
+            bash /inputs/release/ci/native-cache/native-cache.sh restore-or-build vmlinux
+            make -C guest-runtime/native-deps test-scripts
+            cd /src/guest-runtime
+            export VERSION='${{ needs.preflight.outputs.version }}'
+            [ "$(git rev-parse HEAD)" = "${{ needs.preflight.outputs.source_sha }}" ]
+            export SOURCE_DATE_EPOCH
+            SOURCE_DATE_EPOCH=$(git show -s --format=%ct "${{ needs.preflight.outputs.source_sha }}")
+            bash scripts/release.sh package vmlinux "$VERSION" "$TARGET_ARCH" release-bundle
+            bash scripts/release.sh validate vmlinux "$VERSION" "$TARGET_ARCH" release-bundle
       - name: Upload validated vmlinux bundle
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
@@ -170,9 +180,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        arch:
-          - x86_64
-          - aarch64
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
   publish:
     needs:
       - preflight
