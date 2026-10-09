@@ -16,7 +16,7 @@ X86 = ['CONFIG_SMP=y', 'CONFIG_NR_CPUS=4', 'CONFIG_X86_X2APIC=y']
 
 
 class ResolvedKernelConfigTests(unittest.TestCase):
-    def run_build(self, arch, config):
+    def run_build(self, arch, config, budget=None):
         with tempfile.TemporaryDirectory(prefix='vmlinux-config-') as directory:
             root = Path(directory)
             tools = root / 'tools'
@@ -31,6 +31,9 @@ class ResolvedKernelConfigTests(unittest.TestCase):
                 path = tools / name
                 path.write_text('#!/bin/sh\nexit 0\n')
                 path.chmod(0o755)
+            nproc = tools / 'nproc'
+            nproc.write_text('#!/bin/sh\nprintf "88\\n"\n')
+            nproc.chmod(0o755)
             make = tools / 'make'
             make.write_text(r'''#!/usr/bin/env python3
 import os
@@ -42,6 +45,7 @@ out.mkdir(parents=True, exist_ok=True)
 if 'sandbox_defconfig' in args:
     (out / '.config').write_text(os.environ['TEST_RESOLVED_CONFIG'])
 elif args[-1] in ('Image', 'vmlinux'):
+    assert '-j' + os.environ['TEST_EXPECTED_JOBS'] in args, args
     target = 'arch/arm64/boot/Image' if args[-1] == 'Image' else 'vmlinux'
     path = out / target
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -53,7 +57,11 @@ elif args[-1] in ('Image', 'vmlinux'):
                        LINUX_BUILD_SRC=str(source), LINUX_BUILD_OUT=str(output),
                        BINDIR=str(binary), BUILD_DIR=str(root / 'build'),
                        TEST_RESOLVED_CONFIG='\n'.join(config) + '\n',
+                       TEST_EXPECTED_JOBS=budget if budget is not None else '88',
                        PATH=str(tools) + os.pathsep + os.environ['PATH'])
+            env.pop('KUASAR_BUILD_JOBS', None)
+            if budget is not None:
+                env['KUASAR_BUILD_JOBS'] = budget
             result = subprocess.run(['bash', str(ROOT / 'build-vmlinux.sh')],
                                     env=env, capture_output=True, text=True, timeout=15)
             return result, (output / 'compiled').exists(), (binary / 'vmlinux').exists()
@@ -69,6 +77,21 @@ elif args[-1] in ('Image', 'vmlinux'):
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 self.assertTrue(compiled)
                 self.assertTrue(copied)
+
+    def test_task_budget_overrides_host_processor_count(self):
+        for arch, selected in (('arm64', COMMON + ARM), ('x86_64', COMMON + X86)):
+            with self.subTest(arch=arch):
+                result, compiled, copied = self.run_build(arch, selected, budget='4')
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertTrue(compiled and copied)
+
+    def test_invalid_task_budget_fails_before_compilation(self):
+        for budget in ('', '0', '-1', '1.5', 'unlimited'):
+            with self.subTest(budget=budget):
+                result, compiled, copied = self.run_build('x86_64', COMMON + X86, budget=budget)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn('KUASAR_BUILD_JOBS must be a positive integer', result.stderr)
+                self.assertFalse(compiled or copied)
 
     def test_missing_arm_dependency_fails_before_compilation(self):
         for missing in COMMON + ARM:

@@ -20,6 +20,7 @@
 #                         (i.e. $BUILD_DIR/../src/e2b-infra).
 #   TARBALL_CACHE         Optional shared tarball cache (default $BUILD_DIR/tarball).
 #   GO_ARCH               Go GOARCH for the target (amd64 | arm64).
+#   KUASAR_BUILD_JOBS      Positive task CPU budget, independent of ENVD_GOFLAGS.
 #
 # envd's go.mod pins a newer Go toolchain (e.g. `go 1.26.3`); with GOTOOLCHAIN=auto
 # the Go command fetches it on demand. That toolchain download requires the checksum
@@ -41,6 +42,11 @@ source "$script_dir/common.sh"
 : "${BINDIR:=$(pwd)/bin}"
 : "${ENVD_SRC:=$BUILD_DIR/../src/e2b-infra}"
 : "${GO_ARCH:=$(go env GOARCH 2>/dev/null || echo amd64)}"
+build_args=()
+if [ "${KUASAR_BUILD_JOBS+x}" ]; then
+    [[ "$KUASAR_BUILD_JOBS" =~ ^[1-9][0-9]*$ ]] || die "KUASAR_BUILD_JOBS must be a positive integer"
+    build_args+=(-p "$KUASAR_BUILD_JOBS")
+fi
 
 out_bin="$BINDIR/envd"
 if [ -x "$out_bin" ]; then
@@ -62,7 +68,7 @@ mkdir -p "$BINDIR"
     cd "$envd_dir"
     GOWORK=off GOOS=linux GOARCH="$GO_ARCH" CGO_ENABLED=0 \
         GOFLAGS="${ENVD_GOFLAGS:--mod=mod}" \
-        go build -trimpath -ldflags "-s -w" -o "$out_bin" .
+        go build "${build_args[@]}" -trimpath -ldflags "-s -w" -o "$out_bin" .
 )
 
 log "built $out_bin"

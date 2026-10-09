@@ -55,6 +55,7 @@ cat > "$work/tools/make" <<'TOOL'
 #!/usr/bin/env bash
 set -eu
 if [ "$1" = --version ]; then echo 'fixture make 1'; exit; fi
+printf '%s\n' "$*" >> "$TEST_EROFS_WORK/make.log"
 [ "$1" = -C ]
 mkdir -p "$2/.deps"
 printf 'fixture.o: %s/include/consumed.h\n' "$TEST_EROFS_WORK" > "$2/.deps/fixture.Po"
@@ -153,4 +154,16 @@ grep -Fq '/target/usr/lib/aarch64-linux-gnu/pkgconfig:/target/lib/aarch64-linux-
     || fail 'cross pkg-config did not isolate target search paths'
 TEST_CC_TARGET=aarch64 PKG_CONFIG_LIBDIR=/custom/pc PKG_CONFIG_SYSROOT_DIR=/custom run TARGET_ARCH=aarch64
 grep -Fq '|/custom/pc||/custom' "$work/pkg.log" || fail 'cross overrides lost'
+# The task quota must reach each actual make, even when nproc sees the host.
+unset EROFS_BUILD_JOBS
+rm -f "$work/native/bin/x86_64/fsck.erofs"
+: > "$work/make.log"
+KUASAR_BUILD_JOBS=3 run
+[ "$(wc -l < "$work/make.log")" -eq 3 ] || fail 'missing EROFS sub-build'
+if grep -v -- '-j3' "$work/make.log"; then fail 'task budget did not reach every EROFS make'; fi
+before="$(count)"
+KUASAR_BUILD_JOBS=1 run
+[ "$(count)" = "$before" ] || fail 'task budget invalidated binaries'
+if KUASAR_BUILD_JOBS=0 run > /dev/null 2>&1; then fail 'accepted invalid task budget'; fi
+grep -Fq 'EROFS_BUILD_JOBS must be a positive integer' "$work/run.log" || fail 'invalid budget lacked diagnostic'
 printf 'test-erofs: explicit static backend, input reuse/invalidation and cross metadata PASS\n'

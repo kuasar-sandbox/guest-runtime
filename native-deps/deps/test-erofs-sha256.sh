@@ -12,7 +12,7 @@ trap 'rm -rf "$work"' EXIT
 # tools or inflating the production cache with test-only compilation inputs.
 if [ ! -f "$src/lib/sha256.c" ] || [ ! -f "$src/config.h" ]; then
     if ! BUILD_DIR="$work/native" BINDIR="$work/bin" \
-        EROFS_BUILD_JOBS="${EROFS_BUILD_JOBS:-2}" \
+        EROFS_BUILD_JOBS="${EROFS_BUILD_JOBS:-${KUASAR_BUILD_JOBS:-2}}" \
         bash "$script_dir/build-erofs.sh" > "$work/source-build.log" 2>&1; then
         cat "$work/source-build.log" >&2
         die 'cannot prepare verified SHA test sources after a native cache hit'

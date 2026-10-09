@@ -44,6 +44,7 @@
 #   LINUX_PATCHES_DIR      Patch files. Default $(pwd)/deps/linux-patches.
 #   LINUX_BASE_TAG         git tag for the import baseline.
 #                          Default: linux-patches-base.
+#   KUASAR_BUILD_JOBS      Positive task CPU budget. Defaults to nproc.
 #
 # Build deps (build stage): bc, bison, flex, make, libelf headers,
 # libssl headers, pkg-config, and a (cross) gcc matching $CROSS_PREFIX.
@@ -211,7 +212,9 @@ do_patches_format() {
 }
 
 do_build() {
-    local common_frag arch_frag
+    local common_frag arch_frag build_jobs
+    build_jobs="${KUASAR_BUILD_JOBS-$(nproc)}"
+    [[ "$build_jobs" =~ ^[1-9][0-9]*$ ]] || die "KUASAR_BUILD_JOBS must be a positive integer"
     common_frag="$script_dir/vmlinux/sandbox-common.config"
     arch_frag="$script_dir/vmlinux/sandbox-$KERNEL_ARCH.config"
     [ -f "$common_frag" ] || die "config fragment not found: $common_frag"
@@ -269,8 +272,8 @@ do_build() {
             die "resolved $KERNEL_ARCH kernel config is missing $expected"
     done
 
-    log "make $kbuild_target -j$(nproc) (this takes ~5-10 minutes on first build)"
-    make "${make_args[@]}" -j"$(nproc)" "$kbuild_target"
+    log "make $kbuild_target -j$build_jobs"
+    make "${make_args[@]}" -j"$build_jobs" "$kbuild_target"
 
     local image_full="$out_obj/$image_subpath"
     [ -f "$image_full" ] || die "build finished but kernel image missing at $image_full"
