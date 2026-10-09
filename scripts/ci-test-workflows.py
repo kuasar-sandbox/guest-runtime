@@ -86,6 +86,13 @@ def check():
     assert "python3 trusted/guest-runtime/scripts/prepare-sandbox-init.py" in runtime["Verify and install the selected sandbox-init"]["run"]
     build = runtime["Build and test runtime image"]
     assert build["uses"] == "./trusted/platform/.github/actions/workbench"
+    assert build["with"]["outputs"].splitlines() == [
+        "guest-runtime/bin/${{ matrix.arch }}/flatten-ctl",
+        "guest-runtime/native-deps/bin/${{ matrix.arch }}/envd",
+        "guest-runtime/native-deps/bin/${{ matrix.arch }}/mkfs.erofs",
+        "guest-runtime/native-deps/bin/${{ matrix.arch }}/fsck.erofs",
+        "sandboxer/bin/${{ matrix.arch }}/sandbox-init",
+    ]
     for component in ("erofs", "envd"):
         assert "bash /inputs/release/ci/native-cache/native-cache.sh restore-or-build " + component in build["with"]["run"]
     assert "BUILD_MKFS_EROFS" in str(runtime)
@@ -94,6 +101,7 @@ def check():
     assert 'if [ "$TARGET_ARCH" = x86_64 ]; then make -C guest-runtime test; make -C guest-runtime vet; fi' in build["with"]["run"]
     package = runtime["Package runtime release"]
     assert package["uses"] == "./trusted/platform/.github/actions/workbench"
+    assert package["with"]["outputs"] == "guest-runtime/release-bundle"
     assert "make " not in package["with"]["run"]
     assert 'scripts/release.sh package runtime "$VERSION" "$TARGET_ARCH"' in package["with"]["run"]
     assert 'scripts/release.sh validate runtime "$VERSION" "$TARGET_ARCH"' in package["with"]["run"]
@@ -109,6 +117,7 @@ def check():
     assert readers["with"]["sources"] == "workbench-host-tools"
     assert readers["with"]["arch"] == "x86_64"
     assert readers["with"]["cache"] == "false"
+    assert readers["with"]["outputs"].splitlines() == ["bin/fsck.erofs", "bin/dump.erofs"]
     assert 'command -v fsck.erofs' in readers["with"]["run"]
     assert 'command -v dump.erofs' in readers["with"]["run"]
     assert 'src/guest-runtime' not in readers["with"]["run"]
@@ -120,6 +129,7 @@ def check():
     kernel = {s["name"]: s for s in workflows["release-vmlinux.yml"]["build"]["steps"]}
     kernel_build = kernel["Build test and package vmlinux release"]
     assert kernel_build["uses"] == "./trusted/platform/.github/actions/workbench"
+    assert kernel_build["with"]["outputs"] == "guest-runtime/release-bundle"
     assert "bash /inputs/release/ci/native-cache/native-cache.sh restore-or-build vmlinux" in kernel_build["with"]["run"]
     assert 'make -C guest-runtime/native-deps test-scripts' in kernel_build["with"]["run"]
     for command in ('package', 'validate'):

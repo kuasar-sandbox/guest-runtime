@@ -327,6 +327,12 @@ jobs:
         with:
           selection: workbench-selection/workbench.json
           sources: src
+          outputs: |
+            guest-runtime/bin/${{ matrix.arch }}/flatten-ctl
+            guest-runtime/native-deps/bin/${{ matrix.arch }}/envd
+            guest-runtime/native-deps/bin/${{ matrix.arch }}/mkfs.erofs
+            guest-runtime/native-deps/bin/${{ matrix.arch }}/fsck.erofs
+            sandboxer/bin/${{ matrix.arch }}/sandbox-init
           arch: ${{ matrix.arch }}
           cpus: '2'
           memory-gib: '8'
@@ -351,6 +357,7 @@ jobs:
         with:
           selection: workbench-selection/workbench.json
           sources: src
+          outputs: guest-runtime/release-bundle
           arch: ${{ matrix.arch }}
           cpus: '2'
           memory-gib: '8'
@@ -418,6 +425,9 @@ jobs:
         with:
           selection: workbench-selection/workbench.json
           sources: workbench-host-tools
+          outputs: |
+            bin/fsck.erofs
+            bin/dump.erofs
           arch: x86_64
           cache: 'false'
           cpus: '2'
