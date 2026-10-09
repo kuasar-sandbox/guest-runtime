@@ -59,7 +59,9 @@ Runtime 不将它新增为发行输入。独立 Kernel target 使用自己的 Na
 
 ## 构建前置
 
-构建使用环境提供的 Go，并继承 `GOROOT`、`GOTOOLCHAIN` 等工具链选择；发布自动化需要环境在 `PATH` 中提供支持 `api --slurp` 的 `gh`。项目不下载、替换或按固定二进制摘要认证这些环境工具。 EROFS 工具继续按项目源码、补丁及配方构建。
+本地构建使用环境提供的 Go, 继承 `GOROOT` 与 `GOTOOLCHAIN` 选择. Release 编排要求宿主 `PATH` 中已有支持 `api --slurp` 的 `gh`. EROFS 产品仍从项目选定的 source, patch 与 recipe 构建.
+
+CI 在受信 preflight 中一次选择已发布并验证的 Workbench, 将不可变镜像身份与精确 framework revision 传给构建 Job. Runtime 与 VMLinux 分别使用原生 `ubuntu-24.04` x86_64 和 `ubuntu-24.04-arm` aarch64 Runner. 编译, 普通测试和打包通过共享 Workbench action 执行, 使用 Runner 的 ordinary UID, 只读根文件系统, 移除 capabilities, 私有 `/src`, `/build`, `/work` 和显式 CPU 预算. 发布凭据留在宿主. 保留已有按架构声明的测试范围及独立硬件门禁; 原生 ARM 构建不代表 ARM KVM 覆盖. Runtime 发布直接使用已验证 Workbench 的 EROFS reader, 不在宿主编译 helper.
 
 构建 `sandbox-runtime.bundle` 需要**宿主架构**的 `mkfs.erofs` executable。在构建 Host 安装 `erofs-utils`,或设置:
 

@@ -75,6 +75,17 @@ jobs:
         id: framework
         run: |
           echo "sha=$(git -C trusted/platform rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - name: Select verified Workbench images once
+        run: |
+          python3 trusted/platform/ci/hosted/workbench.py select \
+            --framework-sha "${{ steps.framework.outputs.sha }}" --output workbench.json
+      - name: Upload Workbench selection
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: runtime-workbench-${{ github.run_id }}
+          path: workbench.json
+          if-no-files-found: error
+          retention-days: 1
       - name: Check environment GitHub CLI
         run: |
           gh --version
@@ -142,7 +153,7 @@ jobs:
     if: github.event.repository.visibility == 'public' && github.event.repository.full_name == github.repository
   build:
     needs: preflight
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 180
     permissions:
       contents: read
@@ -159,11 +170,11 @@ jobs:
           ref: ${{ needs.preflight.outputs.framework_sha }}
           path: trusted/platform
           persist-credentials: false
-      - name: Bootstrap native or cross build
-        run: |
-          profile=artifact-build
-          if [ "$TARGET_ARCH" = aarch64 ]; then profile=artifact-cross; fi
-          bash trusted/platform/ci/hosted/bootstrap.sh --profile "$profile"
+      - name: Download Workbench selection
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: runtime-workbench-${{ github.run_id }}
+          path: workbench-selection
       - name: Check out trusted build checks
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -305,30 +316,28 @@ jobs:
       - name: Verify and install the selected sandbox-init
         run: |
           set -euo pipefail
-          python3 src/guest-runtime/scripts/prepare-sandbox-init.py \
+          python3 trusted/guest-runtime/scripts/prepare-sandbox-init.py \
             --release-json sandboxer-release.json --directory selected-sandboxer \
             --version "$SANDBOXER_VERSION" --arch "$TARGET_ARCH" \
             --source-sha "$(git -C src/sandboxer rev-parse HEAD)" \
             --output "src/sandboxer/bin/$TARGET_ARCH/sandbox-init" \
-            --go-toolchain-output "$GITHUB_WORKSPACE/selected-sandboxer-go"
-      - name: Prepare native source caches
-        run: |
-          set -euo pipefail
-          mkdir -p src/guest-runtime/native-deps/build src/sandboxer/native-deps/build
-          ln -sfn "$KUASAR_TARBALL_CACHE" src/guest-runtime/native-deps/build/tarball
-          ln -sfn "$KUASAR_TARBALL_CACHE" src/sandboxer/native-deps/build/tarball
-      - name: Build runtime native inputs and retain their material sources
-        shell: bash
-        run: |
-          taskset -pc "$KUASAR_BUILD_CPUS" "$$" >/dev/null
-          make -C src/guest-runtime erofs envd
+            --go-toolchain-output "$GITHUB_WORKSPACE/src/selected-sandboxer-go"
       - name: Build and test runtime image
-        shell: bash
-        run: |
-          taskset -pc "$KUASAR_BUILD_CPUS" "$$" >/dev/null
-          set -euo pipefail
-          if [ "$TARGET_ARCH" = x86_64 ]; then make -C src/guest-runtime test; make -C src/guest-runtime vet; fi
-          make -C src/guest-runtime flatten-ctl sandbox-runtime BUILD_MKFS_EROFS="$(command -v mkfs.erofs)"
+        uses: ./trusted/platform/.github/actions/workbench
+        with:
+          selection: workbench-selection/workbench.json
+          sources: src
+          arch: ${{ matrix.arch }}
+          cpus: '2'
+          memory-gib: '8'
+          run: |
+            set -euo pipefail
+            export GOWORK=off
+            bash /inputs/release/ci/native-cache/native-cache.sh restore-or-build erofs
+            bash /inputs/release/ci/native-cache/native-cache.sh restore-or-build envd
+            if [ "$TARGET_ARCH" = x86_64 ]; then make -C guest-runtime test; make -C guest-runtime vet; fi
+            make -C guest-runtime flatten-ctl
+            make -C guest-runtime sandbox-runtime BUILD_MKFS_EROFS="/src/guest-runtime/native-deps/bin/$TARGET_ARCH/mkfs.erofs"
       - name: Check the released Runtime ABI
         run: |
           python3 trusted/guest-runtime/scripts/ci-check-runtime-abi.py \
@@ -338,17 +347,26 @@ jobs:
             --static src/guest-runtime/native-deps/bin/$TARGET_ARCH/fsck.erofs \
             src/sandboxer/bin/$TARGET_ARCH/sandbox-init
       - name: Package runtime release
-        working-directory: src/guest-runtime
-        env:
-          VERSION: ${{ needs.preflight.outputs.version }}
-          RELEASE_MATERIALS_GO_NOTICE_ROOT: ${{ github.workspace }}/selected-sandboxer-go
-        run: |
-          set -euo pipefail
-          [ "$(git rev-parse HEAD)" = "${{ needs.preflight.outputs.source_sha }}" ]
-          export SOURCE_DATE_EPOCH
-          SOURCE_DATE_EPOCH=$(git show -s --format=%ct "${{ needs.preflight.outputs.source_sha }}")
-          bash scripts/release.sh package runtime "$VERSION" "$TARGET_ARCH" \
-            release-bundle
+        uses: ./trusted/platform/.github/actions/workbench
+        with:
+          selection: workbench-selection/workbench.json
+          sources: src
+          arch: ${{ matrix.arch }}
+          cpus: '2'
+          memory-gib: '8'
+          run: |
+            set -euo pipefail
+            cd /src/guest-runtime
+            export GOWORK=off
+            export VERSION='${{ needs.preflight.outputs.version }}'
+            export ACCELERATOR_VERSION='${{ needs.preflight.outputs.accelerator_version }}'
+            export SANDBOXER_VERSION='${{ needs.preflight.outputs.sandboxer_version }}'
+            export RELEASE_MATERIALS_GO_NOTICE_ROOT=/src/selected-sandboxer-go
+            [ "$(git rev-parse HEAD)" = "${{ needs.preflight.outputs.source_sha }}" ]
+            export SOURCE_DATE_EPOCH
+            SOURCE_DATE_EPOCH=$(git show -s --format=%ct "${{ needs.preflight.outputs.source_sha }}")
+            bash scripts/release.sh package runtime "$VERSION" "$TARGET_ARCH" release-bundle
+            bash scripts/release.sh validate runtime "$VERSION" "$TARGET_ARCH" release-bundle
       - name: Upload validated runtime bundle
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
@@ -360,9 +378,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        arch:
-          - x86_64
-          - aarch64
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
   publish:
     needs:
       - preflight
@@ -385,7 +405,39 @@ jobs:
           persist-credentials: false
       - name: Bootstrap standard runner
         run: |
-          bash trusted/platform/ci/hosted/bootstrap.sh --profile runtime-publish
+          bash trusted/platform/ci/hosted/bootstrap.sh --profile release-control
+      - name: Download Workbench selection
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: runtime-workbench-${{ github.run_id }}
+          path: workbench-selection
+      - name: Prepare private reader output
+        run: mkdir workbench-host-tools
+      - name: Export verified Workbench Runtime readers
+        uses: ./trusted/platform/.github/actions/workbench
+        with:
+          selection: workbench-selection/workbench.json
+          sources: workbench-host-tools
+          arch: x86_64
+          cpus: '2'
+          memory-gib: '8'
+          run: |
+            set -euo pipefail
+            mkdir /src/bin
+            cp "$(command -v fsck.erofs)" "$(command -v dump.erofs)" /src/bin/
+      - name: Check and select exact Runtime readers
+        run: |
+          set -euo pipefail
+          for reader in fsck.erofs dump.erofs; do
+            dependencies=$(ldd "workbench-host-tools/bin/$reader")
+            [[ "$dependencies" != *'not found'* ]] || { echo "$dependencies" >&2; exit 1; }
+          done
+          fsck_help=$(workbench-host-tools/bin/fsck.erofs --help 2>&1 || true)
+          dump_help=$(workbench-host-tools/bin/dump.erofs --help 2>&1 || true)
+          grep -Fq -- --extract <<< "$fsck_help"
+          grep -Fq -- --path <<< "$dump_help"
+          grep -Fq -- --cat <<< "$dump_help"
+          echo "$GITHUB_WORKSPACE/workbench-host-tools/bin" >> "$GITHUB_PATH"
       - name: Check environment GitHub CLI
         run: |
           gh --version

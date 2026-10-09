@@ -66,7 +66,9 @@ actual SHAs when reporting a build or test result.
 
 ## Build prerequisites
 
-Builds use environment-provided Go and inherit its `GOROOT` and `GOTOOLCHAIN` selection. Release automation requires a working `gh` with `api --slurp` support on `PATH`; the project does not install, replace, or authenticate these environment tools against fixed binary digests. EROFS tools remain built from the project-selected sources, patches, and recipes.
+Local builds use environment-provided Go and inherit its `GOROOT` and `GOTOOLCHAIN` selection. Release orchestration requires a working host `gh` with `api --slurp` support on `PATH`. EROFS products remain built from the project-selected sources, patches, and recipes.
+
+CI selects a verified, published Workbench once in trusted preflight and passes that immutable image selection with the exact framework revision to the build jobs. Runtime and VMLinux use native `ubuntu-24.04` x86_64 and `ubuntu-24.04-arm` aarch64 runners. Compilation, ordinary tests, and packaging run through the shared Workbench action as the runner's ordinary UID, with a read-only root filesystem, dropped capabilities, private `/src`, `/build`, and `/work`, and an explicit CPU budget. Publisher credentials stay on the host. Existing architecture-specific test coverage and separate hardware gates still apply; a native ARM build does not imply ARM KVM coverage. Runtime publication uses the verified Workbench's EROFS readers without compiling host helpers.
 
 Building `sandbox-runtime.bundle` requires a **host-architecture** `mkfs.erofs` executable. Install `erofs-utils` on the build host or set:
 

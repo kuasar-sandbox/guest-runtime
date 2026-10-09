@@ -22,7 +22,7 @@ def check():
         jobs = yaml.safe_load(text)["jobs"]
         workflows[filename] = jobs
         for name, job in jobs.items():
-            assert job["runs-on"] == "ubuntu-latest", (filename, name)
+            assert job["runs-on"] == ("${{ matrix.runner }}" if name == "build" else "ubuntu-latest"), (filename, name)
             assert "github.event.repository.visibility == 'public'" in job["if"]
             assert "github.event.repository.full_name == github.repository" in job["if"]
             assert job["permissions"].get("contents", "read") == ("write" if name in ("publish", "reconcile", "delete") else "read")
@@ -32,17 +32,39 @@ def check():
                 if "actions/checkout@" in step.get("uses", ""):
                     assert step["with"]["persist-credentials"] is False
                 if "actions/upload-artifact@" in step.get("uses", ""):
-                    assert step["with"]["path"] == "src/guest-runtime/release-bundle"
-                    assert "matrix.arch" in step["with"]["name"]
+                    if name == "preflight":
+                        assert step["name"] == "Upload Workbench selection"
+                        assert step["with"]["path"] == "workbench.json"
+                        assert step["with"]["name"] == filename.removeprefix("release-").removesuffix(".yml") + "-workbench-${{ github.run_id }}"
+                    else:
+                        assert step["with"]["path"] == "src/guest-runtime/release-bundle"
+                        assert "matrix.arch" in step["with"]["name"]
                     assert step["with"]["retention-days"] == 1
                 if "run" in step:
                     subprocess.run(["bash", "-n"], input=step["run"], text=True, check=True)
+                if step.get("uses") == "./trusted/platform/.github/actions/workbench":
+                    assert "GH_TOKEN" not in step.get("env", {})
+                    assert "GITHUB_TOKEN" not in step.get("env", {})
+                    assert step["with"]["selection"] == "workbench-selection/workbench.json"
+                    assert step["with"]["cpus"] == '2' and step["with"]["memory-gib"] == '8'
+                    subprocess.run(["bash", "-n"], input=step["with"]["run"], text=True, check=True)
+                    if name == "build":
+                        assert step["with"]["sources"] == "src"
+                        assert step["with"]["arch"] == "${{ matrix.arch }}"
         for forbidden in ("self-hosted", "/var/cache/kuasar", "/var/lib/kuasar-ci", "goproxy.cn", "tsinghua.edu.cn", "GOTOOLCHAIN: local"):
             assert forbidden not in text, (filename, forbidden)
         if "build" in jobs:
-            assert jobs["build"]["strategy"] == {"fail-fast": False, "matrix": {"arch": ["x86_64", "aarch64"]}}
+            assert jobs["build"]["strategy"] == {"fail-fast": False, "matrix": {"include": [
+                {"arch": "x86_64", "runner": "ubuntu-24.04"},
+                {"arch": "aarch64", "runner": "ubuntu-24.04-arm"},
+            ]}}
             assert jobs["build"]["env"]["TARGET_ARCH"] == "${{ matrix.arch }}"
             assert jobs["publish"]["needs"] == ["preflight", "build"]
+            selection = [s for s in jobs['preflight']['steps'] if 'workbench.py select' in s.get('run', '')]
+            assert len(selection) == 1
+            assert '--framework-sha "${{ steps.framework.outputs.sha }}" --output workbench.json' in selection[0]['run']
+            assert text.count('workbench.py select') == 1
+            assert 'artifact-build' not in text and 'artifact-cross' not in text
             for stage in ("build", "publish"):
                 steps = {s["name"]: s for s in jobs[stage]["steps"]}
                 assert steps["Check out trusted platform tooling"]["with"]["ref"] == "${{ needs.preflight.outputs.framework_sha }}"
@@ -54,32 +76,53 @@ def check():
     assert pr["jobs"]["ci"]["uses"] == "kuasar-sandbox/kuasar-sandbox/.github/workflows/ci-entry.yml@main"
     runtime = {s["name"]: s for s in workflows["release-runtime.yml"]["build"]["steps"]}
     names = list(runtime)
-    assert names.index("Bootstrap native or cross build") < names.index("Check out exact guest-runtime source")
+    assert names.index("Download Workbench selection") < names.index("Check out exact guest-runtime source")
     assert runtime["Check out trusted build checks"]["with"]["ref"] == "${{ github.sha }}"
     for name in ("accelerator", "sandboxer"):
         checkouts = [s for s in runtime.values() if s.get("with", {}).get("repository") == "kuasar-sandbox/" + name]
         assert len(checkouts) == 2
         assert all(s["with"]["ref"] == "${{ needs.preflight.outputs." + name + "_sha }}" for s in checkouts)
     assert '--arch "$TARGET_ARCH"' in runtime["Verify and install the selected sandbox-init"]["run"]
-    native = runtime["Build runtime native inputs and retain their material sources"]
-    assert "make -C src/guest-runtime erofs envd" in [line.strip() for line in native["run"].splitlines()]
-    assert 'taskset -pc "$KUASAR_BUILD_CPUS" "$$"' in native["run"]
-    assert "ci/native-cache" not in native["run"]
+    assert "python3 trusted/guest-runtime/scripts/prepare-sandbox-init.py" in runtime["Verify and install the selected sandbox-init"]["run"]
+    build = runtime["Build and test runtime image"]
+    assert build["uses"] == "./trusted/platform/.github/actions/workbench"
+    for component in ("erofs", "envd"):
+        assert "bash /inputs/release/ci/native-cache/native-cache.sh restore-or-build " + component in build["with"]["run"]
     assert "BUILD_MKFS_EROFS" in str(runtime)
-    for goal in ("test", "vet", "flatten-ctl sandbox-runtime"):
-        assert f"make -C src/guest-runtime {goal}" in runtime["Build and test runtime image"]["run"]
+    for goal in ("test", "vet", "flatten-ctl", "sandbox-runtime"):
+        assert f"make -C guest-runtime {goal}" in build["with"]["run"]
+    assert 'if [ "$TARGET_ARCH" = x86_64 ]; then make -C guest-runtime test; make -C guest-runtime vet; fi' in build["with"]["run"]
+    package = runtime["Package runtime release"]
+    assert package["uses"] == "./trusted/platform/.github/actions/workbench"
+    assert "make " not in package["with"]["run"]
+    assert 'scripts/release.sh package runtime "$VERSION" "$TARGET_ARCH"' in package["with"]["run"]
+    assert 'scripts/release.sh validate runtime "$VERSION" "$TARGET_ARCH"' in package["with"]["run"]
+    assert 'RELEASE_MATERIALS_GO_NOTICE_ROOT=/src/selected-sandboxer-go' in package["with"]["run"]
     abi = runtime["Check the released Runtime ABI"]["run"]
     assert "trusted/guest-runtime/scripts/ci-check-runtime-abi.py" in abi and abi.count("--static ") == 4
     assert "src/sandboxer/bin/$TARGET_ARCH/sandbox-init" in abi
     assert names.index("Check the released Runtime ABI") < names.index("Package runtime release")
     publish = {s["name"]: s for s in workflows["release-runtime.yml"]["publish"]["steps"]}
+    assert '--profile release-control' in publish["Bootstrap standard runner"]["run"]
+    readers = publish["Export verified Workbench Runtime readers"]
+    assert readers["uses"] == "./trusted/platform/.github/actions/workbench"
+    assert readers["with"]["sources"] == "workbench-host-tools"
+    assert readers["with"]["arch"] == "x86_64"
+    assert 'command -v fsck.erofs' in readers["with"]["run"]
+    assert 'command -v dump.erofs' in readers["with"]["run"]
+    assert 'src/guest-runtime' not in readers["with"]["run"]
+    assert list(publish).index("Check and select exact Runtime readers") < list(publish).index("Assemble the two validated architecture archives")
     objects = publish["Fetch selected source objects for material validation"]
     assert objects["env"]["SOURCE_SHA"] == "${{ needs.preflight.outputs.source_sha }}"
     assert list(publish).index("Fetch selected source objects for material validation") < list(publish).index("Assemble the two validated architecture archives")
     check_publish_source_objects(objects["run"])
     kernel = {s["name"]: s for s in workflows["release-vmlinux.yml"]["build"]["steps"]}
-    assert "trusted/platform/ci/native-cache/native-cache.sh restore-or-build vmlinux" in kernel["Restore or build guest kernel"]["run"]
-    assert kernel["Validate native dependency scripts"]["run"] == "make -C src/guest-runtime/native-deps test-scripts"
+    kernel_build = kernel["Build test and package vmlinux release"]
+    assert kernel_build["uses"] == "./trusted/platform/.github/actions/workbench"
+    assert "bash /inputs/release/ci/native-cache/native-cache.sh restore-or-build vmlinux" in kernel_build["with"]["run"]
+    assert 'make -C guest-runtime/native-deps test-scripts' in kernel_build["with"]["run"]
+    for command in ('package', 'validate'):
+        assert f'scripts/release.sh {command} vmlinux "$VERSION" "$TARGET_ARCH"' in kernel_build["with"]["run"]
     print("guest workflows: public callers, dual target identity, source/material/ABI boundaries PASS")
 
 
