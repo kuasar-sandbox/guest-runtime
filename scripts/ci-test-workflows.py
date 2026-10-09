@@ -62,6 +62,7 @@ def check():
             assert jobs["publish"]["needs"] == ["preflight", "build"]
             selection = [s for s in jobs['preflight']['steps'] if 'workbench.py select' in s.get('run', '')]
             assert len(selection) == 1
+            assert selection[0]['env'] == {'GH_TOKEN': '${{ github.token }}'}
             assert '--framework-sha "${{ steps.framework.outputs.sha }}" --output workbench.json' in selection[0]['run']
             assert text.count('workbench.py select') == 1
             assert 'artifact-build' not in text and 'artifact-cross' not in text
