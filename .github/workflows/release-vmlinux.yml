@@ -150,6 +150,7 @@ jobs:
         with:
           selection: workbench-selection/workbench.json
           sources: src
+          cache-coverage: release-vmlinux
           outputs: guest-runtime/release-bundle
           arch: ${{ matrix.arch }}
           cpus: '2'

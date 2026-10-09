@@ -327,6 +327,7 @@ jobs:
         with:
           selection: workbench-selection/workbench.json
           sources: src
+          cache-coverage: release-runtime-build
           outputs: |
             guest-runtime/bin/${{ matrix.arch }}/flatten-ctl
             guest-runtime/native-deps/bin/${{ matrix.arch }}/envd
@@ -357,6 +358,7 @@ jobs:
         with:
           selection: workbench-selection/workbench.json
           sources: src
+          cache-coverage: release-runtime-package
           outputs: guest-runtime/release-bundle
           arch: ${{ matrix.arch }}
           cpus: '2'
