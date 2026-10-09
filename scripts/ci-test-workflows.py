@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Offline release/PR workflow and Runtime ABI migration contracts."""
 import importlib.util
+import hashlib
 import os
 from pathlib import Path
 import re
@@ -83,6 +84,12 @@ def check():
         checkouts = [s for s in runtime.values() if s.get("with", {}).get("repository") == "kuasar-sandbox/" + name]
         assert len(checkouts) == 2
         assert all(s["with"]["ref"] == "${{ needs.preflight.outputs." + name + "_sha }}" for s in checkouts)
+    freeze = runtime["Freeze clean source cache trust before installing verified assets"]
+    assert freeze["env"] == {"GH_TOKEN": "${{ github.token }}"}
+    assert names.index("Retry versioned sandboxer dependency checkout") < names.index(freeze["name"])
+    assert names.index(freeze["name"]) < names.index("Verify and install the selected sandbox-init")
+    assert names.index("Verify and install the selected sandbox-init") < names.index("Build test and package runtime image")
+    check_runtime_cache_scope(freeze["run"])
     assert '--arch "$TARGET_ARCH"' in runtime["Verify and install the selected sandbox-init"]["run"]
     assert "python3 trusted/guest-runtime/scripts/prepare-sandbox-init.py" in runtime["Verify and install the selected sandbox-init"]["run"]
     build = runtime["Build test and package runtime image"]
@@ -144,6 +151,42 @@ def check():
     for command in ('package', 'validate'):
         assert f'scripts/release.sh {command} vmlinux "$VERSION" "$TARGET_ARCH"' in kernel_build["with"]["run"]
     print("guest workflows: public callers, dual target identity, source/material/ABI boundaries PASS")
+
+
+def check_runtime_cache_scope(script):
+    """The workflow must freeze exactly the shared action's receipt and fail closed."""
+    program = script.split("python3 -B - <<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
+    with tempfile.TemporaryDirectory(prefix="runtime-cache-scope-") as directory:
+        root = Path(directory)
+        sources = root / "src"
+        sources.mkdir()
+        runner_temp = root / "runner-temp"
+        source_hash = hashlib.sha256(str(sources.resolve()).encode()).hexdigest()
+        expected = runner_temp / ("workbench-cache-scope-123-" + source_hash + ".json")
+
+        def invoke(command, **kwargs):
+            assert command[1:4] == ['-B', 'trusted/platform/ci/hosted/workbench.py', 'cache-scope']
+            assert command[4:] == ['--sources', sources, '--receipt', expected]
+            assert kwargs == {"check": True}
+            return subprocess.CompletedProcess(command, 0)
+
+        previous = Path.cwd()
+        try:
+            os.chdir(root)
+            with patch.dict(os.environ, {"RUNNER_TEMP": str(runner_temp), "GITHUB_RUN_ID": "123"}):
+                with patch.object(subprocess, "run", side_effect=invoke) as run:
+                    exec(compile(program, "release-runtime.yml cache scope", "exec"), {})
+                    run.assert_called_once()
+                with patch.object(subprocess, "run", side_effect=subprocess.CalledProcessError(1, "cache-scope")):
+                    try:
+                        exec(compile(program, "release-runtime.yml cache scope", "exec"), {})
+                    except subprocess.CalledProcessError:
+                        pass
+                    else:
+                        raise AssertionError("cache source admission failure was ignored")
+        finally:
+            os.chdir(previous)
+    print("Runtime cache: exact host receipt and failed admission propagation PASS")
 
 
 
