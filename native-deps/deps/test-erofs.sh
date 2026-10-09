@@ -9,6 +9,7 @@ work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 fail() { echo "test-erofs: $*" >&2; exit 1; }
 real_make="$(command -v make)"
+export TEST_EROFS_REAL_UNAME="$(command -v uname)"
 mkdir -p "$work/native/deps" "$work/tools" "$work/source" "$work/libs"
 cp "$script_dir"/{build-erofs.sh,common.sh,erofs-recipe.sh} "$work/native/deps/"
 cp "$script_dir/../Makefile" "$work/native/"
@@ -18,6 +19,16 @@ printf '# synthetic recipe fixture\n' > "$work/native/deps/erofs-patches/series"
 printf '/* consumed header */\n' > "$work/include/consumed.h"
 export TEST_EROFS_WORK="$work"
 for lib in gcrypt gpg-error uuid; do printf '%s v1\n' "$lib" > "$work/libs/lib$lib.a"; done
+# The synthetic compiler models an x86 host. Keep the native fixture and the
+# explicit aarch64 cross checks below identical on either real runner.
+cat > "$work/tools/uname" <<'TOOL'
+#!/usr/bin/env bash
+if [ "$#" -eq 1 ] && [ "$1" = -m ]; then
+    echo x86_64
+else
+    exec "$TEST_EROFS_REAL_UNAME" "$@"
+fi
+TOOL
 cat > "$work/tools/gcc" <<'TOOL'
 #!/usr/bin/env bash
 set -eu

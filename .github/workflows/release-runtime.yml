@@ -315,6 +315,19 @@ jobs:
           ref: ${{ needs.preflight.outputs.sandboxer_sha }}
           path: src/sandboxer
           persist-credentials: false
+      - name: Freeze clean source cache trust before installing verified assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 -B - <<'PY'
+          import hashlib, os, pathlib, subprocess, sys
+          sources = pathlib.Path('src').resolve()
+          source_hash = hashlib.sha256(str(sources).encode()).hexdigest()
+          receipt = pathlib.Path(os.environ['RUNNER_TEMP']) / (
+              'workbench-cache-scope-' + os.environ['GITHUB_RUN_ID'] + '-' + source_hash + '.json')
+          subprocess.run([sys.executable, '-B', 'trusted/platform/ci/hosted/workbench.py', 'cache-scope',
+                          '--sources', sources, '--receipt', receipt], check=True)
+          PY
       - name: Verify and install the selected sandbox-init
         run: |
           set -euo pipefail
