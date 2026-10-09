@@ -108,6 +108,7 @@ def check():
     assert readers["uses"] == "./trusted/platform/.github/actions/workbench"
     assert readers["with"]["sources"] == "workbench-host-tools"
     assert readers["with"]["arch"] == "x86_64"
+    assert readers["with"]["cache"] == "false"
     assert 'command -v fsck.erofs' in readers["with"]["run"]
     assert 'command -v dump.erofs' in readers["with"]["run"]
     assert 'src/guest-runtime' not in readers["with"]["run"]

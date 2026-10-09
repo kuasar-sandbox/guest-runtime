@@ -419,6 +419,7 @@ jobs:
           selection: workbench-selection/workbench.json
           sources: workbench-host-tools
           arch: x86_64
+          cache: 'false'
           cpus: '2'
           memory-gib: '8'
           run: |
