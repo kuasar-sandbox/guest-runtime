@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """Exercise build-vmlinux's resolved-config guard without downloading a kernel."""
 import os
+import io
 import shutil
 from pathlib import Path
 import subprocess
 import tempfile
+import tarfile
 import unittest
 
 ROOT = Path(__file__).resolve().parent
@@ -16,6 +18,56 @@ X86 = ['CONFIG_SMP=y', 'CONFIG_NR_CPUS=4', 'CONFIG_X86_X2APIC=y']
 
 
 class ResolvedKernelConfigTests(unittest.TestCase):
+    def test_synthetic_source_commits_have_stable_scoped_timestamps(self):
+        with tempfile.TemporaryDirectory(prefix='vmlinux-source-dates-') as directory:
+            root = Path(directory)
+            archive = root / 'kernel.tar.gz'
+            with tarfile.open(archive, 'w:gz') as output:
+                member = tarfile.TarInfo('linux/COPYING')
+                content = b'one\n'
+                member.size = len(content)
+                output.addfile(member, io.BytesIO(content))
+            patches = root / 'patches'
+            patches.mkdir()
+            (patches / '0001-fixture.patch').write_text('''From: Fixture <fixture@example.test>
+Date: Thu, 1 Jan 1970 00:02:03 +0000
+Subject: [PATCH] native source fixture
+
+diff --git a/COPYING b/COPYING
+--- a/COPYING
++++ b/COPYING
+@@ -1 +1 @@
+-one
++two
+''')
+            commits = []
+            for index in range(3):
+                source = root / str(index) / 'source'
+                env = dict(os.environ, LINUX_TARBALL=str(archive), LINUX_TARBALL_SHA256='',
+                           LINUX_BUILD_SRC=str(source), BUILD_DIR=str(root / str(index) / 'build'),
+                           TARBALL_CACHE=str(root / str(index) / 'tarballs'),
+                           LINUX_PATCHES_DIR=str(patches), GIT_CONFIG_NOSYSTEM='1',
+                           GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_COUNT='1',
+                           GIT_CONFIG_KEY_0='commit.gpgsign', GIT_CONFIG_VALUE_0='false')
+                for name in ('GIT_AUTHOR_DATE', 'GIT_COMMITTER_DATE', 'SOURCE_DATE_EPOCH'):
+                    env.pop(name, None)
+                if index == 2:
+                    env.update(GIT_AUTHOR_DATE='@123 +0000', GIT_COMMITTER_DATE='@456 +0000')
+                for stage in ('fetch', 'patches-apply'):
+                    result = subprocess.run(['bash', str(ROOT / 'build-vmlinux.sh')],
+                                            env=dict(env, STAGE=stage), text=True,
+                                            capture_output=True, timeout=15)
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    dates = subprocess.check_output(['git', '-C', str(source), 'show',
+                                                     '-s', '--format=%at %ct', 'HEAD'], text=True).strip()
+                    author = 123 if stage == 'patches-apply' or index == 2 else 0
+                    committer = 456 if index == 2 else 0
+                    self.assertEqual(dates, f'{author} {committer}')
+                commits.append(subprocess.check_output(['git', '-C', str(source), 'rev-parse', 'HEAD'],
+                                                       text=True).strip())
+            self.assertEqual(commits[0], commits[1])
+            self.assertNotEqual(commits[0], commits[2])
+
     def run_build(self, arch, config, budget=None):
         with tempfile.TemporaryDirectory(prefix='vmlinux-config-') as directory:
             root = Path(directory)

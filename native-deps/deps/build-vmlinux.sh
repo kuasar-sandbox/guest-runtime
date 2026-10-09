@@ -98,7 +98,11 @@ do_fetch() {
     git -C "$src_dir" init -q
     printf '*.o\n*.ko\n*.cmd\n.tmp_versions/\n' >> "$src_dir/.git/info/exclude"
     git -C "$src_dir" -c user.name=deps -c user.email=deps@local add -A
-    git -C "$src_dir" -c user.name=deps -c user.email=deps@local \
+    # Synthetic source commits can enter CONFIG_LOCALVERSION_AUTO. Keep their
+    # timestamps stable without changing the kernel configuration or caller Git.
+    GIT_AUTHOR_DATE="${GIT_AUTHOR_DATE-@${SOURCE_DATE_EPOCH:-0} +0000}" \
+    GIT_COMMITTER_DATE="${GIT_COMMITTER_DATE-@${SOURCE_DATE_EPOCH:-0} +0000}" \
+        git -C "$src_dir" -c user.name=deps -c user.email=deps@local \
         commit -q -m "import $(basename "$tarball")"
     git -C "$src_dir" tag "$LINUX_BASE_TAG"
 }
@@ -127,7 +131,8 @@ do_patches_apply() {
 
     if [ "$base" = "$head" ]; then
         log "applying ${#patches[@]} patch(es) from $LINUX_PATCHES_DIR"
-        git -C "$src_dir" -c user.name=deps -c user.email=deps@local am "${patches[@]}"
+        GIT_COMMITTER_DATE="${GIT_COMMITTER_DATE-@${SOURCE_DATE_EPOCH:-0} +0000}" \
+            git -C "$src_dir" -c user.name=deps -c user.email=deps@local am "${patches[@]}"
         return 0
     fi
 

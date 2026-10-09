@@ -80,6 +80,8 @@ build         Concatenate sandbox-common.config + sandbox-<arch>.config into
 
 `jobs` uses the positive integer `KUASAR_BUILD_JOBS` supplied by the task. Without an explicit task budget it defaults to `nproc`; a container CPU quota does not by itself constrain that value.
 
+Synthetic source-import author/committer timestamps and patch-application committer timestamps default to `SOURCE_DATE_EPOCH` (zero when unset). Explicit Git date overrides and patch author dates are preserved. These defaults apply only to the recipe's Git subprocesses, keeping SCM-derived kernel version strings reproducible without changing the kernel configuration or developer commits.
+
 Incrementality is input-aware: the native Makefile tracks the build/common scripts, both selected fragments, the patch directory and tracked patches. An existing output alone does not suppress a rebuild after those inputs change. Every explicit `linux-build` re-resolves configuration; Kbuild compilation remains incremental. Removing the output or cleaning before `make vmlinux` forces regeneration.
 
 **Patch development:** inside native-deps, `make linux-fetch` imports the source and creates `linux-patches-base`; edit `build/src/linux/` and commit; run `make linux-patches-format` to export commits into `deps/linux-patches/*.patch`; then run `make vmlinux` to apply/build. See [the native-build guide](../native-deps/README.md) §3 for idempotence and sanity rules. Patches are architecture-neutral and shared by x86_64 and arm64. Preserve unformatted work rather than resetting it merely to make a build proceed.
