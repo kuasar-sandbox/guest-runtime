@@ -43,6 +43,7 @@ jobs:
       actions: read
       contents: read
     outputs:
+      preview_manifest_digest: ${{ steps.request.outputs.preview_manifest_digest }}
       accelerator_version: ${{ steps.request.outputs.accelerator_version }}
       sandboxer_version: ${{ steps.request.outputs.sandboxer_version }}
       source_ref: ${{ steps.request.outputs.source_ref }}
@@ -81,20 +82,13 @@ jobs:
         run: |
           python3 trusted/platform/ci/hosted/workbench.py select \
             --framework-sha "${{ steps.framework.outputs.sha }}" --output workbench.json
-      - name: Upload Workbench selection
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        with:
-          name: runtime-workbench-${{ github.run_id }}
-          path: workbench.json
-          if-no-files-found: error
-          retention-days: 1
       - name: Check environment GitHub CLI
         run: |
           gh --version
           gh_help="$(gh api --help)"
           [[ "$gh_help" == *--slurp* ]] || { echo "environment gh must support api --slurp" >&2; exit 1; }
       - name: Validate hosted workflow contracts
-        run: python3 scripts/ci-test-workflows.py
+        run: python3 scripts/ci-test-workflows.py trusted/platform
       - name: Validate release request
         id: request
         env:
@@ -104,6 +98,7 @@ jobs:
           SOURCE_SHA: ${{ inputs.source_sha }}
           AGGREGATE_VERSION: ${{ inputs.aggregate_version }}
           AGGREGATE_SHA: ${{ inputs.aggregate_sha }}
+          PREVIEW_EVIDENCE_OUTPUT: preview-evidence.json
           VERSION: ${{ inputs.version }}
           SANDBOXER_VERSION: ${{ inputs.sandboxer_version }}
           TARGET_ARCH: all
@@ -152,6 +147,31 @@ jobs:
           release=$(gh api "repos/$repository/releases/tags/$version")
           jq -e --arg tag "$version" --arg sha "$sha" '.tag_name == $tag and .target_commitish == $sha and .draft == false' <<< "$release" >/dev/null
           echo "sandboxer_sha=$sha" >> "$GITHUB_OUTPUT"
+      - name: Freeze admitted source and selected dependency tags
+        env:
+          SOURCE_REF: ${{ steps.request.outputs.source_ref }}
+          SOURCE_SHA: ${{ steps.request.outputs.source_sha }}
+          ACCELERATOR_TAG: ${{ steps.request.outputs.accelerator_version }}
+          ACCELERATOR_SHA: ${{ steps.dependencies.outputs.accelerator_sha }}
+          SANDBOXER_TAG: ${{ steps.request.outputs.sandboxer_version }}
+          SANDBOXER_SHA: ${{ steps.dependencies.outputs.sandboxer_sha }}
+        run: |
+          set -euo pipefail
+          dependencies=()
+          dependencies+=(--dependency accelerator "$ACCELERATOR_TAG" "$ACCELERATOR_SHA")
+          dependencies+=(--dependency sandboxer "$SANDBOXER_TAG" "$SANDBOXER_SHA")
+          python3 -B trusted/platform/release/producer-inputs.py freeze runtime "$SOURCE_REF" "$SOURCE_SHA" producer-inputs.tar "${dependencies[@]}"
+      - name: Upload Workbench selection
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: runtime-workbench-${{ github.run_id }}
+          path: |
+            workbench.json
+            producer-inputs.tar
+            preview-evidence.json
+          if-no-files-found: error
+          retention-days: 1
+
     if: github.event.repository.visibility == 'public' && github.event.repository.full_name == github.repository
   build:
     needs: preflight
@@ -264,57 +284,10 @@ jobs:
               sleep "$delay"
             done
           done
-      - name: Check out exact guest-runtime source
-        id: checkout-guest-runtime
-        continue-on-error: true
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          repository: kuasar-sandbox/guest-runtime
-          ref: ${{ needs.preflight.outputs.source_sha }}
-          path: src/guest-runtime
-          persist-credentials: false
-      - name: Retry exact guest-runtime source checkout
-        if: steps.checkout-guest-runtime.outcome == 'failure'
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          repository: kuasar-sandbox/guest-runtime
-          ref: ${{ needs.preflight.outputs.source_sha }}
-          path: src/guest-runtime
-          persist-credentials: false
-      - name: Check out accelerator dependency
-        id: checkout-accelerator
-        continue-on-error: true
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          repository: kuasar-sandbox/accelerator
-          ref: ${{ needs.preflight.outputs.accelerator_sha }}
-          path: src/accelerator
-          persist-credentials: false
-      - name: Retry accelerator dependency checkout
-        if: steps.checkout-accelerator.outcome == 'failure'
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          repository: kuasar-sandbox/accelerator
-          ref: ${{ needs.preflight.outputs.accelerator_sha }}
-          path: src/accelerator
-          persist-credentials: false
-      - name: Check out versioned sandboxer dependency
-        id: checkout-sandboxer
-        continue-on-error: true
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          repository: kuasar-sandbox/sandboxer
-          ref: ${{ needs.preflight.outputs.sandboxer_sha }}
-          path: src/sandboxer
-          persist-credentials: false
-      - name: Retry versioned sandboxer dependency checkout
-        if: steps.checkout-sandboxer.outcome == 'failure'
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          repository: kuasar-sandbox/sandboxer
-          ref: ${{ needs.preflight.outputs.sandboxer_sha }}
-          path: src/sandboxer
-          persist-credentials: false
+      - name: Restore fixed producer inputs
+        env:
+          SOURCE_SHA: ${{ needs.preflight.outputs.source_sha }}
+        run: python3 -B trusted/platform/release/producer-inputs.py restore workbench-selection/producer-inputs.tar runtime "$SOURCE_SHA" src --dependency accelerator "${{ needs.preflight.outputs.accelerator_version }}" "${{ needs.preflight.outputs.accelerator_sha }}" --dependency sandboxer "${{ needs.preflight.outputs.sandboxer_version }}" "${{ needs.preflight.outputs.sandboxer_sha }}"
       - name: Freeze clean source cache trust before installing verified assets
         env:
           GH_TOKEN: ${{ github.token }}
@@ -470,18 +443,14 @@ jobs:
         with:
           name: runtime-release-${{ needs.preflight.outputs.version }}-aarch64-${{ github.run_id }}
           path: staged/aarch64
-      - name: Fetch selected source objects for material validation
+      - name: Restore selected source objects for material validation
         env:
           SOURCE_SHA: ${{ needs.preflight.outputs.source_sha }}
         run: |
           set -euo pipefail
-          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] \
-            || { echo "invalid selected source commit" >&2; exit 1; }
-          # Preserve the trusted publisher checkout; only immutable objects are
-          # needed to validate source-bound downstream patch material.
-          if ! git cat-file -e "$SOURCE_SHA^{commit}" 2>/dev/null; then
-            git fetch --no-tags --depth=1 origin "$SOURCE_SHA"
-          fi
+          python3 -B trusted/platform/release/producer-inputs.py restore workbench-selection/producer-inputs.tar runtime "$SOURCE_SHA" publisher-inputs --dependency accelerator "${{ needs.preflight.outputs.accelerator_version }}" "${{ needs.preflight.outputs.accelerator_sha }}" --dependency sandboxer "${{ needs.preflight.outputs.sandboxer_version }}" "${{ needs.preflight.outputs.sandboxer_sha }}"
+          # Import only the already admitted run input into the trusted validator.
+          git -c core.hooksPath=/dev/null fetch --no-tags ./publisher-inputs/guest-runtime HEAD
           git cat-file -e "$SOURCE_SHA^{commit}"
       - name: Assemble the two validated architecture archives
         env:
@@ -501,6 +470,8 @@ jobs:
           SOURCE_SHA: ${{ needs.preflight.outputs.source_sha }}
           AGGREGATE_VERSION: ${{ inputs.aggregate_version }}
           AGGREGATE_SHA: ${{ inputs.aggregate_sha }}
+          PREVIEW_EVIDENCE_FILE: workbench-selection/preview-evidence.json
+          PREVIEW_EVIDENCE_DIGEST: ${{ needs.preflight.outputs.preview_manifest_digest }}
           RELEASE_DEPENDENCIES: accelerator=${{ needs.preflight.outputs.accelerator_version }},sandboxer=${{ needs.preflight.outputs.sandboxer_version }}
         run: |
           set -euo pipefail
