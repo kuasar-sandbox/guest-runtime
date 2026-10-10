@@ -722,23 +722,6 @@ hash,或复现 manifest key。单元测试覆盖确定性转换;`verify` 子命�
 (128 字节)、扫描 ZIP 尾部并解析单个 stored entry。manifest 路径可能触发网络/
 chunk 拉取,不能保证普适的亚毫秒延迟。
 
-## 7. See Also
-
-- [accelerator/docs/manifest_zh.md](https://github.com/kuasar-sandbox/accelerator/blob/main/docs/manifest_zh.md):
-  将镜像 ingest 进内容寻址存储,chunk dedup 跨镜像共享重复内容。
-- [宿主镜像默认配置合并](https://github.com/kuasar-sandbox/sandboxer/blob/main/pkg/sandbox/imageconf.go):
-  启动时使用内嵌 OCI runtime config。
-- [sandboxer/docs/sandbox_zh.md](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/sandbox_zh.md) `boot.root.base`:
-  选择展平镜像作为只读 base。
-- [Native 构建指南](../native-deps/README_zh.md):在仓库根目录用
-  `make -C native-deps erofs` 构建 mkfs.erofs,用 `make flatten-ctl` 构建 CLI;
-  CLI 按显式环境覆盖、同目录可执行文件、PATH 的顺序定位 mkfs.erofs。
-- [系统总览](https://github.com/kuasar-sandbox/kuasar-sandbox/blob/main/docs/kuasar-sandbox_zh.md) §2.2 / §3.1:
-  展平在系统中的位置和目标。
-
-
-Image 打包使用 `accelerator/pkg/tailzip` 分离 EROFS payload 与配置后缀，再写入 tarstream envelope。声明的 payload commitment 覆盖 EROFS prefix，后缀使用独立的 metadata commitment。逻辑镜像字节与确定性配置 ZIP 保持不变，已有工件按原有声明身份读取。
-
 ## 7. 判断工作负载是否需要适配
 
 从目标节点原生架构的 digest 固定镜像开始，验证真实入口、用户、可写路径和
@@ -758,3 +741,22 @@ init，[所选 guest kernel](vmlinux_zh.md) 提供内核能力；OCI 镜像携�
 启动失败时先区分镜像文件/权限与 kernel 能力缺失，再调整启动策略。保留原镜像
 digest 与日志，通过 owner kill 测试沙箱，引用核查后才退役工件。flatten 成功
 不是工作负载兼容性认证。
+
+<a id="7-see-also"></a>
+
+## 8. See Also
+
+- [accelerator/docs/manifest_zh.md](https://github.com/kuasar-sandbox/accelerator/blob/main/docs/manifest_zh.md):
+  将镜像 ingest 进内容寻址存储,chunk dedup 跨镜像共享重复内容。
+- [宿主镜像默认配置合并](https://github.com/kuasar-sandbox/sandboxer/blob/main/pkg/sandbox/imageconf.go):
+  启动时使用内嵌 OCI runtime config。
+- [sandboxer/docs/sandbox_zh.md](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/sandbox_zh.md) `boot.root.base`:
+  选择展平镜像作为只读 base。
+- [Native 构建指南](../native-deps/README_zh.md):在仓库根目录用
+  `make -C native-deps erofs` 构建 mkfs.erofs,用 `make flatten-ctl` 构建 CLI;
+  CLI 按显式环境覆盖、同目录可执行文件、PATH 的顺序定位 mkfs.erofs。
+- [系统总览](https://github.com/kuasar-sandbox/kuasar-sandbox/blob/main/docs/kuasar-sandbox_zh.md) §2.2 / §3.1:
+  展平在系统中的位置和目标。
+
+
+Image 打包使用 `accelerator/pkg/tailzip` 分离 EROFS payload 与配置后缀，再写入 tarstream envelope。声明的 payload commitment 覆盖 EROFS prefix，后缀使用独立的 metadata commitment。逻辑镜像字节与确定性配置 ZIP 保持不变，已有工件按原有声明身份读取。

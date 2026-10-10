@@ -570,17 +570,6 @@ Check determinism by exporting an immutable input twice with the same configurat
 
 `flatten-ctl info` does not decompress or load the full EROFS filesystem. It reads the superblock (128 bytes), scans the ZIP tail and decodes the single stored entry through the relevant payload reader. Manifest input can require network/chunk fetches, so latency is not universally sub-millisecond.
 
-## 7. See also
-
-- [accelerator/docs/manifest.md](https://github.com/kuasar-sandbox/accelerator/blob/main/docs/manifest.md): ingest the image into content-addressed storage; chunk deduplication shares repeated content across images.
-- [host image-default merging](https://github.com/kuasar-sandbox/sandboxer/blob/main/pkg/sandbox/imageconf.go): how startup uses the embedded OCI runtime configuration.
-- [sandboxer/docs/sandbox.md](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/sandbox.md) `boot.root.base`: select a flattened image as the read-only base.
-- [Native-build guide](../native-deps/README.md): build mkfs.erofs with `make -C native-deps erofs`; build the CLI with `make flatten-ctl`. The CLI resolves mkfs.erofs through the explicit environment override, sibling executable or PATH.
-- [Project system overview](https://github.com/kuasar-sandbox/kuasar-sandbox/blob/main/docs/kuasar-sandbox.md) §2.2 / §3.1: flattening's role and goals.
-
-
-Image packing uses `accelerator/pkg/tailzip` to split the EROFS payload and configuration suffix before writing the tarstream envelope. The declared payload commitment covers the EROFS prefix; the suffix has its own metadata commitment. The logical image bytes and deterministic configuration ZIP remain unchanged, while existing artifacts are read with their original declared identities.
-
 ## 7. Decide whether your workload needs adaptation
 
 Start with a digest-pinned image for the destination's native architecture. Test
@@ -603,3 +592,16 @@ distinguish missing image files/permissions from missing kernel support before
 changing launch policy. Keep the original image digest and logs; kill the test
 sandbox through its owner and retire its artifacts only after reference review.
 Do not interpret successful flattening as workload compatibility certification.
+
+<a id="7-see-also"></a>
+
+## 8. See also
+
+- [accelerator/docs/manifest.md](https://github.com/kuasar-sandbox/accelerator/blob/main/docs/manifest.md): ingest the image into content-addressed storage; chunk deduplication shares repeated content across images.
+- [host image-default merging](https://github.com/kuasar-sandbox/sandboxer/blob/main/pkg/sandbox/imageconf.go): how startup uses the embedded OCI runtime configuration.
+- [sandboxer/docs/sandbox.md](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/sandbox.md) `boot.root.base`: select a flattened image as the read-only base.
+- [Native-build guide](../native-deps/README.md): build mkfs.erofs with `make -C native-deps erofs`; build the CLI with `make flatten-ctl`. The CLI resolves mkfs.erofs through the explicit environment override, sibling executable or PATH.
+- [Project system overview](https://github.com/kuasar-sandbox/kuasar-sandbox/blob/main/docs/kuasar-sandbox.md) §2.2 / §3.1: flattening's role and goals.
+
+
+Image packing uses `accelerator/pkg/tailzip` to split the EROFS payload and configuration suffix before writing the tarstream envelope. The declared payload commitment covers the EROFS prefix; the suffix has its own metadata commitment. The logical image bytes and deterministic configuration ZIP remain unchanged, while existing artifacts are read with their original declared identities.
