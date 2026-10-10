@@ -2,6 +2,9 @@
 
 set -euo pipefail
 
+# Archive fixtures target x86_64 even when this gate runs on an ARM host.
+# Validators run natively; payload fixtures are inspected, never executed.
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
@@ -348,8 +351,8 @@ install -m 0755 "$TMP/tool" "$TMP/sandboxer/bin/x86_64/sandbox-init"
 install -m 0755 "$TMP/tool" "$fixture_root/native-deps/bin/x86_64/envd"
 printf 'runtime bundle\n' > "$fixture_root/bin/x86_64/sandbox-runtime.bundle"
 # Native fixture headers are inspected; their programs are never executed.
-install -m 0755 /bin/true "$fixture_root/native-deps/bin/x86_64/mkfs.erofs"
-install -m 0644 /bin/true "$fixture_root/native-deps/bin/x86_64/vmlinux"
+install -m 0755 "$TMP/tool" "$fixture_root/native-deps/bin/x86_64/mkfs.erofs"
+install -m 0644 "$TMP/tool" "$fixture_root/native-deps/bin/x86_64/vmlinux"
 printf 'fixture sandboxer license\n' > "$TMP/sandboxer/LICENSE"
 printf 'fixture accelerator license\n' > "$TMP/accelerator/LICENSE"
 for dependency in accelerator sandboxer; do
@@ -419,9 +422,9 @@ esac
 EOF
 chmod 0755 "$TMP/release-build-bin/dpkg-query" "$TMP/release-build-bin/rpm"
 # Build matching synthetic payloads once before exercising package/validate.
-(cd "$fixture_root" && GOWORK=off CGO_ENABLED=0 go build -trimpath -buildvcs=true \
+(cd "$fixture_root" && GOWORK=off CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -buildvcs=true \
   -o bin/x86_64/flatten-ctl ./cmd/flatten-ctl)
-(cd "$TMP/sandboxer" && GOWORK=off CGO_ENABLED=0 go build -trimpath -buildvcs=true \
+(cd "$TMP/sandboxer" && GOWORK=off CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -buildvcs=true \
   -o bin/x86_64/sandbox-init ./cmd/sandbox-init)
 mkdir -p "$fixture_root/native-deps/build/src/e2b-infra/packages"
 cp -a "$TMP/src" "$fixture_root/native-deps/build/src/e2b-infra/packages/envd"
@@ -741,12 +744,12 @@ for target in darwin/amd64 linux/arm64; do
   (cd "$TMP/target-source" && GOWORK=off CGO_ENABLED=0 GOOS="${target%/*}" GOARCH="${target#*/}" \
     go build -buildvcs=true -o "$TMP/target-${target//\//-}" ./cmd/flatten-ctl)
 done
-(cd "$TMP/target-source" && GOWORK=off CGO_ENABLED=0 \
+(cd "$TMP/target-source" && GOWORK=off CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
   go build -buildvcs=true -o "$TMP/other-main" ./cmd/other-tool)
-(cd "$TMP/target-source" && GOWORK=off CGO_ENABLED=0 \
+(cd "$TMP/target-source" && GOWORK=off CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
   go build -buildvcs=false -o "$TMP/unstamped" ./cmd/flatten-ctl)
 printf '// fixture dirty source\n' >> "$TMP/target-source/cmd/flatten-ctl/main.go"
-(cd "$TMP/target-source" && GOWORK=off CGO_ENABLED=0 \
+(cd "$TMP/target-source" && GOWORK=off CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
   go build -buildvcs=true -o "$TMP/dirty-source" ./cmd/flatten-ctl)
 for mutation in wrong-os wrong-arch other-main other-module unstamped dirty-source; do
   candidate="$TMP/flatten-$mutation"
