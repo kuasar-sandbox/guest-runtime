@@ -14,6 +14,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import unittest
 from unittest.mock import patch
 
 import yaml
@@ -58,6 +59,47 @@ def platform_fixture(explicit=None):
             raise ValueError("platform main must provide release/producer-inputs.py before component workflow tests")
         print("workflow test platform:", observed[0], git("rev-parse", "HEAD^{tree}"), flush=True)
         yield platform
+
+
+
+def check_platform_fixture_failures():
+    """Provisioning must fail closed before any workflow contract is executed."""
+    case = unittest.TestCase()
+    with tempfile.TemporaryDirectory() as directory:
+        with patch.object(subprocess, "check_output", side_effect=AssertionError("unexpected network")):
+            with case.assertRaisesRegex(ValueError, "lacks release/producer-inputs.py"):
+                with platform_fixture(directory):
+                    case.fail("accepted a missing explicit dependency")
+    ref = "refs/heads/main"
+    for failure in ("bad-ref", "bad-sha", "moved", "fetch-failure", "timeout"):
+        def git(command, **kwargs):
+            case.assertEqual(kwargs["timeout"], 120)
+            case.assertEqual(kwargs["env"]["GIT_TERMINAL_PROMPT"], "0")
+            case.assertEqual(kwargs["env"]["GCM_INTERACTIVE"], "never")
+            args = command[3:]
+            if args[0] == "ls-remote":
+                return (("invalid" if failure == "bad-sha" else "a" * 40) + "\t" +
+                        ("refs/heads/other" if failure == "bad-ref" else ref) + "\n")
+            if args[0] == "fetch":
+                case.assertEqual(args, ["fetch", "--quiet", "--no-tags", "--depth=1", "origin", ref])
+                if failure == "timeout":
+                    raise subprocess.TimeoutExpired(command, 120)
+                if failure == "fetch-failure":
+                    raise subprocess.CalledProcessError(1, command)
+            if args[0] == "rev-parse":
+                return "b" * 40  # Ref changed after the first observation.
+            return ""
+        expected = (subprocess.TimeoutExpired if failure == "timeout" else
+                    subprocess.CalledProcessError if failure == "fetch-failure" else ValueError)
+        with patch.object(subprocess, "check_output", side_effect=git) as calls:
+            with case.assertRaises(expected):
+                with platform_fixture():
+                    case.fail("accepted " + failure)
+            commands = [call.args[0][3:] for call in calls.call_args_list]
+            case.assertEqual(sum(c[0] == "ls-remote" for c in commands), 1)
+            case.assertFalse(any(c[0] == "checkout" for c in commands))
+            case.assertLessEqual(sum(c[0] == "fetch" for c in commands), 1)
+    print("platform fixture: missing helper, invalid identity, movement and transport failures rejected")
 
 
 def check(platform):
@@ -330,6 +372,7 @@ def check_abi():
 
 
 if __name__ == "__main__":
+    check_platform_fixture_failures()
     with platform_fixture(sys.argv[1] if len(sys.argv) > 1 else os.environ.get("KUASAR_PLATFORM_ROOT")) as platform:
         check(platform)
     check_abi()
