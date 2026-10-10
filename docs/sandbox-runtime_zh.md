@@ -220,6 +220,23 @@ runtime workflow 显式选择已发布 sandboxer tag 构建镜像;runtime 与 vm
 新沙箱使用新版本;运行中沙箱继续持有启动时的 pmem 文件。删除旧版本前必须
 确认没有运行中 VM 或待恢复 snapshot 依赖它。
 
+ABI 兼容并不意味着新 runtime 可恢复旧内存快照。恢复会把 runtime 的
+**basename 与 Bundle footer 声明的 digest** 与 S 引用的 E 工件比较；规则见
+[sandboxer 恢复选择](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/sandbox_zh.md)。
+
+例如 S1 使用 `/runtime/v1/sandbox-runtime.bundle` 捕获，即使 v2 wire ABI
+兼容，也不能直接使用 `/runtime/v2/sandbox-runtime.bundle`。应显式把
+`boot.runtime` 绑定到保留的 v1 文件。上面的分版本目录支持显式绑定，恢复不会
+搜索兄弟版本目录。若需要自动回退，应在捕获 v1 时使用 basename
+`sandbox-runtime-v1.bundle`，把它与 `sandbox-runtime-v2.bundle` 不可变地保留
+在同一目录，并让默认配置指向 v2。恢复 S1 时先检查默认 v2，再且仅再检查
+`<default-directory>/sandbox-runtime-v1.bundle`，两者均须匹配 S1 的 E。
+给已经捕获的 v1 文件改 basename 不是迁移手段。
+
+只要运行中 VM、保留的模板、快照或父链仍依赖旧文件，就保留其原始字节与名称，
+包括备份和回滚候选；同时保留匹配的 kernel/VMM 输入。退役前由部署方盘点引用，
+并在合格目标节点验证恢复；只保留最新 ABI 兼容 runtime 不足以保障恢复。
+
 ### 6.2 整机重启
 
 整机重启后沙箱不自动恢复。节点重新启动时需要 runtime 镜像文件仍在部署目录,

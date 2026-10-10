@@ -738,3 +738,23 @@ chunk 拉取,不能保证普适的亚毫秒延迟。
 
 
 Image 打包使用 `accelerator/pkg/tailzip` 分离 EROFS payload 与配置后缀，再写入 tarstream envelope。声明的 payload commitment 覆盖 EROFS prefix，后缀使用独立的 metadata commitment。逻辑镜像字节与确定性配置 ZIP 保持不变，已有工件按原有声明身份读取。
+
+## 7. 判断工作负载是否需要适配
+
+从目标节点原生架构的 digest 固定镜像开始，验证真实入口、用户、可写路径和
+依赖，而不只启动 shell。[runtime bundle](sandbox-runtime_zh.md) 提供 Guest
+init，[所选 guest kernel](vmlinux_zh.md) 提供内核能力；OCI 镜像携带主机模块
+不能补足该内核未提供的能力。
+
+| 工作负载需求 | 判断与验收探针 |
+|---|---|
+| 普通用户态服务 | 用 `flatten-ctl info --json app.img` 检查 User、Entrypoint/Cmd、Env、WorkingDir；以实际用户检查可执行路径、DNS 和 upper layer 可写路径。显式 launch 覆盖镜像默认值（§4.2）。 |
+| 文件 capabilities、SELinux label 或其他 xattr | 此路径不保留 xattr（§4.3）；重建/适配应用或验证其他受支持部署，不能假设 capability 位和 label 保留。必须测试实际特权操作。 |
+| 设备、内核模块、TUN/bridge 或嵌套容器网络 | 对照所选 kernel 配置；预设不支持可加载模块且裁剪若干设备/网络栈。export 成功不证明这些能力；定制 kernel 须通过内核指南的 ABI/VMM 与启动/恢复验证。 |
+| OCI 元数据驱动行为 | 元数据保留不代表消费者执行；检查镜像默认值合并和显式 mounts/launch，不假设 Docker 网络、Healthcheck 编排或 OnBuild 执行。提供并测试显式构建就绪命令。 |
+| 有状态或外连服务 | 暂停/恢复前后验证文件及应用状态，测试外部连接重建。进程快照不等于外部数据库 checkpoint，也不会续租远端 lease。 |
+
+在一次性沙箱内执行代表性请求和应拒绝的操作，暂停/恢复并比对命令及文件结果。
+启动失败时先区分镜像文件/权限与 kernel 能力缺失，再调整启动策略。保留原镜像
+digest 与日志，通过 owner kill 测试沙箱，引用核查后才退役工件。flatten 成功
+不是工作负载兼容性认证。

@@ -580,3 +580,26 @@ Check determinism by exporting an immutable input twice with the same configurat
 
 
 Image packing uses `accelerator/pkg/tailzip` to split the EROFS payload and configuration suffix before writing the tarstream envelope. The declared payload commitment covers the EROFS prefix; the suffix has its own metadata commitment. The logical image bytes and deterministic configuration ZIP remain unchanged, while existing artifacts are read with their original declared identities.
+
+## 7. Decide whether your workload needs adaptation
+
+Start with a digest-pinned image for the destination's native architecture. Test
+its actual entrypoint, user, writable paths and dependencies, not just a shell.
+The [runtime bundle](sandbox-runtime.md) supplies guest init and the
+[selected guest kernel](vmlinux.md) supplies kernel capabilities; an OCI image
+cannot install capabilities absent from that kernel by carrying a host module.
+
+| Workload requirement | Decision and acceptance probe |
+|---|---|
+| Ordinary userspace service | Inspect `flatten-ctl info --json app.img` for User, Entrypoint/Cmd, Env and WorkingDir; run as that user and verify executable paths, DNS and writable upper-layer paths. Explicit launch settings override image defaults (§4.2). |
+| File capabilities, SELinux labels or other xattrs | This flatten path omits xattrs (§4.3). Rebuild/adapt the application or validate a separate supported deployment; do not assume preserved capability bits or labels. Test the privileged operation itself. |
+| Device access, kernel module, TUN/bridge or a nested container network | Compare against the selected kernel configuration. The preset has no loadable modules and omits several device/network stacks; a successful image export proves none of these features. A custom kernel needs the kernel guide's ABI/VMM and boot/restore validation. |
+| OCI metadata-driven behavior | Preserved metadata is not proof of consumer behavior. Check image-default merging and explicit sandbox mounts/launch policy; do not assume Docker networking, Healthcheck orchestration or OnBuild execution. Supply and test an explicit build readiness command. |
+| Stateful or externally connected service | Verify a file and application state before/after pause/resume and test reconnecting external connections. Snapshotting local process state does not checkpoint an external database or renew remote leases. |
+
+In a disposable sandbox, run the representative request, exercise a denied
+operation, pause/resume, and compare command/file results. If startup fails,
+distinguish missing image files/permissions from missing kernel support before
+changing launch policy. Keep the original image digest and logs; kill the test
+sandbox through its owner and retire its artifacts only after reference review.
+Do not interpret successful flattening as workload compatibility certification.
