@@ -120,6 +120,10 @@ def check(platform):
                 assert f"Download validated {arch} bundle" in publish
     pr = yaml.safe_load((ROOT / ".github/workflows/integration-tests.yml").read_text())
     assert pr["jobs"]["ci"]["uses"] == "kuasar-sandbox/kuasar-sandbox/.github/workflows/ci-entry.yml@main"
+    for filename in ("release-runtime.yml", "release-vmlinux.yml"):
+        validation = next(step for step in workflows[filename]["preflight"]["steps"]
+                          if step.get("name") == "Validate hosted workflow contracts")
+        assert validation["run"] == "python3 scripts/ci-test-workflows.py trusted/platform"
     runtime = {s["name"]: s for s in workflows["release-runtime.yml"]["build"]["steps"]}
     names = list(runtime)
     assert names.index("Download Workbench selection") < names.index("Restore fixed producer inputs")

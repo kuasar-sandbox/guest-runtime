@@ -88,7 +88,7 @@ jobs:
           gh_help="$(gh api --help)"
           [[ "$gh_help" == *--slurp* ]] || { echo "environment gh must support api --slurp" >&2; exit 1; }
       - name: Validate hosted workflow contracts
-        run: python3 scripts/ci-test-workflows.py
+        run: python3 scripts/ci-test-workflows.py trusted/platform
       - name: Validate release request
         id: request
         env:
