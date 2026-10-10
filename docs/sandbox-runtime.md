@@ -178,6 +178,27 @@ A node can keep multiple runtime images, for example:
 
 New sandboxes use the new version; running sandboxes retain their original pmem file. Before deleting an old image, ensure no running VM or snapshot awaiting restore depends on it.
 
+ABI compatibility alone does not make a new runtime eligible for an old memory
+snapshot. Here S denotes the memory snapshot artifact and E its referenced cold
+sandbox artifact, which records the runtime identity. Restore compares the runtime **basename and declared Bundle footer
+digest** with the E artifact referenced by S; see [sandboxer restore selection](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/sandbox.md#7-memory-restore-data-flow).
+
+For example, S1 captured with `/runtime/v1/sandbox-runtime.bundle` cannot use
+`/runtime/v2/sandbox-runtime.bundle` merely because v2 has a compatible wire ABI.
+Explicitly bind `boot.runtime` to the retained v1 file. The directory layout above
+supports this explicit binding; restore does not search sibling version directories.
+For automatic fallback, capture v1 with basename `sandbox-runtime-v1.bundle`, keep
+that immutable file alongside `sandbox-runtime-v2.bundle`, and point the default
+at v2. Restoring S1 then tries the configured v2 file followed by exactly
+`<default-directory>/sandbox-runtime-v1.bundle`, checking both against S1's E.
+Renaming an already captured v1 file to a different basename is not a migration.
+
+Retain original bytes/names while any live VM, retained template, snapshot or
+parent chain needs them, including backups and rollback candidates. Keep the
+matching kernel/VMM inputs too. Before retirement, the deployment owner must
+inventory those references and test restore on an eligible destination; retaining
+only the latest ABI-compatible runtime is insufficient.
+
 ### 6.2 Host reboot
 
 Sandboxes do not automatically resume after a host reboot. On node startup, the runtime image must still exist in the deployment directory for subsequent sandbox creation.
