@@ -591,7 +591,7 @@ cannot install capabilities absent from that kernel by carrying a host module.
 
 | Workload requirement | Decision and acceptance probe |
 |---|---|
-| Ordinary userspace service | Inspect `flatten-ctl info --json app.img` for User, Entrypoint/Cmd, Env and WorkingDir; run as that user and verify executable paths, DNS and writable upper-layer paths. Explicit launch settings override image defaults (§4.2). |
+| Ordinary userspace service | Inspect `flatten-ctl info --json app.img` for User, Entrypoint/Cmd, Env and WorkingDir; run as that user and verify executable paths, DNS and writable upper-layer paths. Explicit launch settings override image defaults (§3.4). |
 | File capabilities, SELinux labels or other xattrs | This flatten path omits xattrs (§4.3). Rebuild/adapt the application or validate a separate supported deployment; do not assume preserved capability bits or labels. Test the privileged operation itself. |
 | Device access, kernel module, TUN/bridge or a nested container network | Compare against the selected kernel configuration. The preset has no loadable modules and omits several device/network stacks; a successful image export proves none of these features. A custom kernel needs the kernel guide's ABI/VMM and boot/restore validation. |
 | OCI metadata-driven behavior | Preserved metadata is not proof of consumer behavior. Check image-default merging and explicit sandbox mounts/launch policy; do not assume Docker networking, Healthcheck orchestration or OnBuild execution. Supply and test an explicit build readiness command. |

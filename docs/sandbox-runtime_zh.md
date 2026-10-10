@@ -220,7 +220,8 @@ runtime workflow 显式选择已发布 sandboxer tag 构建镜像;runtime 与 vm
 新沙箱使用新版本;运行中沙箱继续持有启动时的 pmem 文件。删除旧版本前必须
 确认没有运行中 VM 或待恢复 snapshot 依赖它。
 
-ABI 兼容并不意味着新 runtime 可恢复旧内存快照。恢复会把 runtime 的
+ABI 兼容并不意味着新 runtime 可恢复旧内存快照。这里 S 指内存快照工件，E 指
+它引用的冷沙箱工件，后者记录 runtime 身份。恢复会把 runtime 的
 **basename 与 Bundle footer 声明的 digest** 与 S 引用的 E 工件比较；规则见
 [sandboxer 恢复选择](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/sandbox_zh.md)。
 

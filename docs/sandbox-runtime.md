@@ -179,7 +179,8 @@ A node can keep multiple runtime images, for example:
 New sandboxes use the new version; running sandboxes retain their original pmem file. Before deleting an old image, ensure no running VM or snapshot awaiting restore depends on it.
 
 ABI compatibility alone does not make a new runtime eligible for an old memory
-snapshot. Restore compares the runtime **basename and declared Bundle footer
+snapshot. Here S denotes the memory snapshot artifact and E its referenced cold
+sandbox artifact, which records the runtime identity. Restore compares the runtime **basename and declared Bundle footer
 digest** with the E artifact referenced by S; see [sandboxer restore selection](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/sandbox.md#7-memory-restore-data-flow).
 
 For example, S1 captured with `/runtime/v1/sandbox-runtime.bundle` cannot use
