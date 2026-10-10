@@ -35,6 +35,7 @@ jobs:
       actions: read
       contents: read
     outputs:
+      preview_manifest_digest: ${{ steps.request.outputs.preview_manifest_digest }}
       source_ref: ${{ steps.request.outputs.source_ref }}
       source_sha: ${{ steps.request.outputs.source_sha }}
       version: ${{ steps.request.outputs.version }}
@@ -69,13 +70,6 @@ jobs:
         run: |
           python3 trusted/platform/ci/hosted/workbench.py select \
             --framework-sha "${{ steps.framework.outputs.sha }}" --output workbench.json
-      - name: Upload Workbench selection
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        with:
-          name: vmlinux-workbench-${{ github.run_id }}
-          path: workbench.json
-          if-no-files-found: error
-          retention-days: 1
       - name: Check environment GitHub CLI
         run: |
           gh --version
@@ -91,6 +85,7 @@ jobs:
           SOURCE_SHA: ${{ inputs.source_sha }}
           AGGREGATE_VERSION: ${{ inputs.aggregate_version }}
           AGGREGATE_SHA: ${{ inputs.aggregate_sha }}
+          PREVIEW_EVIDENCE_OUTPUT: preview-evidence.json
           VERSION: ${{ inputs.version }}
           TARGET_ARCH: all
           RELEASE_KIND: vmlinux
@@ -108,6 +103,25 @@ jobs:
             echo "source_sha=$SOURCE_SHA"
             echo "version=$VERSION"
           } >> "$GITHUB_OUTPUT"
+      - name: Freeze admitted source and selected dependency tags
+        env:
+          SOURCE_REF: ${{ steps.request.outputs.source_ref }}
+          SOURCE_SHA: ${{ steps.request.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          dependencies=()
+          python3 -B trusted/platform/release/producer-inputs.py freeze vmlinux "$SOURCE_REF" "$SOURCE_SHA" producer-inputs.tar "${dependencies[@]}"
+      - name: Upload Workbench selection
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: vmlinux-workbench-${{ github.run_id }}
+          path: |
+            workbench.json
+            producer-inputs.tar
+            preview-evidence.json
+          if-no-files-found: error
+          retention-days: 1
+
     if: github.event.repository.visibility == 'public' && github.event.repository.full_name == github.repository
   build:
     needs: preflight
@@ -130,23 +144,10 @@ jobs:
         with:
           name: vmlinux-workbench-${{ github.run_id }}
           path: workbench-selection
-      - name: Check out exact guest-runtime source
-        id: checkout-guest-runtime
-        continue-on-error: true
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          repository: kuasar-sandbox/guest-runtime
-          ref: ${{ needs.preflight.outputs.source_sha }}
-          path: src/guest-runtime
-          persist-credentials: false
-      - name: Retry exact guest-runtime source checkout
-        if: steps.checkout-guest-runtime.outcome == 'failure'
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          repository: kuasar-sandbox/guest-runtime
-          ref: ${{ needs.preflight.outputs.source_sha }}
-          path: src/guest-runtime
-          persist-credentials: false
+      - name: Restore fixed producer inputs
+        env:
+          SOURCE_SHA: ${{ needs.preflight.outputs.source_sha }}
+        run: python3 -B trusted/platform/release/producer-inputs.py restore workbench-selection/producer-inputs.tar vmlinux "$SOURCE_SHA" src
       - name: Build test and package vmlinux release
         uses: ./trusted/platform/.github/actions/workbench
         with:
@@ -231,6 +232,11 @@ jobs:
           RELEASE_KIND: vmlinux
         run: |
           bash scripts/publish-release.sh assemble "$VERSION" staged/x86_64 staged/aarch64 release-bundle
+      - name: Download admitted Preview selection
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: vmlinux-workbench-${{ github.run_id }}
+          path: workbench-selection
       - name: Publish vmlinux release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -241,6 +247,8 @@ jobs:
           SOURCE_SHA: ${{ needs.preflight.outputs.source_sha }}
           AGGREGATE_VERSION: ${{ inputs.aggregate_version }}
           AGGREGATE_SHA: ${{ inputs.aggregate_sha }}
+          PREVIEW_EVIDENCE_FILE: workbench-selection/preview-evidence.json
+          PREVIEW_EVIDENCE_DIGEST: ${{ needs.preflight.outputs.preview_manifest_digest }}
         run: |
           set -euo pipefail
           bash scripts/validate-preview-line.sh \

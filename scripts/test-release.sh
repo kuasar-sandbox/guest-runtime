@@ -228,11 +228,14 @@ grep -Fq 'kuasar-preview-binding' "$ROOT/scripts/publish-release.sh" \
 for input in accelerator_version sandboxer_version; do
   grep -Fq "      $input:" "$WORKFLOW" \
     || fail "runtime release workflow is missing required $input input"
-  [ "$(grep -Fc "ref: \${{ needs.preflight.outputs.${input%_version}_sha }}" "$WORKFLOW")" -eq 2 ] \
-    || fail "runtime release workflow does not pin preflight and build $input checkouts"
+  grep -Fq -- "--dependency ${input%_version} \"\${{ needs.preflight.outputs.$input }}\" \"\${{ needs.preflight.outputs.${input%_version}_sha }}\"" "$WORKFLOW" \
+    || fail "release restore does not bind $input tag and SHA to trusted preflight outputs"
+  if grep -Fq "ref: \${{ needs.preflight.outputs.${input%_version}_sha }}" "$WORKFLOW"; then
+    fail "release workflow refetches a dependency by bare SHA"
+  fi
 done
 # Validate the named native build step rather than YAML single-line formatting.
-python3 "$ROOT/scripts/ci-test-workflows.py" \
+python3 "$ROOT/scripts/ci-test-workflows.py" "${KUASAR_PLATFORM_ROOT:-$ROOT/trusted/platform}" \
   || fail "release workflow contracts do not preserve native inputs and trust boundaries"
 if grep -Fq 'connector_version' "$WORKFLOW" \
   || grep -Fq 'src/connector' "$WORKFLOW"; then

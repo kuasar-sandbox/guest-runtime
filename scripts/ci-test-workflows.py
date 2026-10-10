@@ -5,6 +5,7 @@ import hashlib
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -16,7 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.dont_write_bytecode = True
 
 
-def check():
+def check(platform):
     workflows = {}
     for filename in ("release-runtime.yml", "release-vmlinux.yml", "reconcile-latest.yml", "delete-preview.yml"):
         text = (ROOT / ".github/workflows" / filename).read_text()
@@ -35,7 +36,7 @@ def check():
                 if "actions/upload-artifact@" in step.get("uses", ""):
                     if name == "preflight":
                         assert step["name"] == "Upload Workbench selection"
-                        assert step["with"]["path"] == "workbench.json"
+                        assert step["with"]["path"].splitlines() == ["workbench.json", "producer-inputs.tar", "preview-evidence.json"]
                         assert step["with"]["name"] == filename.removeprefix("release-").removesuffix(".yml") + "-workbench-${{ github.run_id }}"
                     else:
                         assert step["with"]["path"] == "src/guest-runtime/release-bundle"
@@ -78,15 +79,16 @@ def check():
     assert pr["jobs"]["ci"]["uses"] == "kuasar-sandbox/kuasar-sandbox/.github/workflows/ci-entry.yml@main"
     runtime = {s["name"]: s for s in workflows["release-runtime.yml"]["build"]["steps"]}
     names = list(runtime)
-    assert names.index("Download Workbench selection") < names.index("Check out exact guest-runtime source")
+    assert names.index("Download Workbench selection") < names.index("Restore fixed producer inputs")
     assert runtime["Check out trusted build checks"]["with"]["ref"] == "${{ github.sha }}"
-    for name in ("accelerator", "sandboxer"):
-        checkouts = [s for s in runtime.values() if s.get("with", {}).get("repository") == "kuasar-sandbox/" + name]
-        assert len(checkouts) == 2
-        assert all(s["with"]["ref"] == "${{ needs.preflight.outputs." + name + "_sha }}" for s in checkouts)
+    preflight = {row['name']: row for row in workflows['release-runtime.yml']['preflight']['steps']}
+    admitted = preflight['Freeze admitted source and selected dependency tags']
+    for name in ('accelerator', 'sandboxer'):
+        assert '--dependency ' + name + ' "$' + name.upper() + '_TAG" "$' + name.upper() + '_SHA"' in admitted['run']
+    assert 'producer-inputs.py restore workbench-selection/producer-inputs.tar runtime "$SOURCE_SHA" src' in runtime['Restore fixed producer inputs']['run']
     freeze = runtime["Freeze clean source cache trust before installing verified assets"]
     assert freeze["env"] == {"GH_TOKEN": "${{ github.token }}"}
-    assert names.index("Retry versioned sandboxer dependency checkout") < names.index(freeze["name"])
+    assert names.index("Restore fixed producer inputs") < names.index(freeze["name"])
     assert names.index(freeze["name"]) < names.index("Verify and install the selected sandbox-init")
     assert names.index("Verify and install the selected sandbox-init") < names.index("Build test and package runtime image")
     check_runtime_cache_scope(freeze["run"])
@@ -137,10 +139,10 @@ def check():
     assert 'command -v dump.erofs' in readers["with"]["run"]
     assert 'src/guest-runtime' not in readers["with"]["run"]
     assert list(publish).index("Check and select exact Runtime readers") < list(publish).index("Assemble the two validated architecture archives")
-    objects = publish["Fetch selected source objects for material validation"]
+    objects = publish["Restore selected source objects for material validation"]
     assert objects["env"]["SOURCE_SHA"] == "${{ needs.preflight.outputs.source_sha }}"
-    assert list(publish).index("Fetch selected source objects for material validation") < list(publish).index("Assemble the two validated architecture archives")
-    check_publish_source_objects(objects["run"])
+    assert list(publish).index("Restore selected source objects for material validation") < list(publish).index("Assemble the two validated architecture archives")
+    check_publish_source_objects(objects["run"], platform)
     kernel = {s["name"]: s for s in workflows["release-vmlinux.yml"]["build"]["steps"]}
     kernel_build = kernel["Build test and package vmlinux release"]
     assert kernel_build["uses"] == "./trusted/platform/.github/actions/workbench"
@@ -190,7 +192,7 @@ def check_runtime_cache_scope(script):
 
 
 
-def check_publish_source_objects(script):
+def check_publish_source_objects(script, platform):
     """Exercise the actual publish step against a shallow local source remote."""
     with tempfile.TemporaryDirectory(prefix="runtime-source-objects-") as directory:
         work = Path(directory)
@@ -212,22 +214,43 @@ def check_publish_source_objects(script):
         git(origin, "add", "source.txt")
         git(origin, "commit", "-qm", "selected source")
         selected = git(origin, "rev-parse", "HEAD")
+        git(origin, 'branch', '-M', 'main')
+        git(origin, 'tag', 'v1.2.3')
+        capsule = work / 'producer-inputs.tar'
+        source_env = dict(env, GIT_CONFIG_COUNT='1', GIT_CONFIG_KEY_0='url.' + str(origin) + '.insteadOf',
+                          GIT_CONFIG_VALUE_0='https://github.com/kuasar-sandbox/guest-runtime.git')
+        dependencies = []
+        source_env['GIT_CONFIG_COUNT'] = '3'
+        for index, owner in enumerate(('accelerator', 'sandboxer'), 1):
+            source_env['GIT_CONFIG_KEY_' + str(index)] = 'url.' + str(origin) + '.insteadOf'
+            source_env['GIT_CONFIG_VALUE_' + str(index)] = 'https://github.com/kuasar-sandbox/' + owner + '.git'
+            dependencies.extend(['--dependency', owner, 'v1.2.3', selected])
+            script = script.replace('${{ needs.preflight.outputs.' + owner + '_version }}', 'v1.2.3')
+            script = script.replace('${{ needs.preflight.outputs.' + owner + '_sha }}', selected)
+        subprocess.run([sys.executable, '-B', str(platform / 'release/producer-inputs.py'), 'freeze',
+                        'runtime', 'main', selected, str(capsule), *dependencies], env=source_env, check=True)
         (origin / "source.txt").write_text("trusted publisher\n")
         git(origin, "commit", "-qam", "publisher tooling")
         subprocess.run(["git", "clone", "-q", "--depth=1", origin.as_uri(), str(publisher)], env=env, check=True)
         before = git(publisher, "rev-parse", "HEAD")
+        (publisher / 'trusted').mkdir()
+        (publisher / 'trusted/platform').symlink_to(platform.resolve(), target_is_directory=True)
+        (publisher / 'workbench-selection').mkdir()
+        shutil.copy2(capsule, publisher / 'workbench-selection/producer-inputs.tar')
+        shutil.rmtree(origin)  # Publication must not need the remote again.
         missing = subprocess.run(["git", "-C", str(publisher), "cat-file", "-e", selected + "^{commit}"], env=env, capture_output=True)
         assert missing.returncode != 0, "fixture must start without the selected commit"
         for source, valid in (("invalid", False), (selected, True), (selected, True)):
+            shutil.rmtree(publisher / 'publisher-inputs', ignore_errors=True)
             result = subprocess.run(["bash", "-c", script], cwd=publisher,
                                     env=dict(env, SOURCE_SHA=source), text=True,
                                     capture_output=True, timeout=30)
             assert (result.returncode == 0) == valid, result.stderr
             assert git(publisher, "rev-parse", "HEAD") == before
-            assert git(publisher, "status", "--porcelain") == ""
+            assert git(publisher, "status", "--porcelain", "--untracked-files=no") == ""
             assert (publisher / "source.txt").read_text() == "trusted publisher\n"
         git(publisher, "cat-file", "-e", selected + "^{commit}")
-    print("Runtime publish: selected objects fetched without changing trusted checkout PASS")
+    print("Runtime publish: fixed run objects imported without changing trusted checkout PASS")
 
 
 def check_abi():
@@ -260,5 +283,5 @@ def check_abi():
 
 
 if __name__ == "__main__":
-    check()
+    check(Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else ROOT / "trusted/platform")
     check_abi()
