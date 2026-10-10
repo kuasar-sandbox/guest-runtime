@@ -238,7 +238,7 @@ for input in accelerator_version sandboxer_version; do
   fi
 done
 # Validate the named native build step rather than YAML single-line formatting.
-python3 "$ROOT/scripts/ci-test-workflows.py" "${KUASAR_PLATFORM_ROOT:-$ROOT/trusted/platform}" \
+python3 "$ROOT/scripts/ci-test-workflows.py" "${KUASAR_PLATFORM_ROOT:-}" \
   || fail "release workflow contracts do not preserve native inputs and trust boundaries"
 if grep -Fq 'connector_version' "$WORKFLOW" \
   || grep -Fq 'src/connector' "$WORKFLOW"; then
