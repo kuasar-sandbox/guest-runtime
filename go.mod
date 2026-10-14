@@ -3,7 +3,7 @@ module github.com/kuasar-sandbox/guest-runtime
 go 1.26.1
 
 require (
-	github.com/kuasar-sandbox/accelerator v0.1.7-preview.20261014.2.0.20261014161115-81526f693b5c
+	github.com/kuasar-sandbox/accelerator v0.1.7-preview.20261014.2.0.20261014223406-eed52486e9ab
 	gopkg.in/yaml.v3 v3.0.1
 )
 
