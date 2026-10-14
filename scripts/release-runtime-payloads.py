@@ -66,7 +66,7 @@ def run_reader(command, output):
     subprocess.run(command, stdout=output, stderr=subprocess.DEVNULL, check=True)
 
 
-def read_payloads(image, fsck, dump, destination):
+def read_payloads(image, fsck, dump, destination, *, without_mkfs=False):
     verify_bundle(image)
     destination.mkdir(mode=0o700)
     # --extract without a destination validates every file but creates no host
@@ -74,6 +74,8 @@ def read_payloads(image, fsck, dump, destination):
     with open(os.devnull, "wb") as output:
         run_reader([str(fsck), "--extract", str(image)], output)
     for label, path in PAYLOADS.items():
+        if without_mkfs and label == "mkfs.erofs":
+            continue
         metadata = destination / (label + ".metadata")
         with metadata.open("xb") as output:
             os.chmod(metadata, 0o600)
@@ -94,8 +96,14 @@ def read_payloads(image, fsck, dump, destination):
 
 if __name__ == "__main__":
     try:
-        require(len(sys.argv) == 5, "expected bundle, trusted fsck, trusted dump and private output")
-        read_payloads(*(Path(argument) for argument in sys.argv[1:]))
+        arguments = sys.argv[1:]
+        without_mkfs = arguments[:1] == ["--without-mkfs"]
+        if without_mkfs:
+            arguments = arguments[1:]
+        require(len(arguments) == 4, "expected [--without-mkfs] bundle, trusted fsck, trusted dump and private output")
+        # The trusted caller selects the payload contract. Historical callers
+        # still require mkfs; an image cannot opt itself out of this check.
+        read_payloads(*(Path(argument) for argument in arguments), without_mkfs=without_mkfs)
     except (ValueError, OSError, subprocess.SubprocessError, zipfile.BadZipFile) as error:
         # Do not forward raw image-controlled native diagnostics to a CI log.
         message = str(error) if isinstance(error, ValueError) else type(error).__name__

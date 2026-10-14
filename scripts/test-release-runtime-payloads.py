@@ -65,9 +65,9 @@ class RuntimePayloads(unittest.TestCase):
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True, timeout=30)
         make_bundle(erofs, self.image)
 
-    def read(self):
+    def read(self, *, without_mkfs=False):
         READER.read_payloads(self.image, TOOLS / "bin/fsck.erofs",
-                             TOOLS / "build/src/erofs-utils/dump/dump.erofs", self.root / "output")
+                             TOOLS / "build/src/erofs-utils/dump/dump.erofs", self.root / "output", without_mkfs=without_mkfs)
 
     def test_real_erofs_reads_only_fixed_files_privately(self):
         self.pack()
@@ -77,6 +77,27 @@ class RuntimePayloads(unittest.TestCase):
             output = self.root / "output" / label
             self.assertEqual(output.read_bytes(), (self.tree / path.lstrip("/")).read_bytes())
             self.assertEqual(output.stat().st_mode & 0o777, 0o600)
+
+    def test_go_generator_contract_needs_only_runtime_go_payloads(self):
+        (self.tree / "opt/sandbox-runtime/bin/mkfs.erofs").unlink()
+        self.pack()
+        self.read(without_mkfs=True)
+        self.assertFalse((self.root / "output/mkfs.erofs").exists())
+        for label in ("init", "envd", "flatten-ctl"):
+            self.assertEqual((self.root / "output" / label).read_bytes(),
+                             (label + " fixture payload\n").encode())
+
+    def test_legacy_contract_still_requires_mkfs(self):
+        (self.tree / "opt/sandbox-runtime/bin/mkfs.erofs").unlink()
+        self.pack()
+        with self.assertRaises((ValueError, subprocess.SubprocessError)):
+            self.read()
+
+    def test_go_generator_contract_still_requires_flatten(self):
+        (self.tree / "opt/sandbox-runtime/bin/flatten-ctl").unlink()
+        self.pack()
+        with self.assertRaises((ValueError, subprocess.SubprocessError)):
+            self.read(without_mkfs=True)
 
     def test_missing_payload_rejected(self):
         (self.tree / "sbin/init").unlink()
