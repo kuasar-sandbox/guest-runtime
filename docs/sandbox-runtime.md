@@ -26,7 +26,7 @@ This document defines image packaging, filesystem layout, versioning and consump
 
   sandboxer/bin/<arch>/sandbox-init ─┐
   guest-runtime/bin/<arch>/flatten-ctl├─► sandbox-runtime.bundle ──► sandbox-ctl
-  native-deps/bin/<arch>/envd ────────┘          ▲                     │
+  native-deps/bin/<arch>/envd ────────┘             ▲                     │
                                                  │                     ▼
                                            runtime release          guest /sbin/init
 ```
@@ -110,7 +110,7 @@ The target's input and build sequence is:
 2. If the selected `SANDBOX_INIT` (default `../sandboxer/bin/<arch>/sandbox-init`) is absent, delegate to `make -C ../sandboxer sandbox-init`.
 3. Resolve target `ENVD` (default `native-deps/bin/<arch>/envd`), building it when missing.
 4. Resolve this repository's target `FLATTEN_CTL` (default `bin/<arch>/flatten-ctl`), building it when missing.
-5. Assemble the staging tree and use host `BUILD_MKFS_EROFS` to create temporary runtime EROFS.
+5. Verify the selected `flatten-ctl` build record links the external go-erofs module. A stale incremental binary fails explicitly; run `make flatten-ctl` or select a matching binary. Assemble the staging tree and use host `BUILD_MKFS_EROFS` to create temporary runtime EROFS.
 6. The host `runtime-bundle` tool copies EROFS, adds PMEM alignment padding, computes SHA256 and appends the empty-marker ZIP, publishing `bin/<arch>/sandbox-runtime.bundle` atomically.
 
 See [the native-build workflow](../native-deps/README.md) for mkfs.erofs/Envd builds and the [sandboxer guest ABI](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/sandbox-init.md) for sandbox-init.

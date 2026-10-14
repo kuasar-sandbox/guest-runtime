@@ -95,5 +95,51 @@ class EnvironmentTools(unittest.TestCase):
             self.assertFalse((ROOT / directory / "install-gh-cli.sh").exists())
 
 
+class RuntimeGeneratorInput(unittest.TestCase):
+    def test_stale_incremental_cli_fails_before_staging_or_packing(self):
+        self.check_generator('path\tlegacy/flatten\n', expected=False)
+
+    def test_exact_external_generator_reaches_host_packer_without_running_payloads(self):
+        self.check_generator('\tdep\tgithub.com/kuasar-sandbox/go-erofs\tv0.0.0-test\th1:fixedsum=\n', expected=True)
+
+    def test_similarly_named_module_and_unversioned_replacement_fail(self):
+        for metadata in ('\tdep\tgithub.com/kuasar-sandbox/go-erofs-extra\tv1\th1:sum\n',
+                         '\tdep\tgithub.com/kuasar-sandbox/go-erofs\tv1\n=>\t../go-erofs\t(devel)\n'):
+            with self.subTest(metadata=metadata):
+                self.check_generator(metadata, expected=False)
+
+    def check_generator(self, metadata, *, expected):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            payload = root / 'payload'
+            payload.write_text('#!/bin/sh\ntouch "' + str(root / 'executed-payload') + '"\n')
+            payload.chmod(0o755)
+            metadata_file = root / 'metadata'
+            metadata_file.write_text(metadata)
+            go = root / 'go'
+            go.write_text('#!/bin/sh\nif [ "$1" = env ]; then echo amd64; exit; fi\n'
+                          'test "$1:$2:$3" = "version:-m:' + str(payload) + '" || exit 90\n'
+                          'cat "' + str(metadata_file) + '"\n')
+            go.chmod(0o755)
+            packer = root / 'packer'
+            packer.write_text('#!/bin/sh\ntouch "' + str(root / 'packed') + '"\nexit 23\n')
+            packer.chmod(0o755)
+            stage = root / 'build/sandbox-runtime'
+            stage.mkdir(parents=True)
+            (stage / 'unchanged').write_text('original staging')
+            result = subprocess.run(['make', '--no-print-directory', '-f', str(ROOT / 'Makefile'),
+                                     'sandbox-runtime', 'TARGET_ARCH=x86_64', 'GO=' + str(go),
+                                     'BINDIR=' + str(root / 'bin'), 'BUILD_DIR=' + str(root / 'build'),
+                                     'BUILD_MKFS_EROFS=' + str(packer), 'SANDBOX_INIT=' + str(payload),
+                                     'ENVD=' + str(payload), 'FLATTEN_CTL=' + str(payload)],
+                                    cwd=root, text=True, capture_output=True, timeout=15)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertFalse((root / 'executed-payload').exists())
+            self.assertEqual((root / 'packed').exists(), expected, result.stderr)
+            self.assertEqual((stage / 'unchanged').exists(), not expected)
+            if not expected:
+                self.assertIn('lacks the linked Go EROFS generator', result.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()

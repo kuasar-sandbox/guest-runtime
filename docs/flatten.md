@@ -543,7 +543,7 @@ generators need not produce identical bytes; the new generator remains determini
 | Timestamps and UUID | Zero timestamps and an all-zero UUID fix output identity without changing a directory source. |
 | UID/GID/mode | Preserve numeric source ownership and permission bits. Insufficient permissions fail layer application. |
 | Inodes/order/hardlinks | Deterministic shared selection and real shared-inode hardlinks; content dedup remains separate. |
-| Extended attributes | Final EROFS policy: **no xattrs, file capabilities or security labels are emitted**, even when applied successfully to the private rootfs. |
+| Extended attributes | Final EROFS policy: **no xattrs, file capabilities, ACLs or security labels are emitted**, even when applied successfully to the private rootfs. |
 | Compression/devices | Uncompressed, single-device, 4 KiB chunks; no hidden raw/data-blob fallback. |
 
 Plan schema and capabilities are internal and versioned independently of
@@ -672,4 +672,4 @@ Do not interpret successful flattening as workload compatibility certification.
 - [Project system overview](https://github.com/kuasar-sandbox/kuasar-sandbox/blob/main/docs/kuasar-sandbox.md) §2.2 / §3.1: flattening's role and goals.
 
 
-Image packing uses `accelerator/pkg/tailzip` to split the EROFS payload and configuration suffix before writing the tarstream envelope. The declared payload commitment covers the EROFS prefix; the suffix has its own metadata commitment. The logical image bytes and deterministic configuration ZIP remain unchanged, while existing artifacts are read with their original declared identities.
+Image packing uses `accelerator/pkg/tailzip` to split the EROFS payload and configuration suffix before writing the tarstream envelope. The declared payload commitment covers the EROFS prefix; the suffix has its own metadata commitment. The new generator may change EROFS layout and digests; deterministic configuration ZIP and envelope rules remain unchanged, and existing artifacts are read with their original declared identities.

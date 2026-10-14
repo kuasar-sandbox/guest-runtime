@@ -98,6 +98,9 @@ sandbox-runtime:
 	@[ -x "$(SANDBOX_INIT)" ] || $(MAKE) sandbox-init
 	@[ -x "$(ENVD)" ] || $(MAKE) envd
 	@[ -x "$(FLATTEN_CTL)" ] || $(MAKE) flatten-ctl
+	@set -o pipefail; $(GO) version -m "$(FLATTEN_CTL)" | awk -F '\t' '\
+	  $$2 == "dep" && $$3 == "github.com/kuasar-sandbox/go-erofs" && $$4 ~ /^v/ && $$5 ~ /^h1:/ { found++ } \
+	  END { exit found != 1 }' || { echo "selected flatten-ctl lacks the linked Go EROFS generator; rebuild with make flatten-ctl or select a matching FLATTEN_CTL" >&2; exit 1; }
 	rm -rf $(BUILD_DIR)/sandbox-runtime
 	mkdir -p $(BUILD_DIR)/sandbox-runtime/sbin $(BUILD_DIR)/sandbox-runtime/proc \
 	         $(BUILD_DIR)/sandbox-runtime/sys $(BUILD_DIR)/sandbox-runtime/dev \

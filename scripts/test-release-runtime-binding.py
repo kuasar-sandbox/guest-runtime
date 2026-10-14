@@ -40,6 +40,7 @@ def run(source, original, readers):
             ("swapped-init", "Go payload must be built from the clean selected commit"),
             ("non-go-envd", "embedded"),
             ("obsolete-outer-mkfs", "outside the exact runtime release layout"),
+            ("obsolete-embedded-mkfs", "must not contain obsolete mkfs.erofs"),
             ("missing-flatten", "Runtime embedded payload verification failed"),
             ("different-flatten", "embedded flatten-ctl differs"),
             ("forged-envd-record", "Go build records differ from embedded Runtime payloads"),
@@ -78,7 +79,11 @@ def run(source, original, readers):
                 init = guest / "sbin/init"
                 envd = guest / "opt/sandbox-runtime/bin/envd"
                 flatten = guest / "opt/sandbox-runtime/bin/flatten-ctl"
-                if mutation == "missing-init":
+                if mutation == "obsolete-embedded-mkfs":
+                    native = guest / "opt/sandbox-runtime/bin/mkfs.erofs"
+                    native.write_text("retired native payload")
+                    native.chmod(0o755)
+                elif mutation == "missing-init":
                     init.unlink()
                 elif mutation == "linked-init":
                     init.unlink()
@@ -122,7 +127,7 @@ def run(source, original, readers):
             if marker.exists():
                 raise AssertionError("an embedded fixture executable was run")
             print("test-runtime-binding: rejected " + mutation, flush=True)
-        print("test-runtime-binding: 12 rechecksummed EROFS/payload mutations rejected; no payload execution")
+        print("test-runtime-binding: 13 rechecksummed EROFS/payload mutations rejected; no payload execution")
 
 
 if __name__ == "__main__":

@@ -73,6 +73,16 @@ def read_payloads(image, fsck, dump, destination, *, without_mkfs=False):
     # filesystem tree. In-image links and ownership are never applied to the host.
     with open(os.devnull, "wb") as output:
         run_reader([str(fsck), "--extract", str(image)], output)
+    if without_mkfs:
+        # Listing a known required directory distinguishes absence from a
+        # failed lookup. Validate the listing before checking the retired name.
+        listing = subprocess.run([str(dump), "--ls", "--path=/opt/sandbox-runtime/bin", str(image)],
+                                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                 text=True, check=True, env=dict(os.environ, LC_ALL="C"))
+        names = re.findall(r"^\s*[0-9]+\s+[0-9]+\s+([^\n]+)$", listing.stdout, re.M)
+        require({".", "..", "envd", "flatten-ctl"} <= set(names),
+                "cannot verify Runtime tool directory")
+        require("mkfs.erofs" not in names, "Go Runtime must not contain obsolete mkfs.erofs")
     for label, path in PAYLOADS.items():
         if without_mkfs and label == "mkfs.erofs":
             continue

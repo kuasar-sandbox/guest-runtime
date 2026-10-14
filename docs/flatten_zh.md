@@ -630,7 +630,7 @@ Linux 适配调用 **umoci v0.6.0** 层 API，不引入其 CLI、CAS 或 runtime
 | 时间与 UUID | 零时间与全零 UUID 固定输出身份，不修改调用者目录。 |
 | UID/GID/mode | 保留源的数值属主和权限位；层应用权限不足失败。 |
 | inode、遍历、硬链接 | 共同选集的确定性排序和真实共享 inode；内容去重独立进行。 |
-| xattr | 最终 EROFS **不输出 xattr、file capability 或安全标签**，即使它们已成功应用到私有 rootfs。 |
+| xattr | 最终 EROFS **不输出 xattr、file capability、ACL 或安全标签**，即使它们已成功应用到私有 rootfs。 |
 | 压缩与设备 | 不压缩、单设备、4 KiB chunk，无隐式 raw/data-blob fallback。 |
 
 内部 Plan schema/能力、`image.ConversionSemantics` 和制品身份分别管理。Plan 声明
@@ -771,9 +771,9 @@ digest 与日志，通过 owner kill 测试沙箱，引用核查后才退役工�
   选择展平镜像作为只读 base。
 - [Native 构建指南](../native-deps/README_zh.md):在仓库根目录用
   `make -C native-deps erofs` 构建 mkfs.erofs,用 `make flatten-ctl` 构建 CLI;
-  CLI 按显式环境覆盖、同目录可执行文件、PATH 的顺序定位 mkfs.erofs。
+  mkfs 只用于宿主打包和独立对照；CLI 内含 Go 生成器，不查找外部 mkfs。
 - [系统总览](https://github.com/kuasar-sandbox/kuasar-sandbox/blob/main/docs/kuasar-sandbox_zh.md) §2.2 / §3.1:
   展平在系统中的位置和目标。
 
 
-Image 打包使用 `accelerator/pkg/tailzip` 分离 EROFS payload 与配置后缀，再写入 tarstream envelope。声明的 payload commitment 覆盖 EROFS prefix，后缀使用独立的 metadata commitment。逻辑镜像字节与确定性配置 ZIP 保持不变，已有工件按原有声明身份读取。
+Image 打包使用 `accelerator/pkg/tailzip` 分离 EROFS payload 与配置后缀，再写入 tarstream envelope。声明的 payload commitment 覆盖 EROFS prefix，后缀使用独立的 metadata commitment。新生成器的 EROFS 布局和摘要可以变化；确定性配置 ZIP 及封装规则保持不变，已有工件按原有声明身份读取。

@@ -87,6 +87,11 @@ class RuntimePayloads(unittest.TestCase):
             self.assertEqual((self.root / "output" / label).read_bytes(),
                              (label + " fixture payload\n").encode())
 
+    def test_go_generator_contract_rejects_retained_native_payload(self):
+        self.pack()
+        with self.assertRaisesRegex(ValueError, "must not contain obsolete mkfs.erofs"):
+            self.read(without_mkfs=True)
+
     def test_legacy_contract_still_requires_mkfs(self):
         (self.tree / "opt/sandbox-runtime/bin/mkfs.erofs").unlink()
         self.pack()

@@ -33,7 +33,7 @@ kernel 由 `vmlinux` 包发布;VMM 由 `sandboxer` 发布。
 
   sandboxer/bin/<arch>/sandbox-init ─┐
   guest-runtime/bin/<arch>/flatten-ctl├─► sandbox-runtime.bundle ──► sandbox-ctl
-  native-deps/bin/<arch>/envd ────────┘          ▲                     │
+  native-deps/bin/<arch>/envd ────────┘             ▲                     │
                                                  │                     ▼
                                            runtime release          guest /sbin/init
 ```
@@ -127,7 +127,7 @@ make build TARGET_ARCH=aarch64
    委托 `make -C ../sandboxer sandbox-init`。
 3. 使用目标架构 `ENVD`(默认 `native-deps/bin/<arch>/envd`),缺失时触发构建。
 4. 使用本仓目标架构 `FLATTEN_CTL`(默认 `bin/<arch>/flatten-ctl`),缺失时触发构建。
-5. 组装 staging，使用宿主 `BUILD_MKFS_EROFS` 生成临时 runtime EROFS。
+5. 检查所选 `flatten-ctl` 的构建记录中有外部 go-erofs 模块；旧增量产物会明确失败，须先执行 `make flatten-ctl` 或选择匹配的二进制。组装 staging，使用宿主 `BUILD_MKFS_EROFS` 生成临时 runtime EROFS。
 6. host `runtime-bundle` 工具复制 EROFS、补齐 PMEM 对齐、计算 SHA256,
    追加空 marker ZIP,原子发布为 `bin/<arch>/sandbox-runtime.bundle`。
 
