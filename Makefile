@@ -196,3 +196,5 @@ help:
 	@echo "  test-release       test both independent release lines"
 	@echo "  clean"
 	@echo "  TARGET_ARCH        x86_64 (default) | aarch64"
+
+# RFC 246 temporary SOURCE caller acceptance; this branch must not be merged.
