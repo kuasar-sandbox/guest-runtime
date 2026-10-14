@@ -204,7 +204,7 @@ func runExport(args []string, ops exportIO) error {
 	// (the layer applier); check it up front so an unprivileged run fails fast
 	// here instead of partway through the first layer's chown — after a
 	// potentially expensive pull + extract. A rootfs-directory source never
-	// chowns (mkfs.erofs records the source inodes' ownership as read), so
+	// chowns (Go EROFS planner records the source inodes' ownership as read), so
 	// it only needs read access to the tree.
 	if !dirSrc {
 		if err := flatten.RequireOwnershipCap(); err != nil {

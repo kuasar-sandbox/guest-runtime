@@ -18,7 +18,7 @@ rootfs 组装、vsock 控制面、stdio MUX、exec/attach/quiesce 等 ABI 由
 | 组件 | 职责 |
 |---|---|
 | `sandboxer` | 构建 `sandbox-init`;`sandbox-ctl` 启动 CH,把 runtime 镜像作为 virtio-pmem 挂入 guest |
-| `guest-runtime` | 打包 `sandbox-init`、`envd`、`flatten-ctl`、`mkfs.erofs` 为单一 EROFS 镜像 |
+| `guest-runtime` | 打包 `sandbox-init`、`envd`、`flatten-ctl` 为单一 EROFS 镜像 |
 | `guest-runtime/native-deps` | 构建 `mkfs.erofs`、`fsck.erofs`、`vmlinux`、`envd`;可选网关单独按需构建,不是 runtime payload |
 | `accelerator` | 提供 `flatten-ctl` 复用的 `pkg/{flatten,image,remote,tar}` 和 manifest/cache/store 能力 |
 
@@ -33,8 +33,7 @@ kernel 由 `vmlinux` 包发布;VMM 由 `sandboxer` 发布。
 
   sandboxer/bin/<arch>/sandbox-init ─┐
   guest-runtime/bin/<arch>/flatten-ctl├─► sandbox-runtime.bundle ──► sandbox-ctl
-  native-deps/bin/<arch>/envd ────────┤          ▲                     │
-  native-deps/bin/<arch>/mkfs.erofs ──┘          │                     │ virtio-pmem+DAX
+  native-deps/bin/<arch>/envd ────────┘          ▲                     │
                                                  │                     ▼
                                            runtime release          guest /sbin/init
 ```
@@ -67,7 +66,6 @@ DAX 映射同一份 host 文件,避免每个 sandbox 独立复制 runtime 文件
 /sysdisks/disk-{0..7}-upper/        数据盘 upper 挂载点
 /opt/sandbox-runtime/bin/envd       e2b guest agent
 /opt/sandbox-runtime/bin/flatten-ctl
-/opt/sandbox-runtime/bin/mkfs.erofs
 ```
 
 当前 Makefile 为序号 0–7 的数据盘预建 `/sysdisks/` 挂载点。除这些平台路径外,
@@ -84,7 +82,6 @@ DAX 映射同一份 host 文件,避免每个 sandbox 独立复制 runtime 文件
 | `/sbin/init` | `../sandboxer/bin/<arch>/sandbox-init` | guest PID 1,负责挂载、握手、应用监督 |
 | `/opt/sandbox-runtime/bin/envd` | `native-deps/bin/<arch>/envd` | e2b 数据面 agent |
 | `/opt/sandbox-runtime/bin/flatten-ctl` | `bin/<arch>/flatten-ctl` | build sandbox 内拉取/展平 OCI 镜像 |
-| `/opt/sandbox-runtime/bin/mkfs.erofs` | `native-deps/bin/<arch>/mkfs.erofs` | build sandbox 内生成 EROFS base 镜像 |
 
 `fsck.erofs` 是诊断/测试工具,不进入 runtime 镜像。`vmlinux` 不是 runtime
 镜像内容,由 `vmlinux-<arch>-vX.Y.Z.tar.gz` 独立发布。
@@ -120,10 +117,7 @@ make build                       # 构建 flatten-ctl + sandbox-runtime
 make build TARGET_ARCH=aarch64
 ```
 
-执行 `make sandbox-runtime` 前必须已有**宿主可执行的 `mkfs.erofs`**。可安装 erofs-utils,
-先执行 `make -C native-deps erofs TARGET_ARCH=$(uname -m)` 构建宿主版本,或设置
-`BUILD_MKFS_EROFS` 为已有宿主工具。它与被打入镜像的目标架构 `GUEST_MKFS_EROFS`
-不同;交叉构建不能在宿主直接执行 guest 工具。
+执行 `make sandbox-runtime` 前必须已有**宿主可执行的 `mkfs.erofs`**。可安装 erofs-utils，执行 `make -C native-deps erofs TARGET_ARCH=$(uname -m)`，或通过 `BUILD_MKFS_EROFS` 指定宿主工具。它仅打包 runtime bundle；目标 Guest 使用静态 `flatten-ctl` 内部的 Go 生成器，不再安装 `GUEST_MKFS_EROFS`。
 
 目标的输入和构建顺序:
 
@@ -133,11 +127,7 @@ make build TARGET_ARCH=aarch64
    委托 `make -C ../sandboxer sandbox-init`。
 3. 使用目标架构 `ENVD`(默认 `native-deps/bin/<arch>/envd`),缺失时触发构建。
 4. 使用本仓目标架构 `FLATTEN_CTL`(默认 `bin/<arch>/flatten-ctl`),缺失时触发构建。
-5. 使用目标架构 `GUEST_MKFS_EROFS`(默认 `native-deps/bin/<arch>/mkfs.erofs`)。对于本仓管理的
-   默认路径,每次都会执行原生配方检查：已验证的输入不变时复用缓存工具；源码、补丁或实际
-   消费的依赖变化时重建。源码归档、配方 stamp 及目标构建元数据须按 Native Build 文档
-   保留。显式覆盖的 guest 可执行文件必须已存在,本仓不会替用户重建它。组装 staging 后,
-   使用另行解析的宿主 `BUILD_MKFS_EROFS` 生成临时 raw EROFS。
+5. 组装 staging，使用宿主 `BUILD_MKFS_EROFS` 生成临时 runtime EROFS。
 6. host `runtime-bundle` 工具复制 EROFS、补齐 PMEM 对齐、计算 SHA256,
    追加空 marker ZIP,原子发布为 `bin/<arch>/sandbox-runtime.bundle`。
 
@@ -147,7 +137,7 @@ make build TARGET_ARCH=aarch64
 ### 3.1 架构
 
 runtime 镜像按 target arch 构建。构建目录文件名统一为 `sandbox-runtime.bundle`,
-其 EROFS prefix 内的 `/sbin/init`、`envd`、`flatten-ctl`、`mkfs.erofs`
+其 EROFS prefix 内的 `/sbin/init`、`envd`、`flatten-ctl`
 必须都是同一 target arch 的可执行文件。
 
 `TARGET_ARCH=amd64` 归一化为 `x86_64`;`TARGET_ARCH=arm64` 归一化为 `aarch64`。
@@ -178,7 +168,7 @@ runtime 镜像由本仓 `main` 上受信任的 `Runtime Release` workflow 从调
 
 | 包 | 内容 | Release |
 |---|---|---|
-| `sandbox-runtime-<arch>-vX.Y.Z.tar.gz` | runtime 镜像、`flatten-ctl`、`mkfs.erofs` | `guest-runtime` 仓 `runtime-vX.Y.Z` |
+| `sandbox-runtime-<arch>-vX.Y.Z.tar.gz` | runtime 镜像、`flatten-ctl` | `guest-runtime` 仓 `runtime-vX.Y.Z` |
 
 这里 `<arch>` 为所选版本实际声明和发布的 `x86_64` 或 `aarch64`。
 不要仅凭源码构建支持推断另一架构资产存在，也不要将两个架构覆盖解包到同一 `bin/`。
@@ -188,7 +178,6 @@ runtime 专用包内同时放置:
 ```
 bin/sandbox-runtime.bundle
 bin/flatten-ctl
-bin/mkfs.erofs
 ```
 
 `sandbox-runtime.bundle` 是当前脚本、默认配置和外部分发共同使用的稳定入口。
@@ -254,8 +243,8 @@ ABI 兼容并不意味着新 runtime 可恢复旧内存快照。这里 S 指内�
 |---|---|
 | guest 无法启动 `/sbin/init` | 确认 runtime 镜像 arch 与 vmlinux/CH 目标 arch 一致 |
 | build sandbox 找不到 `flatten-ctl` | 检查 `/opt/sandbox-runtime/bin/flatten-ctl` 是否进入镜像 |
-| build sandbox 无法生成 EROFS | 检查 guest `/opt/sandbox-runtime/bin/mkfs.erofs` 和权限 |
-| host 无法打包交叉架构镜像 | 分别检查 host `BUILD_MKFS_EROFS` 与 target `GUEST_MKFS_EROFS` |
+| build sandbox 无法生成 EROFS | 检查 guest `flatten-ctl`、源读取权限和规划预算 |
+| host 无法打包交叉架构镜像 | 检查 `BUILD_MKFS_EROFS` 是否为宿主架构工具 |
 | restore 后行为异常 | 检查 snapshot 使用的 runtime digest 与 restore 配置是否匹配 |
 | 解包后脚本找不到 runtime | 确认已解压 runtime archive,且 `bin/sandbox-runtime.bundle` 存在 |
 

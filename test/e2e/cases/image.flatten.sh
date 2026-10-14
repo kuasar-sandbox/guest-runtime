@@ -10,13 +10,11 @@ done
 
 FLATTEN_CTL="${BIN:?BIN is required}/flatten-ctl"
 ZOT_BIN="${ZOT_BIN:?prepared ZOT_BIN is required}"
-MKFS_EROFS_PATH="$BIN/mkfs.erofs"
 FSCK_EROFS="${FSCK_EROFS:-fsck.erofs}"
-export MKFS_EROFS_PATH
 
 log preflight
 [ "$(uname -s)" = Linux ] || die "E2E requires Linux"
-for tool in python3 curl docker timeout readlink stat chroot cmp "$FLATTEN_CTL" "$ZOT_BIN" "$MKFS_EROFS_PATH" "$FSCK_EROFS"; do
+for tool in python3 curl docker timeout readlink stat chroot cmp "$FLATTEN_CTL" "$ZOT_BIN" "$FSCK_EROFS"; do
     have "$tool" || die "prerequisite not found: $tool"
 done
 require_root
@@ -27,7 +25,6 @@ run docker info >/dev/null 2>&1 || die "docker daemon is not usable"
 for tool in "$FLATTEN_CTL" "$ZOT_BIN"; do
     run "$tool" --help >"$WORK/preflight.log" 2>&1 || die "prerequisite is not runnable: $tool"
 done
-run "$MKFS_EROFS_PATH" --version >"$WORK/mkfs-version.log" 2>&1 || die "mkfs.erofs is not runnable: $MKFS_EROFS_PATH"
 FSCK_HELP="$($FSCK_EROFS --help 2>&1 || true)"
 grep -Fq -- '--extract' <<<"$FSCK_HELP" || die "fsck.erofs does not support --extract"
 
@@ -133,8 +130,8 @@ else
     FIXTURE_ARCH="$(fixture_arch "$E2E_IMAGE")"
 fi
 
-log "image.flatten: static tools in an empty root -> non-seekable artifact"
-capture empty-root python3 - "$WORK/empty-root" "$FLATTEN_CTL" "$MKFS_EROFS_PATH" <<'PY'
+log "image.flatten: single static executable in an empty root -> non-seekable artifact"
+capture empty-root python3 - "$WORK/empty-root" "$FLATTEN_CTL" <<'PY'
 import os, pathlib, shutil, subprocess, sys
 root = pathlib.Path(sys.argv[1])
 for name in ["bin", "dev", "source", "scratch"]:
@@ -148,7 +145,7 @@ os.chown(payload, 10001, 10002)
 os.chmod(payload, 0o640)
 env = os.environ.copy()
 env.pop("FLATTEN_CONFIG", None)  # Host configuration paths do not exist in this empty root.
-env["MKFS_EROFS_PATH"] = "/bin/mkfs.erofs"
+env["MKFS_EROFS_PATH"] = "/missing/native-generator"  # Stale configuration must not select a generator.
 command = ["chroot", str(root), "/bin/flatten-ctl", "export", "--tmpdir", "/scratch",
            "--output", "-", "--no-progress", "/source"]
 with (root / "artifact").open("wb") as output, subprocess.Popen(command, stdout=subprocess.PIPE, env=env) as child:

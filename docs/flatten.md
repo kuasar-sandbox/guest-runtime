@@ -22,11 +22,11 @@ Choose one of three inputs:
 
 - **Remote registry image:** a reference such as `nginx:1.27` or `gcr.io/ns/app@sha256:...`. `flatten-ctl` pulls and flattens it directly (§2.3). `FLATTEN_REGISTRY_*` environment variables supply credentials, and an explicit OCI-layout cache can be shared across processes. Without `cache.dir`, layers stream directly.
 - **Docker archive:** a tar stream produced by `docker save`, supplied on stdin or from a local file.
-- **Already-flattened rootfs directory:** if the positional argument is a local directory, mkfs.erofs reads it in place without a staging-tree copy or source mutation (§2.1). This still reads source data and writes the output.
+- **Already-flattened rootfs directory:** if the positional argument is a local directory, the Go planner reads it in place without a staging-tree copy or source mutation (§2.1). This still reads source data and writes the output.
 
 Arbitrary OCI-layout directories are not accepted as OCI image sources; see §5.5.
 
-The output is **one tarstream artifact**: an `image` payload containing `EROFS + trailing ZIP`, followed by the platform digest marker (§3). The ZIP contains the projected OCI runtime configuration. Registry and docker-archive layers feed the same flattening sink; equivalent uncompressed layers and runtime configuration, built with the same tools/settings, produce the same EROFS payload. Directory export is also deterministic for an unchanged tree and configuration: `-T0 --ignore-mtime` normalizes timestamps in mkfs without modifying the tree. Artifact reproducibility additionally includes the authoritative sparse map and wrapper encoding.
+The output is **one tarstream artifact**: an `image` payload containing `EROFS + trailing ZIP`, followed by the platform digest marker (§3). The ZIP contains the projected OCI runtime configuration. Registry and docker-archive layers feed the same flattening sink; equivalent uncompressed layers and runtime configuration, built with the same tools/settings, produce the same EROFS payload. Directory export is also deterministic for an unchanged tree and configuration: the Go planner fixes output timestamps at zero without modifying the tree. Artifact reproducibility additionally includes the authoritative sparse map and wrapper encoding.
 
 Flattening itself does not sign, encrypt or content-address the data. Optional `--upload` invokes the next manifest-ingest stage, which handles encryption and deduplication; see [manifest.md](https://github.com/kuasar-sandbox/accelerator/blob/main/docs/manifest.md). Do not infer an image-signature verification step from manifest integrity or encryption.
 
@@ -36,7 +36,7 @@ Flattening itself does not sign, encrypt or content-address the data. Optional `
 flowchart TD
   R["Registry image"] --> F["flatten-ctl: pull and merge layers"]
   A["docker save archive"] --> F
-  D["Rootfs directory"] --> E["mkfs.erofs and config ZIP"]
+  D["Rootfs directory"] --> E["go-erofs and config ZIP"]
   F --> E
   E --> T["tarstream image artifact"]
   T --> M["manifest-ctl store: chunk, encrypt and deduplicate"]
@@ -96,7 +96,7 @@ flatten-ctl export [flags] <ref|path|->
   --platform <os/arch>    Override the pull platform (os/arch[/variant]).
   --tmpdir <dir>          Override scratch parent; created if missing. For in-guest root
                           export, use a mountpoint-created directory, so --skip-mounts
-                          excludes scratch, including mkfs temporary files.
+                          excludes scratch, including planner temporary files.
   --insecure              Registry source: allow plain HTTP; TLS verification is controlled
                           separately by tls.* in the configuration.
   --no-progress           Disable stderr progress.
@@ -107,7 +107,7 @@ flatten-ctl export [flags] <ref|path|->
   --registry / --archive  Force registry / local-archive interpretation.
   # Rootfs-directory source (see below)
   --skip <rel>            Exclude the node and subtree relative to rootfs
-                          (mkfs --exclude-path semantics); repeatable.
+                          (relative source-path semantics); repeatable.
   --skip-mounts           Exclude mountpoints strictly below rootfs using mountinfo.
   --runtime-config <p>    OCI image config or projected config.json; detected by top-level
                           keys. Omitted means an empty runtime configuration.
@@ -143,7 +143,7 @@ flatten-ctl referer put --owner "$OWNER" --manifest-id "$APP_KEY" --config flatt
 flatten-ctl export --output big.img --config flatten.yaml ./big.tar
 ```
 
-**Rootfs-directory source:** mkfs.erofs reads the directory in place, without staging or changing source metadata. Timestamp normalization uses `-T0 --ignore-mtime` inside the image builder. Ownership preservation needs read access rather than chown capability; run as root to read a complete rootfs. `--skip` and `--skip-mounts` remove the **entire node**, including the excluded directory itself. The caller must stop all writers before export. One fixed selection excludes owned scratch, plan files, pending output, the destination and their discovered aliases; planning, reading and final validation use that same selection. An excluded mountpoint is useful for scratch and output when exporting a guest root. Exporting `/` requires `--skip-mounts` to avoid traversing /proc and /sys. Directory input rejects `--platform`, `--print-digest`, `--registry` and `--archive`.
+**Rootfs-directory source:** the Go planner reads the directory in place, without staging or changing source metadata. The planner fixes output timestamps at zero. Ownership preservation needs read access rather than chown capability; run as root to read a complete rootfs. `--skip` and `--skip-mounts` remove the **entire node**, including the excluded directory itself. The caller must stop all writers before export. One fixed selection excludes owned scratch, plan files, pending output, the destination and their discovered aliases; planning, reading and final validation use that same selection. An excluded mountpoint is useful for scratch and output when exporting a guest root. Exporting `/` requires `--skip-mounts` to avoid traversing /proc and /sys. Directory input rejects `--platform`, `--print-digest`, `--registry` and `--archive`.
 
 ```bash
 # Export a machine/guest root; first create excluded scratch/output (mount privilege required)
@@ -181,25 +181,21 @@ A staging entry whose private ownership cannot be verified is left untouched whe
 
 The first SIGINT/SIGTERM requests cancellation. If stdout remains blocked, a subsequent signal restores normal process termination; forced termination cannot run deferred cleanup.
 
-Cancellation closes owned input bodies, waits for layer application and native
-processes to stop, and only then removes scratch. Broken stdout pipes unwind the
+Cancellation closes owned input bodies, waits for layer application and planning/output work to stop, and only then removes scratch. Broken stdout pipes unwind the
 same resources and return an error. SIGKILL cannot run cleanup; export does not
 provide a global stale-file sweeper. `--upload --output -` keeps its existing
 stdout convention of artifact bytes followed by the manifest key.
 
-The maintained lifecycle regressions use the real maintained native tool, plus
-per-invocation write/close/upload fault substitutes:
+Lifecycle regressions use the actual Go generator and per-invocation write/close/upload fault substitutes:
 
 ```bash
-make -C native-deps erofs
-MKFS_EROFS_PATH="$PWD/native-deps/bin/$(uname -m)/mkfs.erofs" \
-    GOFLAGS=-p=2 GOMAXPROCS=2 go test -race ./cmd/flatten-ctl
+GOFLAGS=-p=2 GOMAXPROCS=2 go test -race ./cmd/flatten-ctl
 ```
 
-They check atomic output, cleanup before ingest, preserved user files, broken
-pipes and artifact identity against the ordinary native layout. Tests requiring
-the native tool skip if it is absent. Real Guest and live-store acceptance uses
-the [E2E procedures](../test/e2e/README.md).
+They check atomic output, planner budget failure, cleanup before ingest, preserved
+user files, broken pipes and consistency between raw and artifact APIs, without
+requiring mkfs. Independent fsck, kernel mounts and actual Guest content/metadata
+checks retain the [E2E procedures](../test/e2e/README.md).
 
 ### 2.2 `flatten-ctl info` — inspect an image
 
@@ -321,7 +317,7 @@ flatten-ctl referer put --owner <owner-token> --manifest-id <64hex> [--validity 
 `lookup` resolves the source to the platform image digest `D` and probes the OCI 1.1 Referrers API. Output:
 
 ```json
-{"conversion_semantics":"umoci-erofs-no-xattr-v1","supported":true,"subject":"repo/app@sha256:...","hit":true,"manifest_id":"..."}
+{"conversion_semantics":"umoci-go-erofs-no-xattr-v1","supported":true,"subject":"repo/app@sha256:...","hit":true,"manifest_id":"..."}
 ```
 
 - `supported=false`: the registry does not support Referrers; the caller chooses fallback or failure.
@@ -344,7 +340,7 @@ Referrer annotations:
 ```text
 vnd.kuasar.flatten-manifest.owner    = <hmac-hex> <referer_desc>
 vnd.kuasar.flatten-manifest.id       = <manifest_id>                        # Ingest content key
-vnd.kuasar.flatten-manifest.conversion = umoci-erofs-no-xattr-v1
+vnd.kuasar.flatten-manifest.conversion = umoci-go-erofs-no-xattr-v1
 vnd.kuasar.flatten-manifest.valid_at = <import RFC3339>[ <expiry RFC3339>]
 ```
 
@@ -534,31 +530,37 @@ Changes to included metadata, links, objects or directory membership do.
 
 ### 4.3 Layout and metadata policy
 
-The maintained **erofs-utils v1.9.1** patch reuses native traversal, sorting,
-inode/NID assignment, hardlinks, superblock, block allocation and chunk indexes.
-It batches source reads at about 1 MiB but still deduplicates each 4 KiB chunk
-with complete SHA-256. Normal raw and Plan output use this same layout algorithm.
+`accelerator` pins the external module `github.com/kuasar-sandbox/go-erofs` for
+directory/inode/NID placement, hardlinks, superblock, block allocation and compact
+single-device chunk indexes. The caller scans the shared selection deterministically,
+hashes each 4 KiB chunk with full SHA-256 using an approximately 1 MiB buffer, and
+writes ordered source records. The library only plans and writes structural metadata,
+without spooling payload. Raw and artifact APIs share KERPLAN v1. Old and new
+generators need not produce identical bytes; the new generator remains deterministic.
 
 | Field | Handling |
 |---|---|
-| Timestamps and UUID | `-T0 --ignore-mtime` and an all-zero UUID fix output identity without changing a directory source. |
+| Timestamps and UUID | Zero timestamps and an all-zero UUID fix output identity without changing a directory source. |
 | UID/GID/mode | Preserve numeric source ownership and permission bits. Insufficient permissions fail layer application. |
-| Inodes/order/hardlinks | Deterministic native traversal and real shared-inode hardlinks; content dedup remains separate. |
-| Extended attributes | Final EROFS uses `-x-1`: **no xattrs, file capabilities or security labels are emitted**, even when applied successfully to the private rootfs. |
+| Inodes/order/hardlinks | Deterministic shared selection and real shared-inode hardlinks; content dedup remains separate. |
+| Extended attributes | Final EROFS policy: **no xattrs, file capabilities or security labels are emitted**, even when applied successfully to the private rootfs. |
 | Compression/devices | Uncompressed, single-device, 4 KiB chunks; no hidden raw/data-blob fallback. |
 
 Plan schema and capabilities are internal and versioned independently of
 `image.ConversionSemantics` and artifact identity. The Plan declares logical
 length, source identity/path, ordered target/source offsets, lengths, SHA-256 and
 padding. The reader rejects unsupported features, overflow, excessive counts or
-bytes, missing/truncated inputs, overlaps and out-of-bounds references. Native
-address-space limits cover dedup and inode/path tables; Go budgets cover source
-indexes, decoder/applier bookkeeping and tarstream extent/sparse-map metadata.
-Defaults are finite and configurable through the library limit structures.
+bytes, missing/truncated inputs, overlaps and out-of-bounds references. The legacy
+field `NativeMemoryBytes` (default 512 MiB) now bounds controlled Go planner
+allocations, split equally between the library and caller dedup/hardlink tables.
+Capacity growth admits old and new storage together before allocation. `PlanBytes`
+defaults to 512 MiB and `IndexMemoryBytes` to 128 MiB, retaining plan/source/output
+extent and sparse-map accounting. These are not process RSS limits: GC, stacks
+and allocator retention still need actual measurement.
 
 ### 4.4 Sequential output and acceptance
 
-The native process finishes and releases its indexes before emission. Layout
+Planning releases references to its indexes before emission, without forcing global GC or promising immediate return of memory to the OS. Layout
 holes occupied by planned payload are reported as **Data**. `RunAt` is a repeatable
 metadata query and does not consume a data cursor or infer holes by scanning zeros.
 Each payload block is checked against its planned digest before entering a writer.
@@ -580,10 +582,12 @@ when supplied (nil stays silent), while returning success for the committed file
 `Close` cancels active work, joins it and releases owned resources; an arbitrary
 caller-supplied output writer must itself return from a blocked Write.
 
-Build the maintained native tools with `make -C native-deps erofs`; `make build`
-builds the CLI and runtime bundle through the existing packaging path. Native
-lookup still uses `MKFS_EROFS_PATH`, the CLI directory, then PATH. Missing Plan
-capability fails explicitly. There is no implicit high-space fallback.
+`make flatten-ctl` builds one static Go executable. Runtime generation no longer
+searches for mkfs and `MKFS_EROFS_PATH` does not select its generator. `make build`
+still uses a host native packer for the runtime bundle; `make -C native-deps erofs`
+retains host packaging, independent fsck and explicit native performance controls.
+There is no implicit old-generator or high-space fallback. Rollback selects the
+previous source/artifact set and its matching conversion semantics.
 
 ## 5. Design decisions
 
@@ -664,7 +668,7 @@ Do not interpret successful flattening as workload compatibility certification.
 - [accelerator/docs/manifest.md](https://github.com/kuasar-sandbox/accelerator/blob/main/docs/manifest.md): ingest the image into content-addressed storage; chunk deduplication shares repeated content across images.
 - [host image-default merging](https://github.com/kuasar-sandbox/sandboxer/blob/main/pkg/sandbox/imageconf.go): how startup uses the embedded OCI runtime configuration.
 - [sandboxer/docs/sandbox.md](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/sandbox.md) `boot.root.base`: select a flattened image as the read-only base.
-- [Native-build guide](../native-deps/README.md): build mkfs.erofs with `make -C native-deps erofs`; build the CLI with `make flatten-ctl`. The CLI resolves mkfs.erofs through the explicit environment override, sibling executable or PATH.
+- [Native-build guide](../native-deps/README.md): build mkfs.erofs with `make -C native-deps erofs`; build the CLI with `make flatten-ctl`. mkfs is a host packaging/test tool; the CLI has no runtime dependency on it.
 - [Project system overview](https://github.com/kuasar-sandbox/kuasar-sandbox/blob/main/docs/kuasar-sandbox.md) §2.2 / §3.1: flattening's role and goals.
 
 

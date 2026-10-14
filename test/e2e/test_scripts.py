@@ -64,20 +64,21 @@ class EmptyRootEnvironment(unittest.TestCase):
         block = script.split('capture empty-root python3 ', 1)[1].split("<<'PY'\n", 1)[1].split('\nPY\n', 1)[0]
         with tempfile.TemporaryDirectory(prefix='empty-root-env-') as temporary:
             tree = Path(temporary)
-            for name in ['flatten-ctl','mkfs.erofs']:
+            for name in ['flatten-ctl']:
                 (tree/name).write_bytes(b'fixture')
             child = mock.MagicMock()
             child.__enter__.return_value = child
             child.stdout = io.BytesIO(b'artifact')
             child.wait.return_value = 0
             with mock.patch.dict(os.environ, {'FLATTEN_CONFIG':'/host/only/config.yaml', 'KEEP_FIXTURE':'yes'}), \
-                 mock.patch.object(sys,'argv',['fixture',str(tree/'root'),str(tree/'flatten-ctl'),str(tree/'mkfs.erofs')]), \
+                 mock.patch.object(sys,'argv',['fixture',str(tree/'root'),str(tree/'flatten-ctl')]), \
                  mock.patch.object(os,'mknod'), mock.patch.object(os,'chown'), \
                  mock.patch.object(subprocess,'Popen',return_value=child) as launch:
                 exec(compile(block,'image.flatten empty-root','exec'),{})
                 environment=launch.call_args.kwargs['env']
                 self.assertFalse('FLATTEN_CONFIG' in environment, 'host config was inherited by the empty-root child')
-                self.assertEqual(environment['MKFS_EROFS_PATH'],'/bin/mkfs.erofs')
+                self.assertEqual(environment['MKFS_EROFS_PATH'],'/missing/native-generator')
+                self.assertFalse((tree/'root/bin/mkfs.erofs').exists())
                 self.assertEqual(environment['KEEP_FIXTURE'],'yes')
                 self.assertEqual(os.environ['FLATTEN_CONFIG'],'/host/only/config.yaml')
 

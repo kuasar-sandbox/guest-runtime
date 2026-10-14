@@ -26,13 +26,12 @@ import (
 )
 
 // Each export runs in a subprocess: fatal/flag exit behavior is observable and
-// mkfs/config environment changes never affect another test or the parent.
+// generator/config environment changes never affect another test or the parent.
 func TestExportLifecycle(t *testing.T) {
 	cases := []struct {
-		name, mode, output, config, wantErr, wantFile       string
-		upload, stream, mkfsFail, sharedScratch, brokenPipe bool
+		name, mode, output, config, wantErr, wantFile string
+		upload, stream, sharedScratch, brokenPipe     bool
 	}{
-		{name: "mkfs-partial-output", output: "file", mkfsFail: true, wantErr: "flatten: native plan: exit status 7: fake mkfs failure", wantFile: "previous"},
 		{name: "artifact-create", output: "directory", wantErr: "create artifact:", wantFile: "previous"},
 		{name: "runtime-config", output: "file", config: "runtime", wantErr: "invalid character", wantFile: "previous"},
 		{name: "missing-manifest", upload: true, wantErr: "missing manifest config: pass --manifest-config <path> or set MANIFEST_CONFIG", wantFile: "previous"},
@@ -62,7 +61,6 @@ func TestExportLifecycle(t *testing.T) {
 		{name: "upload-file-success", mode: "upload-success", output: "file", upload: true, config: "empty", wantFile: "artifact"},
 		{name: "upload-stdout-success", mode: "upload-success", output: "-", upload: true, stream: true, config: "empty", wantFile: "previous"},
 		{name: "shared-scratch", output: "scratch-file", sharedScratch: true, wantFile: "artifact"},
-		{name: "shared-scratch-mkfs-failure", output: "file", sharedScratch: true, mkfsFail: true, wantErr: "flatten: native plan: exit status 7: fake mkfs failure", wantFile: "previous"},
 		{name: "shared-scratch-config-failure", output: "scratch-file", sharedScratch: true, upload: true, config: "invalid", wantErr: "load config: manifest: parse", wantFile: "previous"},
 	}
 	for _, tc := range cases {
@@ -113,9 +111,6 @@ func TestExportLifecycle(t *testing.T) {
 					flag = "--runtime-config"
 				}
 				args = append(args, flag, path)
-			}
-			if tc.mkfsFail {
-				writeExportFile(t, f.mkfs, []byte(fakeExportMkfs+"echo 'fake mkfs failure' >&2\nexit 7\n"))
 			}
 			if tc.sharedScratch {
 				// Even lookalike names in shared scratch belong to someone else.
@@ -371,12 +366,6 @@ func (w *exportTestWriter) Close() error {
 	return nil
 }
 
-const fakeExportMkfs = `#!/bin/sh
-set -eu
-while [ "$#" -gt 2 ]; do shift; done
-printf 'fake EROFS bytes\000tail\n' > "$1"
-`
-
 type exportFixture struct {
 	root, source, scratch, output, config, mkfs string
 	retained                                    map[string][]byte
@@ -407,15 +396,8 @@ func newExportFixture(t *testing.T) exportFixture {
 		t.Fatal(err)
 	}
 	writeExportFile(t, f.output, []byte("previous user artifact\n"))
-	native := os.Getenv("MKFS_EROFS_PATH")
-	if native == "" {
-		t.Skip("set MKFS_EROFS_PATH to the maintained native Plan tool")
-	}
-	capability, err := exec.Command(native, "--plan-version").CombinedOutput()
-	if err != nil || !bytes.Contains(capability, []byte("erofs-plan 1")) {
-		t.Fatalf("native Plan capability: %s %v", capability, err)
-	}
-	writeExportFile(t, f.mkfs, []byte("#!/bin/sh\nexec '"+strings.ReplaceAll(native, "'", "'\"'\"'")+"' \"$@\"\n"))
+	// A stale environment variable must never select an external generator.
+	writeExportFile(t, f.mkfs, []byte("#!/bin/sh\necho unexpected native generator >&2\nexit 77\n"))
 	if err := os.Chmod(f.mkfs, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -460,11 +442,10 @@ func (f exportFixture) run(t *testing.T, mode string, brokenPipe bool, args ...s
 func expectedExportArtifact(t *testing.T, f exportFixture) []byte {
 	t.Helper()
 	raw := filepath.Join(t.TempDir(), "expected.raw")
-	cmd := exec.Command(f.mkfs, "-Ededupe", "--chunksize=4096", "-T0", "-b4096", "-x-1", "-U", "00000000-0000-0000-0000-000000000000", "--quiet", "--ignore-mtime", raw, f.source)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("raw baseline: %s %v", out, err)
-	}
-	if err := image.AppendConfigZip(raw, &image.RuntimeConfig{}); err != nil {
+	// Packaging must agree with the explicit raw API of the same generator.
+	// Independent filesystem semantics are checked by accelerator's reader,
+	// native fsck and kernel mount tests, not by comparing native layout bytes.
+	if err := flatten.BuildFromDir(f.source, raw, flatten.Options{TmpDir: f.scratch}, flatten.DirOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	var artifact bytes.Buffer
@@ -1105,5 +1086,30 @@ func TestExportRedirectedDirectoryStreams(t *testing.T) {
 				assertExportScratch(t, f.scratch, nil)
 			})
 		}
+	}
+}
+
+// A real planner failure after reserving the destination must preserve both
+// the previous output and unrelated files in shared scratch.
+func TestExportPlanBudgetFailure(t *testing.T) {
+	f := newExportFixture(t)
+	sentinel := []byte("unrelated scratch\n")
+	writeExportFile(t, filepath.Join(f.scratch, "flatten-prepared-user"), sentinel)
+	err := writePreparedExport(context.Background(), f.output, false, f.scratch, nil, true,
+		func(excluded []string) (*flatten.PreparedImage, error) {
+			return flatten.PrepareDir(context.Background(), f.source,
+				flatten.Options{TmpDir: f.scratch, PlanLimits: flatten.PlanLimits{PlanBytes: 192}},
+				flatten.DirOptions{OutputPaths: excluded})
+		}, exportIO{})
+	if err == nil || !strings.Contains(err.Error(), "budget") {
+		t.Fatalf("expected plan budget failure, got %v", err)
+	}
+	assertExportFile(t, f.output, []byte("previous user artifact\n"))
+	for path, data := range f.retained {
+		assertExportFile(t, path, data)
+	}
+	assertExportScratch(t, f.scratch, map[string][]byte{"flatten-prepared-user": sentinel})
+	if err := checkExportRawClosed(f.scratch); err != nil {
+		t.Fatal(err)
 	}
 }

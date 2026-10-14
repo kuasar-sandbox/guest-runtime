@@ -27,8 +27,6 @@ class SourceInventory(unittest.TestCase):
                 ("runtime", "bin/sandbox-runtime.bundle:/sbin/init", "sandboxer"),
                 ("runtime", "bin/sandbox-runtime.bundle:/opt/sandbox-runtime/bin/envd", "envd"),
                 ("runtime", "bin/flatten-ctl", "Go toolchain"),
-                ("runtime", EROFS, "erofs-utils"),
-                ("runtime", EROFS, "guest-runtime-erofs-patches"),
                 ("vmlinux", "bin/vmlinux", "linux"),
                 ("vmlinux", "bin/vmlinux", "guest-runtime-kernel-inputs")):
             row = [payload, name, "fixture", "fixture", "fixture", "fixture"]
@@ -40,55 +38,13 @@ class SourceInventory(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("unrecognized or inconsistent source inventory record", result.stderr)
 
-    def test_native_input_identity_and_own_license_directory_are_required(self):
-        for unit, payload, name in (("runtime", EROFS, "libgcc.a"),
-                                    ("runtime", EROFS, "crtbeginT.o")):
-            row = [payload, "system:" + name, "1.2.3", "deb-source:fixture@1.2.3",
-                   "sha256:" + "a" * 64 + ";package:fixture", "share/licenses/" + unit + "/system/" + name]
-            self.assertEqual(self.validate(unit, row).returncode, 0)
-            rpm = list(row)
-            rpm[3] = "rpm-source:fixture-1.2.3.src.rpm"
-            self.assertEqual(self.validate(unit, rpm).returncode, 0)
-            for column, value in ((0, "bin/other"), (1, "system:unknown"),
-                                   (2, "wrong version"), (3, "https://example.invalid"),
-                                   (4, "sha256:invalid;package:fixture"),
-                                   (4, row[4] + ";extra:field"),
-                                   (5, "share/licenses/" + unit + "/project")):
-                changed = list(row)
-                changed[column] = value
-                self.assertNotEqual(self.validate(unit, changed).returncode, 0)
-
-
-    def test_existing_source_built_libuuid_catalog_is_accepted(self):
-        row = [EROFS, "system:libuuid.a", "util-linux-2.23.2.tar.xz",
-               "https://example.invalid/util-linux-2.23.2-65.src.rpm",
-               "sha256:" + "a" * 64 + ";tarball-sha256:" + "b" * 64 + ";srpm-sha256:" + "c" * 64,
-               "share/licenses/runtime/system/libuuid.a"]
-        self.assertEqual(self.validate("runtime", row).returncode, 0)
-        for column, value in ((0, "bin/other"), (1, "system:libgcc.a"),
-                              (3, "https://example.invalid/not-an-srpm"),
-                              (4, row[4].replace("b" * 64, "invalid")),
-                              (4, row[4] + ";extra:field"),
-                              (5, "share/licenses/runtime/project")):
-            changed = list(row)
-            changed[column] = value
-            self.assertNotEqual(self.validate("runtime", changed).returncode, 0)
-
-
-    def test_pinned_crypto_source_catalog_shape(self):
-        for name in ("libgcrypt.a", "libgpg-error.a"):
-            row = [EROFS, "system:" + name, "1.10.2-4.oe2403sp4",
-                   "https://mirrors.huaweicloud.com/pinned.src.rpm",
-                   "sha256:" + "a" * 64 + ";srpm-sha256:" + "b" * 64 +
-                   ";tarball-sha256:" + "c" * 64 + ";crypto-catalog:" + "d" * 64,
-                   "share/licenses/runtime/system/" + name]
-            self.assertEqual(self.validate("runtime", row).returncode, 0)
-            for column, value in ((1, "system:libother.a"), (3, "file:///unverified.src.rpm"),
-                                  (4, row[4].replace("d" * 64, "invalid")),
-                                  (4, row[4] + ";extra:field"), (5, "share/licenses/runtime/project")):
-                changed = list(row)
-                changed[column] = value
-                self.assertNotEqual(self.validate("runtime", changed).returncode, 0)
+    def test_native_generator_records_are_not_runtime_payloads(self):
+        # Native recipe/linker inventory checks remain in the native-material
+        # tests. A Go-only runtime package must not claim to ship those inputs.
+        for name in ("erofs-utils", "guest-runtime-erofs-patches", "system:libc.a",
+                     "system:libuuid.a", "system:libgcrypt.a", "system:libgpg-error.a"):
+            row = [EROFS, name, "1.2.3", "fixture", "fixture", "fixture"]
+            self.assertNotEqual(self.validate("runtime", row).returncode, 0)
 
 
 if __name__ == "__main__":

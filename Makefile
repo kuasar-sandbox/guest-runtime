@@ -49,13 +49,12 @@ FLATTEN_CTL   ?= $(BINDIR)/flatten-ctl
 STORE_CTL     ?= ../accelerator/$(BINDIR)/store-ctl
 
 # BUILD_MKFS_EROFS is the host executable that packs the raw runtime EROFS.
-# GUEST_MKFS_EROFS is the target-arch static binary shipped inside the guest
-# runtime image. Cross builds must keep them separate.
+# It is a build/test dependency only; flatten-ctl generates EROFS in Go.
+# Cross builds must use an executable for the build host.
 BUILD_MKFS_EROFS ?= $(shell \
     command -v mkfs.erofs 2>/dev/null \
     || ( [ "$(HOST_ARCH)" = "$(TARGET_ARCH)" ] && [ -x native-deps/$(BINDIR)/mkfs.erofs ] && echo native-deps/$(BINDIR)/mkfs.erofs ) \
     || ( [ -x native-deps/bin/mkfs.erofs ] && echo native-deps/bin/mkfs.erofs ))
-GUEST_MKFS_EROFS ?= native-deps/$(BINDIR)/mkfs.erofs
 
 define link_bin
 @if [ "$(HOST_ARCH)" = "$(TARGET_ARCH)" ]; then \
@@ -91,7 +90,7 @@ vmlinux:
 	$(MAKE) -C native-deps vmlinux
 
 # Pack sandbox-init into the guest "/" image (virtio-pmem, DAX, read-only,
-# shared across sandboxes via host page cache). envd, flatten-ctl, and mkfs.erofs
+# shared across sandboxes via host page cache). envd and flatten-ctl
 # are projected into application roots by sandbox-init through
 # /opt/sandbox-runtime/bin.
 sandbox-runtime:
@@ -99,11 +98,6 @@ sandbox-runtime:
 	@[ -x "$(SANDBOX_INIT)" ] || $(MAKE) sandbox-init
 	@[ -x "$(ENVD)" ] || $(MAKE) envd
 	@[ -x "$(FLATTEN_CTL)" ] || $(MAKE) flatten-ctl
-	@if [ "$(GUEST_MKFS_EROFS)" = "native-deps/$(BINDIR)/mkfs.erofs" ]; then \
-	    $(MAKE) erofs; \
-	else \
-	    test -x "$(GUEST_MKFS_EROFS)"; \
-	fi
 	rm -rf $(BUILD_DIR)/sandbox-runtime
 	mkdir -p $(BUILD_DIR)/sandbox-runtime/sbin $(BUILD_DIR)/sandbox-runtime/proc \
 	         $(BUILD_DIR)/sandbox-runtime/sys $(BUILD_DIR)/sandbox-runtime/dev \
@@ -115,10 +109,8 @@ sandbox-runtime:
 	chmod +x $(BUILD_DIR)/sandbox-runtime/sbin/init
 	cp "$(ENVD)" $(BUILD_DIR)/sandbox-runtime/opt/sandbox-runtime/bin/envd
 	cp "$(FLATTEN_CTL)" $(BUILD_DIR)/sandbox-runtime/opt/sandbox-runtime/bin/flatten-ctl
-	cp "$(GUEST_MKFS_EROFS)" $(BUILD_DIR)/sandbox-runtime/opt/sandbox-runtime/bin/mkfs.erofs
 	chmod 0755 $(BUILD_DIR)/sandbox-runtime/opt/sandbox-runtime/bin/envd \
-	           $(BUILD_DIR)/sandbox-runtime/opt/sandbox-runtime/bin/flatten-ctl \
-	           $(BUILD_DIR)/sandbox-runtime/opt/sandbox-runtime/bin/mkfs.erofs
+	           $(BUILD_DIR)/sandbox-runtime/opt/sandbox-runtime/bin/flatten-ctl
 	mkdir -p $(BINDIR)
 	rm -f $(BUILD_DIR)/sandbox-runtime.erofs $(BINDIR)/sandbox-runtime.bundle
 	"$(BUILD_MKFS_EROFS)" \
@@ -142,7 +134,7 @@ test:
 	$(MAKE) -C native-deps test
 	PYTHONPYCACHEPREFIX="$(abspath $(BUILD_DIR)/python-cache)" \
 		python3 -m py_compile scripts/guest-inspect.py
-	MKFS_EROFS_PATH="$(abspath native-deps/$(BINDIR)/mkfs.erofs)" CGO_ENABLED=0 $(GO) test ./...
+	CGO_ENABLED=0 $(GO) test ./...
 
 vet:
 	CGO_ENABLED=0 $(GO) vet ./...

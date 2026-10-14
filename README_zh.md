@@ -69,7 +69,7 @@ CI 在受信 preflight 中一次选择已发布并验证的 Workbench, 将不可
 BUILD_MKFS_EROFS=/path/to/host/mkfs.erofs make sandbox-runtime
 ```
 
-Host packer 与作为目标架构 static binary 复制进 guest Runtime image 的 `native-deps/bin/<target-arch>/mkfs.erofs` 不同。Cross-build 必须保持这一区分:aarch64 guest binary 不能在 x86_64 Host 上打包 image。
+Host packer 仅在构建时组装 runtime bundle，必须匹配宿主架构。`flatten-ctl` 内部使用纯 Go 的 `github.com/kuasar-sandbox/go-erofs` 库生成 EROFS；Guest 和 Runtime 发行包不再携带 `mkfs.erofs`。
 
 其他前置和 Native source 位置见 [Native 构建与维护](native-deps/README_zh.md)。
 
@@ -87,11 +87,10 @@ GOWORK=off make build TARGET_ARCH=aarch64  # 在依赖支持的范围内交叉�
 
 - `../sandboxer/bin/<arch>/sandbox-init`;
 - `native-deps/bin/<arch>/envd`;
-- 作为 guest payload 的 `native-deps/bin/<arch>/mkfs.erofs`;
 - `bin/<arch>/flatten-ctl`;
 - 作为 Host image packer 的 `BUILD_MKFS_EROFS`。
 
-缺少 `sandbox-init`、Envd 或 `flatten-ctl` 时，Makefile 会调用对应构建 target。每次普通 Runtime 构建在使用仓库管理的目标架构 guest `mkfs.erofs` 前也会检查 EROFS 配方，即使可执行文件已经存在。明确指定 `GUEST_MKFS_EROFS` 时直接使用该覆盖值，文件必须可执行。Host `mkfs.erofs` 不同:它必须已在 `PATH`、有文档记录的 native-deps Host 路径中,或由 `BUILD_MKFS_EROFS` 指定;否则 Runtime 构建明确失败。干净的公开构建必须使用有文档记录的公开 source/download location,不得依赖开发者私有 package mirror 或 cache。
+缺少 `sandbox-init`、Envd 或 `flatten-ctl` 时，Makefile 调用对应构建 target。Host `mkfs.erofs` 必须已在 `PATH`、有文档记录的 native-deps Host 路径中，或由 `BUILD_MKFS_EROFS` 指定；缺少时 Runtime 构建明确失败。原生 EROFS 配方、静态依赖与缓存仍用于宿主打包和独立测试，不是 Guest 的运行时依赖。公开构建继续使用公开 source/download location。
 
 ## 输出
 
@@ -109,7 +108,7 @@ GOWORK=off make build TARGET_ARCH=aarch64  # 在依赖支持的范围内交叉�
 
 本仓不发布通用的 `guest-runtime-vX.Y.Z` Release,而是维护两条独立版本线:
 
-- **`runtime-vX.Y.Z`** - 发布 `sandbox-runtime-<arch>-vX.Y.Z.tar.gz`,包含 Runtime bundle、`flatten-ctl` 和 Release contract 选定的 EROFS creation tool;
+- **`runtime-vX.Y.Z`** - 发布 `sandbox-runtime-<arch>-vX.Y.Z.tar.gz`,包含 Runtime bundle、静态 `flatten-ctl` 及其许可和源码材料;
 - **`vmlinux-vX.Y.Z`** - 发布 `vmlinux-<arch>-vX.Y.Z.tar.gz`,在稳定路径 `bin/vmlinux` 包含 guest kernel，并在 `bin/vmlinux.sha256` 携带原始内核文件的 SHA-256。
 
 两者版本号可以独立演进。项目聚合 Release 精确选择一个 Runtime Tag 和一个 VMLinux Tag,不假定版本号相同。

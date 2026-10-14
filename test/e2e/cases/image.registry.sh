@@ -11,8 +11,6 @@ done
 FLATTEN_CTL="${BIN:?BIN is required}/flatten-ctl"
 STORE_CTL="$BIN/store-ctl"
 ZOT_BIN="${ZOT_BIN:?prepared ZOT_BIN is required}"
-MKFS_EROFS_PATH="$BIN/mkfs.erofs"
-export MKFS_EROFS_PATH
 MANIFEST_KEY_A="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 MANIFEST_KEY_B="fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
 OWNER_A="owner-a e2e-owner"
@@ -22,7 +20,7 @@ AUTH_PASS="e2epass"
 
 log preflight
 [ "$(uname -s)" = Linux ] || die "E2E requires Linux"
-for tool in python3 curl docker timeout base64 "$FLATTEN_CTL" "$STORE_CTL" "$ZOT_BIN" "$MKFS_EROFS_PATH"; do
+for tool in python3 curl docker timeout base64 "$FLATTEN_CTL" "$STORE_CTL" "$ZOT_BIN"; do
     have "$tool" || die "prerequisite not found: $tool"
 done
 require_root
@@ -33,7 +31,6 @@ run docker info >/dev/null 2>&1 || die "docker daemon is not usable"
 for tool in "$FLATTEN_CTL" "$STORE_CTL" "$ZOT_BIN"; do
     run "$tool" --help >"$WORK/preflight.log" 2>&1 || die "prerequisite is not runnable: $tool"
 done
-run "$MKFS_EROFS_PATH" --version >"$WORK/mkfs-version.log" 2>&1 || die "mkfs.erofs is not runnable: $MKFS_EROFS_PATH"
 
 capture() {
     local label="$1"

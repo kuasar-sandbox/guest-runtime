@@ -34,7 +34,7 @@
   `flatten-ctl` 直接拉取并展平(§2.3),拉取凭据经 `FLATTEN_REGISTRY_*` 环境变量注入,
   显式 OCI-layout 缓存可跨进程共享；未设置 `cache.dir` 时层直接流式输入；
 - **Docker archive**(`docker save` 产物的 tar 流,stdin 或本地文件);
-- **已展平的 rootfs 目录**——位置参数是一个本地目录时,mkfs.erofs 直接就地读取
+- **已展平的 rootfs 目录**——位置参数是一个本地目录时,Go 规划器直接就地读取
   该目录出图,不复制 staging 树、不修改源树(§2.1 的目录源小节);仍会读取数据并写输出。
 
 (OCI layout 目录暂不直读,见 §5.5。)
@@ -42,8 +42,7 @@
 输出:**单个 tarstream 工件**,内含 `image` payload(`EROFS + 末尾 ZIP`)及
 平台摘要 marker(§3)。ZIP 存放 OCI runtime config 投影。registry 与 docker-archive
 两条层源汇入同一 sink;相同的未压缩层和 runtime config 在相同工具/设置下产出
-相同的 EROFS payload。目录源也要求源树与配置不变;mtime 由 `-T0 --ignore-mtime`
-在 mkfs 层归一,不触碰源树。整个工件的复现还须包含权威稀疏图和容器编码条件。
+相同的 EROFS payload。目录源也要求源树与配置不变;mtime 在 Go 规划器中固定为零,不触碰源树。整个工件的复现还须包含权威稀疏图和容器编码条件。
 
 展平本身不签名、不加密、不做内容寻址。可选 `--upload` 调用下一阶段的 manifest
 ingest,完成加密/去重,见[manifest_zh.md](https://github.com/kuasar-sandbox/accelerator/blob/main/docs/manifest_zh.md)。
@@ -55,7 +54,7 @@ manifest 完整性与加密不能直接当作镜像签名校验流程。
 flowchart TD
   R["Registry 镜像"] --> F["flatten-ctl: 拉取并合并层"]
   A["docker save 归档"] --> F
-  D["Rootfs 目录"] --> E["mkfs.erofs 与 config ZIP"]
+  D["Rootfs 目录"] --> E["go-erofs 与 config ZIP"]
   F --> E
   E --> T["tarstream 镜像工件"]
   T --> M["manifest-ctl store: 分块、加密、去重"]
@@ -169,9 +168,8 @@ flatten-ctl referer put --owner "$OWNER" --manifest-id "$APP_KEY" --config flatt
 flatten-ctl export --output big.img --config flatten.yaml ./big.tar
 ```
 
-**rootfs 目录源**。位置参数 stat 为目录时走第三条源:mkfs.erofs **就地读取**
-该目录——没有 staging 拷贝,源树永不被修改(时间戳归一靠 `-T0 --ignore-mtime`
-在镜像层完成),保留属主只需要对树的读权限(导出完整 rootfs 用 root 跑)。被
+**rootfs 目录源**。位置参数 stat 为目录时走第三条源:Go 规划器**就地读取**
+该目录——没有 staging 拷贝,源树永不被修改(时间戳在输出元数据中固定为零),保留属主只需要对树的读权限(导出完整 rootfs 用 root 跑)。被
 `--skip` / `--skip-mounts` 排除的路径**节点整体消失**(目录本身也不在镜像里);
 调用者必须在导出前停止所有写入活动。共同选集排除自有 scratch、计划、pending 输出、
 目标路径及已发现的别名，规划、读取和最终校验始终使用此选集。导出 Guest 根目录时，
@@ -214,21 +212,19 @@ stdout 等 writer 输出现有工件，不保存整镜像压缩层、mkfs 私有
 
 首次 SIGINT/SIGTERM 请求取消；stdout 持续阻塞时，后续信号按正常信号行为终止进程。强制终止无法执行延迟清理。
 
-取消会关闭拥有的输入 body，等待 applier 与 native 进程真正结束再清理。stdout
+取消会关闭拥有的输入 body，等待 applier 和规划/输出工作真正结束再清理。stdout
 断管走同一错误返回和清理路径。SIGKILL 无法执行清理；这里不提供全局遗留文件
 清扫器。`--upload --output -` 仍在工件后追加 manifest key。
 
-维护中的生命周期回归使用真实 native 工具，并按调用注入 writer/Close/upload 故障：
+生命周期回归使用实际 Go 生成器，并按调用注入 writer/Close/upload 故障：
 
 ```bash
-make -C native-deps erofs
-MKFS_EROFS_PATH="$PWD/native-deps/bin/$(uname -m)/mkfs.erofs" \
-    GOFLAGS=-p=2 GOMAXPROCS=2 go test -race ./cmd/flatten-ctl
+GOFLAGS=-p=2 GOMAXPROCS=2 go test -race ./cmd/flatten-ctl
 ```
 
-覆盖原子输出、ingest 前资源释放、用户文件保留、断管和与普通 native 布局的工件
-身份对照。缺少 native 工具时相应用例会跳过；真实 Guest 和在线 store 验收使用
-[既有 E2E 入口](../test/e2e/README.md)。
+覆盖原子输出、规划预算失败、ingest 前资源释放、用户文件保留、断管及 raw 与
+artifact 入口的一致性；无需安装 mkfs。独立 fsck、内核挂载和实际 Guest 内容/元数据
+验证沿用[既有 E2E 入口](../test/e2e/README.md)。
 
 ### 2.2 `flatten-ctl info` — 检视镜像
 
@@ -363,7 +359,7 @@ flatten-ctl referer put --owner <owner-token> --manifest-id <64hex> [--validity 
 `lookup` 解析源 → 平台镜像 digest `D`,直接探测 OCI 1.1 Referrers API。输出:
 
 ```json
-{"conversion_semantics":"umoci-erofs-no-xattr-v1","supported":true,"subject":"repo/app@sha256:...","hit":true,"manifest_id":"..."}
+{"conversion_semantics":"umoci-go-erofs-no-xattr-v1","supported":true,"subject":"repo/app@sha256:...","hit":true,"manifest_id":"..."}
 ```
 
 - `supported=false`:registry 不支持 Referrers API,调用方可按策略 fallback 或失败;
@@ -388,7 +384,7 @@ referrer 注解:
 ```
 vnd.kuasar.flatten-manifest.owner    = <hmac-hex> <referer_desc>
 vnd.kuasar.flatten-manifest.id       = <manifest_id>                        # ingest 产出的内容键
-vnd.kuasar.flatten-manifest.conversion = umoci-erofs-no-xattr-v1
+vnd.kuasar.flatten-manifest.conversion = umoci-go-erofs-no-xattr-v1
 vnd.kuasar.flatten-manifest.valid_at = <import RFC3339>[ <expiry RFC3339>]
 ```
 
@@ -623,27 +619,31 @@ Linux 适配调用 **umoci v0.6.0** 层 API，不引入其 CLI、CAS 或 runtime
 
 ### 4.3 布局与元数据政策
 
-维护中的 **erofs-utils v1.9.1** 补丁复用 native 扫描、排序、inode/NID、硬链接、
-superblock、块分配与 chunk 索引。约 1 MiB 批量读取内仍逐 4 KiB 使用完整 SHA-256
-去重；普通 raw 与 Plan 使用同一布局算法。
+`accelerator` 使用固定版本的外部模块 `github.com/kuasar-sandbox/go-erofs`，复用其
+目录、inode/NID、硬链接、superblock、块分配和紧凑单设备 chunk 索引。调用方沿共同
+选集按确定顺序扫描，以约 1 MiB 缓冲逐 4 KiB 计算完整 SHA-256 去重，并顺序写出
+数据来源记录。库只规划并输出结构元数据，不暂存 payload。raw 与 artifact 共用
+同一 KERPLAN v1 布局；新旧生成器不要求字节相同，新生成器自身保持确定性。
 
 | 字段 | 处理 |
 |---|---|
-| 时间与 UUID | `-T0 --ignore-mtime` 和全零 UUID 固定输出身份，不修改调用者目录。 |
+| 时间与 UUID | 零时间与全零 UUID 固定输出身份，不修改调用者目录。 |
 | UID/GID/mode | 保留源的数值属主和权限位；层应用权限不足失败。 |
-| inode、遍历、硬链接 | native 确定性排序和真实共享 inode；内容去重独立进行。 |
-| xattr | 最终 EROFS 固定 `-x-1`，**不输出 xattr、file capability 或安全标签**，即使它们已成功应用到私有 rootfs。 |
+| inode、遍历、硬链接 | 共同选集的确定性排序和真实共享 inode；内容去重独立进行。 |
+| xattr | 最终 EROFS **不输出 xattr、file capability 或安全标签**，即使它们已成功应用到私有 rootfs。 |
 | 压缩与设备 | 不压缩、单设备、4 KiB chunk，无隐式 raw/data-blob fallback。 |
 
 内部 Plan schema/能力、`image.ConversionSemantics` 和制品身份分别管理。Plan 声明
 逻辑长度、源身份/路径、有序目标和源 offset、length、SHA-256 及 padding。Reader
-拒绝未知能力、溢出、数量/字节超限、缺源/截断、重叠和越界。Native 地址空间预算
-覆盖去重与 inode/path 表；Go 预算覆盖源索引、decoder/applier 和 tarstream extent/
-sparse-map 元数据。默认预算有限，可通过库的 limits 结构配置。
+拒绝未知能力、溢出、数量/字节超限、缺源/截断、重叠和越界。兼容字段
+`NativeMemoryBytes`（默认 512 MiB）现在限制 Go 规划器的受控分配，分给库和调用方
+去重/硬链接表，各占一半；容量增长前计入新旧存储并存。`PlanBytes` 默认 512 MiB，
+`IndexMemoryBytes` 默认 128 MiB，继续覆盖计划、源索引及输出 extent/sparse-map。
+它们不是进程 RSS 硬上限；GC、栈及分配器残留还须实际计量。
 
 ### 4.4 顺序输出与接收条件
 
-Native 退出并释放索引后才开始 emit。layout 中计划 payload 尚未物化的洞标为
+规划完成后释放对构建索引的引用，再开始 emit；不强制全局 GC，也不承诺内存立即归还系统。layout 中计划 payload 尚未物化的洞标为
 **Data**；`RunAt` 是可重复的纯元数据查询，不消费游标、不扫描零字节推断洞。
 每个 payload 块进入 writer 前核验计划摘要。现有 runtime-config 投影、tailzip 和
 加密 writer 保持不变。
@@ -660,9 +660,10 @@ Plan/layout 身份。接收方必须同时要求完整工件身份/尾以及 pro
 `Close` 取消并等待活动工作，然后释放拥有的资源；
 调用者提供的任意输出 writer 须自行让阻塞的 Write 返回。
 
-`make -C native-deps erofs` 构建维护中的 native 工具，`make build` 沿用现有 CLI 和
-runtime bundle 打包路径。Native 查找顺序仍为 `MKFS_EROFS_PATH`、CLI 同目录、PATH。
-缺少 Plan 能力明确失败，不自动回退到高空间路径。
+`make flatten-ctl` 构建单个静态 Go 可执行文件，运行时不查找 mkfs，
+`MKFS_EROFS_PATH` 不再选择生产生成器。`make build` 仍用宿主原生工具打包 runtime
+bundle；`make -C native-deps erofs` 保留宿主打包、独立 fsck 和显式 native 性能对照。
+没有隐式旧生成器或高空间 fallback。回退应恢复上一组源码/制品及对应转换语义版本。
 
 ## 5. 设计决策
 
@@ -727,7 +728,7 @@ OCI image config 字段繁多,大量与启动无关:`created` / `author` / `hist
 ## 6. 性能特征
 
 构建工作量通常随输入字节数和文件数增长,主要成本包括下载、层解压、文件系统
-条目应用与 mkfs.erofs。缓存状态、元数据分布、存储、CPU 和工具版本均影响结果。
+条目应用与 Go EROFS 规划。缓存状态、元数据分布、存储、CPU 和工具版本均影响结果。
 追加单个无压缩 ZIP entry 相对典型镜像构建较小,但仓库没有建立普适的
 1 GiB/3–5 秒或 ZIP 小于 10 ms 保证。
 

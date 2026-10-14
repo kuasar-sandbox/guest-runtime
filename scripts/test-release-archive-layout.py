@@ -24,7 +24,7 @@ class ArchiveLayout(unittest.TestCase):
                        ("./share/licenses/" + kind + "/project/LICENSE", False),
                        ("./share/sources/" + kind + "/", True)]
             entries += [("./bin/" + name, False) for name in (
-                ("sandbox-runtime.bundle", "flatten-ctl", "mkfs.erofs") if kind == "runtime" else ("vmlinux",))]
+                ("sandbox-runtime.bundle", "flatten-ctl") if kind == "runtime" else ("vmlinux",))]
             if extra is not None:
                 entries.append(extra)
             with tarfile.open(archive, "w:gz", format=tarfile.GNU_FORMAT) as output:
@@ -60,7 +60,7 @@ class ArchiveLayout(unittest.TestCase):
                     self.assertIn("outside the exact", result.stderr)
 
     def test_runtime_and_kernel_payloads_are_not_interchangeable(self):
-        for kind, name in (("runtime", "./bin/vmlinux"), ("runtime", "./bin/other"),
+        for kind, name in (("runtime", "./bin/mkfs.erofs"), ("runtime", "./bin/vmlinux"), ("runtime", "./bin/other"),
                            ("vmlinux", "./bin/sandbox-runtime.bundle"), ("vmlinux", "./bin/flatten-ctl")):
             result = self.validate(kind, (name, False))
             self.assertNotEqual(result.returncode, 0)

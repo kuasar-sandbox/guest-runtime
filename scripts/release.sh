@@ -173,7 +173,7 @@ validate_archive_paths() {
         exit 1
       }
       if (material) next
-      if (unit == "runtime" && path ~ /^bin\/(sandbox-runtime[.]bundle|flatten-ctl|mkfs[.]erofs)$/) next
+      if (unit == "runtime" && path ~ /^bin\/(sandbox-runtime[.]bundle|flatten-ctl)$/) next
       if (unit == "vmlinux" && (path == "bin/vmlinux" || path == "bin/vmlinux.sha256")) next
       exit 1
     }
@@ -184,7 +184,7 @@ validate_archive_paths() {
     $1 !~ /^-/ { exit 1 }
     {
       path=$6; sub(/^\.\//, "", path)
-      expected=(path ~ /^bin\/(flatten-ctl|mkfs[.]erofs)$/ ? "-rwxr-xr-x" : "-rw-r--r--")
+      expected=(path ~ /^bin\/(flatten-ctl)$/ ? "-rwxr-xr-x" : "-rw-r--r--")
       if ($1 != expected) exit 1
     }
   ' || fail "$archive contains an unsafe type, mode or ownership"
@@ -208,10 +208,6 @@ validate_source_inventory() {
         if ($1 != "bin/sandbox-runtime.bundle:/opt/sandbox-runtime/bin/envd") exit 1
         next
       }
-      if ($2 == "erofs-utils" || $2 == "guest-runtime-erofs-patches") {
-        if ($1 != "bin/mkfs.erofs,bin/sandbox-runtime.bundle:/opt/sandbox-runtime/bin/mkfs.erofs") exit 1
-        next
-      }
       if ($2 == "Go toolchain") {
         if ($1 != "bin/flatten-ctl" && $1 != "bin/sandbox-runtime.bundle:/sbin/init" &&
             $1 != "bin/sandbox-runtime.bundle:/opt/sandbox-runtime/bin/envd") exit 1
@@ -220,47 +216,6 @@ validate_source_inventory() {
     }
     unit == "vmlinux" && ($2 == "linux" || $2 == "guest-runtime-kernel-inputs") {
       if ($1 != "bin/vmlinux") exit 1
-      next
-    }
-    $2 ~ /^system:/ {
-      name=substr($2, 8)
-      if (unit == "runtime") {
-        if ($1 != "bin/mkfs.erofs,bin/sandbox-runtime.bundle:/opt/sandbox-runtime/bin/mkfs.erofs" ||
-            name !~ /^[A-Za-z0-9._+-]+[.](a|o)$/) exit 1
-      } else {
-        exit 1
-      }
-      if ($6 != "share/licenses/" unit "/system/" name || $3 !~ /^[A-Za-z0-9.+:~_-]+$/) exit 1
-      # The existing runner source-build catalog records tarball/SRPM inputs
-      # instead of a binary package owner; preserve that collection format.
-      if (name == "libuuid.a" && split($5, fields, ";") == 3) {
-        if ($4 !~ /^https:\/\/[^[:space:]]+[.]src[.]rpm$/ ||
-            fields[1] !~ /^sha256:/ || fields[2] !~ /^tarball-sha256:/ || fields[3] !~ /^srpm-sha256:/) exit 1
-        for (i=1; i<=3; i++) {
-          digest=fields[i]; sub(/^[^:]+:/, "", digest)
-          if (length(digest) != 64 || digest ~ /[^0-9a-f]/) exit 1
-        }
-        next
-      }
-      if ((name == "libgcrypt.a" || name == "libgpg-error.a") && split($5, fields, ";") == 4) {
-        if ($4 !~ /^https:\/\/[^[:space:]]+[.]src[.]rpm$/ || fields[1] !~ /^sha256:/ ||
-            fields[2] !~ /^srpm-sha256:/ || fields[3] !~ /^tarball-sha256:/ || fields[4] !~ /^crypto-catalog:/) exit 1
-        for (i=1; i<=4; i++) {
-          digest=fields[i]; sub(/^[^:]+:/, "", digest)
-          if (length(digest) != 64 || digest ~ /[^0-9a-f]/) exit 1
-        }
-        next
-      }
-      if (split($5, fields, ";") != 2 || fields[1] !~ /^sha256:/ || fields[2] !~ /^package:/) exit 1
-      digest=substr(fields[1], 8); package=substr(fields[2], 9)
-      if (length(digest) != 64 || digest ~ /[^0-9a-f]/ || package !~ /^[A-Za-z0-9][A-Za-z0-9.+_-]*$/) exit 1
-      if ($4 ~ /^deb-source:/) {
-        if (package !~ /^[a-z0-9][a-z0-9+.-]*$/ || $4 != "deb-source:" package "@" $3) exit 1
-      } else if ($4 ~ /^rpm-source:[A-Za-z0-9][A-Za-z0-9.+:~_-]*[.](no)?src[.]rpm$/) {
-        suffix="-" $3 ".src.rpm"; alternate="-" $3 ".nosrc.rpm"
-        if (substr($4, length($4)-length(suffix)+1) != suffix &&
-            substr($4, length($4)-length(alternate)+1) != alternate) exit 1
-      } else exit 1
       next
     }
     { exit 1 }
@@ -279,14 +234,12 @@ validate_runtime_payloads() {
   local extract="$1" target_arch="$2" go_arch payloads="$WORK/runtime-payloads" sandboxer_sha binary package module info
   case "$target_arch" in x86_64) go_arch=amd64 ;; aarch64) go_arch=arm64 ;; *) fail "invalid target: $target_arch" ;; esac
   prepare_runtime_verifier
-  python3 "$ROOT/scripts/release-runtime-payloads.py" \
+  python3 "$ROOT/scripts/release-runtime-payloads.py" --without-mkfs \
     "$extract/bin/sandbox-runtime.bundle" "$RUNTIME_FSCK" "$RUNTIME_DUMP" "$payloads" \
     || fail "Runtime embedded payload verification failed"
-  cmp -s "$payloads/mkfs.erofs" "$extract/bin/mkfs.erofs" \
-    || fail "embedded mkfs.erofs differs from the shipped host payload"
   cmp -s "$payloads/flatten-ctl" "$extract/bin/flatten-ctl" \
     || fail "embedded flatten-ctl differs from the verified outer payload"
-  for binary in init envd flatten-ctl mkfs.erofs; do
+  for binary in init envd flatten-ctl; do
     check_target_binary "$payloads/$binary" "$target_arch" "embedded $binary"
   done
   sandboxer_sha="$(awk -F '\t' '$2 == "sandboxer" { sub(/^git:/, "", $5); print $5 }' \
@@ -363,6 +316,10 @@ validate_bundle() {
     fi
     [[ "$selected_sha" =~ ^[0-9a-f]{40}$ ]] || fail "flatten-ctl must bind its full selected source commit"
     release_materials_require_go_revision "$extract/bin/flatten-ctl" "$selected_sha"
+    # Runtime source admission previously occurred while checking the native
+    # generator's patch material. Keep it explicit after removing that payload.
+    git -C "$ROOT" cat-file -e "$selected_sha^{commit}" 2>/dev/null \
+      || fail "selected source commit is unavailable for Runtime validation"
   elif [ -z "$selected_sha" ]; then
     selected_sha="$(awk -F '\t' '$1 == "bin/vmlinux" && $2 == "guest-runtime-kernel-inputs" {
       split($5, fields, ";"); sub(/^git:/, "", fields[1]); print fields[1]
@@ -386,27 +343,12 @@ validate_bundle() {
       release_materials_require_source "$extract" "$kind" 'bin/sandbox-runtime.bundle:/opt/sandbox-runtime/bin/envd' 'github.com/e2b-dev/infra/packages/shared' "2026.22" \
         'https://github.com/e2b-dev/runtime/archive/refs/tags/2026.22.tar.gz' \
         'sha256:8f074b23dcb2c9db48f8e674a8ab8082b54a16088fb29b66376178feeb7fe040'
-      release_materials_require_source "$extract" "$kind" 'bin/mkfs.erofs,bin/sandbox-runtime.bundle:/opt/sandbox-runtime/bin/mkfs.erofs' 'erofs-utils' "v1.9.1" \
-        'https://github.com/erofs/erofs-utils/archive/refs/tags/v1.9.1.tar.gz' \
-        'sha256:a9ef5ab67c4b8d2d3e9ed71f39cd008bda653142a720d8a395a36f1110d0c432'
-      release_materials_require_source "$extract" "$kind" \
-        'bin/mkfs.erofs,bin/sandbox-runtime.bundle:/opt/sandbox-runtime/bin/mkfs.erofs' \
-        guest-runtime-erofs-patches "$version" \
-        "https://github.com/kuasar-sandbox/guest-runtime/tree/$selected_sha/native-deps/deps/erofs-patches" \
-        "git:$selected_sha"
-      release_native_validate_erofs_patches "$extract/share/sources/runtime/erofs-patches" "$selected_sha"
       release_materials_require_go_key "$extract" "$kind" 'bin/flatten-ctl'
-      release_native_validate_erofs_inventory "$extract"
-      release_materials_require_source "$extract" "$kind" \
-        'bin/mkfs.erofs,bin/sandbox-runtime.bundle:/opt/sandbox-runtime/bin/mkfs.erofs' 'system:libc.a' ""
-      release_materials_require_source "$extract" "$kind" \
-        'bin/mkfs.erofs,bin/sandbox-runtime.bundle:/opt/sandbox-runtime/bin/mkfs.erofs' 'system:libuuid.a' ""
       release_materials_require_go_key "$extract" "$kind" 'bin/sandbox-runtime.bundle:/sbin/init'
       release_materials_require_go_key "$extract" "$kind" 'bin/sandbox-runtime.bundle:/opt/sandbox-runtime/bin/envd'
       [ -f "$extract/bin/sandbox-runtime.bundle" ] \
         || fail "$archive is missing bin/sandbox-runtime.bundle"
       [ -x "$extract/bin/flatten-ctl" ] || fail "$archive is missing bin/flatten-ctl"
-      [ -x "$extract/bin/mkfs.erofs" ] || fail "$archive is missing bin/mkfs.erofs"
       check_go_binary "$extract/bin/flatten-ctl" "$arch"
       validate_runtime_payloads "$extract" "$arch"
       ;;
@@ -459,13 +401,12 @@ package_release() {
   release_materials_copy_licenses "$ROOT" project
   case "$kind" in
     runtime)
-      local sandboxer_source accelerator_source envd_source erofs_source
+      local sandboxer_source accelerator_source envd_source
       local sandbox_init_bin envd_bin sandboxer_version accelerator_version
-      local sandboxer_sha accelerator_sha patch_file
+      local sandboxer_sha accelerator_sha
       sandboxer_source="${RELEASE_SANDBOXER_SOURCE_DIR:-$ROOT/../sandboxer}"
       accelerator_source="${RELEASE_ACCELERATOR_SOURCE_DIR:-$ROOT/../accelerator}"
       envd_source="${RELEASE_ENVD_SOURCE_DIR:-${ENVD_SRC:-$ROOT/native-deps/build/src/e2b-infra}}"
-      erofs_source="${RELEASE_EROFS_SOURCE_DIR:-$ROOT/native-deps/build/$arch/src/erofs-utils}"
       sandbox_init_bin="${RELEASE_SANDBOX_INIT_BIN:-$sandboxer_source/bin/$arch/sandbox-init}"
       envd_bin="${RELEASE_ENVD_BIN:-$native_bin_dir/envd}"
       sandboxer_version="${RELEASE_SANDBOXER_VERSION:-${SANDBOXER_VERSION:-}}"
@@ -481,7 +422,6 @@ package_release() {
       record_release_go_contexts "$ROOT" "$sandboxer_source" "$envd_source"
       copy_external_file "$bin_dir/sandbox-runtime.bundle" bin/sandbox-runtime.bundle
       copy_executable "$bin_dir/flatten-ctl" bin/flatten-ctl
-      copy_executable "$native_bin_dir/mkfs.erofs" bin/mkfs.erofs
       check_go_binary "$STAGE/bin/flatten-ctl" "$arch"
       release_materials_require_go_revision "$STAGE/bin/flatten-ctl" "$project_sha"
       accelerator_version="$(release_materials_git_version "$accelerator_source" "$accelerator_version" "$accelerator_sha")"
@@ -491,9 +431,6 @@ package_release() {
       release_materials_copy_licenses "$envd_source" envd
       release_materials_copy_licenses "$envd_source" \
         go/github.com/e2b-dev/infra/packages/shared@v0.0.0
-      release_materials_copy_licenses "$erofs_source" erofs-utils
-      release_native_erofs_inputs "$erofs_source/mkfs/mkfs.erofs.map" "$erofs_source" \
-        'bin/mkfs.erofs,bin/sandbox-runtime.bundle:/opt/sandbox-runtime/bin/mkfs.erofs'
       release_materials_record_source 'bin/sandbox-runtime.bundle,bin/flatten-ctl' guest-runtime "$version" \
         "https://github.com/kuasar-sandbox/guest-runtime/commit/$project_sha" \
         "git:$project_sha" project
@@ -511,17 +448,6 @@ package_release() {
         'https://github.com/e2b-dev/runtime/archive/refs/tags/2026.22.tar.gz' \
         'sha256:8f074b23dcb2c9db48f8e674a8ab8082b54a16088fb29b66376178feeb7fe040' \
         go/github.com/e2b-dev/infra/packages/shared@v0.0.0
-      release_materials_record_source 'bin/mkfs.erofs,bin/sandbox-runtime.bundle:/opt/sandbox-runtime/bin/mkfs.erofs' erofs-utils v1.9.1 \
-        'https://github.com/erofs/erofs-utils/archive/refs/tags/v1.9.1.tar.gz' \
-        'sha256:a9ef5ab67c4b8d2d3e9ed71f39cd008bda653142a720d8a395a36f1110d0c432' erofs-utils
-      release_native_validate_erofs_patches "$ROOT/native-deps/deps/erofs-patches" "$project_sha"
-      for patch_file in "$ROOT"/native-deps/deps/erofs-patches/*; do
-        copy_file "${patch_file#"$ROOT/"}" "share/sources/runtime/erofs-patches/${patch_file##*/}"
-      done
-      release_materials_record_source 'bin/mkfs.erofs,bin/sandbox-runtime.bundle:/opt/sandbox-runtime/bin/mkfs.erofs' \
-        guest-runtime-erofs-patches "$version" \
-        "https://github.com/kuasar-sandbox/guest-runtime/tree/$project_sha/native-deps/deps/erofs-patches" \
-        "git:$project_sha" erofs-utils
       release_materials_add_go_binary "$STAGE/bin/flatten-ctl" bin/flatten-ctl
       release_materials_add_go_binary "$sandbox_init_bin" bin/sandbox-runtime.bundle:/sbin/init
       release_materials_add_go_binary "$envd_bin" bin/sandbox-runtime.bundle:/opt/sandbox-runtime/bin/envd

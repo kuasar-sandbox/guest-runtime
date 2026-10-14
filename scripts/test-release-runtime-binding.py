@@ -29,7 +29,7 @@ def run(source, original, readers):
         subprocess.run(["tar", "--same-permissions", "-xzf", str(original / "assets" / archive_name),
                         "-C", str(base)], check=True)
         FIXTURE.READER.read_payloads(base / "bin/sandbox-runtime.bundle", readers / "bin/fsck.erofs",
-                                     readers / "build/src/erofs-utils/dump/dump.erofs", work / "payloads")
+                                     readers / "build/src/erofs-utils/dump/dump.erofs", work / "payloads", without_mkfs=True)
         marker = work / "must-not-execute"
         mutations = (
             ("arbitrary-bundle", "offset-zero EROFS"),
@@ -39,7 +39,7 @@ def run(source, original, readers):
             ("wrong-mode", "mode 0755"),
             ("swapped-init", "Go payload must be built from the clean selected commit"),
             ("non-go-envd", "embedded"),
-            ("different-mkfs", "embedded mkfs.erofs differs"),
+            ("obsolete-outer-mkfs", "outside the exact runtime release layout"),
             ("missing-flatten", "Runtime embedded payload verification failed"),
             ("different-flatten", "embedded flatten-ctl differs"),
             ("forged-envd-record", "Go build records differ from embedded Runtime payloads"),
@@ -59,12 +59,18 @@ def run(source, original, readers):
                     value = data.read(1)
                     data.seek(4096)
                     data.write(bytes([value[0] ^ 1]))
+            elif mutation == "obsolete-outer-mkfs":
+                target = tree / "bin/mkfs.erofs"
+                target.write_text("#!/bin/sh\ntouch " + str(marker) + "\n")
+                target.chmod(0o755)
             elif mutation == "forged-envd-record":
                 with (tree / "share/sources/runtime/GO-BUILD-INFO.tsv").open("a") as data:
                     data.write("bin/sandbox-runtime.bundle:/opt/sandbox-runtime/bin/envd\tbuild-setting\t-tags\tfixture-forged\t-\n")
             else:
                 guest = candidate / "guest"
                 for label, path in FIXTURE.READER.PAYLOADS.items():
+                    if label == "mkfs.erofs":
+                        continue
                     target = guest / path.lstrip("/")
                     target.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copyfile(work / "payloads" / label, target)
@@ -85,9 +91,8 @@ def run(source, original, readers):
                     flatten.unlink()
                 elif mutation == "different-flatten":
                     flatten.write_text("#!/bin/sh\ntouch " + str(marker) + "\n")
-                elif mutation in ("non-go-envd", "different-mkfs"):
-                    target = envd if mutation == "non-go-envd" else guest / "opt/sandbox-runtime/bin/mkfs.erofs"
-                    target.write_text("#!/bin/sh\ntouch " + str(marker) + "\n")
+                elif mutation == "non-go-envd":
+                    envd.write_text("#!/bin/sh\ntouch " + str(marker) + "\n")
                 erofs = candidate / "raw.erofs"
                 subprocess.run([str(readers / "bin/mkfs.erofs"), "--all-root", "-T0", "-U",
                                 "00000000-0000-0000-0000-000000000000", str(erofs), str(guest)],

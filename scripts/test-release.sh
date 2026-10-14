@@ -434,7 +434,6 @@ tree="$fixture_root/build/runtime-fixture"
 mkdir -p "$tree/sbin" "$tree/opt/sandbox-runtime/bin"
 install -m 0755 "$TMP/sandboxer/bin/x86_64/sandbox-init" "$tree/sbin/init"
 install -m 0755 "$fixture_root/native-deps/bin/x86_64/envd" "$tree/opt/sandbox-runtime/bin/envd"
-install -m 0755 "$fixture_root/native-deps/bin/x86_64/mkfs.erofs" "$tree/opt/sandbox-runtime/bin/mkfs.erofs"
 install -m 0755 "$fixture_root/bin/x86_64/flatten-ctl" "$tree/opt/sandbox-runtime/bin/flatten-ctl"
 mkfs.erofs --all-root -T0 -U 00000000-0000-0000-0000-000000000000 \
   "$fixture_root/build/runtime.erofs" "$tree" >/dev/null
@@ -504,55 +503,22 @@ RELEASE_KIND=vmlinux bash "$ROOT/scripts/test-publisher.sh" \
   "$project_sha" release/v2.3.x
 
 runtime_archive="$TMP/runtime-bundle/assets/sandbox-runtime-x86_64-v1.2.3-preview.20260804.tar.gz"
-# Regenerated archive/material checksums must not authorize altered downstream
-# source material. The fixture Git commit remains the independent reference.
-for mutation in patch series license readme extra missing traversal duplicate source; do
-  candidate="$TMP/patch-material-$mutation"
-  cp -a "$TMP/runtime-bundle" "$candidate"
-  mkdir "$candidate/root"
-  tar --same-permissions -xzf "$runtime_archive" -C "$candidate/root"
-  material="$candidate/root/share/sources/runtime/erofs-patches"
-  expected='EROFS patch material'
-  case "$mutation" in
-    patch) printf '\nchanged patch\n' >> "$material/0002-explicit-libgcrypt-sha256.patch" ;;
-    series) printf '# substituted series\n' > "$material/series" ;;
-    license) printf 'different license\n' > "$material/0002-explicit-libgcrypt-sha256.patch.license" ;;
-    readme) printf 'different provenance\n' >> "$material/README.md" ;;
-    extra) printf 'untracked material\n' > "$material/extra.patch"; chmod 0644 "$material/extra.patch" ;;
-    missing) rm "$material/0002-explicit-libgcrypt-sha256.patch.license" ;;
-    traversal) printf '../outside.patch\n' > "$material/series" ;;
-    duplicate) cat "$fixture_root/native-deps/deps/erofs-patches/series" >> "$material/series" ;;
-    source)
-      sed -i '/guest-runtime-erofs-patches/s/git:[0-9a-f]\{40\}/git:0000000000000000000000000000000000000000/' \
-        "$candidate/root/share/sources/runtime/SOURCES.tsv"
-      expected='missing or inconsistent source record for guest-runtime-erofs-patches' ;;
-  esac
-  release_materials_hash_tree "$candidate/root" runtime "$candidate/root/share/sources/runtime/MATERIALS.sha256"
-  tar --sort=name --owner=0 --group=0 --numeric-owner --mtime=@1700000000 \
-    -czf "$candidate/assets/$(basename "$runtime_archive")" -C "$candidate/root" .
-  (cd "$candidate/assets" && sha256sum "$(basename "$runtime_archive")" > SHA256SUMS)
-  if "$fixture_root/scripts/release.sh" validate runtime runtime-v1.2.3-preview.20260804 x86_64 "$candidate" > "$candidate/result.log" 2>&1; then
-    fail "validator accepted $mutation patch material with regenerated checksums"
-  fi
-  grep -Fq "$expected" "$candidate/result.log" \
-    || { cat "$candidate/result.log" >&2; fail "patch material $mutation failed for an unrelated reason"; }
-done
-printf 'test-release: selected-source patch bytes, sidecars, exact inventory and source association PASS\n'
+# The generator is linked into flatten-ctl. Native patch/linker-material
+# regressions still run above in test-release-native-materials.sh.
+if tar -tzf "$runtime_archive" | grep -E '^./bin/mkfs[.]erofs$|^./share/sources/runtime/(EROFS-INPUTS[.]tsv|erofs-patches/)'; then
+  fail "runtime package retained a native generator payload or its payload inventory"
+fi
 
 go_toolchain="$(go version | awk '{print $3}')"
-for path in ./bin/sandbox-runtime.bundle ./bin/flatten-ctl ./bin/mkfs.erofs \
+for path in ./bin/sandbox-runtime.bundle ./bin/flatten-ctl \
   ./share/licenses/runtime/project/LICENSE \
   ./share/licenses/runtime/sandboxer/LICENSE \
   ./share/licenses/runtime/accelerator/LICENSE \
   ./share/licenses/runtime/envd/LICENSE \
-  ./share/licenses/runtime/erofs-utils/COPYING \
   ./share/licenses/runtime/go-toolchain/"$go_toolchain"/LICENSE \
   ./share/sources/runtime/SOURCES.tsv \
   ./share/sources/runtime/GO-BUILD-INFO.tsv \
   ./share/sources/runtime/GO-MODULES.tsv \
-  ./share/sources/runtime/EROFS-INPUTS.tsv \
-  ./share/sources/runtime/erofs-patches/series \
-  ./share/sources/runtime/erofs-patches/0002-explicit-libgcrypt-sha256.patch \
   ./share/sources/runtime/MATERIALS.sha256; do
   tar -tzf "$runtime_archive" | grep -Fx "$path" >/dev/null \
     || fail "runtime archive is missing $path"
@@ -589,45 +555,6 @@ fi
 grep -Fq 'missing or inconsistent source record for guest-runtime-kernel-inputs' "$candidate/result.log" \
   || fail "Linux COPYING mutation failed for an unrelated reason"
 
-for input in libc.a libuuid.a libgcrypt.a libgpg-error.a libgcc.a crtbeginT.o; do
-  candidate="$TMP/omitted-native-$input"
-  cp -a "$TMP/runtime-bundle" "$candidate"
-  mkdir "$candidate/root"
-  tar --same-permissions -xzf "$runtime_archive" -C "$candidate/root"
-  table="$candidate/root/share/sources/runtime/SOURCES.tsv"
-  awk -F '\t' -v name="system:$input" '$2 != name' "$table" > "$candidate/changed-sources"
-  install -m 0644 "$candidate/changed-sources" "$table"
-  mv "$candidate/root/share/licenses/runtime/system/$input" "$candidate/removed-notices"
-  release_materials_hash_tree "$candidate/root" runtime "$candidate/root/share/sources/runtime/MATERIALS.sha256"
-  tar --sort=name --owner=0 --group=0 --numeric-owner --mtime=@1700000000 \
-    -czf "$candidate/assets/$(basename "$runtime_archive")" -C "$candidate/root" .
-  (cd "$candidate/assets" && sha256sum "$(basename "$runtime_archive")" > SHA256SUMS)
-  if "$fixture_root/scripts/release.sh" validate runtime runtime-v1.2.3-preview.20260804 x86_64 "$candidate" > "$candidate/result.log" 2>&1; then
-    fail "validator accepted omitted native input and notices: $input"
-  fi
-  grep -Fq 'EROFS source records omit or alter collected linker inputs' "$candidate/result.log" \
-    || fail "omitted native input failed for an unrelated reason"
-done
-for input in libgcc.a crtbeginT.o; do
-  candidate="$TMP/redirected-native-$input"
-  cp -a "$TMP/runtime-bundle" "$candidate"
-  mkdir "$candidate/root"
-  tar --same-permissions -xzf "$runtime_archive" -C "$candidate/root"
-  table="$candidate/root/share/sources/runtime/SOURCES.tsv"
-  awk -F '\t' -v OFS='\t' -v name="system:$input" \
-    '$2 == name {$6="share/licenses/runtime/system/libc.a"} {print}' "$table" > "$candidate/changed-sources"
-  install -m 0644 "$candidate/changed-sources" "$table"
-  mv "$candidate/root/share/licenses/runtime/system/$input" "$candidate/removed-notices"
-  release_materials_hash_tree "$candidate/root" runtime "$candidate/root/share/sources/runtime/MATERIALS.sha256"
-  tar --sort=name --owner=0 --group=0 --numeric-owner --mtime=@1700000000 \
-    -czf "$candidate/assets/$(basename "$runtime_archive")" -C "$candidate/root" .
-  (cd "$candidate/assets" && sha256sum "$(basename "$runtime_archive")" > SHA256SUMS)
-  if "$fixture_root/scripts/release.sh" validate runtime runtime-v1.2.3-preview.20260804 x86_64 "$candidate" > "$candidate/result.log" 2>&1; then
-    fail "validator accepted another input's notices for $input"
-  fi
-  grep -Fq 'unrecognized or inconsistent source inventory record' "$candidate/result.log" \
-    || { sed -n '1,$p' "$candidate/result.log" >&2; fail "redirected native notices failed for an unrelated reason"; }
-done
 if tar -tzf "$runtime_archive" | grep -E '^\./(docs|test/e2e)(/|$)' >/dev/null \
   || tar -tzf "$vmlinux_archive" | grep -E '^\./(docs|test/e2e)(/|$)' >/dev/null; then
   fail "component archive contains documentation or E2E sources"
@@ -818,9 +745,6 @@ for kind in runtime vmlinux; do
       fail "validator accepted $kind $mutation with regenerated checksums"
     fi
     expected="unrecognized or inconsistent source inventory record"
-    if [ "$kind:$mutation" = runtime:uninventoried-system ]; then
-      expected="EROFS source records omit or alter collected linker inputs"
-    fi
     grep -Fq "$expected" "$candidate/result.log" \
       || { sed -n '1,$p' "$candidate/result.log" >&2; fail "$kind $mutation failed for an unrelated reason"; }
   done
@@ -829,7 +753,7 @@ done
 for kind in runtime vmlinux; do
   if [ "$kind" = runtime ]; then
     version=runtime-v1.2.3-preview.20260804
-    names=(guest-runtime sandboxer accelerator envd erofs-utils guest-runtime-erofs-patches github.com/e2b-dev/infra/packages/shared system:libc.a system:libuuid.a system:libgcrypt.a system:libgpg-error.a)
+    names=(guest-runtime sandboxer accelerator envd github.com/e2b-dev/infra/packages/shared)
   else
     version=vmlinux-v2.3.4
     names=(guest-runtime-kernel-inputs linux)
@@ -871,7 +795,7 @@ done
 for kind in runtime vmlinux; do
   if [ "$kind" = runtime ]; then
     version=runtime-v1.2.3-preview.20260804
-    names=(envd erofs-utils)
+    names=(envd)
   else
     version=vmlinux-v2.3.4
     names=(linux)

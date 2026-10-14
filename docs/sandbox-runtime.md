@@ -13,7 +13,7 @@ This document defines image packaging, filesystem layout, versioning and consump
 | Component | Responsibility |
 | --- | --- |
 | `sandboxer` | Build `sandbox-init`; `sandbox-ctl` starts CH and attaches the runtime image as guest virtio-pmem. |
-| `guest-runtime` | Package `sandbox-init`, `envd`, `flatten-ctl` and `mkfs.erofs` into one EROFS image. |
+| `guest-runtime` | Package `sandbox-init`, `envd`, `flatten-ctl` into one EROFS image. |
 | `guest-runtime/native-deps` | Build `mkfs.erofs`, `fsck.erofs`, `vmlinux` and `envd`; the optional gateway is a separate opt-in target, not runtime payload. |
 | `accelerator` | Supply the reusable `pkg/{flatten,image,remote,tar}` packages used by `flatten-ctl`, and Manifest/Cache/Store capabilities. |
 
@@ -26,8 +26,7 @@ This document defines image packaging, filesystem layout, versioning and consump
 
   sandboxer/bin/<arch>/sandbox-init ─┐
   guest-runtime/bin/<arch>/flatten-ctl├─► sandbox-runtime.bundle ──► sandbox-ctl
-  native-deps/bin/<arch>/envd ────────┤          ▲                     │
-  native-deps/bin/<arch>/mkfs.erofs ──┘          │                     │ virtio-pmem+DAX
+  native-deps/bin/<arch>/envd ────────┘          ▲                     │
                                                  │                     ▼
                                            runtime release          guest /sbin/init
 ```
@@ -59,7 +58,6 @@ The image root contains:
 /sysdisks/disk-{0..7}-upper/        Data-disk upper mountpoints
 /opt/sandbox-runtime/bin/envd       E2B guest agent
 /opt/sandbox-runtime/bin/flatten-ctl
-/opt/sandbox-runtime/bin/mkfs.erofs
 ```
 
 The `/sysdisks/` mountpoints are precreated by the current Makefile for data-disk ordinals 0–7. Apart from these platform paths, the image supplies no `/etc`, `/usr`, shared libraries or general distribution environment.
@@ -73,7 +71,6 @@ The `/sysdisks/` mountpoints are precreated by the current Makefile for data-dis
 | `/sbin/init` | `../sandboxer/bin/<arch>/sandbox-init` | Guest PID 1: mounts, handshakes and application supervision. |
 | `/opt/sandbox-runtime/bin/envd` | `native-deps/bin/<arch>/envd` | E2B data-plane agent. |
 | `/opt/sandbox-runtime/bin/flatten-ctl` | `bin/<arch>/flatten-ctl` | Pull/flatten OCI images inside the build sandbox. |
-| `/opt/sandbox-runtime/bin/mkfs.erofs` | `native-deps/bin/<arch>/mkfs.erofs` | Generate EROFS base images inside the build sandbox. |
 
 `fsck.erofs` is a diagnostic/test tool and is not included in the runtime image. `vmlinux` is not runtime-image content; it is released independently as `vmlinux-<arch>-vX.Y.Z.tar.gz`.
 
@@ -105,7 +102,7 @@ make build                       # Build flatten-ctl + sandbox-runtime.
 make build TARGET_ARCH=aarch64
 ```
 
-A **host-executable `mkfs.erofs` must already be available** before `make sandbox-runtime`. Install erofs-utils, build a host copy with `make -C native-deps erofs TARGET_ARCH=$(uname -m)`, or set `BUILD_MKFS_EROFS` to an existing host executable. This is distinct from `GUEST_MKFS_EROFS`, the target-architecture binary embedded in the image; cross-builds must not execute the guest binary on the host.
+A **host-executable `mkfs.erofs` must already be available** before `make sandbox-runtime`. Install erofs-utils, run `make -C native-deps erofs TARGET_ARCH=$(uname -m)`, or set `BUILD_MKFS_EROFS`. It only packs the runtime bundle; the target Guest uses the Go generator linked into static `flatten-ctl`, with no `GUEST_MKFS_EROFS` payload.
 
 The target's input and build sequence is:
 
@@ -113,14 +110,14 @@ The target's input and build sequence is:
 2. If the selected `SANDBOX_INIT` (default `../sandboxer/bin/<arch>/sandbox-init`) is absent, delegate to `make -C ../sandboxer sandbox-init`.
 3. Resolve target `ENVD` (default `native-deps/bin/<arch>/envd`), building it when missing.
 4. Resolve this repository's target `FLATTEN_CTL` (default `bin/<arch>/flatten-ctl`), building it when missing.
-5. Resolve target `GUEST_MKFS_EROFS` (default `native-deps/bin/<arch>/mkfs.erofs`). For this repository-managed default, always invoke the native recipe check: unchanged verified inputs reuse the cached tools, while changed source, patches or consumed dependencies rebuild them. The archive, recipe stamp and target build metadata must remain available as described in the native-build guide. An explicitly overridden guest executable must already exist and is not rebuilt by this repository. Assemble the staging tree and use the separate host `BUILD_MKFS_EROFS` to generate temporary raw EROFS.
+5. Assemble the staging tree and use host `BUILD_MKFS_EROFS` to create temporary runtime EROFS.
 6. The host `runtime-bundle` tool copies EROFS, adds PMEM alignment padding, computes SHA256 and appends the empty-marker ZIP, publishing `bin/<arch>/sandbox-runtime.bundle` atomically.
 
 See [the native-build workflow](../native-deps/README.md) for mkfs.erofs/Envd builds and the [sandboxer guest ABI](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/sandbox-init.md) for sandbox-init.
 
 ### 3.1 Architectures
 
-The runtime image is built for the target architecture. Its build-directory filename is always `sandbox-runtime.bundle`. `/sbin/init`, `envd`, `flatten-ctl` and `mkfs.erofs` inside the EROFS prefix must all be executable files for that same target architecture.
+The runtime image is built for the target architecture. Its build-directory filename is always `sandbox-runtime.bundle`. `/sbin/init`, `envd`, `flatten-ctl` inside the EROFS prefix must all be executable files for that same target architecture.
 
 `TARGET_ARCH=amd64` normalizes to `x86_64`; `TARGET_ARCH=arm64` normalizes to `aarch64`. Cross-builds do not update host-architecture symlinks, avoiding host entry points to non-runnable binaries. The host packing tool remains separate from this target payload.
 
@@ -143,7 +140,7 @@ The trusted `Runtime Release` workflow on this repository's main branch independ
 
 | Package | Contents | Release |
 | --- | --- | --- |
-| `sandbox-runtime-<arch>-vX.Y.Z.tar.gz` | Runtime image, `flatten-ctl` and `mkfs.erofs` | `runtime-vX.Y.Z` in guest-runtime |
+| `sandbox-runtime-<arch>-vX.Y.Z.tar.gz` | Runtime image, `flatten-ctl` | `runtime-vX.Y.Z` in guest-runtime |
 
 Here `<arch>` is `x86_64` or `aarch64` when declared and published by the selected release.
 Do not infer another architecture's assets from source-build support or overwrite two architectures
@@ -154,7 +151,6 @@ The runtime package contains:
 ```text
 bin/sandbox-runtime.bundle
 bin/flatten-ctl
-bin/mkfs.erofs
 ```
 
 `sandbox-runtime.bundle` is the stable filename shared by scripts, default configuration and external distribution.
@@ -213,8 +209,8 @@ Point configuration back to an old runtime file and restart node-ctl, or have th
 | --- | --- |
 | Guest cannot start `/sbin/init` | Confirm the runtime-image architecture matches vmlinux/CH. |
 | Build sandbox cannot find `flatten-ctl` | Inspect `/opt/sandbox-runtime/bin/flatten-ctl` in the image. |
-| Build sandbox cannot generate EROFS | Check guest `/opt/sandbox-runtime/bin/mkfs.erofs` and its permissions. |
-| Host cannot pack a cross-architecture image | Check host `BUILD_MKFS_EROFS` separately from target `GUEST_MKFS_EROFS`. |
+| Build sandbox cannot generate EROFS | Check guest `flatten-ctl`, source read permissions and planner budgets. |
+| Host cannot pack a cross-architecture image | Check that `BUILD_MKFS_EROFS` is executable on the build host. |
 | Behavior changes after restore | Compare the snapshot's runtime digest with restore configuration. |
 | Scripts cannot find runtime after package extraction | Confirm the runtime archive was extracted and `bin/sandbox-runtime.bundle` exists. |
 

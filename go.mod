@@ -3,7 +3,7 @@ module github.com/kuasar-sandbox/guest-runtime
 go 1.26.1
 
 require (
-	github.com/kuasar-sandbox/accelerator v0.1.7-preview.20261013.0.20261014005452-b736dee899eb
+	github.com/kuasar-sandbox/accelerator v0.1.7-preview.20261014.2.0.20261014161115-81526f693b5c
 	gopkg.in/yaml.v3 v3.0.1
 )
 
@@ -13,6 +13,7 @@ require (
 	github.com/blang/semver/v4 v4.0.0 // indirect
 	github.com/cyphar/filepath-securejoin v0.5.0 // indirect
 	github.com/klauspost/pgzip v1.2.6 // indirect
+	github.com/kuasar-sandbox/go-erofs v0.0.0-20261014160540-827da6f90114 // indirect
 	github.com/moby/sys/user v0.4.0 // indirect
 	github.com/moby/sys/userns v0.1.0 // indirect
 	github.com/opencontainers/runtime-spec v1.2.1 // indirect
@@ -39,7 +40,7 @@ require (
 	golang.org/x/crypto v0.56.0 // indirect
 	golang.org/x/net v0.58.0 // indirect
 	golang.org/x/sync v0.22.0 // indirect
-	golang.org/x/sys v0.47.0 // indirect
+	golang.org/x/sys v0.47.0
 	golang.org/x/text v0.41.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260526163538-3dc84a4a5aaa // indirect
 	google.golang.org/grpc v1.83.2 // indirect

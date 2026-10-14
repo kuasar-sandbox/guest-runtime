@@ -76,7 +76,7 @@ Building `sandbox-runtime.bundle` requires a **host-architecture** `mkfs.erofs` 
 BUILD_MKFS_EROFS=/path/to/host/mkfs.erofs make sandbox-runtime
 ```
 
-The host packer is separate from `native-deps/bin/<target-arch>/mkfs.erofs`, which is the target-architecture static binary copied into the guest Runtime image. This distinction is required for cross-builds: an aarch64 guest binary cannot package an image on an x86_64 host.
+The host packer only assembles the runtime bundle at build time and must match the build host. `flatten-ctl` generates EROFS through the pure Go `github.com/kuasar-sandbox/go-erofs` library; neither the Guest nor the Runtime release package needs an accompanying `mkfs.erofs`.
 
 Other prerequisites and native-source locations are documented in [Native build and maintenance](native-deps/README.md).
 
@@ -94,11 +94,10 @@ GOWORK=off make build TARGET_ARCH=aarch64  # cross-build where documented depend
 
 - `../sandboxer/bin/<arch>/sandbox-init`;
 - `native-deps/bin/<arch>/envd`;
-- `native-deps/bin/<arch>/mkfs.erofs` as the guest payload;
 - `bin/<arch>/flatten-ctl`;
 - `BUILD_MKFS_EROFS` as the host image packer.
 
-When `sandbox-init`, Envd or `flatten-ctl` is absent, the Makefile invokes its corresponding build target. Every ordinary Runtime build also checks the EROFS recipe before consuming the repository-managed target-architecture guest `mkfs.erofs`, even if that executable already exists. An explicit `GUEST_MKFS_EROFS` override is used as supplied and must be executable. The host `mkfs.erofs` is different: it must already be available on `PATH`, at a documented native-deps host path, or through `BUILD_MKFS_EROFS`; otherwise the Runtime build fails explicitly. A clean public build must use documented public source and download locations and must not depend on a developer's private package mirror or cache.
+When `sandbox-init`, Envd or `flatten-ctl` is absent, the Makefile invokes its corresponding build target. Host `mkfs.erofs` must already be on `PATH`, at a documented native-deps host path, or selected by `BUILD_MKFS_EROFS`; otherwise the Runtime build fails explicitly. The native EROFS recipe, static dependencies and cache remain for host packaging and independent tests, not as Guest runtime dependencies. Public builds continue to use documented public source and download locations.
 
 ## Outputs
 
@@ -114,7 +113,7 @@ When `sandbox-init`, Envd or `flatten-ctl` is absent, the Makefile invokes its c
 
 This repository does not publish a generic `guest-runtime-vX.Y.Z` release. It maintains two independent version lines:
 
-- **`runtime-vX.Y.Z`** — publishes `sandbox-runtime-<arch>-vX.Y.Z.tar.gz`, containing the runtime bundle, `flatten-ctl`, and the EROFS creation tool selected by the release contract;
+- **`runtime-vX.Y.Z`** — publishes `sandbox-runtime-<arch>-vX.Y.Z.tar.gz`, containing the runtime bundle, static `flatten-ctl`, and their license/source materials;
 - **`vmlinux-vX.Y.Z`** — publishes `vmlinux-<arch>-vX.Y.Z.tar.gz`, containing the guest kernel at the stable `bin/vmlinux` path and its raw-file SHA-256 at `bin/vmlinux.sha256`.
 
 The two version numbers may advance independently. The project aggregate release selects an exact Runtime tag and an exact VMLinux tag; it does not assume that their version numbers match.
