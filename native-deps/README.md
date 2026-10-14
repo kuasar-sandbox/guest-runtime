@@ -3,7 +3,7 @@
 <a id="native-deps"></a>
 # native-deps — build and maintenance
 
-The native-deps directory builds upstream sources into three default artifact families consumed at runtime, not linked by the Go repositories: `mkfs.erofs`/`fsck.erofs` (erofs-utils), `vmlinux` (guest kernel) and `envd` (E2B guest agent). Their autotools/Kbuild/Go toolchains and independent upstream schedules are kept together in `guest-runtime/native-deps`. An additional `versitygw` gateway target is opt-in and not part of the default build.
+The native-deps directory builds three default artifact families: `mkfs.erofs`/`fsck.erofs` (erofs-utils host packaging and independent test tools), `vmlinux` (guest kernel) and `envd` (E2B guest agent). Guest image export uses the Go EROFS library linked into `flatten-ctl` and does not execute these native tools. Their autotools/Kbuild/Go toolchains and independent upstream schedules are kept together in `guest-runtime/native-deps`. An additional `versitygw` gateway target is opt-in and not part of the default build.
 
 The common pipeline is: pinned upstream tarball URL with optional SHA256 verification → shared cache and extraction → local patches (vmlinux, using `git am`) → build → `bin/<arch>/`.
 
@@ -17,7 +17,7 @@ Project-level aggregation runs `make -C kuasar-sandbox build`, which invokes thi
 
 | Artifact | Pinned upstream | Repository inputs | Consumers |
 | --- | --- | --- | --- |
-| `mkfs.erofs` / `fsck.erofs` | erofs-utils v1.9.1 | — | accelerator flattening, guest-runtime image construction, source diagnostics and accelerator tests |
+| `mkfs.erofs` / `fsck.erofs` | erofs-utils v1.9.1 | — | host runtime-bundle construction, source diagnostics and independent accelerator comparison tests |
 | `vmlinux` | Linux 6.1.169 (LTS, cdn.kernel.org) | `deps/linux-patches/` and `deps/vmlinux/*.config` | sandboxer / sandbox-ctl guest kernel |
 | `envd` | e2b-dev/runtime 2026.22 source tarball | — | Guest agent in `sandbox-runtime.bundle` |
 | `versitygw` (opt-in) | versity/versitygw v1.5.0 | — | Local/single-node S3-compatible file-storage integration where required |
@@ -31,12 +31,13 @@ Calling `release.sh package` directly reuses prebuilt files; it does not rebuild
 native dependencies, replace source checkouts or reset caches. Runtime and
 Kernel remain independently built, packaged and selected.
 
-Runtime inputs are `bin/<arch>/{sandbox-runtime.bundle,flatten-ctl}` and
-`native-deps/bin/<arch>/mkfs.erofs`; Kernel uses
+Runtime package inputs are `bin/<arch>/{sandbox-runtime.bundle,flatten-ctl}`;
+the bundle is built earlier with a host `mkfs.erofs`, which is not a Runtime
+payload. Kernel uses
 `native-deps/bin/<arch>/vmlinux`. Existing `RELEASE_BIN_DIR` and
 `RELEASE_NATIVE_BIN_DIR` overrides select matching output directories.
 `RELEASE_SANDBOXER_SOURCE_DIR`, `RELEASE_ACCELERATOR_SOURCE_DIR`,
-`RELEASE_ENVD_SOURCE_DIR`, `RELEASE_EROFS_SOURCE_DIR` and
+`RELEASE_ENVD_SOURCE_DIR` and
 `RELEASE_LINUX_SOURCE_DIR` select the corresponding source trees;
 `RELEASE_SANDBOX_INIT_BIN` and `RELEASE_ENVD_BIN` select the matching init
 and Envd binaries for material collection and image consistency checks. Keep source versions, native link maps and these outputs
@@ -48,8 +49,9 @@ The Runtime source build uses `GOWORK=off` and the minimal
 Accelerator/Sandboxer dependency closure. Internal records use a release version
 only when its local Git tag identifies the selected commit, otherwise
 `git:<commit>`; future target tags need not exist. `flatten-ctl` must be the
-Linux/amd64 `github.com/kuasar-sandbox/guest-runtime/cmd/flatten-ctl` main
-package, with clean Go VCS metadata matching the selected project commit.
+Linux `github.com/kuasar-sandbox/guest-runtime/cmd/flatten-ctl` main package
+for the selected amd64 or arm64 target, with clean Go VCS metadata matching the
+selected project commit and a versioned, checksummed external go-erofs build record.
 The package records its requested Runtime or Kernel version separately from
 source commits.
 
@@ -70,13 +72,13 @@ Materials are isolated under `share/licenses/runtime` and
 carries `SOURCES.tsv`, `GO-BUILD-INFO.tsv`, `GO-MODULES.tsv` and
 `MATERIALS.sha256`. Collection rejects missing notices, unreadable subtrees,
 partial traversals and collisions between different inputs. Project, Envd,
-EROFS, Linux, internal/shared-module and system records must reference their
+Linux, Go dependency and internal/shared-module records must reference their
 own material directories. Kernel includes Linux `COPYING` and the complete
 `LICENSES` tree from its selected source; the recorded COPYING digest must
 agree with the bundled file.
 
 Validation accepts only the selected unit's payloads: Runtime has
-`sandbox-runtime.bundle`, `flatten-ctl` and `mkfs.erofs` under `bin/`;
+`sandbox-runtime.bundle` and `flatten-ctl` under `bin/`;
 Kernel has only `bin/vmlinux`. It checks exact paths, duplicate entries,
 types, root ownership, modes, inventory, source-record consistency and
 checksums. Foreign unit materials and unrelated directories are refused before
@@ -89,11 +91,19 @@ or compile readers on demand. These readers must support the image format,
 `fsck.erofs --extract` and `dump.erofs --path/--cat`.
 Validation checks the bundle's alignment and prefix digest, verifies the
 complete EROFS filesystem without extracting its tree, and reads only init,
-Envd, mkfs and flatten-ctl into fixed private files. In-image ownership/modes,
+Envd and flatten-ctl into fixed private files. In-image ownership/modes,
 Go main identities/targets and build records must match; init must also bind
-the selected Sandboxer commit. Embedded mkfs and flatten-ctl must equal their
-outer payloads. No archive executable is run. Kernel validation needs no EROFS
+the selected Sandboxer commit. Embedded flatten-ctl must equal its outer
+payload. An obsolete embedded or outer mkfs payload is rejected. No archive executable is run. Kernel validation needs no EROFS
 reader, Runtime payload or dependency checkout.
+
+#### Historical native-tool materials
+
+The following material contract applies to older Runtime packages that ship
+`mkfs.erofs`; use their matching release tools to validate them. Current
+Go-backed Runtime packages omit this native-tool inventory. The maintained
+erofs-utils recipe still retains pinned static dependencies and link maps for
+host packaging and independent native controls.
 
 The matching `mkfs.erofs` link map supplies every actual external archive and
 startup object to `EROFS-INPUTS.tsv`. The inventory retains their names and
@@ -130,6 +140,8 @@ source claims and notice copies without executing a catalog recipe.
 Ubuntu target dev packages continue through the installed Debian source-package
 and copyright path. There is no synthetic package registration, permissive
 fallback or additional written-offer commitment.
+
+#### Publishing and validation boundaries
 
 The publisher supplies the selected project `SOURCE_SHA` to validation before
 Tag/Release writes, uses the bundle's `release-notes.md` body and appends the

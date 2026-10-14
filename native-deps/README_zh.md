@@ -3,9 +3,9 @@
 <a id="native-deps"></a>
 # native-deps — 原生依赖构建与维护
 
-native-deps 目录的构建工作流:从上游源码构建 kuasar-sandbox 平台运行期消费、但各 Go 仓
-不链接的三类默认原生产物——`mkfs.erofs`/`fsck.erofs`(erofs-utils)、`vmlinux`(guest 内核)、
-`envd`(e2b guest agent)。工具链(autotools/kbuild/Go)与 Go 仓不同、上游发布节奏独立,
+native-deps 目录构建三类默认原生产物：`mkfs.erofs`/`fsck.erofs`（erofs-utils
+宿主打包与独立测试工具）、`vmlinux`（guest 内核）、`envd`（e2b guest agent）。
+Guest 镜像导出使用链接在 `flatten-ctl` 中的 Go EROFS 库，不执行这些原生工具。工具链(autotools/kbuild/Go)与 Go 仓不同、上游发布节奏独立,
 因此内聚在 `guest-runtime/native-deps` 目录下独立构建。另提供可选的 `versitygw`
 网关目标,不包含在默认 build 中。
 
@@ -27,7 +27,7 @@ native-deps 目录的构建工作流:从上游源码构建 kuasar-sandbox 平台
 
 | 产物 | 上游(pin) | 本仓输入 | 消费方 |
 |---|---|---|---|
-| `mkfs.erofs` `fsck.erofs` | erofs-utils v1.9.1 | — | `accelerator`(展平)、`guest-runtime`(打 guest erofs)、源码树诊断 / accelerator 测试 |
+| `mkfs.erofs` `fsck.erofs` | erofs-utils v1.9.1 | — | 宿主 runtime bundle 打包、源码树诊断与 accelerator 独立对照测试 |
 | `vmlinux` | linux 6.1.169(LTS,cdn.kernel.org) | `deps/linux-patches/` + `deps/vmlinux/*.config` | `sandboxer`/`sandbox-ctl`(guest 内核) |
 | `envd` | e2b-dev/runtime 2026.22(源码 tarball) | — | `guest-runtime`(注入 `sandbox-runtime.bundle`) |
 | `versitygw`(可选) | versity/versitygw v1.5.0 | — | 按需用于本地/单节点 S3-compatible 文件存储集成 |
@@ -43,12 +43,12 @@ pin 落在 Makefile 变量(`EROFS_TARBALL` / `LINUX_TARBALL` / `ENVD_TARBALL` �
 原生依赖、不替换源码 checkout、不重置缓存。Runtime 与 Kernel 保持独立构建、
 打包及选择。
 
-Runtime 输入为 `bin/<arch>/{sandbox-runtime.bundle,flatten-ctl}` 和
-`native-deps/bin/<arch>/mkfs.erofs`;Kernel 使用
+Runtime 包输入为 `bin/<arch>/{sandbox-runtime.bundle,flatten-ctl}`；bundle
+预先由宿主 `mkfs.erofs` 构建，该工具不属于 Runtime 载荷。Kernel 使用
 `native-deps/bin/<arch>/vmlinux`。已有 `RELEASE_BIN_DIR`、
 `RELEASE_NATIVE_BIN_DIR` 可选择匹配输出目录。
 `RELEASE_SANDBOXER_SOURCE_DIR`、`RELEASE_ACCELERATOR_SOURCE_DIR`、
-`RELEASE_ENVD_SOURCE_DIR`、`RELEASE_EROFS_SOURCE_DIR`、
+`RELEASE_ENVD_SOURCE_DIR`、
 `RELEASE_LINUX_SOURCE_DIR` 选择对应源码树;
 `RELEASE_SANDBOX_INIT_BIN`、`RELEASE_ENVD_BIN` 选择与镜像匹配的 init 和 Envd
 二进制,用于材料收集与镜像一致性检查。
@@ -57,9 +57,10 @@ Runtime 输入为 `bin/<arch>/{sandbox-runtime.bundle,flatten-ctl}` 和
 
 Runtime 源码构建使用 `GOWORK=off` 及最小 Accelerator/Sandboxer 依赖闭包。
 内部记录只有在本地 Git Tag 指向所选 commit 时使用发行版本,否则使用
-`git:<commit>`;未来目标 Tag 不必已经存在。`flatten-ctl` 必须是 Linux/amd64
-的 `github.com/kuasar-sandbox/guest-runtime/cmd/flatten-ctl` 主入口,
-且 Go VCS 元数据为干净状态并匹配所选项目 commit。包中请求的 Runtime 或 Kernel
+`git:<commit>`；未来目标 Tag 不必已经存在。`flatten-ctl` 必须是所选 amd64 或
+arm64 目标上的 Linux `github.com/kuasar-sandbox/guest-runtime/cmd/flatten-ctl`
+主入口，Go VCS 元数据为干净状态并匹配所选项目 commit，且包含具有版本和
+校验和的外部 go-erofs 构建记录。包中请求的 Runtime 或 Kernel
 版本与源码 commit 分别记录。
 
 分别在 guest-runtime、sandboxer、Envd 的 module 目录记录 Go 编译器选择。
@@ -72,12 +73,12 @@ module 本地替换继续支持;官方包不支持其他无版本的第三方替
 材料隔离放在 `share/licenses/runtime`、`share/sources/runtime` 或独立的
 `vmlinux` 命名空间。每个单元包含 `SOURCES.tsv`、`GO-BUILD-INFO.tsv`、
 `GO-MODULES.tsv` 和 `MATERIALS.sha256`。声明缺失、子目录不可读、遍历不完整
-或不同输入发生材料冲突时收集失败。项目、Envd、EROFS、Linux、内部/shared
-module 及系统记录必须指向各自的材料目录。Kernel 包含所选源码中的 Linux
+或不同输入发生材料冲突时收集失败。项目、Envd、Linux、Go 依赖及内部/shared
+module 记录必须指向各自的材料目录。Kernel 包含所选源码中的 Linux
 `COPYING` 和完整 `LICENSES` 树;记录的 COPYING 摘要须与包内文件一致。
 
 验证只接受所选单元的载荷:Runtime 的 `bin/` 下为
-`sandbox-runtime.bundle`、`flatten-ctl`、`mkfs.erofs`;Kernel 只有
+`sandbox-runtime.bundle`、`flatten-ctl`；Kernel 只有
 `bin/vmlinux`。检查精确路径、重复条目、类型、root 属主、权限、清单、来源记录
 相符性及校验和。其他单元的材料和无关目录在解包前被拒绝。Runtime 包不能替换
 独立选择的 Kernel,也不能改变无关安装根目录的权限。
@@ -86,10 +87,16 @@ Runtime 独立验证使用已安装在 `PATH` 中的可信主机 `fsck.erofs` �
 `dump.erofs`,不下载 EROFS 源码或现场编译读取器。读取器须支持镜像格式、
 `fsck.erofs --extract` 及 `dump.erofs --path/--cat`。
 验证检查 bundle 对齐和前缀摘要,不展开目录树地验证完整 EROFS 文件系统,只把
-init、Envd、mkfs、flatten-ctl 读入固定私有文件。镜像内属主/权限、Go main
-身份/目标及构建记录须一致;init 还须绑定所选 Sandboxer commit。内嵌 mkfs、
-flatten-ctl 必须分别等于外部对应载荷。不执行任何归档可执行文件。Kernel 验证
+init、Envd、flatten-ctl 读入固定私有文件。镜像内属主/权限、Go main
+身份/目标及构建记录须一致；init 还须绑定所选 Sandboxer commit。内嵌
+flatten-ctl 必须等于外部对应载荷。残留的内嵌或外部 mkfs 载荷会被拒绝。不执行任何归档可执行文件。Kernel 验证
 不需要 EROFS 读取器、Runtime 载荷或依赖 checkout。
+
+#### 历史原生工具材料
+
+以下材料合同适用于携带 `mkfs.erofs` 的旧 Runtime 包，应使用与其匹配的发行
+工具验证。当前基于 Go 生成器的 Runtime 包不再包含这份原生工具清单。维护中的
+erofs-utils 配方仍为宿主打包和独立原生对照保留固定的静态依赖与链接映射。
 
 匹配的 `mkfs.erofs` 链接映射把全部实际外部静态库及启动对象提供给
 `EROFS-INPUTS.tsv`。清单保留名称与文件摘要;来源行及每个输入的
@@ -118,6 +125,8 @@ flatten-ctl 必须分别等于外部对应载荷。不执行任何归档可执�
 检查 archive 绑定关系、目录内容、来源声明和声明文件副本,不执行目录中的配方。
 Ubuntu 目标 dev 软件包继续使用已安装 Debian 源包及 copyright 路径。不会合成
 软件包注册、放宽失败后的回退,也不会新增书面要约承诺。
+
+#### 发布与验证边界
 
 发布者在 Tag/Release 写入前将选定项目 `SOURCE_SHA` 传入验证器,采用 bundle
 的 `release-notes.md` 正文,追加既有来源/Preview 标记。生产者提供的说明不得夹带

@@ -632,7 +632,7 @@ An explicit projection makes the supported launch fields predictable for downstr
 
 ## 6. Performance characteristics
 
-Build work generally grows with input bytes and file count. Major costs are layer download/decompression, filesystem entry application and mkfs.erofs; cache state, metadata distribution, storage, CPU and tool versions all matter. Appending one uncompressed ZIP entry is small relative to a typical image build, but the repository does not establish a universal 1 GiB/3–5 second or sub-10 ms result.
+Build work generally grows with input bytes and file count. Major costs are layer download/decompression, filesystem entry application and Go EROFS planning; cache state, metadata distribution, storage, CPU and tool versions all matter. Appending one uncompressed ZIP entry is small relative to a typical image build, but the repository does not establish a universal 1 GiB/3–5 second or sub-10 ms result.
 
 Check determinism by exporting an immutable input twice with the same configuration/toolchain and comparing payload/artifact hashes as appropriate, or reproducing manifest keys. Unit tests cover deterministic conversion; `verify` is no longer a CLI command (§2).
 
