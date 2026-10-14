@@ -166,6 +166,48 @@ cmp "$WORK/empty-root/source/payload" "$WORK/empty-root/extracted/payload" || di
     || die "empty-root payload ownership/mode changed"
 ok "static empty-root export, actual pipe, consumer content/metadata and scratch cleanup"
 
+log "image.flatten: fixed artifact identity on each native architecture"
+capture generator-golden python3 - "$WORK/generator-golden" "$FLATTEN_CTL" <<'PY'
+import hashlib, os, pathlib, shutil, stat, subprocess, sys
+root = pathlib.Path(sys.argv[1])
+source, scratch = root / "source", root / "scratch"
+source.mkdir(parents=True)
+scratch.mkdir()
+payload = bytes((i * 17 + i // 4096) % 251 for i in range((1 << 20) + 73))
+for name, body in {"data": payload, "duplicate": payload, "short": b"fixed tail\n", "empty-file": b""}.items():
+    (source / name).write_bytes(body)
+os.link(source / "data", source / "hardlink")
+os.symlink("data", source / "symlink")
+(source / "empty-directory").mkdir()
+os.mkfifo(source / "fifo")
+for path in [source, *source.iterdir()]:
+    os.lchown(path, 12345, 23456)
+    mode = path.lstat().st_mode
+    if not stat.S_ISLNK(mode):
+        path.chmod(0o751 if stat.S_ISDIR(mode) else 0o640)
+environment = os.environ.copy()
+environment.pop("FLATTEN_CONFIG", None)
+environment["MKFS_EROFS_PATH"] = "/missing/native-generator"
+command = [sys.argv[2], "export", "--tmpdir", str(scratch), "--output", "-", "--no-progress", str(source)]
+artifact = root / "image.artifact"
+with artifact.open("wb") as output, subprocess.Popen(command, stdout=subprocess.PIPE, env=environment) as child:
+    shutil.copyfileobj(child.stdout, output)
+    child.stdout.close()
+    if child.wait() != 0:
+        raise SystemExit("fixed generator export failed")
+with artifact.open("rb") as image:
+    actual = hashlib.file_digest(image, "sha256").hexdigest()
+# Shared with accelerator's TestGoPlannerCrossArchitectureGolden. The fixed
+# source excludes host architecture, ownership, umask and temporary paths.
+expected = "53497f42d28f1697238d70a3bdd227b740875308831a108cad52bd5009927f16"
+if actual != expected:
+    raise SystemExit(f"fixed artifact differs on {os.uname().machine}: {actual}; expected {expected}")
+assert not list(scratch.iterdir()), "fixed generator scratch survived"
+print(f"fixed artifact {actual} verified on {os.uname().machine}")
+PY
+capture generator-golden-info "$FLATTEN_CTL" info --json "$WORK/generator-golden/image.artifact"
+ok "native architecture matches the fixed Go generator artifact identity"
+
 log "image.flatten: real registry image -> EROFS"
 start_zot "$WORK/zot" ZOT_PORT
 REPOSITORY="e2e-$RUN_ID/flatten"
