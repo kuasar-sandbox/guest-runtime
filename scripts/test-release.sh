@@ -7,7 +7,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP="$(mktemp -d)"
-trap 'rm -rf "$TMP"' EXIT
+trap 'chmod -R u+w "$TMP"; rm -rf "$TMP"' EXIT
 
 fail() {
   echo "test-release: $*" >&2
@@ -333,8 +333,31 @@ install -m 0755 "$ROOT/scripts/release-native-materials.sh" \
   "$fixture_root/scripts/release-native-materials.sh"
 install -m 0644 "$ROOT/scripts/static-crypto-catalog.py" "$fixture_root/scripts/static-crypto-catalog.py"
 mkdir -p "$fixture_root/cmd/flatten-ctl" "$fixture_root/cmd/other-tool"
-printf 'module github.com/kuasar-sandbox/guest-runtime\n\ngo 1.24\n' > "$fixture_root/go.mod"
-printf 'package main\nfunc main() {}\n' > "$fixture_root/cmd/flatten-ctl/main.go"
+# A private offline module fixture supplies a real external dependency record.
+# It never enters the caller's module cache or any published runtime.
+export GOMODCACHE="$TMP/generator-module-cache" GOPROXY="file://$TMP/generator-proxy"
+export GOSUMDB=off
+export GOENV=off GOPRIVATE='' GONOPROXY=none GONOSUMDB=none GOINSECURE='' GOAUTH=off
+python3 - "$TMP/generator-proxy" <<'PY'
+import json
+from pathlib import Path
+import sys
+import zipfile
+module, version = "github.com/kuasar-sandbox/go-erofs", "v0.0.0-test"
+proxy = Path(sys.argv[1]) / module / "@v"
+proxy.mkdir(parents=True)
+files = {"go.mod": "module " + module + "\n\ngo 1.24\n",
+         "fixture.go": "package erofs\nfunc Fixture() {}\n",
+         "LICENSE": "fixture generator license\n"}
+(proxy / (version + ".mod")).write_text(files["go.mod"])
+(proxy / (version + ".info")).write_text(json.dumps({"Version": version, "Time": "2026-01-01T00:00:00Z"}))
+with zipfile.ZipFile(proxy / (version + ".zip"), "w") as archive:
+    for name, content in files.items():
+        archive.writestr(module + "@" + version + "/" + name, content)
+PY
+printf 'module github.com/kuasar-sandbox/guest-runtime\n\ngo 1.24\nrequire github.com/kuasar-sandbox/go-erofs v0.0.0-test\n' > "$fixture_root/go.mod"
+printf 'package main\nimport "github.com/kuasar-sandbox/go-erofs"\nfunc main() { erofs.Fixture() }\n' > "$fixture_root/cmd/flatten-ctl/main.go"
+(cd "$fixture_root" && GOWORK=off go mod tidy)
 printf 'package main\nfunc main() {}\n' > "$fixture_root/cmd/other-tool/main.go"
 printf '/bin/\n/build/\n' > "$TMP/sandboxer/.gitignore"
 printf '/bin/\n/build/\n' > "$TMP/accelerator/.gitignore"
@@ -387,7 +410,7 @@ init_fixture_repo "$fixture_root" LICENSE LICENSES NOTICE .gitignore native-deps
   native-deps/Makefile native-deps/deps/common.sh scripts/release.sh scripts/release-materials.sh \
   scripts/release-native-materials.sh scripts/static-crypto-catalog.py scripts/publish-release.sh \
   scripts/release-runtime-payloads.py scripts/test-release-runtime-payloads.py \
-  scripts/validate-preview-line.sh scripts/testdata/linux-COPYING go.mod cmd >/dev/null
+  scripts/validate-preview-line.sh scripts/testdata/linux-COPYING go.mod go.sum cmd >/dev/null
 project_sha="$(git -C "$fixture_root" rev-parse HEAD)"
 mkdir "$TMP/release-build-bin" "$TMP/system-inputs"
 printf 'fixture libc archive\n' > "$TMP/system-inputs/libc.a"

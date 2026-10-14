@@ -127,6 +127,10 @@ check_go_binary() {
     $2 == "mod" { modules++; if ($3 != "github.com/kuasar-sandbox/guest-runtime") bad=1 }
     END { exit bad || paths != 1 || modules != 1 }
   ' <<< "$info" || fail "flatten-ctl must use the selected guest-runtime module and main package"
+  awk -F '\t' '
+    $2 == "dep" && $3 == "github.com/kuasar-sandbox/go-erofs" && $4 ~ /^v/ && $5 ~ /^h1:/ { found++ }
+    END { exit found != 1 }
+  ' <<< "$info" || fail "flatten-ctl lacks the linked Go EROFS generator"
   check_target_binary "$file" "$target_arch"
 }
 

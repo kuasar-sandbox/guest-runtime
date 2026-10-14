@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Release jobs consume the environment CLI without installing or selecting tools."""
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -115,7 +116,11 @@ class RuntimeGeneratorInput(unittest.TestCase):
             payload.write_text('#!/bin/sh\ntouch "' + str(root / 'executed-payload') + '"\n')
             payload.chmod(0o755)
             metadata_file = root / 'metadata'
-            metadata_file.write_text(metadata)
+            metadata_file.write_text(
+                str(payload) + ': go1.26.8\n'
+                '\tpath\tgithub.com/kuasar-sandbox/guest-runtime/cmd/flatten-ctl\n'
+                '\tmod\tgithub.com/kuasar-sandbox/guest-runtime\t(devel)\n'
+                '\tbuild\tGOOS=linux\n\tbuild\tGOARCH=amd64\n' + metadata)
             go = root / 'go'
             go.write_text('#!/bin/sh\nif [ "$1" = env ]; then echo amd64; exit; fi\n'
                           'test "$1:$2:$3" = "version:-m:' + str(payload) + '" || exit 90\n'
@@ -139,6 +144,22 @@ class RuntimeGeneratorInput(unittest.TestCase):
             self.assertEqual((stage / 'unchanged').exists(), not expected)
             if not expected:
                 self.assertIn('lacks the linked Go EROFS generator', result.stderr)
+            # Exercise the standalone package/validate gate independently of
+            # Makefile staging, inspecting metadata without running a payload.
+            source = (ROOT / 'scripts/release.sh').read_text()
+            function = re.search(r'(?ms)^check_go_binary\(\) \{\n.*?^\}', source).group()
+            script = ('set -euo pipefail\n'
+                      'fail() { echo "$*" >&2; exit 1; }\n'
+                      'check_target_binary() { :; }\n' + function +
+                      '\ncheck_go_binary "$1" x86_64\n')
+            result = subprocess.run(['bash', '-c', script, 'test', str(payload)],
+                                    env=dict(os.environ, PATH=str(root) + os.pathsep + os.environ['PATH']),
+                                    text=True, capture_output=True, timeout=10)
+            self.assertEqual(result.returncode == 0, expected, result.stderr)
+            self.assertFalse((root / 'executed-payload').exists())
+            if not expected:
+                self.assertIn('lacks the linked Go EROFS generator', result.stderr)
+
 
 
 if __name__ == "__main__":
