@@ -176,7 +176,7 @@ build/
 ### 1.4 幂等与缓存
 
 - **产物复用:** Envd 在目标文件已存在时复用。EROFS 使用唯一的 `bin/<arch>/.erofs-recipe` v2 stamp，记录两个输出的摘要、已验证的归档字节、根目录/native Makefile、build/common/recipe helper、完整有序补丁目录、编译/构建工具、选项及 pkg-config 元数据。编译器依赖文件记录实际外部头文件（包括强制包含的头文件）；两个链接映射记录实际选中的静态库和启动对象。输入改变或缺失会使复用失效并重新解压自动生成的 per-arch 源码树。拒绝覆盖 Git 源码 checkout。构建并行度不进入身份。内核仍根据脚本、配置和补丁执行增量 Kbuild。
-- **迁移与源码身份:** 相同归档字节随工作区迁移不会改变身份。工作区内的依赖标签使用相对路径，外部路径及具有语义的编译器/sysroot/选项值仍然有效。复用需要两个缓存输出和唯一 stamp；没有 stamp 的旧缓存会重建一次。普通根目录 Runtime 构建在使用仓库管理的 guest 工具前执行此检查；仍支持明确指定自定义 guest 可执行文件。
+- **迁移与源码身份:** 相同归档字节随工作区迁移不会改变身份。工作区内的依赖标签使用相对路径，外部路径及具有语义的编译器/sysroot/选项值仍然有效。复用需要两个缓存输出和唯一 stamp；没有 stamp 的旧缓存会重建一次。`make -C native-deps erofs` 在构建或复用原生工具时执行此检查。普通 Runtime 构建直接使用选定的宿主 `BUILD_MKFS_EROFS`，不调用原生配方；打包前须确保该宿主工具已更新。该选项不选择 Guest 镜像生成器。
 - **tarball 缓存:** `build/tarball/` 中的下载按预期摘要校验。EROFS 直接读取本地归档，同名输入的字节改变不能被按文件名缓存所掩盖。明确设空 `EROFS_TARBALL_SHA256` 支持本地源码实验；未设置时仍使用生产 pin。配方不匹配时丢弃解压的 `.extracted` marker。
 - **`make clean`**:删除 `bin/` 与目标构建输出,**保留** tarball
   缓存与 `build/src/*` 源树。内核源树可能携带尚未 format 回 `deps/` 的 patch
@@ -205,7 +205,7 @@ Workbench 任务向配方传入正整数 `KUASAR_BUILD_JOBS`. 内核编译使用
 压缩 / fuse / 网络特性)→ 只编 `lib` + `mkfs` + `fsck` 三个子目录 → 产出
 `bin/<arch>/{mkfs.erofs,fsck.erofs}`。
 
-- Runtime 工具构建跳过 `mount`/`dump`/`fuse` 子目录,同时避开 v1.9.1 的 mount.erofs
+- 原生 EROFS 工具构建跳过 `mount`/`dump`/`fuse` 子目录,同时避开 v1.9.1 的 mount.erofs
   在 `--disable-multithreading` 下的 pthread 链接问题。独立 bundle 验证另需安装
   可信主机 `dump.erofs` (§1.1)。
 - [维护的源码补丁](deps/erofs-patches/README_zh.md) 通过 `EROFS_USE_LIBGCRYPT_SHA256` 明确选择 Libgcrypt 的完整 SHA-256。Configure 禁用 OpenSSL 和多线程。完整 32 字节摘要、精确的 4 KiB chunk 去重、不压缩布局及原始 v1.9.1 归档 pin 保持不变；不包含分配器或读取路径变更。

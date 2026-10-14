@@ -1,7 +1,7 @@
 # native-deps — native dependency builds for the kuasar-sandbox platform.
 #
-# Produces the runtime artifacts the Go repos consume but don't link:
-#   mkfs.erofs        (erofs-utils)        — used by accelerator, guest-runtime
+# Produces native build/test tools and guest artifacts the Go repos do not link:
+#   mkfs.erofs        (erofs-utils)        — host runtime packer / native tests
 #   vmlinux           (guest kernel)       — used by sandboxer / sandbox-ctl
 #   envd              (e2b guest agent)    — injected into sandbox-runtime.bundle
 #

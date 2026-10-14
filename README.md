@@ -17,7 +17,7 @@ The repository owns the guest environment and its build inputs, provenance, and 
 ## Responsibilities
 
 - build the guest VMLinux image from a documented kernel source, configuration, and patch set;
-- build native guest dependencies such as EROFS tools and Envd;
+- build host EROFS packaging/test tools and native guest dependencies such as Envd;
 - build `flatten-ctl`, the OCI/directory-to-EROFS image builder;
 - assemble `sandbox-runtime.bundle`, including `sandbox-init` from `sandboxer` and the guest payloads maintained here;
 - validate the produced guest/runtime filesystem structure;
@@ -30,7 +30,7 @@ The repository is one component repository even though it publishes two release-
 | Path | Purpose |
 | --- | --- |
 | `cmd/flatten-ctl` | OCI or directory to deterministic EROFS image builder, using shared `accelerator` packages |
-| `native-deps/` | VMLinux, EROFS tools, Envd, and other native guest build inputs |
+| `native-deps/` | Guest VMLinux/Envd, host EROFS packaging/test tools, and their native build inputs |
 | `docs/sandbox-runtime.md` | Runtime image layout, guest payload, build, and release contract |
 | `docs/vmlinux.md` | Guest kernel source/configuration contract and platform ABI |
 | `docs/flatten.md` | `flatten-ctl`, remote image retrieval, cache, and OCI Referrers behavior |

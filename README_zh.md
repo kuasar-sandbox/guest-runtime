@@ -14,7 +14,7 @@
 ## 职责
 
 - 从有文档记录的 kernel source、config 和 patch set 构建 guest VMLinux image;
-- 构建 EROFS tool 和 Envd 等 Native guest 依赖;
+- 构建宿主 EROFS 打包/测试工具及 Envd 等原生 guest 依赖;
 - 构建 OCI/directory 到 EROFS 的 image builder `flatten-ctl`;
 - 组装 `sandbox-runtime.bundle`,其中包括 `sandboxer` 提供的 `sandbox-init` 和本仓维护的 guest payload;
 - 验证生成的 guest/Runtime 文件系统结构;
@@ -27,7 +27,7 @@
 | 路径 | 用途 |
 | --- | --- |
 | `cmd/flatten-ctl` | 使用共享 `accelerator` package 将 OCI 或目录构建为 deterministic EROFS image |
-| `native-deps/` | VMLinux、EROFS tool、Envd 和其他 Native guest 构建输入 |
+| `native-deps/` | Guest VMLinux/Envd、宿主 EROFS 打包/测试工具及其原生构建输入 |
 | `docs/sandbox-runtime.md` | Runtime image 布局、guest payload、build 和 Release contract |
 | `docs/vmlinux.md` | Guest kernel source/config contract 与 platform ABI |
 | `docs/flatten.md` | `flatten-ctl`、remote image retrieval、cache 和 OCI Referrers 行为 |

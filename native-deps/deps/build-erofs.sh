@@ -1,18 +1,17 @@
 #!/usr/bin/env bash
 #
 # Build mkfs.erofs + fsck.erofs (no compression, no fuse) into $BINDIR.
-# mkfs.erofs sits alongside flatten-ctl (it locates mkfs.erofs via its own binary
-# directory when MKFS_EROFS_PATH is unset); fsck.erofs stays in the native
-# dependency build output as a source-tree diagnostic/test helper.
+# These are host packaging and independent test tools. flatten-ctl generates
+# EROFS in Go; neither tool is included in the current Runtime package or guest.
 #
-# Both are TARGET-ARCH binaries (not host tools). Component release packages only
-# need mkfs.erofs; cross-compilation uses CROSS_PREFIX for the C toolchain.
+# Both are built for TARGET_ARCH; cross-compilation uses CROSS_PREFIX. Select
+# the executable matching the build host as BUILD_MKFS_EROFS when packing a
+# runtime bundle, even when that bundle contains guest binaries for another arch.
 #
-# STATIC linking is required, not cosmetic: mkfs.erofs rides the builder guest
-# runtime (/opt/sandbox-runtime/bin, projected into ANY app rootfs — empty ones
-# included), where no dynamic loader exists. Needs target libuuid.a, libgcrypt.a
-# and libgpg-error.a plus their headers and pkg-config metadata. A maintained
-# patch explicitly selects full SHA-256 through Libgcrypt, without fallback.
+# The maintained native recipe still requires fully static tools for isolated
+# builds, empty-root checks and native comparison fixtures. It needs target
+# libuuid.a, libgcrypt.a and libgpg-error.a plus headers and pkg-config metadata.
+# A maintained patch selects full SHA-256 through Libgcrypt, without fallback.
 #
 # Inputs (env):
 #   EROFS_TARBALL         URL or local path; supports "url#filename" form.

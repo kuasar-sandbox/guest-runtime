@@ -182,7 +182,7 @@ help:
 	@echo "  flatten-ctl        OCI/dir -> deterministic EROFS builder"
 	@echo "  sandbox-runtime    pack sandboxer sandbox-init into guest erofs"
 	@echo "  sandbox-init       delegate to ../sandboxer sandbox-init"
-	@echo "  erofs              build target-arch guest mkfs.erofs"
+	@echo "  erofs              build target-arch mkfs.erofs / fsck.erofs for host use"
 	@echo "  envd               build e2b guest agent"
 	@echo "  vmlinux            build the guest kernel"
 	@echo "  native-deps        build vmlinux / mkfs.erofs / fsck.erofs / envd"
