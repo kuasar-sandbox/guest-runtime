@@ -50,11 +50,10 @@ select_fixture "$work/relocated"
 [ "$(erofs_recipe_digest)" = "$recipe" ] || die 'equal relocated recipe changed identity'
 bash "$script_dir/build-erofs.sh" > "$work/relocated.log" 2>&1
 grep -Fq 'already built with matching erofs recipe' "$work/relocated.log"
-make -C "$fixture" build GO=true SANDBOX_INIT="$(type -P true)" ENVD="$(type -P true)" \
-    FLATTEN_CTL="$(type -P true)" BUILD_MKFS_EROFS="$(type -P true)" \
-    > "$work/root-hit.log" 2>&1 || { cat "$work/root-hit.log"; die "root cache fixture failed"; }
+make -C "$fixture" erofs \
+    > "$work/root-hit.log" 2>&1 || { cat "$work/root-hit.log"; die "root erofs cache fixture failed"; }
 grep -Fq 'already built with matching erofs recipe' "$work/root-hit.log"
-echo 'test-erofs-recipe: relocated cache and ordinary root build reuse PASS'
+echo 'test-erofs-recipe: relocated cache and explicit root erofs target reuse PASS'
 
 # The shared native cache intentionally omits the complete upstream source tree.
 # SHA vector checks must still work and leave the verified cached pair intact.
@@ -160,20 +159,16 @@ first="$(CFLAGS="-DRECIPE_SOURCE=$work/first" erofs_recipe_digest)"
 
 echo 'test-erofs-recipe: helper/Makefiles/series/patch/license/flags/tool/pkg-config invalidation PASS'
 
-# Ordinary root build must enter the inner recipe even with baseline executables.
+# The explicit host-tool target must validate its recipe even with baseline executables.
+# Default build/runtime packing no longer selects or ships a Guest mkfs.
 cp "$baseline_bin/mkfs.erofs" "$BINDIR/mkfs.erofs"
 cp "$baseline_bin/fsck.erofs" "$BINDIR/fsck.erofs"
 status=0
-make -C "$fixture" build GO=true SANDBOX_INIT="$(type -P true)" ENVD="$(type -P true)" \
-    FLATTEN_CTL="$(type -P true)" BUILD_MKFS_EROFS="$(type -P true)" \
+make -C "$fixture" erofs \
     > "$work/root-stale.log" 2>&1 || status=$?
 [ "$status" -ne 0 ] && grep -Fq 'test deliberately stops a required rebuild' "$work/root-stale.log" \
-    || die 'root build accepted baseline executables without recipe validation'
-make -C "$fixture" build GO=true SANDBOX_INIT="$(type -P true)" ENVD="$(type -P true)" \
-    FLATTEN_CTL="$(type -P true)" BUILD_MKFS_EROFS="$(type -P true)" GUEST_MKFS_EROFS="$(type -P true)" \
-    > "$work/root-custom.log" 2>&1
-! grep -Fq 'bash deps/build-erofs.sh' "$work/root-custom.log" || die 'explicit custom guest tool was rebuilt'
-echo 'test-erofs-recipe: root stale pristine executable rejection and custom override PASS'
+    || die 'root erofs target accepted baseline executables without recipe validation'
+echo 'test-erofs-recipe: root erofs stale pristine executable rejection PASS'
 
 # Build against private real inputs, then mutate those exact consumed files.
 # No system library/header is modified. Compiler work is limited to two jobs.
