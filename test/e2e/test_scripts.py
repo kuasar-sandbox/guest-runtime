@@ -304,7 +304,7 @@ class PreparedCaseTests(TemporaryTest):
             self.assertIsNotNone(source, name)
             (binary / name).symlink_to(source)
         (binary / "python3").symlink_to(sys.executable)
-        for name in ("curl", "docker", "flatten-ctl", "store-ctl", "zot", "mkfs.erofs"):
+        for name in ("curl", "docker", "flatten-ctl", "store-ctl", "zot"):
             path = binary / name
             path.write_text("#!/bin/bash\nexit 0\n")
             path.chmod(0o755)

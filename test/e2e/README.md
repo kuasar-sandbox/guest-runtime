@@ -32,7 +32,7 @@ WORK=/tmp/kuasar-e2e
 
 The product cases consume only prepared `BIN`, `E2E_WORKSPACE`, `E2E_LIB`, prepared fixture inputs and prepared test helpers. They do not build products or helpers, discover sibling source repositories, pull fallback workload images, or fall back to source during execution.
 
-The selected cases require Linux, root, Python 3, curl, a usable Docker daemon, GNU timeout, `chroot`, `cmp`, `mkfs.erofs`, `fsck.erofs` with `--extract`, `flatten-ctl`, `store-ctl`, and the prepared zot helper. Missing or unusable selected prerequisites fail the case; they are not reported as a successful skip. Architecture and host capabilities are execution conditions, not suites.
+The selected cases require Linux, root, Python 3, curl, a usable Docker daemon, GNU timeout, `chroot`, `cmp`, `fsck.erofs` with `--extract`, `flatten-ctl`, `store-ctl`, and the prepared zot helper. Missing or unusable selected prerequisites fail the case; they are not reported as a successful skip. Architecture and host capabilities are execution conditions, not suites.
 
 Source/helper regressions remain outside product E2E and can be run with:
 
