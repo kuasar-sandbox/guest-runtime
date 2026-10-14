@@ -5,6 +5,8 @@ import re
 from pathlib import Path
 import shutil
 import subprocess
+import sys
+import time
 import tempfile
 import unittest
 
@@ -97,6 +99,77 @@ class EnvironmentTools(unittest.TestCase):
 
 
 class RuntimeGeneratorInput(unittest.TestCase):
+    def test_parallel_build_waits_for_cli_before_assembly(self):
+        # An existing CLI must not let assembly inspect it while the requested
+        # rebuild is still running. Standalone/prebuilt selection is covered by
+        # check_generator, whose Go fixture rejects any unexpected build.
+        for goal in ('build', 'all'):
+            with self.subTest(goal=goal), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                binary = root / 'bin/x86_64/flatten-ctl'
+                binary.parent.mkdir(parents=True)
+                binary.write_text('old CLI')
+                binary.chmod(0o755)
+                payload = root / 'payload'
+                payload.write_text('#!/bin/sh\nexit 91\n')
+                payload.chmod(0o755)
+                go = root / 'go'
+                go.write_text('#!' + sys.executable + '\n' + r'''import pathlib,sys,time
+root=pathlib.Path(__file__).parent
+if sys.argv[1] == 'build':
+    # The parent releases the build after giving an incorrectly parallel
+    # metadata check a chance to run; no timing determines test success.
+    (root/'building').touch()
+    deadline=time.monotonic()+5
+    while not (root/'release').exists():
+        if time.monotonic() > deadline: sys.exit(92)
+        time.sleep(0.01)
+    pathlib.Path(sys.argv[sys.argv.index('-o')+1]).write_text('rebuilt CLI')
+    (root/'built').touch()
+elif sys.argv[1:3] == ['version','-m']:
+    (root/'checked').touch()
+    if not (root/'built').exists(): sys.exit(93)
+    print('\tdep\tgithub.com/kuasar-sandbox/go-erofs\tv0.0.0-test\th1:sum')
+elif sys.argv[1] == 'env':
+    print('amd64')
+elif sys.argv[1] == 'run':
+    pathlib.Path(sys.argv[sys.argv.index('-output')+1]).write_text('bundle')
+else:
+    sys.exit(94)
+''')
+                go.chmod(0o755)
+                packer = root / 'packer'
+                packer.write_text('#!/bin/sh\ntouch "' + str(root / 'packed') + '"\n')
+                packer.chmod(0o755)
+                # Recursive make must use this same isolated Makefile.
+                (root / 'Makefile').write_text((ROOT / 'Makefile').read_text())
+                command = ['make', '--no-print-directory', '-j2', goal,
+                           'TARGET_ARCH=x86_64', 'GO=' + str(go),
+                           'BINDIR=' + str(binary.parent), 'BUILD_DIR=' + str(root / 'build'),
+                           'BUILD_MKFS_EROFS=' + str(packer), 'SANDBOX_INIT=' + str(payload),
+                           'ENVD=' + str(payload)]
+                with (root / 'make.log').open('w+') as output:
+                    process = subprocess.Popen(command, cwd=root, stdout=output, stderr=subprocess.STDOUT)
+                    try:
+                        deadline = time.monotonic() + 3
+                        while not (root / 'building').exists() and process.poll() is None:
+                            self.assertLess(time.monotonic(), deadline, 'CLI build did not start')
+                            time.sleep(0.01)
+                        # A broken dependency can inspect the old CLI here.
+                        deadline = time.monotonic() + 0.3
+                        while not (root / 'checked').exists() and time.monotonic() < deadline:
+                            time.sleep(0.01)
+                        (root / 'release').touch()
+                        code = process.wait(timeout=10)
+                    finally:
+                        (root / 'release').touch()
+                        process.wait(timeout=10)
+                    output.seek(0)
+                    self.assertEqual(code, 0, output.read())
+                self.assertTrue((root / 'packed').exists())
+                self.assertEqual((root / 'build/sandbox-runtime/opt/sandbox-runtime/bin/flatten-ctl').read_text(),
+                                 'rebuilt CLI')
+
     def test_stale_incremental_cli_fails_before_staging_or_packing(self):
         self.check_generator('path\tlegacy/flatten\n', expected=False)
 

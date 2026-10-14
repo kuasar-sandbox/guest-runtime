@@ -67,7 +67,10 @@ endef
 # ---------------------------------------------------------------------------
 all: build
 
-build: flatten-ctl sandbox-runtime
+# Finish the requested CLI rebuild before inspecting or staging its output.
+# A direct sandbox-runtime invocation still accepts a prebuilt FLATTEN_CTL.
+build: flatten-ctl
+	$(MAKE) sandbox-runtime
 
 flatten-ctl:
 	@mkdir -p $(BINDIR)
