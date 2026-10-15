@@ -3,7 +3,7 @@
 <a id="native-deps"></a>
 # native-deps — build and maintenance
 
-The native-deps directory builds three default artifact families: `mkfs.erofs`/`fsck.erofs` (erofs-utils host packaging and independent test tools), `vmlinux` (guest kernel) and `envd` (E2B guest agent). Guest image export uses the Go EROFS library linked into `flatten-ctl` and does not execute these native tools. Their autotools/Kbuild/Go toolchains and independent upstream schedules are kept together in `guest-runtime/native-deps`. An additional `versitygw` gateway target is opt-in and not part of the default build.
+The default native-deps artifacts are `vmlinux` (Guest kernel) and `envd` (E2B Guest agent); `versitygw` is opt-in. Image export uses the Go EROFS library linked into `flatten-ctl`. Runtime bundle packing uses a preinstalled host mkfs, and independent validation uses fsck/dump. The project no longer maintains erofs-utils patches or builds and distributes mkfs.
 
 The common pipeline is: pinned upstream tarball URL with optional SHA256 verification → shared cache and extraction → local patches (vmlinux, using `git am`) → build → `bin/<arch>/`.
 
@@ -17,12 +17,11 @@ Project-level aggregation runs `make -C kuasar-sandbox build`, which invokes thi
 
 | Artifact | Pinned upstream | Repository inputs | Consumers |
 | --- | --- | --- | --- |
-| `mkfs.erofs` / `fsck.erofs` | erofs-utils v1.9.1 | — | host runtime-bundle construction, source diagnostics and independent accelerator comparison tests |
 | `vmlinux` | Linux 6.1.169 (LTS, cdn.kernel.org) | `deps/linux-patches/` and `deps/vmlinux/*.config` | sandboxer / sandbox-ctl guest kernel |
 | `envd` | e2b-dev/runtime 2026.22 source tarball | — | Guest agent in `sandbox-runtime.bundle` |
 | `versitygw` (opt-in) | versity/versitygw v1.5.0 | — | Local/single-node S3-compatible file-storage integration where required |
 
-Pins live in Makefile variables (`EROFS_TARBALL`, `LINUX_TARBALL`, `ENVD_TARBALL`, and optional `VERSITYGW_TARBALL`), accepting `url#filename` or a local path. An empty corresponding `*_TARBALL_SHA256` skips verification. The current default EROFS, Linux and Envd inputs have hashes configured; the optional gateway hash must be supplied when required by the deployment's verification policy. Updating a version means updating those variables and revalidating patch application.
+Pins live in Makefile variables (`LINUX_TARBALL`, `ENVD_TARBALL`, and optional `VERSITYGW_TARBALL`), accepting `url#filename` or a local path. An empty corresponding `*_TARBALL_SHA256` skips verification. The current default Linux and Envd inputs have hashes configured; the optional gateway hash must be supplied when required by the deployment's verification policy. Updating a version means updating those variables and revalidating patch application.
 
 Use the normal Makefile targets to build the selected sources, then package the
 matching outputs. From the repository root, `make release-runtime` depends on
@@ -99,47 +98,7 @@ reader, Runtime payload or dependency checkout.
 
 #### Historical native-tool materials
 
-The following material contract applies to older Runtime packages that ship
-`mkfs.erofs`; use their matching release tools to validate them. Current
-Go-backed Runtime packages omit this native-tool inventory. The maintained
-erofs-utils recipe still retains pinned static dependencies and link maps for
-host packaging and independent native controls.
-
-The matching `mkfs.erofs` link map supplies every actual external archive and
-startup object to `EROFS-INPUTS.tsv`. The inventory retains their names and
-file digests; source rows and per-input `system/<input>` notice directories
-must cover exactly that set, including libc, libuuid, Libgcrypt/Libgpg-error (libgcrypt/libgpg-error) and GCC/CRT inputs.
-Packaging records installed Debian/RPM source-package identities and copies
-their copyright, license and NOTICE files, including referenced common-license
-texts. Package names or SPDX labels alone do not replace the texts. RPM package
-and same-source sibling file listings must complete successfully; partial output
-is not complete coverage. Installed package ownership provides attribution,
-not dpkg/RPM file-digest or co-owner authentication.
-
-For source-built libuuid, Runtime packaging requires matching `SOURCES.tsv`,
-`MATERIALS.sha256` and license texts, and checks the library's inventory and
-digest. Missing, altered or unowned inputs need the actual matching materials,
-not fabricated source records.
-
-The supported openEuler 24.03-LTS-SP4 build profile requires the external
-[runner static-crypto provider](https://github.com/kuasar-sandbox/kuasar-sandbox/blob/d375effe12531b49f44368d33735c5b7b50b244c/ci/runner/README.md#install)
-for matching static crypto libraries and complete source/license/relink materials.
-See that owner section for provider versions, provisioning, catalog layout and
-install/reuse behavior.
-
-The collector checks the complete catalog against the actual linked archive
-bytes, independently pinned SRPM/contained-source/spec/patch digests and the
-recognized provider recipe. It rejects missing or altered notices, sources,
-recipes, build records and archives, unsafe paths, links and incomplete
-inventories. All verified source, build and relink materials are copied once to
-`share/sources/runtime/native-crypto/<build-id>/`. Per-archive notice texts stay
-under `share/licenses/runtime/system/<archive>/`; large source/binary files are
-not repeated there. `SOURCES.tsv` binds each linked archive to its catalog ID.
-Standalone Runtime validation rechecks archive bindings, catalog contents,
-source claims and notice copies without executing a catalog recipe.
-Ubuntu target dev packages continue through the installed Debian source-package
-and copyright path. There is no synthetic package registration, permissive
-fallback or additional written-offer commitment.
+Historical Runtime packages containing mkfs retain their original source, license and relinking materials; validate them with their matching release tools. Current packages do not claim these native tools as payloads. Existing artifacts remain readable; current Runtime builds use the Go generator and host tools.
 
 #### Publishing and validation boundaries
 
@@ -159,7 +118,7 @@ candidates. These materials support release review, not legal certification.
 
 | Path | Role |
 | --- | --- |
-| `deps/build-{erofs,vmlinux,envd}.sh` | Source-build scripts; vmlinux uses a multi-stage STAGE dispatcher |
+| `deps/build-{vmlinux,envd}.sh` | Source-build scripts; vmlinux uses a multi-stage STAGE dispatcher |
 | `deps/build-versitygw.sh` | Optional gateway build |
 | `deps/common.sh` | Shared tarball download, cache and extraction helpers |
 | `deps/linux-patches/` | Architecture-neutral guest-kernel patches |
@@ -170,7 +129,7 @@ candidates. These materials support release review, not legal certification.
 
 ```text
 bin/
-├── x86_64/                  x86_64 artifacts: mkfs.erofs, fsck.erofs, vmlinux, envd
+├── x86_64/                  x86_64 artifacts: vmlinux, envd
 ├── aarch64/                 aarch64 artifacts (same names)
 └── <name>                   Symlink → <host-arch>/<name>, created/updated only for native builds
 
@@ -181,8 +140,7 @@ build/
 │   ├── e2b-infra/           Shared Envd sources; Go selects the target via GOARCH
 │   └── versitygw/           Shared sources for the optional gateway
 ├── x86_64/
-│   ├── linux/               Kbuild O= output
-│   └── src/erofs-utils/     Per-architecture autotools in-tree source/build tree
+│   └── linux/               Kbuild O= output
 └── aarch64/                 Corresponding target output
 ```
 
@@ -190,16 +148,12 @@ Native builds (host = target) create `bin/<name> → <arch>/<name>` for their pu
 
 ### 1.4 Idempotency and caching
 
-- **Artifact reuse:** Envd outputs are reused when their target files already exist. EROFS uses one `bin/<arch>/.erofs-recipe` v2 stamp for both output hashes, the verified archive bytes, root/native Makefiles, build/common/recipe helpers, the entire ordered patch directory, compiler/build tools, flags and pkg-config metadata. Compiler depfiles record actual external headers (including forced includes); both link maps record the selected archives and startup objects. Changed or missing inputs invalidate reuse and re-extract the generated per-architecture tree. A Git source checkout is refused. Build parallelism is not an input. Kernel still uses its tracked scripts/configuration/patches for incremental Kbuild.
-- **Relocation and source identity:** identical archive bytes may move with the workspace without changing identity. Dependency labels inside the workspace are relative; external paths and meaningful compiler/sysroot/flag values remain significant. Both cached outputs and the sole stamp are required; legacy caches without it rebuild once. `make -C native-deps erofs` performs this check when building or reusing the native tools. Ordinary Runtime builds use the selected host `BUILD_MKFS_EROFS` without invoking the native recipe; ensure that host tool is current before packaging. It does not select the Guest image generator.
-- **Tarball cache:** downloads in `build/tarball/` are verified against the expected digest. EROFS reads a local archive directly, so a changed same-name input cannot hide behind a filename-based cache. An explicitly empty `EROFS_TARBALL_SHA256` supports local source experiments; an unset value retains the production pin. Extraction uses an `.extracted` marker that is discarded on recipe mismatch.
-- **`make clean`:** removes `bin/` and target build output while **retaining** tarball caches and architecture-neutral `build/src/*` source trees. Kernel source trees may contain unexported patch-development work and must not be silently discarded.
+Envd reuses existing target files; the kernel uses scripts, configuration and patches for incremental Kbuild. Downloads remain in `build/tarball/` and are verified against expected digests. `make clean` removes `bin/` and target build output while preserving tarball caches and architecture-neutral source trees, including kernel patch-development work. Host erofs-utils is managed by the environment and is outside this project's native cache.
 
 ## 2. Build targets
 
 ```bash
-make build      # =all: vmlinux + erofs + envd
-make erofs      # mkfs.erofs + fsck.erofs
+make build      # =all: vmlinux + envd
 make vmlinux    # Guest kernel
 make envd       # E2B guest agent
 make versitygw  # Optional gateway; not part of build
@@ -209,20 +163,11 @@ make help       # List targets
 
 Build duration depends on the host, toolchain and cache state; these commands do not carry a fixed timing guarantee.
 
-Workbench jobs pass the positive integer `KUASAR_BUILD_JOBS` to each recipe. Kernel compilation uses it instead of the host processor count; Envd passes it explicitly to `go build -p` even when `ENVD_GOFLAGS` is set. EROFS uses it as the default for `EROFS_BUILD_JOBS`, including its test builds. CPU quota alone does not change the processor count reported by `nproc`.
+Workbench jobs pass the positive integer `KUASAR_BUILD_JOBS` to each recipe. Kernel compilation uses it instead of the host processor count; Envd passes it explicitly to `go build -p` even when `ENVD_GOFLAGS` is set. CPU quota alone does not change the processor count reported by `nproc`.
 
-### 2.1 EROFS (`make erofs`)
+### 2.1 Host EROFS tools
 
-`deps/build-erofs.sh` extracts erofs-utils into `build/<arch>/src/erofs-utils/`, keeping one tree per architecture because this autotools path does not support out-of-source builds. It runs `autoreconf` and `configure` with compression/FUSE/network features disabled, builds only the `lib`, `mkfs` and `fsck` subdirectories, and writes `bin/<arch>/{mkfs.erofs,fsck.erofs}`.
-
-- The native EROFS tool build skips the `mount`/`dump`/`fuse` subdirectories; it also avoids the v1.9.1 mount.erofs pthread-linking issue under `--disable-multithreading`. Standalone bundle validation separately requires a trusted host `dump.erofs` installation (§1.1).
-- A [maintained source patch](deps/erofs-patches/README.md) explicitly selects Libgcrypt full SHA-256 through `EROFS_USE_LIBGCRYPT_SHA256`. Configure disables OpenSSL and multithreading. Full 32-byte digests, exact 4 KiB chunk deduplication, uncompressed layout and the original v1.9.1 archive pin remain unchanged; no allocator or read-path change is included.
-- The target compiler must statically link `libgcrypt.a`, `libgpg-error.a` and `libuuid.a`. Debian/Ubuntu packages are `libgcrypt20-dev libgpg-error-dev uuid-dev`. Ubuntu 24.04 validation used Libgcrypt `1.10.3-2ubuntu0.2` and Libgpg-error `1.47-3build2.1`; use the actual target distribution's versions, headers and pkg-config metadata. The preflight checks the real target link with private static dependencies and fails with provisioning guidance.
-- RPM devel packages do not necessarily ship static libraries. The openEuler 24.03-LTS-SP4 profile requires the [external runner provider](https://github.com/kuasar-sandbox/kuasar-sandbox/blob/d375effe12531b49f44368d33735c5b7b50b244c/ci/runner/README.md#install) and matching materials described in §1.1. Installing `libgcrypt-devel libgpg-error-devel` alone is insufficient.
-- Both output ELFs must have no `INTERP` or `NEEDED` entries. The SHA path must execute in an empty root without host libraries, configuration, `/proc` or `/dev`; validate each new target/toolchain with exact baseline image comparison and fsck/extraction.
-- Libgcrypt and Libgpg-error library licenses are LGPL-2.1-or-later, with additional file-specific notices in their source distributions. Existing EROFS file licenses, including GPL-2.0 hashmap code, are preserved. Release provenance uses both actual linker inputs and matching package/source copyright, LICENSE/COPYING/NOTICE texts (§1.1). Missing materials fail packaging. Retain the recipe, ordered patches, original source archive, EROFS objects and exact target library sources/build configuration for rebuilding/relinking; do not substitute synthetic fixtures for release materials.
-- `EROFS_BUILD_JOBS=2 make -j2 erofs` bounds compilation. The default is `KUASAR_BUILD_JOBS`, then `JOBS`, then 2.
-- Host build tools: `autoconf automake libtool pkg-config make gcc g++ binutils patch python3` (Python 3.11 or newer; binutils includes `readelf`). `make test` covers SHA vectors/failure paths, real pristine/candidate images and extraction, root dispatch, relocation and input mutation. A native binary-cache hit need not retain the complete EROFS source tree: the SHA test prepares verified sources in temporary storage when needed, without replacing the cached tools or stamp. Kernel-only jobs use the dependency-independent `test-scripts` target.
+Install erofs-utils from the host distribution, or select a host-executable mkfs through `BUILD_MKFS_EROFS`. Cross builds also use a host-architecture packer. The `make erofs` target, patched Plan ABI, private static-link recipe and associated cache are retired. Independent validation needs fsck/dump supporting the current format and `--extract`, `--path`, `--cat`; trusted CI may build unmodified upstream readers, but does not build or export mkfs.
 
 ### 2.2 vmlinux (`make vmlinux`)
 
@@ -293,21 +238,9 @@ The default is `uname -m`. When `HOST_ARCH != TARGET_ARCH`, cross-compilation is
 make TARGET_ARCH=aarch64 build
 ```
 
-### 4.2 Toolchain preparation (x86_64 host to aarch64)
+### 4.2 Cross toolchain preparation
 
-The reverse direction follows the same model.
-
-```bash
-# C toolchain for erofs-utils configure/linking and Kbuild CROSS_COMPILE.
-apt install gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
-
-# Target static Libgcrypt, Libgpg-error and libuuid, including pkg-config metadata.
-sudo dpkg --add-architecture arm64
-sudo apt update
-sudo apt install libgcrypt20-dev:arm64 libgpg-error-dev:arm64 uuid-dev:arm64
-```
-
-Envd is pure Go with `CGO_ENABLED=0`; GOARCH cross-compiles it without these C packages. The script uses the target compiler for a static Libgcrypt/Libgpg-error/uuid link probe before configuring. Cross builds default `PKG_CONFIG_LIBDIR` to the compiler's multiarch directories inside its sysroot, excluding host library directories. Set `PKG_CONFIG_LIBDIR`, `PKG_CONFIG_SYSROOT_DIR` and, if needed, `PKG_CONFIG_PATH` explicitly for other target sysroots. These overrides and resolved libraries are build/cache inputs; a host `.pc` file cannot make an incompatible target archive link successfully.
+Kbuild needs the target C toolchain, for example `gcc-aarch64-linux-gnu` on an x86_64 host. Envd and flatten-ctl cross-build with Go. Runtime packing always uses host erofs-utils; target static Libgcrypt, Libgpg-error and libuuid are no longer EROFS build prerequisites.
 
 ## 5. WSL2 notes
 

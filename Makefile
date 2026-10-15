@@ -3,7 +3,7 @@
 # This repo builds guest runtime artifacts:
 #   flatten-ctl               OCI/dir -> deterministic EROFS builder
 #   sandbox-runtime.bundle    virtio-pmem/DAX guest runtime image
-#   native-deps/bin/*         vmlinux, mkfs.erofs, fsck.erofs, envd
+#   native-deps/bin/*         vmlinux, envd
 #
 # The sandbox-init binary is produced by the sibling sandboxer repo. This
 # Makefile consumes ../sandboxer/bin/$(TARGET_ARCH)/sandbox-init and injects the
@@ -12,7 +12,7 @@
 
 SHELL := /bin/bash
 
-.PHONY: all build flatten-ctl sandbox-init sandbox-runtime native-deps erofs envd vmlinux test vet test-e2e-scripts release-runtime release-vmlinux test-release clean help
+.PHONY: all build flatten-ctl sandbox-init sandbox-runtime native-deps envd vmlinux test vet test-e2e-scripts release-runtime release-vmlinux test-release clean help
 
 # ---------------------------------------------------------------------------
 # Architecture selection (identical block across all kuasar-sandbox repos)
@@ -51,10 +51,7 @@ STORE_CTL     ?= ../accelerator/$(BINDIR)/store-ctl
 # BUILD_MKFS_EROFS is the host executable that packs the raw runtime EROFS.
 # It is a build/test dependency only; flatten-ctl generates EROFS in Go.
 # Cross builds must use an executable for the build host.
-BUILD_MKFS_EROFS ?= $(shell \
-    command -v mkfs.erofs 2>/dev/null \
-    || ( [ "$(HOST_ARCH)" = "$(TARGET_ARCH)" ] && [ -x native-deps/$(BINDIR)/mkfs.erofs ] && echo native-deps/$(BINDIR)/mkfs.erofs ) \
-    || ( [ -x native-deps/bin/mkfs.erofs ] && echo native-deps/bin/mkfs.erofs ))
+BUILD_MKFS_EROFS ?= $(shell command -v mkfs.erofs 2>/dev/null)
 
 define link_bin
 @if [ "$(HOST_ARCH)" = "$(TARGET_ARCH)" ]; then \
@@ -79,9 +76,6 @@ flatten-ctl:
 
 native-deps:
 	$(MAKE) -C native-deps build
-
-erofs:
-	$(MAKE) -C native-deps erofs
 
 sandbox-init:
 	$(MAKE) -C $(SANDBOXER_DIR) sandbox-init
@@ -182,10 +176,9 @@ help:
 	@echo "  flatten-ctl        OCI/dir -> deterministic EROFS builder"
 	@echo "  sandbox-runtime    pack sandboxer sandbox-init into guest erofs"
 	@echo "  sandbox-init       delegate to ../sandboxer sandbox-init"
-	@echo "  erofs              build target-arch mkfs.erofs / fsck.erofs for host use"
 	@echo "  envd               build e2b guest agent"
 	@echo "  vmlinux            build the guest kernel"
-	@echo "  native-deps        build vmlinux / mkfs.erofs / fsck.erofs / envd"
+	@echo "  native-deps        build vmlinux / envd"
 	@echo "  test               unit/static checks"
 	@echo "  vet                Go static analysis"
 	@echo "  test-e2e-scripts   fixture, assertion and lifecycle regressions (no Docker required)"

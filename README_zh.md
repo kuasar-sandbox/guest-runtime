@@ -90,7 +90,7 @@ GOWORK=off make build TARGET_ARCH=aarch64  # 在依赖支持的范围内交叉�
 - `bin/<arch>/flatten-ctl`;
 - 作为 Host image packer 的 `BUILD_MKFS_EROFS`。
 
-缺少 `sandbox-init`、Envd 或 `flatten-ctl` 时，Makefile 调用对应构建 target。Host `mkfs.erofs` 必须已在 `PATH`、有文档记录的 native-deps Host 路径中，或由 `BUILD_MKFS_EROFS` 指定；缺少时 Runtime 构建明确失败。原生 EROFS 配方、静态依赖与缓存仍用于宿主打包和独立测试，不是 Guest 的运行时依赖。公开构建继续使用公开 source/download location。
+缺少 `sandbox-init`、Envd 或 `flatten-ctl` 时，Makefile 调用对应构建目标。宿主 `mkfs.erofs` 必须已在 `PATH` 中，或由 `BUILD_MKFS_EROFS` 指定；缺少时 Runtime 构建明确失败。项目不再维护 erofs-utils 补丁、编译或分发 mkfs。Workbench 或宿主可安装发行版的 erofs-utils，用于构建时打包和独立校验。
 
 ## 输出
 
@@ -99,7 +99,6 @@ GOWORK=off make build TARGET_ARCH=aarch64  # 在依赖支持的范围内交叉�
 | `bin/<arch>/flatten-ctl` | `make flatten-ctl` |
 | `bin/<arch>/sandbox-runtime.bundle` | `make sandbox-runtime` |
 | `native-deps/bin/<arch>/vmlinux` | `make native-deps` |
-| `native-deps/bin/<arch>/mkfs.erofs` / `fsck.erofs` | `make native-deps` |
 | `native-deps/bin/<arch>/envd` | `make native-deps` |
 
 ## 两个发行单元

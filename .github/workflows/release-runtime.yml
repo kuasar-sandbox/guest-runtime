@@ -319,8 +319,6 @@ jobs:
           outputs: |
             guest-runtime/bin/${{ matrix.arch }}/flatten-ctl
             guest-runtime/native-deps/bin/${{ matrix.arch }}/envd
-            guest-runtime/native-deps/bin/${{ matrix.arch }}/mkfs.erofs
-            guest-runtime/native-deps/bin/${{ matrix.arch }}/fsck.erofs
             sandboxer/bin/${{ matrix.arch }}/sandbox-init
             guest-runtime/release-bundle
           arch: ${{ matrix.arch }}
@@ -329,11 +327,10 @@ jobs:
           run: |
             set -euo pipefail
             export GOWORK=off
-            bash /inputs/release/ci/native-cache/native-cache.sh restore-or-build erofs
             bash /inputs/release/ci/native-cache/native-cache.sh restore-or-build envd
             if [ "$TARGET_ARCH" = x86_64 ]; then make -C guest-runtime test; make -C guest-runtime vet; fi
             make -C guest-runtime flatten-ctl
-            make -C guest-runtime sandbox-runtime BUILD_MKFS_EROFS="/src/guest-runtime/native-deps/bin/$TARGET_ARCH/mkfs.erofs"
+            make -C guest-runtime sandbox-runtime BUILD_MKFS_EROFS="$(command -v mkfs.erofs)"
             cd /src/guest-runtime
             export GOWORK=off
             export VERSION='${{ needs.preflight.outputs.version }}'
@@ -350,8 +347,6 @@ jobs:
           python3 trusted/guest-runtime/scripts/ci-check-runtime-abi.py \
             --static src/guest-runtime/bin/$TARGET_ARCH/flatten-ctl \
             --static src/guest-runtime/native-deps/bin/$TARGET_ARCH/envd \
-            --static src/guest-runtime/native-deps/bin/$TARGET_ARCH/mkfs.erofs \
-            --static src/guest-runtime/native-deps/bin/$TARGET_ARCH/fsck.erofs \
             src/sandboxer/bin/$TARGET_ARCH/sandbox-init
       - name: Upload validated runtime bundle
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a

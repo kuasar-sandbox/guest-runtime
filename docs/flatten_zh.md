@@ -661,8 +661,9 @@ Plan/layout 身份。接收方必须同时要求完整工件身份/尾以及 pro
 调用者提供的任意输出 writer 须自行让阻塞的 Write 返回。
 
 `make flatten-ctl` 构建单个静态 Go 可执行文件，运行时不查找 mkfs，
-`MKFS_EROFS_PATH` 不再选择生产生成器。`make build` 仍用宿主原生工具打包 runtime
-bundle；`make -C native-deps erofs` 保留宿主打包、独立 fsck 和显式 native 性能对照。
+`MKFS_EROFS_PATH` 不再选择生产生成器。`make build` 使用宿主预安装的 erofs-utils
+打包 runtime bundle。项目不再编译 mkfs 或维护其补丁；独立 fsck/dump 校验使用
+宿主工具，历史 native 性能对照保留其原始源码版本。
 没有隐式旧生成器或高空间 fallback。回退应恢复上一组源码/制品及对应转换语义版本。
 
 ## 5. 设计决策
@@ -770,7 +771,7 @@ digest 与日志，通过 owner kill 测试沙箱，引用核查后才退役工�
 - [sandboxer/docs/sandbox_zh.md](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/sandbox_zh.md) `boot.root.base`:
   选择展平镜像作为只读 base。
 - [Native 构建指南](../native-deps/README_zh.md):在仓库根目录用
-  `make -C native-deps erofs` 构建 mkfs.erofs,用 `make flatten-ctl` 构建 CLI;
+  宿主安装 erofs-utils；用 `make flatten-ctl` 构建 CLI;
   mkfs 只用于宿主打包和独立对照；CLI 内含 Go 生成器，不查找外部 mkfs。
 - [系统总览](https://github.com/kuasar-sandbox/kuasar-sandbox/blob/main/docs/kuasar-sandbox_zh.md) §2.2 / §3.1:
   展平在系统中的位置和目标。

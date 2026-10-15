@@ -19,7 +19,7 @@ rootfs 组装、vsock 控制面、stdio MUX、exec/attach/quiesce 等 ABI 由
 |---|---|
 | `sandboxer` | 构建 `sandbox-init`;`sandbox-ctl` 启动 CH,把 runtime 镜像作为 virtio-pmem 挂入 guest |
 | `guest-runtime` | 打包 `sandbox-init`、`envd`、`flatten-ctl` 为单一 EROFS 镜像 |
-| `guest-runtime/native-deps` | 构建 `mkfs.erofs`、`fsck.erofs`、`vmlinux`、`envd`;可选网关单独按需构建,不是 runtime payload |
+| `guest-runtime/native-deps` | 构建 `vmlinux`、`envd`;可选网关单独按需构建,不是 runtime payload |
 | `accelerator` | 提供 `flatten-ctl` 复用的 `pkg/{flatten,image,remote,tar}` 和 manifest/cache/store 能力 |
 
 `sandbox-runtime.bundle` 不包含用户 rootfs、用户依赖、guest kernel 或
@@ -111,18 +111,17 @@ EROFS。bundle 最终大小保持 2 MiB 对齐,因此 Cloud Hypervisor 无需 of
 
 ```bash
 make flatten-ctl                 # 构建目标架构 guest 内工具
-make native-deps                 # 构建 mkfs.erofs / fsck.erofs / vmlinux / envd
+make native-deps                 # 构建 vmlinux / envd
 make sandbox-runtime             # 生成 bin/<arch>/sandbox-runtime.bundle
 make build                       # 构建 flatten-ctl + sandbox-runtime
 make build TARGET_ARCH=aarch64
 ```
 
-执行 `make sandbox-runtime` 前必须已有**宿主可执行的 `mkfs.erofs`**。可安装 erofs-utils，执行 `make -C native-deps erofs TARGET_ARCH=$(uname -m)`，或通过 `BUILD_MKFS_EROFS` 指定宿主工具。它仅打包 runtime bundle；目标 Guest 使用静态 `flatten-ctl` 内部的 Go 生成器，不再安装 `GUEST_MKFS_EROFS`。
+执行 `make sandbox-runtime` 前必须已有**宿主可执行的 `mkfs.erofs`**。可安装宿主 erofs-utils，或通过 `BUILD_MKFS_EROFS` 指定宿主工具。项目不编译 mkfs；该工具仅打包 runtime bundle；目标 Guest 使用静态 `flatten-ctl` 内部的 Go 生成器，不再安装 `GUEST_MKFS_EROFS`。
 
 目标的输入和构建顺序:
 
-1. 解析并检查 `BUILD_MKFS_EROFS`:先查 host PATH,host/target 相同时再查目标输出,
-   最后查 native-deps 的 host 入口。缺少宿主工具在组装镜像前即失败。
+1. 解析并检查 `BUILD_MKFS_EROFS`:使用显式指定的工具或宿主 PATH 中预安装的工具。缺少宿主工具在组装镜像前即失败。
 2. 若所选 `SANDBOX_INIT`(默认 `../sandboxer/bin/<arch>/sandbox-init`)不存在,
    委托 `make -C ../sandboxer sandbox-init`。
 3. 使用目标架构 `ENVD`(默认 `native-deps/bin/<arch>/envd`),缺失时触发构建。
@@ -131,7 +130,7 @@ make build TARGET_ARCH=aarch64
 6. host `runtime-bundle` 工具复制 EROFS、补齐 PMEM 对齐、计算 SHA256,
    追加空 marker ZIP,原子发布为 `bin/<arch>/sandbox-runtime.bundle`。
 
-`mkfs.erofs` 和 `envd` 构建流程见[Native Build 文档](../native-deps/README_zh.md)。
+宿主 EROFS 工具要求和 `envd` 构建流程见[Native Build 文档](../native-deps/README_zh.md)。
 `sandbox-init` 实现与 ABI 见[sandboxer Guest ABI](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/sandbox-init_zh.md)。
 
 ### 3.1 架构
@@ -252,7 +251,7 @@ ABI 兼容并不意味着新 runtime 可恢复旧内存快照。这里 S 指内�
 
 - [sandbox-init](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/sandbox-init_zh.md) - guest PID 1 ABI 和 host/guest 控制协议。
 - [sandbox](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/sandbox_zh.md) - runtime 镜像消费、启动与恢复。
-- [Native Build](../native-deps/README_zh.md) - mkfs.erofs、vmlinux、envd 构建。
+- [Native Build](../native-deps/README_zh.md) - 宿主 EROFS 工具要求及 vmlinux、envd 构建。
 - [vmlinux](vmlinux_zh.md) - guest kernel 与 runtime 镜像的配合关系。
 - [flatten](flatten_zh.md) - build sandbox 中的 flatten-ctl 执行模型。
 - [聚合验证](https://github.com/kuasar-sandbox/kuasar-sandbox/blob/main/test/QUICKSTART_zh.md) - 发布包解压和 E2E 入口。

@@ -1,13 +1,12 @@
 # native-deps — native dependency builds for the kuasar-sandbox platform.
 #
 # Produces native build/test tools and guest artifacts the Go repos do not link:
-#   mkfs.erofs        (erofs-utils)        — host runtime packer / native tests
 #   vmlinux           (guest kernel)       — used by sandboxer / sandbox-ctl
 #   envd              (e2b guest agent)    — injected into sandbox-runtime.bundle
 #
 # (librocksdb, accelerator's CGO link dep, is built in that repo.)
 #
-# `make build` builds vmlinux + erofs + envd. Each
+# `make build` builds vmlinux + envd. Each
 # artifact has fetch / (patch) / build sub-stages; idempotency lives inside the
 # scripts. vmlinux is the multi-minute cold build.
 # Cross-compile by setting TARGET_ARCH; CROSS_PREFIX auto-derives when
@@ -54,14 +53,11 @@ BINDIR         := bin/$(TARGET_ARCH)
 BUILD_DIR      := build/$(TARGET_ARCH)
 TARBALL_DIR    := build/tarball
 
-EROFS_BIN     := $(abspath $(BINDIR)/mkfs.erofs)
 VMLINUX_BIN   := $(abspath $(BINDIR)/vmlinux)
 ENVD_BIN      := $(abspath $(BINDIR)/envd)
 VERSITYGW_BIN := $(abspath $(BINDIR)/versitygw)
 
 # Upstream tarballs + optional SHA256 (scripts skip verify when empty).
-EROFS_TARBALL                   ?= https://codeload.github.com/erofs/erofs-utils/tar.gz/refs/tags/v1.9.1\#erofs-utils-v1.9.1.tar.gz
-EROFS_TARBALL_SHA256            ?= a9ef5ab67c4b8d2d3e9ed71f39cd008bda653142a720d8a395a36f1110d0c432
 LINUX_TARBALL                   ?= https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.1.169.tar.gz
 LINUX_TARBALL_SHA256            ?= ab28b4ca2a2eca38b3da9aa33b231288168c3560bbc866359045f1c8f4d48d94
 ENVD_TARBALL                    ?= https://codeload.github.com/e2b-dev/runtime/tar.gz/refs/tags/2026.22\#e2b-runtime-2026.22.tar.gz
@@ -122,24 +118,14 @@ endef
 # ---------------------------------------------------------------------------
 # Targets
 # ---------------------------------------------------------------------------
-.PHONY: all build erofs vmlinux envd versitygw \
+.PHONY: all build vmlinux envd versitygw \
         linux-fetch linux-patches-apply linux-patches linux-patches-format linux-build \
         test clean help
 
 all: build
 
-# All native artifacts. vmlinux is the multi-minute cold build; erofs + envd are
-# the fastest (subminute on a warm tarball cache).
-build: vmlinux erofs envd
-
-# --- erofs-utils (mkfs.erofs) ----------------------------------------------
-# Always consult the bounded recipe/input stamp, including on a restored cache.
-erofs:
-	$(DEPS_ENV) \
-	EROFS_TARBALL="$(EROFS_TARBALL)" \
-	EROFS_TARBALL_SHA256="$(EROFS_TARBALL_SHA256)" \
-		bash deps/build-erofs.sh
-	$(call link_bin,mkfs.erofs)
+# All native artifacts. vmlinux is the multi-minute cold build.
+build: vmlinux envd
 
 # --- envd (e2b guest agent; injected into sandbox-runtime.bundle) -----------
 envd: $(ENVD_BIN)
@@ -195,39 +181,30 @@ $(VMLINUX_BIN): $(VMLINUX_INPUTS)
 	STAGE=patches-apply $(LINUX_INVOKE) bash deps/build-vmlinux.sh
 	STAGE=build $(LINUX_INVOKE) bash deps/build-vmlinux.sh
 
-test: test-scripts test-erofs
+test: test-scripts
 
-.PHONY: test-scripts test-erofs
+.PHONY: test-scripts
 test-scripts:
 	@for script in deps/*.sh; do bash -n "$$script" || exit; done
 	bash deps/test-common.sh
 	PYTHONDONTWRITEBYTECODE=1 python3 deps/test-vmlinux-config.py
 	PYTHONDONTWRITEBYTECODE=1 python3 deps/test-envd-budget.py
-	bash deps/test-erofs.sh
-
-test-erofs: erofs
-	$(DEPS_ENV) EROFS_TARBALL="$(EROFS_TARBALL)" EROFS_TARBALL_SHA256="$(EROFS_TARBALL_SHA256)" bash deps/test-erofs-read.sh
-	$(DEPS_ENV) EROFS_TARBALL="$(EROFS_TARBALL)" EROFS_TARBALL_SHA256="$(EROFS_TARBALL_SHA256)" bash deps/test-erofs-sha256.sh
-	$(DEPS_ENV) EROFS_TARBALL="$(EROFS_TARBALL)" EROFS_TARBALL_SHA256="$(EROFS_TARBALL_SHA256)" bash deps/test-erofs-real.sh
-	$(DEPS_ENV) EROFS_TARBALL="$(EROFS_TARBALL)" EROFS_TARBALL_SHA256="$(EROFS_TARBALL_SHA256)" bash deps/test-erofs-recipe.sh
 
 clean:
 	# Preserve build/tarball/ (re-downloading source is expensive) and the
 	# arch-neutral source trees under build/src/ (may contain WIP patch dev
 	# under build/src/linux/.git).
-	rm -rf $(LINUX_BUILD_OUT) $(BUILD_DIR)/src/erofs-utils
+	rm -rf $(LINUX_BUILD_OUT)
 	rm -rf bin
 
 help:
 	@echo "native-deps — native dependency builds. Targets:"
-	@echo "  build (=all)          vmlinux + erofs + envd (multi-min cold)"
-	@echo "  erofs                 build mkfs.erofs (erofs-utils)"
+	@echo "  build (=all)          vmlinux + envd (multi-min cold)"
 	@echo "  vmlinux               build the guest kernel (~5-10 min cold)"
 	@echo "  envd                  build the e2b guest agent (e2b-dev/runtime; pin via ENVD_TARBALL)"
 	@echo "  versitygw             build the S3 gateway (opt-in; for builder.files_storage on single-node/local)"
 	@echo "  linux-patches-format  extract HEAD linux commits back to deps/linux-patches/"
-	@echo "  test                  script regressions and actual EROFS build/image tests"
+	@echo "  test                  dependency script regressions"
 	@echo "  test-scripts          dependency-independent script regressions (kernel jobs)"
-	@echo "  test-erofs            actual EROFS SHA/image/recipe tests (runtime jobs)"
 	@echo "  clean                 wipe build artifacts (preserves tarball cache + source trees)"
 	@echo "  TARGET_ARCH           x86_64 (default) | aarch64; CROSS_PREFIX auto-derives"

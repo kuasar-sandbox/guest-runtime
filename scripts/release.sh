@@ -8,8 +8,6 @@ WORK="$(mktemp -d)"
 trap 'chmod -R u+w "$WORK"; rm -rf "$WORK"' EXIT
 # shellcheck source=scripts/release-materials.sh
 source "$ROOT/scripts/release-materials.sh"
-# shellcheck source=scripts/release-native-materials.sh
-source "$ROOT/scripts/release-native-materials.sh"
 
 fail() {
   echo "release: $*" >&2

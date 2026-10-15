@@ -14,7 +14,7 @@ This document defines image packaging, filesystem layout, versioning and consump
 | --- | --- |
 | `sandboxer` | Build `sandbox-init`; `sandbox-ctl` starts CH and attaches the runtime image as guest virtio-pmem. |
 | `guest-runtime` | Package `sandbox-init`, `envd`, `flatten-ctl` into one EROFS image. |
-| `guest-runtime/native-deps` | Build `mkfs.erofs`, `fsck.erofs`, `vmlinux` and `envd`; the optional gateway is a separate opt-in target, not runtime payload. |
+| `guest-runtime/native-deps` | Build `vmlinux` and `envd`; the optional gateway is a separate opt-in target, not runtime payload. |
 | `accelerator` | Supply the reusable `pkg/{flatten,image,remote,tar}` packages used by `flatten-ctl`, and Manifest/Cache/Store capabilities. |
 
 `sandbox-runtime.bundle` does not contain the user rootfs, user dependencies, guest kernel or Cloud Hypervisor. The user rootfs comes from `boot.root.base`/`boot.disks[]`. The kernel is published in the vmlinux package; the VMM is published by sandboxer.
@@ -96,24 +96,24 @@ Common entry points:
 
 ```bash
 make flatten-ctl                 # Build the target-architecture guest tool.
-make native-deps                 # Build mkfs.erofs / fsck.erofs / vmlinux / envd.
+make native-deps                 # Build vmlinux / envd.
 make sandbox-runtime             # Produce bin/<arch>/sandbox-runtime.bundle.
 make build                       # Build flatten-ctl + sandbox-runtime.
 make build TARGET_ARCH=aarch64
 ```
 
-A **host-executable `mkfs.erofs` must already be available** before `make sandbox-runtime`. Install erofs-utils, run `make -C native-deps erofs TARGET_ARCH=$(uname -m)`, or set `BUILD_MKFS_EROFS`. It only packs the runtime bundle; the target Guest uses the Go generator linked into static `flatten-ctl`, with no `GUEST_MKFS_EROFS` payload.
+A **host-executable `mkfs.erofs` must already be available** before `make sandbox-runtime`. Install host erofs-utils or set `BUILD_MKFS_EROFS`. The project does not build mkfs. It only packs the runtime bundle; the target Guest uses the Go generator linked into static `flatten-ctl`, with no `GUEST_MKFS_EROFS` payload.
 
 The target's input and build sequence is:
 
-1. Resolve and check `BUILD_MKFS_EROFS`. Lookup tries host PATH, the native target output when host and target match, then the native-deps host entry. A missing host tool fails before image assembly.
+1. Resolve and check `BUILD_MKFS_EROFS`. Use the explicitly selected tool or the preinstalled executable on host PATH. A missing host tool fails before image assembly.
 2. If the selected `SANDBOX_INIT` (default `../sandboxer/bin/<arch>/sandbox-init`) is absent, delegate to `make -C ../sandboxer sandbox-init`.
 3. Resolve target `ENVD` (default `native-deps/bin/<arch>/envd`), building it when missing.
 4. Resolve this repository's target `FLATTEN_CTL` (default `bin/<arch>/flatten-ctl`), building it when missing.
 5. Verify the selected `flatten-ctl` build record links the external go-erofs module. A stale incremental binary fails explicitly; run `make flatten-ctl` or select a matching binary. Assemble the staging tree and use host `BUILD_MKFS_EROFS` to create temporary runtime EROFS.
 6. The host `runtime-bundle` tool copies EROFS, adds PMEM alignment padding, computes SHA256 and appends the empty-marker ZIP, publishing `bin/<arch>/sandbox-runtime.bundle` atomically.
 
-See [the native-build workflow](../native-deps/README.md) for mkfs.erofs/Envd builds and the [sandboxer guest ABI](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/sandbox-init.md) for sandbox-init.
+See [the native-build workflow](../native-deps/README.md) for host EROFS prerequisites and Envd builds and the [sandboxer guest ABI](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/sandbox-init.md) for sandbox-init.
 
 ### 3.1 Architectures
 
@@ -159,7 +159,7 @@ The project repository's `release-vX.Y.Z` aggregate release uploads the platform
 
 `vmlinux` is not part of the runtime version; it uses this repository's independent `vmlinux-vX.Y.Z` line. The runtime workflow explicitly selects a published sandboxer tag to build the image. Runtime and vmlinux version numbers evolve independently.
 
-Envd is already embedded in the image and is not published separately as `bin/envd`. `fsck.erofs` is a source-tree diagnostic/test helper, not part of the general component packages.
+Envd is already embedded in the image and is not published separately as `bin/envd`. `fsck.erofs` is a host diagnostic/test tool, not part of the general component packages.
 
 ## 6. Reliability and upgrades
 
@@ -218,7 +218,7 @@ Point configuration back to an old runtime file and restart node-ctl, or have th
 
 - [sandbox-init](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/sandbox-init.md): guest PID 1 ABI and host/guest protocol.
 - [sandbox](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/sandbox.md): runtime-image consumption, startup and restore.
-- [Native-build workflow](../native-deps/README.md): mkfs.erofs, vmlinux and Envd builds.
+- [Native-build workflow](../native-deps/README.md): host EROFS prerequisites, vmlinux and Envd builds.
 - [vmlinux](vmlinux.md): guest kernel and runtime-image relationship.
 - [flatten](flatten.md): flatten-ctl execution in a build sandbox.
 - [Aggregate validation](https://github.com/kuasar-sandbox/kuasar-sandbox/blob/main/test/QUICKSTART.md): package extraction and E2E entry points.
