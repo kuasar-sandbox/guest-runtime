@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# e2e-requires: ["docker"]
 # OCI image/config/ownership -> real EROFS correctness using prepared products.
 set -euo pipefail
 

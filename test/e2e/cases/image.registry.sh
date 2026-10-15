@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# e2e-requires: ["docker"]
 # Registry/OCI 1.1/referrer/store/auth/expiry contracts using prepared products.
 set -euo pipefail
 
