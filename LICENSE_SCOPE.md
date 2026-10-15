@@ -14,14 +14,6 @@ Unless stated otherwise below or in the affected file, original project material
 
 Project scripts that fetch and build the kernel, and project-maintained configuration fragments, use the root Apache-2.0 license. Linux sources downloaded during a build and not tracked in this repository retain their upstream licenses.
 
-## EROFS patches
-
-`native-deps/deps/erofs-patches/0002-explicit-libgcrypt-sha256.patch` preserves the licenses of its target files: `lib/sha256.h` is `GPL-2.0-or-later OR Apache-2.0`, and `lib/sha256.c` is `Unlicense`. The adjacent `.license` gives the combined machine-readable expression. License texts are in the root [Apache license](LICENSE), [GPL version 2 text](LICENSES/GPL-2.0-only.txt) (the source notice permits later versions for this header), and [Unlicense](LICENSES/Unlicense.txt). Other upstream file declarations, including GPL-2.0 hashmap code, remain unchanged. [Patch provenance](native-deps/deps/erofs-patches/README.md) describes the library notices and source/relink inputs.
-
-`native-deps/deps/erofs-patches/0003-exact-chunk-read.patch` preserves the `GPL-2.0-or-later OR Apache-2.0` declaration of `lib/blobchunk.c`. Its adjacent `.license` provides the machine-readable mapping; the Apache and GPL texts linked above apply, with later GPL versions permitted by the source notice. The project-owned read-injection test helpers use the root Apache-2.0 license and are not linked into release tools.
-
-`0004-single-device-plan.patch` changes `mkfs/main.c` and the library build list and adds the plan interface/implementation alongside changes to `lib/blobchunk.c` and `lib/inode.c`. Its sidecar records `GPL-2.0-or-later AND (GPL-2.0-or-later OR Apache-2.0)`, retaining the affected upstream declarations. The plan reconstruction and batch-read injection tests use the root Apache-2.0 license and are not shipped in native payloads. The ordered patch bytes, sidecars, application helper and actual static inputs remain part of recipe and release-material identity.
-
 ## Go submodule notices
 
 `scripts/release-notices/rootless-containers-proto/COPYING` is the unmodified Apache-2.0 license from upstream commit `4cd87ebadd670f849a518618bc9862e703f9baa5`. That commit's `go-proto` module archive omits the repository-root license. Packaging supplements only `github.com/rootless-containers/proto/go-proto@v0.0.0-20230421021042-4cd87ebadd67` with this pinned notice, verifies its digest and retains the module's ordinary source/checksum inventory. The adjacent `NOTICE` records provenance; this does not exempt other modules or versions from license collection.

@@ -20,7 +20,7 @@ class KernelChecksumRelease(unittest.TestCase):
         cls.work = Path(cls.temporary.name)
         cls.source = cls.work / "source"
         (cls.source / "scripts").mkdir(parents=True)
-        for name in ("release.sh", "release-materials.sh", "release-native-materials.sh"):
+        for name in ("release.sh", "release-materials.sh"):
             shutil.copy2(ROOT / "scripts" / name, cls.source / "scripts" / name)
         (cls.source / "LICENSE").write_text("synthetic project license fixture\n")
         (cls.source / ".gitignore").write_text("/native-deps/bin/\n")

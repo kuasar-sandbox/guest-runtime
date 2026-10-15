@@ -30,10 +30,7 @@ PYTHONDONTWRITEBYTECODE=1 python3 "$ROOT/scripts/test-release-source-inventory.p
 PYTHONDONTWRITEBYTECODE=1 python3 "$ROOT/scripts/test-release-runtime-payloads.py" --prepare "$TMP/runtime-readers"
 bash "$ROOT/scripts/test-release-go-contexts.sh"
 bash "$ROOT/native-deps/deps/test-common.sh"
-bash "$ROOT/native-deps/deps/test-erofs.sh"
-bash "$ROOT/scripts/test-release-native-materials.sh"
 python3 -B "$ROOT/scripts/test-static-crypto.py"
-bash "$ROOT/scripts/test-release-rpm-enumeration.sh"
 
 init_fixture_repo() {
   local directory="$1"
@@ -291,7 +288,6 @@ mkdir -p "$TMP/src" "$TMP/sandboxer/bin/x86_64" "$TMP/accelerator" \
   "$fixture_root/scripts" "$fixture_root/bin/x86_64" \
   "$fixture_root/native-deps/bin/x86_64" \
   "$fixture_root/native-deps/build/src/e2b-infra" \
-  "$fixture_root/native-deps/build/x86_64/src/erofs-utils" \
   "$fixture_root/native-deps/build/src/linux/LICENSES/preferred"
 install -m 0644 "$ROOT/LICENSE" "$fixture_root/LICENSE"
 mkdir "$fixture_root/LICENSES"
@@ -310,7 +306,6 @@ install -m 0644 "$ROOT/scripts/testdata/linux-COPYING" "$fixture_root/scripts/te
 install -m 0755 "$ROOT/scripts/release-materials.sh" \
   "$fixture_root/scripts/release-materials.sh"
 mkdir -p "$fixture_root/native-deps/deps"
-cp -a "$ROOT/native-deps/deps/erofs-patches" "$fixture_root/native-deps/deps/"
 cat > "$fixture_root/native-deps/deps/common.sh" <<'EOF'
 # Synthetic envd source fixture, not a native source-authentication result.
 resolve_tarball() {
@@ -329,8 +324,6 @@ extract_tarball() {
   printf 'fixture envd license\n' > "$2/LICENSE"
 }
 EOF
-install -m 0755 "$ROOT/scripts/release-native-materials.sh" \
-  "$fixture_root/scripts/release-native-materials.sh"
 install -m 0644 "$ROOT/scripts/static-crypto-catalog.py" "$fixture_root/scripts/static-crypto-catalog.py"
 mkdir -p "$fixture_root/cmd/flatten-ctl" "$fixture_root/cmd/other-tool"
 # A private offline module fixture supplies a real external dependency record.
@@ -386,10 +379,6 @@ for dependency in accelerator sandboxer; do
 done
 printf 'fixture envd license\n' \
   > "$fixture_root/native-deps/build/src/e2b-infra/LICENSE"
-printf 'fixture erofs authors\n' \
-  > "$fixture_root/native-deps/build/x86_64/src/erofs-utils/AUTHORS"
-printf 'fixture erofs license\n' \
-  > "$fixture_root/native-deps/build/x86_64/src/erofs-utils/COPYING"
 printf 'fixture Linux license\n' \
   > "$fixture_root/native-deps/build/src/linux/COPYING"
 printf 'fixture GPL-2.0 text\n' \
@@ -405,10 +394,9 @@ mkdir -p "$fixture_root/native-deps/deps/vmlinux"
 printf 'CONFIG_LOCALVERSION="-kuasar"\nCONFIG_LOCALVERSION_AUTO=y\n' \
   > "$fixture_root/native-deps/deps/vmlinux/sandbox-common.config"
 init_fixture_repo "$fixture_root" LICENSE LICENSES NOTICE .gitignore native-deps/.gitignore \
-  native-deps/deps/erofs-patches \
   native-deps/deps/vmlinux/sandbox-common.config \
   native-deps/Makefile native-deps/deps/common.sh scripts/release.sh scripts/release-materials.sh \
-  scripts/release-native-materials.sh scripts/static-crypto-catalog.py scripts/publish-release.sh \
+  scripts/static-crypto-catalog.py scripts/publish-release.sh \
   scripts/release-runtime-payloads.py scripts/test-release-runtime-payloads.py \
   scripts/validate-preview-line.sh scripts/testdata/linux-COPYING go.mod go.sum cmd >/dev/null
 project_sha="$(git -C "$fixture_root" rev-parse HEAD)"
@@ -462,10 +450,6 @@ mkfs.erofs --all-root -T0 -U 00000000-0000-0000-0000-000000000000 \
   "$fixture_root/build/runtime.erofs" "$tree" >/dev/null
 PYTHONDONTWRITEBYTECODE=1 python3 "$ROOT/scripts/test-release-runtime-payloads.py" --pack \
   "$fixture_root/build/runtime.erofs" "$fixture_root/bin/x86_64/sandbox-runtime.bundle"
-mkdir -p "$fixture_root/native-deps/build/x86_64/src/erofs-utils/mkfs"
-for input in libc.a libuuid.a libgcrypt.a libgpg-error.a libgcc.a crtbeginT.o; do
-  printf 'LOAD %s/%s\n' "$TMP/system-inputs" "$input"
-done > "$fixture_root/native-deps/build/x86_64/src/erofs-utils/mkfs/mkfs.erofs.map"
 install -m 0644 "$ROOT/scripts/testdata/linux-COPYING" "$fixture_root/native-deps/build/src/linux/COPYING"
 cat > "$TMP/release-build-bin/make" <<'EOF'
 #!/bin/sh
@@ -482,8 +466,6 @@ common_env=(
   RELEASE_SANDBOXER_VERSION=v0.1.3
   RELEASE_ACCELERATOR_SOURCE_SHA="$accelerator_sha"
   RELEASE_ACCELERATOR_VERSION=v0.1.3
-  EROFS_TARBALL=https://codeload.github.com/erofs/erofs-utils/tar.gz/refs/tags/v1.9.1#erofs-utils-v1.9.1.tar.gz
-  EROFS_TARBALL_SHA256=a9ef5ab67c4b8d2d3e9ed71f39cd008bda653142a720d8a395a36f1110d0c432
   ENVD_TARBALL=https://codeload.github.com/e2b-dev/runtime/tar.gz/refs/tags/2026.22#e2b-runtime-2026.22.tar.gz
   ENVD_TARBALL_SHA256=8f074b23dcb2c9db48f8e674a8ab8082b54a16088fb29b66376178feeb7fe040
   LINUX_TARBALL=https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.1.169.tar.gz
@@ -526,8 +508,7 @@ RELEASE_KIND=vmlinux bash "$ROOT/scripts/test-publisher.sh" \
   "$project_sha" release/v2.3.x
 
 runtime_archive="$TMP/runtime-bundle/assets/sandbox-runtime-x86_64-v1.2.3-preview.20260804.tar.gz"
-# The generator is linked into flatten-ctl. Native patch/linker-material
-# regressions still run above in test-release-native-materials.sh.
+# The generator is linked into flatten-ctl; retired native inputs are not shipped.
 if tar -tzf "$runtime_archive" | grep -E '^./bin/mkfs[.]erofs$|^./share/sources/runtime/(EROFS-INPUTS[.]tsv|erofs-patches/)'; then
   fail "runtime package retained a native generator payload or its payload inventory"
 fi

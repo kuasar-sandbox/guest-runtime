@@ -189,14 +189,13 @@ def check(platform):
     assert build["with"]["outputs"].splitlines() == [
         "guest-runtime/bin/${{ matrix.arch }}/flatten-ctl",
         "guest-runtime/native-deps/bin/${{ matrix.arch }}/envd",
-        "guest-runtime/native-deps/bin/${{ matrix.arch }}/mkfs.erofs",
-        "guest-runtime/native-deps/bin/${{ matrix.arch }}/fsck.erofs",
         "sandboxer/bin/${{ matrix.arch }}/sandbox-init",
         "guest-runtime/release-bundle",
     ]
-    for component in ("erofs", "envd"):
+    for component in ("envd",):
         assert "bash /inputs/release/ci/native-cache/native-cache.sh restore-or-build " + component in build["with"]["run"]
-    assert "BUILD_MKFS_EROFS" in str(runtime)
+    assert 'BUILD_MKFS_EROFS="$(command -v mkfs.erofs)"' in build["with"]["run"]
+    assert "restore-or-build erofs" not in build["with"]["run"]
     for goal in ("test", "vet", "flatten-ctl", "sandbox-runtime"):
         assert f"make -C guest-runtime {goal}" in build["with"]["run"]
     assert 'if [ "$TARGET_ARCH" = x86_64 ]; then make -C guest-runtime test; make -C guest-runtime vet; fi' in build["with"]["run"]
@@ -212,7 +211,7 @@ def check(platform):
     assert script.index("make -C guest-runtime sandbox-runtime") < script.index("scripts/release.sh package runtime")
     assert script.index("scripts/release.sh package runtime") < script.index("scripts/release.sh validate runtime")
     abi = runtime["Check the released Runtime ABI"]["run"]
-    assert "trusted/guest-runtime/scripts/ci-check-runtime-abi.py" in abi and abi.count("--static ") == 4
+    assert "trusted/guest-runtime/scripts/ci-check-runtime-abi.py" in abi and abi.count("--static ") == 2
     assert "src/sandboxer/bin/$TARGET_ARCH/sandbox-init" in abi
     assert names.index("Build test and package runtime image") < names.index("Check the released Runtime ABI")
     assert names.index("Check the released Runtime ABI") < names.index("Upload validated runtime bundle")

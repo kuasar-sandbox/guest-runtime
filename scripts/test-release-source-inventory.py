@@ -39,8 +39,7 @@ class SourceInventory(unittest.TestCase):
                 self.assertIn("unrecognized or inconsistent source inventory record", result.stderr)
 
     def test_native_generator_records_are_not_runtime_payloads(self):
-        # Native recipe/linker inventory checks remain in the native-material
-        # tests. A Go-only runtime package must not claim to ship those inputs.
+        # A Go-only runtime package must not claim to ship retired native inputs.
         for name in ("erofs-utils", "guest-runtime-erofs-patches", "system:libc.a",
                      "system:libuuid.a", "system:libgcrypt.a", "system:libgpg-error.a"):
             row = [EROFS, name, "1.2.3", "fixture", "fixture", "fixture"]

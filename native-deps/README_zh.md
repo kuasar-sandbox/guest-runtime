@@ -3,11 +3,7 @@
 <a id="native-deps"></a>
 # native-deps — 原生依赖构建与维护
 
-native-deps 目录构建三类默认原生产物：`mkfs.erofs`/`fsck.erofs`（erofs-utils
-宿主打包与独立测试工具）、`vmlinux`（guest 内核）、`envd`（e2b guest agent）。
-Guest 镜像导出使用链接在 `flatten-ctl` 中的 Go EROFS 库，不执行这些原生工具。工具链(autotools/kbuild/Go)与 Go 仓不同、上游发布节奏独立,
-因此内聚在 `guest-runtime/native-deps` 目录下独立构建。另提供可选的 `versitygw`
-网关目标,不包含在默认 build 中。
+native-deps 默认构建 `vmlinux`（Guest 内核）和 `envd`（E2B Guest agent）；`versitygw` 是可选目标。镜像导出使用链接在 `flatten-ctl` 内的 Go EROFS 库。Runtime bundle 打包使用宿主预安装的 mkfs，独立校验使用 fsck/dump。项目不再维护 erofs-utils 补丁或编译、分发 mkfs。
 
 公共流水线:按 URL pin 的上游 tarball(可选 SHA256 校验)→ 共享缓存与
 解压 → 本地补丁(vmlinux,`git am`)→ 构建 → `bin/<arch>/`。
@@ -27,14 +23,13 @@ Guest 镜像导出使用链接在 `flatten-ctl` 中的 Go EROFS 库，不执行�
 
 | 产物 | 上游(pin) | 本仓输入 | 消费方 |
 |---|---|---|---|
-| `mkfs.erofs` `fsck.erofs` | erofs-utils v1.9.1 | — | 宿主 runtime bundle 打包、源码树诊断与 accelerator 独立对照测试 |
 | `vmlinux` | linux 6.1.169(LTS,cdn.kernel.org) | `deps/linux-patches/` + `deps/vmlinux/*.config` | `sandboxer`/`sandbox-ctl`(guest 内核) |
 | `envd` | e2b-dev/runtime 2026.22(源码 tarball) | — | `guest-runtime`(注入 `sandbox-runtime.bundle`) |
 | `versitygw`(可选) | versity/versitygw v1.5.0 | — | 按需用于本地/单节点 S3-compatible 文件存储集成 |
 
-pin 落在 Makefile 变量(`EROFS_TARBALL` / `LINUX_TARBALL` / `ENVD_TARBALL` 及可选
+pin 落在 Makefile 变量(`LINUX_TARBALL` / `ENVD_TARBALL` 及可选
 `VERSITYGW_TARBALL`,支持 `url#filename` 与本地路径两种形式),配套的
-`*_TARBALL_SHA256` 为空时跳过校验。当前 EROFS、Linux、Envd 默认输入配置了 hash;
+`*_TARBALL_SHA256` 为空时跳过校验。当前 Linux、Envd 默认输入配置了 hash;
 可选网关的 hash 按部署验证策略补充。升级版本 = 改变量 + 重验 patch 应用。
 
 先使用正常 Makefile 目标构建所选源码,再打包匹配的输出。在仓库根目录执行的
@@ -94,37 +89,7 @@ flatten-ctl 必须等于外部对应载荷。残留的内嵌或外部 mkfs 载�
 
 #### 历史原生工具材料
 
-以下材料合同适用于携带 `mkfs.erofs` 的旧 Runtime 包，应使用与其匹配的发行
-工具验证。当前基于 Go 生成器的 Runtime 包不再包含这份原生工具清单。维护中的
-erofs-utils 配方仍为宿主打包和独立原生对照保留固定的静态依赖与链接映射。
-
-匹配的 `mkfs.erofs` 链接映射把全部实际外部静态库及启动对象提供给
-`EROFS-INPUTS.tsv`。清单保留名称与文件摘要;来源行及每个输入的
-`system/<input>` 声明目录须精确覆盖整个集合,包括 libc、libuuid、Libgcrypt/Libgpg-error（libgcrypt/libgpg-error）和 GCC/CRT
-输入。打包记录已安装的 Debian/RPM 源包身份,复制其版权、许可和 NOTICE 文件,
-包括引用的公共许可正文。包名或 SPDX 标识本身不能代替正文。RPM 包列表和同源
-兄弟包文件列表须完整成功;部分输出不算完整覆盖。已安装包归属用于来源归类,
-不用于 dpkg/RPM 文件摘要认证或共同所有者认证。
-
-对于源码构建的 libuuid,Runtime 打包需要匹配的 `SOURCES.tsv`、
-`MATERIALS.sha256` 和许可正文,并检查库的清单与摘要。输入缺失、被改动或无法
-归属时需要提供实际匹配的材料,不能编造来源记录。
-
-支持的 openEuler 24.03-LTS-SP4 构建 profile 需要外部
-[Runner 静态 crypto provider](https://github.com/kuasar-sandbox/kuasar-sandbox/blob/d375effe12531b49f44368d33735c5b7b50b244c/ci/runner/README_zh.md#安装)
-提供匹配的静态 crypto 库及完整的源码/许可/重新链接材料。Provider 版本、配齐
-依赖的配方、目录布局及安装/复用行为以该归属章节为准。
-
-收集器将完整目录与实际链接 archive 字节、独立 pin 的 SRPM/内含源码/spec/
-补丁摘要和认可的 provider 配方进行核对。声明、源码、配方、构建记录和 archive
-缺失或被改动,路径不安全,出现链接或清单不完整时均拒绝。所有经过验证的源码、
-构建及重新链接材料只复制一份到
-`share/sources/runtime/native-crypto/<build-id>/`。每个 archive 的声明正文
-仍位于 `share/licenses/runtime/system/<archive>/`,不在其中重复大型源码/二进制。
-`SOURCES.tsv` 将每个链接 archive 绑定到目录 ID。独立 Runtime 验证器重新
-检查 archive 绑定关系、目录内容、来源声明和声明文件副本,不执行目录中的配方。
-Ubuntu 目标 dev 软件包继续使用已安装 Debian 源包及 copyright 路径。不会合成
-软件包注册、放宽失败后的回退,也不会新增书面要约承诺。
+携带 mkfs 的历史 Runtime 包及对应源码、许可和重新链接材料保持不变，使用其匹配的发行工具验证。当前包不再声明这些原生工具为载荷。旧制品仍可读取；重新构建当前 Runtime 使用 Go 生成器和宿主工具。
 
 #### 发布与验证边界
 
@@ -142,7 +107,7 @@ Ubuntu 目标 dev 软件包继续使用已安装 Debian 源包及 copyright 路�
 
 | 路径 | 角色 |
 |---|---|
-| `deps/build-{erofs,vmlinux,envd}.sh` | 源码构建脚本(vmlinux 为 STAGE 多阶段 dispatcher) |
+| `deps/build-{vmlinux,envd}.sh` | 源码构建脚本(vmlinux 为 STAGE 多阶段 dispatcher) |
 | `deps/build-versitygw.sh` | 可选网关构建 |
 | `deps/common.sh` | tarball 下载 / 缓存 / 解压共享逻辑 |
 | `deps/linux-patches/` | guest 内核补丁(arch-neutral) |
@@ -153,7 +118,7 @@ Ubuntu 目标 dev 软件包继续使用已安装 Debian 源包及 copyright 路�
 
 ```
 bin/
-├── x86_64/                  x86_64 产物: mkfs.erofs fsck.erofs vmlinux envd
+├── x86_64/                  x86_64 产物: vmlinux envd
 ├── aarch64/                 aarch64 产物(同上)
 └── <name>                   软链 → <host-arch>/<name>,仅原生构建时生成/更新
 
@@ -164,8 +129,7 @@ build/
 │   ├── e2b-infra/           envd 源树(跨架构共享,Go 以 GOARCH 选目标)
 │   └── versitygw/           可选网关的共享源码
 ├── x86_64/
-│   ├── linux/               kbuild O= 输出
-│   └── src/erofs-utils/     erofs-utils 源树(autotools in-tree,per-arch)
+│   └── linux/               kbuild O= 输出
 └── aarch64/                 (同上)
 ```
 
@@ -175,18 +139,12 @@ build/
 
 ### 1.4 幂等与缓存
 
-- **产物复用:** Envd 在目标文件已存在时复用。EROFS 使用唯一的 `bin/<arch>/.erofs-recipe` v2 stamp，记录两个输出的摘要、已验证的归档字节、根目录/native Makefile、build/common/recipe helper、完整有序补丁目录、编译/构建工具、选项及 pkg-config 元数据。编译器依赖文件记录实际外部头文件（包括强制包含的头文件）；两个链接映射记录实际选中的静态库和启动对象。输入改变或缺失会使复用失效并重新解压自动生成的 per-arch 源码树。拒绝覆盖 Git 源码 checkout。构建并行度不进入身份。内核仍根据脚本、配置和补丁执行增量 Kbuild。
-- **迁移与源码身份:** 相同归档字节随工作区迁移不会改变身份。工作区内的依赖标签使用相对路径，外部路径及具有语义的编译器/sysroot/选项值仍然有效。复用需要两个缓存输出和唯一 stamp；没有 stamp 的旧缓存会重建一次。`make -C native-deps erofs` 在构建或复用原生工具时执行此检查。普通 Runtime 构建直接使用选定的宿主 `BUILD_MKFS_EROFS`，不调用原生配方；打包前须确保该宿主工具已更新。该选项不选择 Guest 镜像生成器。
-- **tarball 缓存:** `build/tarball/` 中的下载按预期摘要校验。EROFS 直接读取本地归档，同名输入的字节改变不能被按文件名缓存所掩盖。明确设空 `EROFS_TARBALL_SHA256` 支持本地源码实验；未设置时仍使用生产 pin。配方不匹配时丢弃解压的 `.extracted` marker。
-- **`make clean`**:删除 `bin/` 与目标构建输出,**保留** tarball
-  缓存与 `build/src/*` 源树。内核源树可能携带尚未 format 回 `deps/` 的 patch
-  开发 WIP,不能静默丢弃。
+Envd 复用已存在的目标文件；内核根据脚本、配置和补丁执行增量 Kbuild。下载保留在 `build/tarball/` 并按预期摘要校验。`make clean` 删除 `bin/` 与目标构建输出，保留 tarball 缓存和架构无关源码树，尤其保留内核补丁开发中的工作。宿主 erofs-utils 由环境管理，不进入本项目的 native cache。
 
 ## 2. 构建目标
 
 ```bash
-make build      # =all: vmlinux + erofs + envd
-make erofs      # mkfs.erofs + fsck.erofs
+make build      # =all: vmlinux + envd
 make vmlinux    # guest 内核
 make envd       # e2b guest agent
 make versitygw  # 可选网关,不包含在 build 中
@@ -196,25 +154,11 @@ make help       # 列举目标
 
 构建耗时取决于主机、工具链及缓存状态,以上命令不承诺固定耗时。
 
-Workbench 任务向配方传入正整数 `KUASAR_BUILD_JOBS`. 内核编译使用该预算代替宿主 CPU 数量; Envd 即使设置了 `ENVD_GOFLAGS`, 也通过 `go build -p` 显式传入预算. EROFS 及其测试构建将它用作 `EROFS_BUILD_JOBS` 的默认值. CPU quota 本身不会改变 `nproc` 报告的 CPU 数量.
+Workbench 任务向配方传入正整数 `KUASAR_BUILD_JOBS`. 内核编译使用该预算代替宿主 CPU 数量; Envd 即使设置了 `ENVD_GOFLAGS`, 也通过 `go build -p` 显式传入预算. CPU quota 本身不会改变 `nproc` 报告的 CPU 数量.
 
-### 2.1 erofs(`make erofs`)
+### 2.1 宿主 EROFS 工具
 
-`deps/build-erofs.sh`:解压 erofs-utils 到 `build/<arch>/src/erofs-utils/`(该 autotools
-路径不支持 out-of-source 构建,per-arch 各一棵)→ `autoreconf` + `configure`(关闭
-压缩 / fuse / 网络特性)→ 只编 `lib` + `mkfs` + `fsck` 三个子目录 → 产出
-`bin/<arch>/{mkfs.erofs,fsck.erofs}`。
-
-- 原生 EROFS 工具构建跳过 `mount`/`dump`/`fuse` 子目录,同时避开 v1.9.1 的 mount.erofs
-  在 `--disable-multithreading` 下的 pthread 链接问题。独立 bundle 验证另需安装
-  可信主机 `dump.erofs` (§1.1)。
-- [维护的源码补丁](deps/erofs-patches/README_zh.md) 通过 `EROFS_USE_LIBGCRYPT_SHA256` 明确选择 Libgcrypt 的完整 SHA-256。Configure 禁用 OpenSSL 和多线程。完整 32 字节摘要、精确的 4 KiB chunk 去重、不压缩布局及原始 v1.9.1 归档 pin 保持不变；不包含分配器或读取路径变更。
-- 目标编译器必须能静态链接 `libgcrypt.a`、`libgpg-error.a` 和 `libuuid.a`。Debian/Ubuntu 软件包为 `libgcrypt20-dev libgpg-error-dev uuid-dev`。Ubuntu 24.04 验证使用 Libgcrypt `1.10.3-2ubuntu0.2` 和 Libgpg-error `1.47-3build2.1`；须使用实际目标发行版的版本、头文件及 pkg-config 元数据。前置探针检查包含静态私有依赖的实际目标链接，失败时给出配齐依赖的指引。
-- RPM devel 软件包不一定包含静态库。openEuler 24.03-LTS-SP4 profile 需要[外部 Runner provider](https://github.com/kuasar-sandbox/kuasar-sandbox/blob/d375effe12531b49f44368d33735c5b7b50b244c/ci/runner/README_zh.md#安装)及 §1.1 所述的匹配材料。仅安装 `libgcrypt-devel libgpg-error-devel` 不足以构建。
-- 两个输出 ELF 均不得含 `INTERP` 或 `NEEDED`。SHA 路径必须能在没有 host 库、配置、`/proc` 或 `/dev` 的空根目录运行；每个新目标/工具链都应验证与基线完全一致的镜像字节及 fsck/解压结果。
-- Libgcrypt 和 Libgpg-error 库适用 LGPL-2.1-or-later，源码发行包还包含特定文件的声明。保留现有 EROFS 文件许可证，包括 GPL-2.0 hashmap 代码。发布来源记录使用实际链接输入及匹配的软件包/源码 copyright、LICENSE/COPYING/NOTICE 文本（§1.1）；材料缺失时打包失败。须保留配方、有序补丁、原始源码归档、EROFS 对象及精确的目标库源码/构建配置，以便重建或重新链接；不能用合成测试材料替代发布材料。
-- `EROFS_BUILD_JOBS=2 make -j2 erofs` 限制编译并行度, 默认值依次取 `KUASAR_BUILD_JOBS`, `JOBS`, 2.
-- host 构建依赖为 `autoconf automake libtool pkg-config make gcc g++ binutils patch python3`（Python 3.11 或更新版本；binutils 包括 `readelf`）。`make test` 覆盖 SHA 向量/失败路径、真实原版与候选镜像及解压、根目录调用、迁移和输入变更。原生二进制缓存命中不要求保留完整的 EROFS 源码树：SHA 测试会在需要时于临时目录准备经过校验的源码，不替换缓存工具或 stamp。仅构建内核的任务使用不依赖原生库的 `test-scripts` 目标。
+从宿主发行版安装 erofs-utils，或通过 `BUILD_MKFS_EROFS` 选择宿主可执行的 mkfs。交叉构建也使用宿主架构的打包器。`make erofs`、补丁版 Plan ABI、私有静态链接配方和相应缓存已移除。独立校验需要支持当前格式及 `--extract`、`--path`、`--cat` 的 fsck/dump；可信 CI 可构建未修改的上游读取工具，但不构建或导出 mkfs。
 
 ### 2.2 vmlinux(`make vmlinux`)
 
@@ -311,24 +255,9 @@ make vmlinux           # 重新 apply + build,验证可重复
 make TARGET_ARCH=aarch64 build
 ```
 
-### 4.2 工具链准备(x86_64 host → aarch64 为例,反向对称)
+### 4.2 交叉工具链准备
 
-```bash
-# C 工具链(erofs-utils configure/链接 + kbuild CROSS_COMPILE)
-apt install gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
-
-# 目标静态 Libgcrypt、Libgpg-error 与 libuuid，包括 pkg-config 元数据
-sudo dpkg --add-architecture arm64
-sudo apt update
-sudo apt install libgcrypt20-dev:arm64 libgpg-error-dev:arm64 uuid-dev:arm64
-```
-
-envd 是 `CGO_ENABLED=0` 的纯 Go 构建，GOARCH 即完成交叉，无须以上 C 包。EROFS
-脚本在 configure 前使用目标编译器做静态 Libgcrypt/Libgpg-error/uuid 链接探针。交叉构建默认把
-`PKG_CONFIG_LIBDIR` 设置为编译器 sysroot 内的 multiarch 目录，不搜索 host 库目录。
-其他目标 sysroot 可显式设置 `PKG_CONFIG_LIBDIR`、`PKG_CONFIG_SYSROOT_DIR`，必要时
-设置 `PKG_CONFIG_PATH`。这些覆盖值及解析出的库都属于构建/cache 输入；host `.pc`
-文件无法使架构不匹配的目标 archive 成功链接。
+Kbuild 需要目标 C 工具链，例如在 x86_64 宿主安装 `gcc-aarch64-linux-gnu`。Envd 和 flatten-ctl 使用 Go 交叉构建。Runtime 打包器始终使用宿主 erofs-utils，不再需要为 EROFS 安装目标架构的静态 Libgcrypt、Libgpg-error 或 libuuid。
 
 ## 5. WSL2 注意
 

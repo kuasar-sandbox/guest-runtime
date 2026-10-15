@@ -1,4 +1,4 @@
-# Shared helpers for dependency build scripts. Sourced by build-erofs.sh and
+# Shared helpers for dependency build scripts. Sourced by build-vmlinux.sh and
 # build-envd.sh (tarball fetch + extract); not executable on its own.
 #
 # Callers must set $BUILD_DIR (absolute path to the repo's build/ root).

@@ -584,8 +584,10 @@ caller-supplied output writer must itself return from a blocked Write.
 
 `make flatten-ctl` builds one static Go executable. Runtime generation no longer
 searches for mkfs and `MKFS_EROFS_PATH` does not select its generator. `make build`
-still uses a host native packer for the runtime bundle; `make -C native-deps erofs`
-retains host packaging, independent fsck and explicit native performance controls.
+uses preinstalled host erofs-utils to pack the runtime bundle. The project no
+longer builds mkfs or maintains its patches. Independent fsck/dump validation
+uses host tools; historical native performance controls retain their original
+source revisions.
 There is no implicit old-generator or high-space fallback. Rollback selects the
 previous source/artifact set and its matching conversion semantics.
 
@@ -668,7 +670,7 @@ Do not interpret successful flattening as workload compatibility certification.
 - [accelerator/docs/manifest.md](https://github.com/kuasar-sandbox/accelerator/blob/main/docs/manifest.md): ingest the image into content-addressed storage; chunk deduplication shares repeated content across images.
 - [host image-default merging](https://github.com/kuasar-sandbox/sandboxer/blob/main/pkg/sandbox/imageconf.go): how startup uses the embedded OCI runtime configuration.
 - [sandboxer/docs/sandbox.md](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/sandbox.md) `boot.root.base`: select a flattened image as the read-only base.
-- [Native-build guide](../native-deps/README.md): build mkfs.erofs with `make -C native-deps erofs`; build the CLI with `make flatten-ctl`. mkfs is a host packaging/test tool; the CLI has no runtime dependency on it.
+- [Native-build guide](../native-deps/README.md): install host erofs-utils; build the CLI with `make flatten-ctl`. mkfs is a host packaging/test tool; the CLI has no runtime dependency on it.
 - [Project system overview](https://github.com/kuasar-sandbox/kuasar-sandbox/blob/main/docs/kuasar-sandbox.md) §2.2 / §3.1: flattening's role and goals.
 
 

@@ -97,7 +97,7 @@ GOWORK=off make build TARGET_ARCH=aarch64  # cross-build where documented depend
 - `bin/<arch>/flatten-ctl`;
 - `BUILD_MKFS_EROFS` as the host image packer.
 
-When `sandbox-init`, Envd or `flatten-ctl` is absent, the Makefile invokes its corresponding build target. Host `mkfs.erofs` must already be on `PATH`, at a documented native-deps host path, or selected by `BUILD_MKFS_EROFS`; otherwise the Runtime build fails explicitly. The native EROFS recipe, static dependencies and cache remain for host packaging and independent tests, not as Guest runtime dependencies. Public builds continue to use documented public source and download locations.
+When `sandbox-init`, Envd or `flatten-ctl` is absent, the Makefile invokes its corresponding build target. Host `mkfs.erofs` must be installed on `PATH` or selected by `BUILD_MKFS_EROFS`; otherwise the Runtime build fails explicitly. The project no longer maintains erofs-utils patches or builds and distributes mkfs. Workbench and host environments may install distribution erofs-utils packages for build-time packing and independent validation.
 
 ## Outputs
 
@@ -106,7 +106,6 @@ When `sandbox-init`, Envd or `flatten-ctl` is absent, the Makefile invokes its c
 | `bin/<arch>/flatten-ctl` | `make flatten-ctl` |
 | `bin/<arch>/sandbox-runtime.bundle` | `make sandbox-runtime` |
 | `native-deps/bin/<arch>/vmlinux` | `make native-deps` |
-| `native-deps/bin/<arch>/mkfs.erofs` / `fsck.erofs` | `make native-deps` |
 | `native-deps/bin/<arch>/envd` | `make native-deps` |
 
 ## Two release units
