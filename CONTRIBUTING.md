@@ -54,6 +54,22 @@ A pull request should:
 
 Draft pull requests are welcome for early feedback, but they are not merge candidates.
 
+## Guest kernel release inputs
+
+Automatic `vmlinux` version selection and kernel release notes consider only
+`native-deps/deps/vmlinux/*.config` and `native-deps/deps/linux-patches/`.
+Changes to config comments also count as release input changes.
+
+A change to build scripts, Makefiles, upstream source versions or checksums, or
+compiler/toolchain inputs that can change the kernel artifact MUST update a
+`native-deps/deps/vmlinux/*.config` file in the same PR. A config comment
+explaining why the kernel needs a new release is sufficient when no option needs
+to change. Those other build inputs do not independently trigger a kernel release.
+
+This release-intent rule does not narrow CI validation or caching. Candidate
+kernel builds and cache detection retain their complete build-input rules,
+including relevant script-only and Makefile changes.
+
 ## E2E execution requirements
 
 Every `test/e2e/cases/<suite>.<case>.sh` starts with one static
