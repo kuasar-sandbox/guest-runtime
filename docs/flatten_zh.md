@@ -635,11 +635,20 @@ Linux 适配调用 **umoci v0.6.0** 层 API，不引入其 CLI、CAS 或 runtime
 
 内部 Plan schema/能力、`image.ConversionSemantics` 和制品身份分别管理。Plan 声明
 逻辑长度、源身份/路径、有序目标和源 offset、length、SHA-256 及 padding。Reader
-拒绝未知能力、溢出、数量/字节超限、缺源/截断、重叠和越界。兼容字段
-`NativeMemoryBytes`（默认 512 MiB）现在限制 Go 规划器的受控分配，分给库和调用方
-去重/硬链接表，各占一半；容量增长前计入新旧存储并存。`PlanBytes` 默认 512 MiB，
-`IndexMemoryBytes` 默认 128 MiB，继续覆盖计划、源索引及输出 extent/sparse-map。
-它们不是进程 RSS 硬上限；GC、栈及分配器残留还须实际计量。
+拒绝未知能力、溢出、数量/字节超限、缺源/截断、重叠和越界。
+
+库的 `LayerLimits.MetadataBytes` 和 `PlanLimits` 字段是可选准入配额。零值不再
+额外限制层元数据、规划、落盘 Plan 或索引；整数/分配表示范围及格式边界检查仍然
+生效。CLI 使用这些零值选项，因此增加 Builder 资源不再被这些固定的层/计划配额
+抵消，不需要新的 CLI 参数或 Builder API。执行资源仍是外层内存/存储边界；独立
+调用方必须约束自己的执行环境。这不保证任意大的输入都能完成。
+
+显式正值保留原有保守计费。兼容字段名 `NativeMemoryBytes` 限制 Go 规划器的受控
+分配，分给库和调用方去重/硬链接表，各占一半；扩容计入新旧存储并存。
+`PlanBytes` 限制计划文件及结构元数据；`IndexMemoryBytes` 保留选集、reader 和
+writer 的份额。原先的一百万来源上限改为可寻址来源切片边界。这些估算不是进程
+RSS 硬上限；GC、栈及分配器残留还须计量。解码器、归档、路径、摘要和完成条件
+检查仍然生效。
 
 ### 4.4 顺序输出与接收条件
 
