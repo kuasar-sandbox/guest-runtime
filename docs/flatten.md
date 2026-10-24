@@ -550,13 +550,26 @@ Plan schema and capabilities are internal and versioned independently of
 `image.ConversionSemantics` and artifact identity. The Plan declares logical
 length, source identity/path, ordered target/source offsets, lengths, SHA-256 and
 padding. The reader rejects unsupported features, overflow, excessive counts or
-bytes, missing/truncated inputs, overlaps and out-of-bounds references. The legacy
-field `NativeMemoryBytes` (default 512 MiB) now bounds controlled Go planner
-allocations, split equally between the library and caller dedup/hardlink tables.
-Capacity growth admits old and new storage together before allocation. `PlanBytes`
-defaults to 512 MiB and `IndexMemoryBytes` to 128 MiB, retaining plan/source/output
-extent and sparse-map accounting. These are not process RSS limits: GC, stacks
-and allocator retention still need actual measurement.
+bytes, missing/truncated inputs, overlaps and out-of-bounds references.
+
+The library's `LayerLimits.MetadataBytes` and `PlanLimits` fields are optional
+admission quotas. Zero imposes no additional layer, planning, on-disk Plan or
+index quota; checked integer/allocation and format boundaries still apply. The
+CLI uses these zero-valued options, so increasing Builder resources is no longer
+masked by these fixed layer/plan quotas. No new CLI flag or Builder API is
+required. Execution resources remain the outer memory/storage boundary;
+standalone callers must bound their environment. This does not guarantee that
+arbitrarily large input will complete.
+
+Explicit positive values keep the existing conservative accounting. The legacy
+name `NativeMemoryBytes` bounds controlled Go planner allocations, split equally
+between the library and caller dedup/hardlink tables; growth accounts for old
+and new storage together. `PlanBytes` bounds Plan files and structural metadata;
+`IndexMemoryBytes` retains selection, reader and writer shares. The former
+one-million-source cap is replaced by an addressable source-slice bound. These
+estimates are not process RSS limits: GC, stacks and allocator retention still
+need measurement. Decoder, archive, path, digest and completion checks remain
+in force.
 
 ### 4.4 Sequential output and acceptance
 
