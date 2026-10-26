@@ -156,4 +156,4 @@ Runtime 与 VMLinux 组件 Release 从所选 source ref 和精确 commit 构建�
 
 ## License
 
-项目原创内容采用 [Apache License 2.0](LICENSE)。Linux kernel patch 保留 [`LICENSE_SCOPE_zh.md`](LICENSE_SCOPE_zh.md)记录的 GPL-2.0-only 边界。Runtime package、EROFS tool、Envd、Buildroot/distribution input 和其他第三方 material 保留各自 license、notice、source 与 redistribution obligation。
+项目原创内容采用 [Apache License 2.0](LICENSE)。内核构建输入的许可证边界见 [`LICENSE_SCOPE_zh.md`](LICENSE_SCOPE_zh.md)。Runtime package、EROFS tool、Envd、Buildroot/distribution input 和其他第三方 material 保留各自 license、notice、source 与 redistribution obligation。

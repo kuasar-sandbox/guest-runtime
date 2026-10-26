@@ -67,10 +67,10 @@ packaging step does not change the standalone `make vmlinux` build output.
 fetch         Download and verify linux-6.1.169.tar.gz, with optional shared TARBALL_CACHE;
               extract the cross-architecture shared source tree at build/src/linux;
               git init, commit the imported tree and tag linux-patches-base.
-patches-apply Apply deps/linux-patches/*.patch with git am. The current platform patch
-              makes virtio_balloon converge to a sustainable size under an infeasible
-              host target rather than livelocking (§5.6). Already-applied patches are
-              an idempotent no-op; unformatted or divergent work is not overwritten.
+patches-apply Apply deps/linux-patches/*.patch with git am. No kernel patches are
+              currently shipped; an empty patch set requires HEAD == linux-patches-base.
+              Already-applied patches are an idempotent no-op; unformatted or
+              divergent work is not overwritten.
 build         Concatenate sandbox-common.config + sandbox-<arch>.config into
               arch/<kbuild_arch>/configs/sandbox_defconfig; run make sandbox_defconfig
               and make olddefconfig to resolve dependencies, then make -j<jobs>
@@ -378,13 +378,13 @@ The kernel supplies capabilities, not node resource policy. [Guest ABI](https://
 
 `VIRTIO_MEM=y` is retained as an extension point for host-driven guest memory-block unplugging. Its coarse, less frequent events can support separately designed memory-hotplug/NUMA scenarios. The platform's current fixed-capacity Budget model rejects memory hotplug and does not use virtio-mem. Retaining the driver is only an extension point; enabling a new hotplug design would also require corresponding host support and end-to-end validation.
 
-### 5.6 Why the virtio_balloon convergence patch is applied
+### 5.6 Balloon behavior under memory pressure
 
-Host BalloonController updates vm.resize targets using feedback (§5.5), and a requested target can temporarily be **infeasible**: for example, the startup working set still occupies more pages than the guest can release. In the failure scenario addressed by the patch, the stock inflate path repeatedly fails allocation (`Out of puff`) and retries the same target while deflate_on_oom releases recently inflated pages under pressure. Competing inflate/deflate activity can prevent useful convergence while consuming CPU and generating mapping invalidations.
+The guest uses the upstream Linux 6.1.169 `virtio_balloon` driver. When inflation cannot allocate a page, it ends the current batch and the size worker retries the pending host target. When `deflate_on_oom` is negotiated, the upstream OOM notifier can release balloon pages. The driver does not turn a transient allocation failure into a permanent ceiling on balloon size.
 
-The platform patch instead enforces **convergence**. When inflation cannot allocate pages, the driver records the sustainable balloon size minus a safety margin as a **sticky ceiling** and actively deflates to it. Further pressure can only tighten that ceiling downward. This is emergency guest protection, not a Budget change, and it does not automatically restore the host target. If CH memory_actual_size shows target/current disagreement, host control treats the phase as unstable: it does not continue shrinking, release reservation or discard the configured memory.high soft guarantee. Ordinary growth can still give the guest more memory by lowering the balloon target.
+Host resource control owns the requested target, Budget and reservation accounting. CH `memory_actual_size` reports the current guest Budget (effective guest memory size); the observed balloon size is `Capacity - memory_actual_size`. Target/current disagreement does not itself establish a sustainable memory limit. The current growth, shrink and pressure-feedback rules are defined by §5.5 and [sandbox.md §9.3](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/sandbox.md#93-balloon).
 
-The patch is guest-side robustness work and does not change the host/guest protocol. It reduces the identified convergence failure; it is not a guarantee that arbitrary guest workloads cannot OOM. Accounting and subsequent control are described in §5.5 and sandbox.md §9.3. Patch sources are in [native-deps/deps/linux-patches](../native-deps/deps/linux-patches/).
+Validate balloon pressure and recovery with the matching host controller and real MicroVM workloads, including startup and snapshot/restore. Neither a successful kernel build nor upstream OOM deflation guarantees that arbitrary guest workloads complete without OOM.
 
 ## 6. Validation
 
@@ -409,7 +409,7 @@ For configuration review, inspect the resolved olddefconfig diff for silent Kcon
 
 ## 7. Maintenance
 
-- When upgrading the kernel line, such as 6.1 to another 6.x release, review sandbox-common.config features, security choices and diagnostics, and inspect olddefconfig output for silent regressions. Rebase `deps/linux-patches/*.patch` onto the new source: create the new imported baseline with linux-fetch, preserve and rebase/reapply the working commits in build/src/linux, then export with linux-patches-format. Resolve conflicts between the convergence patch (§5.6) and the new virtio_balloon driver.
+- When upgrading the kernel line, such as 6.1 to another 6.x release, review sandbox-common.config features, security choices and diagnostics, and inspect olddefconfig output for silent regressions. If `deps/linux-patches/*.patch` contains patches, rebase them onto the new source: create the new imported baseline with linux-fetch, preserve and rebase/reapply the working commits in build/src/linux, then export with linux-patches-format. Revalidate balloon pressure and recovery (§5.6) with the selected host sources.
 - When changing an architecture fragment, review whether CH's device model for that architecture adds dependencies such as GICv4 or another RTC driver.
 - The project does not seek to upstream this defconfig as a general server-distribution configuration. Its choices intentionally differ: guest userfaultfd is disabled, namespaces are trimmed, and cgroups retain the freezer plus the cpu/memory/io/pids controllers needed by sandbox workloads.
 

@@ -78,10 +78,9 @@ bin/vmlinux.sha256
 fetch         下载并校验 linux-6.1.169.tar.gz(支持 TARBALL_CACHE 共享缓存),
               解压到 build/src/linux/(跨 arch 共享同一棵源码树),git init +
               提交原始树 + 打 tag linux-patches-base
-patches-apply git am deps/linux-patches/*.patch 到该树(平台对 guest 内核的
-              定制补丁;当前一条:virtio_balloon 在不可行 host target 下收敛
-              到可持续大小而非活锁,见 §5.6)。已应用则幂等跳过;未导出或
-              与 patch 不一致的工作不会被覆盖
+patches-apply git am deps/linux-patches/*.patch 到该树。当前不携带内核补丁;
+              空补丁集要求 HEAD == linux-patches-base。已应用的补丁幂等跳过;
+              未导出或与 patch 不一致的工作不会被覆盖
 build         把 sandbox-common.config + sandbox-<arch>.config 拼接成
               arch/<kbuild_arch>/configs/sandbox_defconfig → make
               sandbox_defconfig + make olddefconfig(关键:让 kbuild 解析依赖
@@ -444,24 +443,22 @@ CONFIG_VIRTIO_BALLOON_FREE_PAGE_REPORTING=y、CONFIG_PAGE_REPORTING=y。
 memory hotplug,不使用 virtio-mem。保留驱动本身不能启用新设计;还须有相应 host
 支持并完成端到端验证。
 
-### 5.6 为什么打 virtio_balloon 收敛补丁(`deps/linux-patches/`)
+### 5.6 内存压力下的 balloon 行为
 
-Host BalloonController 根据反馈调整 vm.resize target(§5.5),目标可暂时**不可行**:
-例如启动工作集占用较大,Guest 暂时没有足够页可释放。在此 patch 处理的故障场景中,
-原始 inflate 路径反复分配失败(`Out of puff`)并重试同一 target,而 deflate_on_oom
-又在压力下放掉刚充入的页。相互竞争的 inflate/deflate 可使大小不收敛,持续消耗 CPU
-并产生映射失效。
+Guest 使用上游 Linux 6.1.169 的 `virtio_balloon` 驱动。充气时无法分配页会结束
+当前批次,大小更新 worker 随后重试尚未完成的 host target。协商启用
+`deflate_on_oom` 时,上游 OOM notifier 可以释放 balloon 页。驱动不会把一次
+暂时的分配失败转换成永久的 balloon 大小上限。
 
-平台 patch 改为**收敛**语义。Inflate 分配失败后,driver 把可持续 balloon 大小减去
-安全余量,记录为**粘滞上限**,并主动 deflate 到该上限。后续压力只能继续向下收紧。
-这是 Guest 应急保护,不是 Budget 调整,也不会自动恢复 host target。CH
-memory_actual_size 显示 target/current 不一致时,host 视该阶段为 unstable:
-不继续 shrink、不释放 reservation、不丢弃已配置的 memory.high 软保证。正常 grow
-仍可通过降低 balloon target 给 Guest 更多内存。
+Host 资源控制负责请求的 target、Budget 和 reservation 记账。CH 的
+`memory_actual_size` 提供当前 Guest Budget(有效内存大小);实际 balloon 大小为
+`Capacity - memory_actual_size`。target/current 不一致本身不能证明内存存在一个
+可持续上限。当前 grow、shrink 与压力反馈规则见 §5.5 和
+[sandbox_zh.md §9.3](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/sandbox_zh.md#93-balloon)。
 
-这是纯 Guest 侧鲁棒性修复,不改变 host/guest 协议。它缓解所识别的收敛故障,不保证
-任意 Guest workload 都不会 OOM。记账与后续控制见 §5.5 和 sandbox.md §9.3;
-patch 源码位于 `native-deps/deps/linux-patches/`。
+Balloon 压力与恢复须使用配套的 host 控制器和真实 MicroVM 工作负载验证,覆盖启动
+及快照/恢复路径。内核编译成功或上游 OOM 放气都不能保证任意 Guest 工作负载
+无 OOM 地完成。
 
 ## 6. 验证
 
@@ -493,11 +490,11 @@ RAM 字节相同比例作为发布门禁.
 ## 7. 维护
 
 - 升级 kernel 主版本(6.1 → 6.x):review `sandbox-common.config` 的功能、安全和
-  调试选项,运行 `make olddefconfig` 看 silent regression;并把
-  `deps/linux-patches/*.patch` 在新源码树上 rebase
+  调试选项,运行 `make olddefconfig` 看 silent regression;若
+  `deps/linux-patches/*.patch` 中有补丁,则在新源码树上 rebase
   (`make linux-fetch` 重打 base → 在 `build/src/linux/` `git rebase` /
-  重打补丁 → `make linux-patches-format` 回写),解决 virtio_balloon
-  收敛补丁(§5.6)与新版驱动的冲突
+  重打补丁 → `make linux-patches-format` 回写),并使用配套 host 源码
+  重新验证 balloon 压力与恢复(§5.6)
 - 升级架构 fragment:review CH 对该 arch 的设备模型是否有新依赖(例如
   GICv4 / 新 RTC 驱动)
 - 不上游化 defconfig:本配置选择跟通用 server distro 取向偏离明显

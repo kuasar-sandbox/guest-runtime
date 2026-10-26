@@ -229,14 +229,19 @@ make vmlinux           # 重新 apply + build,验证可重复
 `patches-apply` 的 sanity 检查,核心目标是**绝不静默覆盖开发中的改动**:
 
 - 源树必须有 base tag,否则报错并指引先跑 `make {linux,ch}-fetch`;
-- `HEAD == base`:`git am` 应用全部 patch;
+- `HEAD == base`:`git am` 应用全部 patch;空补丁集则直接成功,不改源码;
 - `HEAD = base + N` 且 N 等于 patch 数、commit subject 与 patch 文件逐一匹配:
   视为已应用,幂等跳过;
 - 其他任何状态:报错并指引先用 `make linux-patches-format` 保存 WIP,确认已保存后
   才 reset 到 base tag,再重跑。
 
-当前补丁 arch-neutral:`deps/linux-patches/` 触及
-`drivers/virtio/virtio_balloon.c`,两架构共用同一组、各自 defconfig 编译。
+当前不携带内核补丁。补丁管线仍然 arch-neutral:两架构共用同一补丁目录,
+各自 defconfig 编译。
+
+空补丁集且 `HEAD != base` 时拒绝继续:源码可能仍带有已移除的补丁或未导出的
+工作。先保存这些工作,再为无补丁构建选择新的 `LINUX_BUILD_SRC` 和
+`LINUX_BUILD_OUT` 路径。`make clean` 保留源码树,因此不会移除之前应用的补丁。
+显式 `linux-build` 目标仍可用于直接构建开发中的源码树,不应用受跟踪的补丁集。
 
 ## 4. 交叉编译
 

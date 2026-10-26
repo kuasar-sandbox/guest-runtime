@@ -122,10 +122,11 @@ do_patches_apply() {
 
     if [ "${#patches[@]}" -eq 0 ]; then
         if [ "$base" != "$head" ]; then
-            log "no patches in $LINUX_PATCHES_DIR but src tree has commits beyond $LINUX_BASE_TAG — assuming WIP, leaving as-is"
-        else
-            log "no patches in $LINUX_PATCHES_DIR — nothing to apply"
+            die "no patches in $LINUX_PATCHES_DIR but HEAD ($head) differs from $LINUX_BASE_TAG ($base).
+The source may contain a removed patch or unformatted work; refusing to build it as an unpatched kernel.
+Preserve any work before changing this tree. For an unpatched build, select a fresh LINUX_BUILD_SRC and LINUX_BUILD_OUT, or restore the preserved tree to $LINUX_BASE_TAG."
         fi
+        log "no patches in $LINUX_PATCHES_DIR — nothing to apply"
         return 0
     fi
 
