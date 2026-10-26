@@ -18,6 +18,69 @@ X86 = ['CONFIG_SMP=y', 'CONFIG_NR_CPUS=4', 'CONFIG_X86_X2APIC=y']
 
 
 class ResolvedKernelConfigTests(unittest.TestCase):
+    def test_empty_patch_set_rejects_previously_patched_source(self):
+        with tempfile.TemporaryDirectory(prefix='vmlinux-empty-patches-') as directory:
+            root = Path(directory)
+            archive = root / 'kernel.tar.gz'
+            with tarfile.open(archive, 'w:gz') as output:
+                member = tarfile.TarInfo('linux/COPYING')
+                content = b'one\n'
+                member.size = len(content)
+                output.addfile(member, io.BytesIO(content))
+            source = root / 'source'
+            patches = root / 'patches'
+            env = dict(os.environ, LINUX_TARBALL=str(archive), LINUX_TARBALL_SHA256='',
+                       LINUX_BUILD_SRC=str(source), BUILD_DIR=str(root / 'build'),
+                       TARBALL_CACHE=str(root / 'tarballs'), LINUX_PATCHES_DIR=str(patches),
+                       GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_GLOBAL=os.devnull,
+                       GIT_CONFIG_COUNT='1', GIT_CONFIG_KEY_0='commit.gpgsign',
+                       GIT_CONFIG_VALUE_0='false')
+
+            def run(stage):
+                return subprocess.run(['bash', str(ROOT / 'build-vmlinux.sh')],
+                                      env=dict(env, STAGE=stage), text=True,
+                                      capture_output=True, timeout=15)
+
+            def head():
+                return subprocess.check_output(['git', '-C', str(source),
+                                                'rev-parse', 'HEAD'], text=True).strip()
+
+            result = run('fetch')
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            baseline = head()
+            # A missing or empty patch directory is valid for the script.
+            for present in (False, True):
+                if present:
+                    patches.mkdir()
+                result = run('patches-apply')
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(head(), baseline)
+
+            patch = patches / '0001-fixture.patch'
+            patch.write_text('''From: Fixture <fixture@example.test>
+Date: Thu, 1 Jan 1970 00:02:03 +0000
+Subject: [PATCH] patch removed from the shipped inventory
+
+diff --git a/COPYING b/COPYING
+--- a/COPYING
++++ b/COPYING
+@@ -1 +1 @@
+-one
++two
+''')
+            result = run('patches-apply')
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            patched = head()
+            self.assertNotEqual(patched, baseline)
+            patch.unlink()
+            for content in ('two\n', 'local work after the applied patch\n'):
+                (source / 'COPYING').write_text(content)
+                result = run('patches-apply')
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn('refusing to build it as an unpatched kernel', result.stderr)
+                self.assertEqual(head(), patched)
+                self.assertEqual((source / 'COPYING').read_text(), content)
+
     def test_synthetic_source_commits_have_stable_scoped_timestamps(self):
         with tempfile.TemporaryDirectory(prefix='vmlinux-source-dates-') as directory:
             root = Path(directory)

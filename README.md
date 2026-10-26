@@ -163,4 +163,4 @@ Do not report vulnerabilities or disclose private package sources, credentials, 
 
 ## License
 
-Original project content is licensed under the [Apache License 2.0](LICENSE). Linux kernel patches retain the GPL-2.0-only boundary documented in [`LICENSE_SCOPE.md`](LICENSE_SCOPE.md). Runtime packages, EROFS tools, Envd, Buildroot/distribution inputs, and other third-party materials retain their own licenses, notices, source, and redistribution obligations.
+Original project content is licensed under the [Apache License 2.0](LICENSE). Kernel build inputs retain the licensing boundary documented in [`LICENSE_SCOPE.md`](LICENSE_SCOPE.md). Runtime packages, EROFS tools, Envd, Buildroot/distribution inputs, and other third-party materials retain their own licenses, notices, source, and redistribution obligations.

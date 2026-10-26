@@ -217,11 +217,13 @@ make vmlinux           # Reapply/build to verify reproducibility.
 The patch-application sanity checks must **never silently overwrite work in progress**:
 
 - The source tree must have the base tag; otherwise the command reports an error and points to `make {linux,ch}-fetch`.
-- `HEAD == base`: apply all patches with `git am`.
+- `HEAD == base`: apply all patches with `git am`, or succeed without changes when the patch set is empty.
 - `HEAD = base + N`, where N equals patch count and commit subjects match patch files one by one: treat patches as already applied and skip idempotently.
 - Any other state: stop and instruct the developer to save work with `make linux-patches-format`, then reset to the base tag only after preserving that work, and rerun.
 
-The current kernel patch set is architecture-neutral and touches `drivers/virtio/virtio_balloon.c`; both architectures use the same patches and their own defconfig.
+No kernel patches are currently shipped. The patch pipeline remains architecture-neutral; both architectures use the same patch directory and their own defconfig.
+
+An empty patch set with `HEAD != base` is rejected: the source may still contain a removed patch or unformatted work. Preserve that work and select fresh `LINUX_BUILD_SRC` and `LINUX_BUILD_OUT` paths for an unpatched build. `make clean` preserves the source tree and therefore does not remove previously applied patches. The explicit `linux-build` target remains available for building a development tree without applying the tracked patch set.
 
 ## 4. Cross-compilation
 
