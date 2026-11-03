@@ -67,8 +67,8 @@ packaging step does not change the standalone `make vmlinux` build output.
 fetch         Download and verify linux-6.1.169.tar.gz, with optional shared TARBALL_CACHE;
               extract the cross-architecture shared source tree at build/src/linux;
               git init, commit the imported tree and tag linux-patches-base.
-patches-apply Apply deps/linux-patches/*.patch with git am. No kernel patches are
-              currently shipped; an empty patch set requires HEAD == linux-patches-base.
+patches-apply Apply deps/linux-patches/*.patch with git am. An empty patch set
+              requires HEAD == linux-patches-base.
               Already-applied patches are an idempotent no-op; unformatted or
               divergent work is not overwritten.
 build         Concatenate sandbox-common.config + sandbox-<arch>.config into
@@ -380,7 +380,11 @@ The kernel supplies capabilities, not node resource policy. [Guest ABI](https://
 
 ### 5.6 Balloon behavior under memory pressure
 
-The guest uses the upstream Linux 6.1.169 `virtio_balloon` driver. When inflation cannot allocate a page, it ends the current batch and the size worker retries the pending host target. When `deflate_on_oom` is negotiated, the upstream OOM notifier can release balloon pages. The driver does not turn a transient allocation failure into a permanent ceiling on balloon size.
+The Linux 6.1.169 balloon patch transfers up to 8192 4 KiB PFNs in one request.
+Inflation allocates ordinary order-0 pages and enqueues them in groups of up to
+256 native pages. A separate physically contiguous 32 KiB buffer backs the
+single scatterlist entry. The size worker handles one request, waits for its
+ACK, publishes actual and rereads the target on its next invocation. When inflation cannot allocate a page, it ends the current batch and the size worker retries the pending host target. When `deflate_on_oom` is negotiated, the upstream OOM notifier can release balloon pages. The driver does not turn a transient allocation failure into a permanent ceiling on balloon size.
 
 Host resource control owns the requested target, Budget and reservation accounting. CH `memory_actual_size` reports the current guest Budget (effective guest memory size); the observed balloon size is `Capacity - memory_actual_size`. Target/current disagreement does not itself establish a sustainable memory limit. The current growth, shrink and pressure-feedback rules are defined by §5.5 and [sandbox.md §9.3](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/sandbox.md#93-balloon).
 

@@ -1,7 +1,8 @@
 # Guest kernel patches
 
-No kernel patches are currently shipped. The guest uses upstream Linux 6.1.169
-with the platform configuration fragments in `../vmlinux/`.
+Linux 6.1.169 uses one architecture-neutral virtio balloon patch. Each transfer
+carries up to 8192 PFNs. Allocation and enqueue operate on batches of at most
+256 native pages. See [the guest kernel specification](../../../docs/vmlinux.md#56-balloon-behavior-under-memory-pressure).
 
 This directory remains an input to the generic `linux-patches-apply` and
 `linux-patches-format` stages. Future architecture-neutral patches belong here

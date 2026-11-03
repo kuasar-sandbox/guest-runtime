@@ -235,7 +235,7 @@ make vmlinux           # 重新 apply + build,验证可重复
 - 其他任何状态:报错并指引先用 `make linux-patches-format` 保存 WIP,确认已保存后
   才 reset 到 base tag,再重跑。
 
-当前不携带内核补丁。补丁管线仍然 arch-neutral:两架构共用同一补丁目录,
+两个架构均应用 [vmlinux §5.6](../docs/vmlinux_zh.md#56-内存压力下的-balloon-行为) 所述的 balloon order-0 批处理补丁。补丁管线仍然 arch-neutral:两架构共用同一补丁目录,
 各自 defconfig 编译。
 
 空补丁集且 `HEAD != base` 时拒绝继续:源码可能仍带有已移除的补丁或未导出的

@@ -78,7 +78,7 @@ bin/vmlinux.sha256
 fetch         下载并校验 linux-6.1.169.tar.gz(支持 TARBALL_CACHE 共享缓存),
               解压到 build/src/linux/(跨 arch 共享同一棵源码树),git init +
               提交原始树 + 打 tag linux-patches-base
-patches-apply git am deps/linux-patches/*.patch 到该树。当前不携带内核补丁;
+patches-apply git am deps/linux-patches/*.patch 到该树。
               空补丁集要求 HEAD == linux-patches-base。已应用的补丁幂等跳过;
               未导出或与 patch 不一致的工作不会被覆盖
 build         把 sandbox-common.config + sandbox-<arch>.config 拼接成
@@ -445,7 +445,10 @@ memory hotplug,不使用 virtio-mem。保留驱动本身不能启用新设计;�
 
 ### 5.6 内存压力下的 balloon 行为
 
-Guest 使用上游 Linux 6.1.169 的 `virtio_balloon` 驱动。充气时无法分配页会结束
+Linux 6.1.169 的 balloon 补丁每次请求传输最多 8192 个 4 KiB PFN。充气时分配
+普通 order-0 页，每次分配和入链最多 256 个 native 页。单段 scatterlist 使用独立的
+32 KiB 物理连续缓冲。大小更新 worker 每次处理一个请求，等待 ACK 后发布 actual，
+下次执行时重新读取目标。充气时无法分配页会结束
 当前批次,大小更新 worker 随后重试尚未完成的 host target。协商启用
 `deflate_on_oom` 时,上游 OOM notifier 可以释放 balloon 页。驱动不会把一次
 暂时的分配失败转换成永久的 balloon 大小上限。

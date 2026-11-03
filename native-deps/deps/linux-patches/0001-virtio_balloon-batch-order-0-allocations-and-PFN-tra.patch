@@ -1,0 +1,145 @@
+From 614b9d847dffea9945aa8912fb3aaf9fda1928d7 Mon Sep 17 00:00:00 2001
+From: Chen Xiaohui <graych@gmail.com>
+Date: Tue, 3 Nov 2026 21:43:24 +0800
+Subject: [PATCH] virtio_balloon: batch order-0 allocations and PFN transfers
+
+Collect up to 8192 virtio PFNs for one acknowledged request. Allocate at most 256 native pages at a time and publish the private page list under the balloon lock. Keep one physically contiguous PFN buffer separate from device metadata for sg_init_one().
+---
+ drivers/virtio/virtio_balloon.c | 57 +++++++++++++++++++++++----------
+ 1 file changed, 40 insertions(+), 17 deletions(-)
+
+diff --git a/drivers/virtio/virtio_balloon.c b/drivers/virtio/virtio_balloon.c
+index 41fa694..b58c5ea 100644
+--- a/drivers/virtio/virtio_balloon.c
++++ b/drivers/virtio/virtio_balloon.c
+@@ -25,7 +25,9 @@
+  * page units.
+  */
+ #define VIRTIO_BALLOON_PAGES_PER_PAGE (unsigned int)(PAGE_SIZE >> VIRTIO_BALLOON_PFN_SHIFT)
+-#define VIRTIO_BALLOON_ARRAY_PFNS_MAX 256
++#define VIRTIO_BALLOON_ARRAY_PFNS_MAX 8192
++/* Native pages per allocator call and IRQ-disabled enqueue. */
++#define VIRTIO_BALLOON_PAGE_BATCH 256
+ /* Maximum number of (4k) pages to deflate on OOM notifications. */
+ #define VIRTIO_BALLOON_OOM_NR_PAGES 256
+ #define VIRTIO_BALLOON_OOM_NOTIFY_PRIORITY 80
+@@ -105,7 +107,7 @@ struct virtio_balloon {
+ 
+ 	/* The array of pfns we tell the Host about. */
+ 	unsigned int num_pfns;
+-	__virtio32 pfns[VIRTIO_BALLOON_ARRAY_PFNS_MAX];
++	__virtio32 *pfns;
+ 
+ 	/* Memory statistics */
+ 	struct virtio_balloon_stat stats[VIRTIO_BALLOON_S_NR];
+@@ -205,42 +207,53 @@ static unsigned int fill_balloon(struct virtio_balloon *vb, size_t num)
+ {
+ 	unsigned int num_allocated_pages;
+ 	unsigned int num_pfns;
+-	struct page *page;
++	unsigned int batch_pages = 0;
++	struct page *page, *next;
++	LIST_HEAD(batch);
+ 	LIST_HEAD(pages);
+ 
+ 	/* We can only do one array worth at a time. */
+-	num = min(num, ARRAY_SIZE(vb->pfns));
+-
+-	for (num_pfns = 0; num_pfns < num;
+-	     num_pfns += VIRTIO_BALLOON_PAGES_PER_PAGE) {
+-		struct page *page = balloon_page_alloc();
+-
+-		if (!page) {
++	num = min_t(size_t, num, VIRTIO_BALLOON_ARRAY_PFNS_MAX);
++
++	for (num_pfns = 0; num_pfns < num;) {
++		unsigned int remaining = (num - num_pfns) /
++					 VIRTIO_BALLOON_PAGES_PER_PAGE;
++		unsigned int count;
++
++		count = alloc_pages_bulk_list(balloon_mapping_gfp_mask() |
++					      __GFP_NOMEMALLOC | __GFP_NORETRY |
++					      __GFP_NOWARN,
++					      min_t(unsigned int, remaining,
++						    VIRTIO_BALLOON_PAGE_BATCH),
++					      &pages);
++		if (!count) {
+ 			dev_info_ratelimited(&vb->vdev->dev,
+ 					     "Out of puff! Can't get %u pages\n",
+ 					     VIRTIO_BALLOON_PAGES_PER_PAGE);
+-			/* Sleep for at least 1/5 of a second before retry. */
+ 			msleep(200);
+ 			break;
+ 		}
+-
+-		balloon_page_push(&pages, page);
++		num_pfns += count * VIRTIO_BALLOON_PAGES_PER_PAGE;
+ 	}
+ 
+ 	mutex_lock(&vb->balloon_lock);
+ 
+ 	vb->num_pfns = 0;
+ 
+-	while ((page = balloon_page_pop(&pages))) {
+-		balloon_page_enqueue(&vb->vb_dev_info, page);
+-
++	list_for_each_entry_safe(page, next, &pages, lru) {
+ 		set_page_pfns(vb, vb->pfns + vb->num_pfns, page);
+ 		vb->num_pages += VIRTIO_BALLOON_PAGES_PER_PAGE;
+ 		if (!virtio_has_feature(vb->vdev,
+ 					VIRTIO_BALLOON_F_DEFLATE_ON_OOM))
+ 			adjust_managed_page_count(page, -1);
+ 		vb->num_pfns += VIRTIO_BALLOON_PAGES_PER_PAGE;
++		if (++batch_pages == VIRTIO_BALLOON_PAGE_BATCH) {
++			list_cut_position(&batch, &pages, &page->lru);
++			balloon_page_list_enqueue(&vb->vb_dev_info, &batch);
++			batch_pages = 0;
++		}
+ 	}
++	balloon_page_list_enqueue(&vb->vb_dev_info, &pages);
+ 
+ 	num_allocated_pages = vb->num_pfns;
+ 	/* Did we get any? */
+@@ -273,7 +286,7 @@ static unsigned int leak_balloon(struct virtio_balloon *vb, size_t num)
+ 	LIST_HEAD(pages);
+ 
+ 	/* We can only do one array worth at a time. */
+-	num = min(num, ARRAY_SIZE(vb->pfns));
++	num = min_t(size_t, num, VIRTIO_BALLOON_ARRAY_PFNS_MAX);
+ 
+ 	mutex_lock(&vb->balloon_lock);
+ 	/* We can't release more pages than taken */
+@@ -878,6 +891,14 @@ static int virtballoon_probe(struct virtio_device *vdev)
+ 		goto out;
+ 	}
+ 
++	/* tell_host() submits the entire PFN array as one scatterlist entry. */
++	vb->pfns = kmalloc_array(VIRTIO_BALLOON_ARRAY_PFNS_MAX,
++				 sizeof(*vb->pfns), GFP_KERNEL);
++	if (!vb->pfns) {
++		err = -ENOMEM;
++		goto out_free_vb;
++	}
++
+ 	INIT_WORK(&vb->update_balloon_stats_work, update_balloon_stats_func);
+ 	INIT_WORK(&vb->update_balloon_size_work, update_balloon_size_func);
+ 	spin_lock_init(&vb->stop_update_lock);
+@@ -1004,6 +1025,7 @@ out_del_balloon_wq:
+ out_del_vqs:
+ 	vdev->config->del_vqs(vdev);
+ out_free_vb:
++	kfree(vb->pfns);
+ 	kfree(vb);
+ out:
+ 	return err;
+@@ -1048,6 +1070,7 @@ static void virtballoon_remove(struct virtio_device *vdev)
+ 	}
+ 
+ 	remove_common(vb);
++	kfree(vb->pfns);
+ 	kfree(vb);
+ }
+ 
+-- 
+2.43.0
+
