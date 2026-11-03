@@ -10,6 +10,8 @@ Unless stated otherwise below or in the affected file, original project material
 
 ## Linux kernel builds
 
+Tracked Linux patches in `native-deps/deps/linux-patches/` are GPL-2.0-only. Each patch has an adjacent SPDX license file.
+
 Project scripts that fetch and build the kernel, and project-maintained configuration fragments, use the root Apache-2.0 license. Linux sources downloaded during a build and not tracked in this repository retain their upstream licenses.
 
 ## Go submodule notices

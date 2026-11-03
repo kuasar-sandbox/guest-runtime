@@ -221,7 +221,7 @@ The patch-application sanity checks must **never silently overwrite work in prog
 - `HEAD = base + N`, where N equals patch count and commit subjects match patch files one by one: treat patches as already applied and skip idempotently.
 - Any other state: stop and instruct the developer to save work with `make linux-patches-format`, then reset to the base tag only after preserving that work, and rerun.
 
-No kernel patches are currently shipped. The patch pipeline remains architecture-neutral; both architectures use the same patch directory and their own defconfig.
+Both architectures apply the order-0 balloon batching patch described in [vmlinux §5.6](../docs/vmlinux.md#56-balloon-behavior-under-memory-pressure). The patch pipeline remains architecture-neutral; both architectures use the same patch directory and their own defconfig.
 
 An empty patch set with `HEAD != base` is rejected: the source may still contain a removed patch or unformatted work. Preserve that work and select fresh `LINUX_BUILD_SRC` and `LINUX_BUILD_OUT` paths for an unpatched build. `make clean` preserves the source tree and therefore does not remove previously applied patches. The explicit `linux-build` target remains available for building a development tree without applying the tracked patch set.
 
