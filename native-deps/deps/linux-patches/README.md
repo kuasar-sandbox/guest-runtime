@@ -1,8 +1,8 @@
 # Guest kernel patches
 
-Linux 6.1.169 uses one architecture-neutral virtio balloon patch. Each transfer
-carries up to 8192 PFNs. Allocation and enqueue operate on batches of at most
-256 native pages. See [the guest kernel specification](../../../docs/vmlinux.md#56-balloon-behavior-under-memory-pressure).
+Linux 6.1.169 uses one architecture-neutral virtio balloon patch. Inflation batches
+order-0 page allocation and list enqueue within the upstream 256-PFN request.
+See [the guest kernel specification](../../../docs/vmlinux.md#56-balloon-behavior-under-memory-pressure).
 
 This directory remains an input to the generic `linux-patches-apply` and
 `linux-patches-format` stages. Future architecture-neutral patches belong here

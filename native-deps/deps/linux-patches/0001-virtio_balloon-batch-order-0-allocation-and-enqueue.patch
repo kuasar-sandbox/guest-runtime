@@ -1,0 +1,75 @@
+From 72d820d152bf8351a5991e1b0b69ce754ad2d11d Mon Sep 17 00:00:00 2001
+From: Chen Xiaohui <graych@gmail.com>
+Date: Tue, 3 Nov 2026 22:48:19 +0800
+Subject: [PATCH] virtio_balloon: batch order-0 allocation and enqueue during
+ inflate
+
+Fill the private list with ordinary pages from alloc_pages_bulk_list(),
+retrying short allocations and preserving the existing failure backoff.
+Account the pages under balloon_lock and use balloon_page_list_enqueue()
+to publish their balloon state before notifying the host.
+
+Keep the upstream 256-PFN descriptor and single-batch worker. A restored
+VMM can reclaim pages one at a time and must acknowledge the whole
+descriptor before the guest can act on a changed target.
+---
+ drivers/virtio/virtio_balloon.c | 24 +++++++++++++-----------
+ 1 file changed, 13 insertions(+), 11 deletions(-)
+
+diff --git a/drivers/virtio/virtio_balloon.c b/drivers/virtio/virtio_balloon.c
+index 41fa694..23d6d6b 100644
+--- a/drivers/virtio/virtio_balloon.c
++++ b/drivers/virtio/virtio_balloon.c
+@@ -211,29 +211,30 @@ static unsigned int fill_balloon(struct virtio_balloon *vb, size_t num)
+ 	/* We can only do one array worth at a time. */
+ 	num = min(num, ARRAY_SIZE(vb->pfns));
+ 
+-	for (num_pfns = 0; num_pfns < num;
+-	     num_pfns += VIRTIO_BALLOON_PAGES_PER_PAGE) {
+-		struct page *page = balloon_page_alloc();
+-
+-		if (!page) {
++	/* The private list may already contain pages from a short allocation. */
++	for (num_pfns = 0; num_pfns < num;) {
++		unsigned int count;
++
++		count = alloc_pages_bulk_list(balloon_mapping_gfp_mask() |
++					      __GFP_NOMEMALLOC | __GFP_NORETRY |
++					      __GFP_NOWARN,
++					      (num - num_pfns) / VIRTIO_BALLOON_PAGES_PER_PAGE,
++					      &pages);
++		if (!count) {
+ 			dev_info_ratelimited(&vb->vdev->dev,
+ 					     "Out of puff! Can't get %u pages\n",
+ 					     VIRTIO_BALLOON_PAGES_PER_PAGE);
+-			/* Sleep for at least 1/5 of a second before retry. */
+ 			msleep(200);
+ 			break;
+ 		}
+-
+-		balloon_page_push(&pages, page);
++		num_pfns += count * VIRTIO_BALLOON_PAGES_PER_PAGE;
+ 	}
+ 
+ 	mutex_lock(&vb->balloon_lock);
+ 
+ 	vb->num_pfns = 0;
+ 
+-	while ((page = balloon_page_pop(&pages))) {
+-		balloon_page_enqueue(&vb->vb_dev_info, page);
+-
++	list_for_each_entry(page, &pages, lru) {
+ 		set_page_pfns(vb, vb->pfns + vb->num_pfns, page);
+ 		vb->num_pages += VIRTIO_BALLOON_PAGES_PER_PAGE;
+ 		if (!virtio_has_feature(vb->vdev,
+@@ -241,6 +242,7 @@ static unsigned int fill_balloon(struct virtio_balloon *vb, size_t num)
+ 			adjust_managed_page_count(page, -1);
+ 		vb->num_pfns += VIRTIO_BALLOON_PAGES_PER_PAGE;
+ 	}
++	balloon_page_list_enqueue(&vb->vb_dev_info, &pages);
+ 
+ 	num_allocated_pages = vb->num_pfns;
+ 	/* Did we get any? */
+-- 
+2.43.0
+
