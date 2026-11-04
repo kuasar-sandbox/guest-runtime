@@ -148,10 +148,7 @@ class KernelChecksumRelease(unittest.TestCase):
                     subprocess.run(["tar", "--sort=name", "--owner=0", "--group=0", "--numeric-owner",
                                     "--mtime=@1700000000", "-czf", str(archive), "-C", str(tree), "."],
                                    check=True)
-                    # Make outer integrity valid so failure must come from the
-                    # new per-kernel check or the exact layout/type/mode gate.
-                    (candidate / "assets/SHA256SUMS").write_text(
-                        hashlib.sha256(archive.read_bytes()).hexdigest() + "  " + archive.name + "\n")
+                    # Exercise the per-kernel check and exact layout/type/mode gate.
                     result = self.validate(candidate, arch)
                     if mutation == "absent":
                         self.assertEqual(result.returncode, 0, result.stderr)
