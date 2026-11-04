@@ -398,6 +398,15 @@ grep -Fxq 'CONFIG_LOCALVERSION_AUTO=y' "$fixture_root/native-deps/deps/vmlinux/s
   || fail "release packaging changed the caller's Kernel config"
 "$fixture_root/scripts/release.sh" validate \
   runtime runtime-v1.2.3-preview.20260804 x86_64 "$TMP/runtime-bundle"
+# A current publication may bind its own binaries to its selected commit;
+# standalone validation above does not require or query historical sources.
+if SOURCE_SHA=0000000000000000000000000000000000000000 "$fixture_root/scripts/release.sh" validate \
+  runtime runtime-v1.2.3-preview.20260804 x86_64 "$TMP/runtime-bundle" > "$TMP/publication-source.log" 2>&1; then
+  fail "publication accepted an owner binary built at another commit"
+fi
+grep -Fq 'Go payload must be built from the clean selected commit' "$TMP/publication-source.log" \
+  || fail "publication source mismatch failed for an unrelated reason"
+
 "$fixture_root/scripts/release.sh" validate \
   vmlinux vmlinux-v2.3.4 x86_64 "$TMP/vmlinux-bundle"
 RELEASE_ACCELERATOR_SOURCE_DIR="$TMP/absent-accelerator" \
