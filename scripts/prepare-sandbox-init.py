@@ -202,20 +202,53 @@ def prepare(release, directory, version, source_sha, output, go_toolchain_output
     print(f"selected sandboxer {version}@{source_sha}: sandbox-init sha256:{hashlib.sha256(payload).hexdigest()}")
 
 
+
+def fetch(version, source_sha, output, go_toolchain_output=None, arch="x86_64"):
+    """Fetch one native asset by its pinned GitHub ID, then verify before install."""
+    require(re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+(?:-preview\.[0-9]{8}(?:\.[1-9][0-9]*)?)?", version),
+            "invalid sandboxer version")
+    require(arch in ("x86_64", "aarch64"), "invalid sandbox-init target architecture")
+    repo = "repos/kuasar-sandbox/sandboxer"
+    # gh 2.97+ guards raw output; older CLIs emit bytes without this option.
+    # Probe local capabilities instead of requiring a particular CLI version.
+    api_help = subprocess.check_output(["gh", "api", "--help"], text=True)
+    raw_option = ["--allow-escape-sequences"] if "--allow-escape-sequences" in api_help else []
+    release = json.loads(subprocess.check_output(["gh", "api", f"{repo}/releases/tags/{version}"], text=True))
+    name = f"sandboxer-{version}-linux-{arch}.tar.gz"
+    matches = [asset for asset in release.get("assets", []) if asset.get("name") == name]
+    require(len(matches) == 1 and type(matches[0].get("id")) is int and matches[0]["id"] > 0,
+            "selected sandboxer asset is missing or ambiguous")
+    with tempfile.TemporaryDirectory(prefix="selected-sandbox-init-") as directory:
+        directory = Path(directory)
+        with (directory / name).open("wb") as stream:
+            subprocess.run(["gh", "api", *raw_option,
+                            "-H", "Accept: application/octet-stream",
+                            f"{repo}/releases/assets/{matches[0]['id']}"], stdout=stream, check=True)
+        prepare(release, directory, version, source_sha, output, go_toolchain_output, arch)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--release-json", type=Path, required=True)
-    parser.add_argument("--directory", type=Path, required=True)
+    parser.add_argument("--release-json", type=Path)
+    parser.add_argument("--directory", type=Path)
+    parser.add_argument("--fetch", action="store_true", help="fetch the selected native GitHub asset before installing")
     parser.add_argument("--version", required=True)
     parser.add_argument("--source-sha", required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--go-toolchain-output", type=Path)
     parser.add_argument("--arch", choices=("x86_64", "aarch64"), default="x86_64")
     args = parser.parse_args()
+    if args.fetch and (args.release_json is not None or args.directory is not None):
+        parser.error("--fetch cannot be combined with local release metadata or archives")
+    if not args.fetch and (args.release_json is None or args.directory is None):
+        parser.error("provide --fetch or both --release-json and --directory")
     try:
-        prepare(json.loads(args.release_json.read_text()), args.directory,
-                args.version, args.source_sha, args.output, args.go_toolchain_output, args.arch)
-    except (ValueError, KeyError, OSError, tarfile.TarError) as error:
+        if args.fetch:
+            fetch(args.version, args.source_sha, args.output, args.go_toolchain_output, args.arch)
+        else:
+            prepare(json.loads(args.release_json.read_text()), args.directory,
+                    args.version, args.source_sha, args.output, args.go_toolchain_output, args.arch)
+    except (ValueError, KeyError, OSError, tarfile.TarError, subprocess.CalledProcessError) as error:
         parser.exit(1, f"release dependency: {error}\n")
 
 

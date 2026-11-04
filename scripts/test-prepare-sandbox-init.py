@@ -2,6 +2,9 @@
 import copy
 import importlib.util
 import io
+import json
+import os
+import shutil
 from pathlib import Path
 import subprocess
 import tarfile
@@ -61,6 +64,128 @@ class SelectedSandboxInitTests(unittest.TestCase):
                 self.assertEqual(self.output.stat().st_mode & 0o7777, 0o755)
                 self.assertEqual((self.notices / self.toolchain / 'LICENSE').read_bytes(), b'Go license')
                 self.assertFalse((self.root / 'SHA256SUMS').exists())
+
+    def test_fetch_uses_one_native_asset_id_and_replaces_stale_local_binary(self):
+        for help_text, raw_option in [('gh api options', []),
+                                     ('gh api --allow-escape-sequences', ['--allow-escape-sequences'])]:
+            with self.subTest(raw_option=raw_option):
+                self.output.parent.mkdir(exist_ok=True)
+                self.output.write_bytes(b"old development binary")
+                commands = []
+                def download(command, **kwargs):
+                    commands.append(command)
+                    kwargs["stdout"].write(self.archive.read_bytes())
+                    return subprocess.CompletedProcess(command, 0)
+                with mock.patch.object(helper.subprocess, 'check_output',
+                        side_effect=[help_text, json.dumps(self.release)]) as metadata, \
+                     mock.patch.object(helper.subprocess, 'run', side_effect=download), \
+                     mock.patch.object(helper, '_binary_go_toolchain', return_value=self.toolchain):
+                    helper.fetch(self.version, self.sha, self.output, self.notices)
+                self.assertEqual(metadata.call_args_list, [mock.call(['gh', 'api', '--help'], text=True),
+                    mock.call(['gh', 'api', f'repos/kuasar-sandbox/sandboxer/releases/tags/{self.version}'], text=True)])
+                self.assertEqual(commands, [['gh', 'api', *raw_option,
+                    '-H', 'Accept: application/octet-stream', 'repos/kuasar-sandbox/sandboxer/releases/assets/123']])
+                self.assertEqual(self.output.read_bytes(), self.payload)
+                self.assertEqual((self.notices / self.toolchain / 'LICENSE').read_bytes(), b'Go license')
+
+    def test_cli_help_failure_stops_before_release_lookup_or_download(self):
+        with mock.patch.object(helper.subprocess, 'check_output',
+                side_effect=subprocess.CalledProcessError(1, ['gh', 'api', '--help'])) as query, \
+             mock.patch.object(helper.subprocess, 'run') as download:
+            with self.assertRaises(subprocess.CalledProcessError):
+                helper.fetch(self.version, self.sha, self.output, self.notices)
+        query.assert_called_once_with(['gh', 'api', '--help'], text=True)
+        download.assert_not_called()
+        self.assertFalse(self.output.exists())
+
+    def test_fetch_failure_never_accepts_stale_input(self):
+        for failure in ('download', 'digest', 'missing'):
+            with self.subTest(failure=failure):
+                self.output.parent.mkdir(exist_ok=True)
+                self.output.write_bytes(b'old development binary')
+                release = copy.deepcopy(self.release)
+                if failure == 'missing': release['assets'] = []
+                def download(command, **kwargs):
+                    if failure == 'download': raise subprocess.CalledProcessError(1, command)
+                    kwargs['stdout'].write(b'corrupt bytes')
+                    return subprocess.CompletedProcess(command, 0)
+                with mock.patch.object(helper.subprocess, 'check_output', return_value=json.dumps(release)), \
+                     mock.patch.object(helper.subprocess, 'run', side_effect=download):
+                    with self.assertRaises((ValueError, subprocess.CalledProcessError)):
+                        helper.fetch(self.version, self.sha, self.output, self.notices)
+                self.assertEqual(self.output.read_bytes(), b'old development binary')
+                self.assertFalse(self.notices.exists())
+
+    def test_local_make_release_preserves_selected_paths_and_stops_on_fetch_failure(self):
+        make = shutil.which('make', path=os.defpath)
+        self.assertIsNotNone(make)
+        project, tools = self.root / 'runtime', self.root / 'tools'
+        project.mkdir(); tools.mkdir(); (project / 'scripts').mkdir()
+        (project / 'Makefile').write_bytes(Path(__file__).resolve().parents[1].joinpath('Makefile').read_bytes())
+        log = self.root / 'calls'
+        selected = self.root / 'custom sandboxer'
+        selected.mkdir()
+        (selected / 'bin').mkdir(); (selected / 'bin/sandbox-init').write_bytes(b'stale')
+        python = tools / 'python3'
+        python.write_text('#!/usr/bin/python3\n' + """import os,sys,pathlib
+args=sys.argv[1:]
+if any(arg.endswith('/go_workspace.py') for arg in args):
+    print('/selected/go.work');raise SystemExit(0)
+assert '--fetch' in args and args[args.index('--version')+1] == 'v1.2.3'
+with open(os.environ['CALLS'],'a') as f:f.write('fetch\\n')
+if os.environ.get('FETCH_FAIL'):raise SystemExit(23)
+output=pathlib.Path(args[args.index('--output')+1]);output.parent.mkdir(parents=True,exist_ok=True);output.write_bytes(b'selected release')
+pathlib.Path(args[args.index('--go-toolchain-output')+1]).mkdir()
+""")
+        python.chmod(0o755)
+        git = tools / 'git'
+        git.write_text('#!/usr/bin/python3\n' + """import os,sys
+if any('refs/tags/' in arg for arg in sys.argv):
+    if os.environ.get('TAG_MISSING'):raise SystemExit(1)
+    print(os.environ.get('TAG_REVISION','1').zfill(40))
+elif 'rev-parse' in sys.argv:\n    if os.environ.get('HEAD_FAIL'):raise SystemExit(1)\n    print('1'.zfill(40))
+else:print(123)
+""");git.chmod(0o755)
+        child = tools / 'child-make'
+        child.write_text('#!/usr/bin/python3\n' + """import os,sys,pathlib
+assert 'GOWORK=/selected/go.work' in sys.argv
+if sys.argv[1]=='flatten-ctl':
+    with open(os.environ['CALLS'],'a') as f:f.write('flatten\\n')
+    raise SystemExit(0)
+assert sys.argv[1]=='sandbox-runtime'
+path=pathlib.Path(next(arg.removeprefix('SANDBOX_INIT=') for arg in sys.argv if arg.startswith('SANDBOX_INIT=')))
+assert path.read_bytes()==b'selected release'
+with open(os.environ['CALLS'],'a') as f:f.write('assemble:'+str(path)+'\\n')
+""")
+        child.chmod(0o755)
+        (project / 'scripts/release.sh').write_text("""#!/bin/bash
+set -euo pipefail
+[ "$(cat "$RELEASE_SANDBOX_INIT_BIN")" = 'selected release' ]
+[ -d "$RELEASE_MATERIALS_GO_NOTICE_ROOT" ]
+printf 'package:%s\\nsource:%s\\n' "$RELEASE_SANDBOX_INIT_BIN" "$RELEASE_SANDBOXER_SOURCE_DIR" >> "$CALLS"
+""")
+        environment = dict(os.environ, PATH=str(tools)+os.pathsep+os.defpath, CALLS=str(log), GOWORK='off')
+        for key in ('MAKEFLAGS','MFLAGS','MAKELEVEL','MAKEOVERRIDES'):
+            environment.pop(key,None)
+        command = [make, '-s', 'release-runtime', 'SANDBOXER_VERSION=v1.2.3',
+                   'SANDBOXER_DIR='+str(selected), 'MAKE='+str(child)]
+        result = subprocess.run(command, cwd=project, env=environment, text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        expected = project / 'build' / os.uname().machine / 'release-inputs/sandbox-init'
+        self.assertEqual(log.read_text().splitlines(), ['fetch','flatten','assemble:'+str(expected),
+            'package:'+str(expected),'source:'+str(selected)])
+        log.unlink()
+        result = subprocess.run(command, cwd=project, env=dict(environment, FETCH_FAIL='1'), text=True, capture_output=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(log.read_text().splitlines(), ['fetch'])
+        for changes in ({'TAG_MISSING': '1'}, {'TAG_REVISION': '2'}, {'HEAD_FAIL': '1'},
+                        {'HEAD_FAIL': '1', 'TAG_MISSING': '1'}):
+            log.unlink(missing_ok=True)
+            result = subprocess.run(command, cwd=project, env=dict(environment, **changes),
+                                    text=True, capture_output=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('check out the selected sandboxer tag', result.stderr)
+            self.assertFalse(log.exists())
 
     def test_rejects_wrong_tag_or_publication_state(self):
         initial = copy.deepcopy(self.release)

@@ -3,7 +3,7 @@ module github.com/kuasar-sandbox/guest-runtime
 go 1.26.1
 
 require (
-	github.com/kuasar-sandbox/accelerator v0.1.7
+	github.com/kuasar-sandbox/accelerator v0.1.10
 	gopkg.in/yaml.v3 v3.0.1
 )
 
@@ -46,5 +46,3 @@ require (
 	google.golang.org/grpc v1.83.2 // indirect
 	google.golang.org/protobuf v1.36.11 // indirect
 )
-
-replace github.com/kuasar-sandbox/accelerator => ../accelerator

@@ -182,7 +182,7 @@ bin/flatten-ctl
 `sandbox-runtime.bundle` 是当前脚本、默认配置和外部分发共同使用的稳定入口。
 
 聚合发布由项目主仓的 `release-vX.Y.Z` 承载,同时上传 platform 包、各独立
-版本的原始组件包和聚合 `SHA256SUMS`。platform 包从所选 runtime tag 聚合本仓
+版本的原始组件包，使用 GitHub 原生资产大小和摘要校验。platform 包从所选 runtime tag 聚合本仓
 runtime 文档与 `test/e2e/`,从独立选择的 vmlinux tag 取得内核文档对(`docs/vmlinux.md` 及该 tag 中存在的 `docs/vmlinux_zh.md`);组件包本身
 不重复携带这些内容。用户把需要的包解到同一目录即可得到共享 `bin/`、`docs/`、
 `test/`、`deploy/` 布局。双语文档交付与二进制版本选择分别验收。

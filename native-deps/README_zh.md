@@ -48,42 +48,26 @@ Runtime 包输入为 `bin/<arch>/{sandbox-runtime.bundle,flatten-ctl}`；bundle
 `RELEASE_SANDBOX_INIT_BIN`、`RELEASE_ENVD_BIN` 选择与镜像匹配的 init 和 Envd
 二进制,用于材料收集与镜像一致性检查。
 源码版本、原生链接映射与这些产物应一并保留。原生 pin 变化需要同步更新配方、
-摘要与来源记录;路径覆盖不表示可以把不同源码字节标记为配置的版本。
+输入摘要与许可证收集；路径覆盖不表示可以把不同源码字节标记为配置的版本。
 
-Runtime 源码构建使用 `GOWORK=off` 及最小 Accelerator/Sandboxer 依赖闭包。
-内部记录只有在本地 Git Tag 指向所选 commit 时使用发行版本,否则使用
-`git:<commit>`；未来目标 Tag 不必已经存在。`flatten-ctl` 必须是所选 amd64 或
-arm64 目标上的 Linux `github.com/kuasar-sandbox/guest-runtime/cmd/flatten-ctl`
-主入口，Go VCS 元数据为干净状态并匹配所选项目 commit，且包含具有版本和
-校验和的外部 go-erofs 构建记录。包中请求的 Runtime 或 Kernel
-版本与源码 commit 分别记录。
+Runtime Go 构建的 workspace 只包含本轮选定的 guest-runtime 和 accelerator 模块。`sandbox-init` 来自指定 sandboxer 发布二进制；sandboxer 不加入 Runtime Go workspace。`flatten-ctl` 必须标识 Linux `github.com/kuasar-sandbox/guest-runtime/cmd/flatten-ctl` 主入口及所选 amd64 或 arm64 目标。当次生产者检查自身干净的 Go VCS 元数据。正常二进制构建信息和具有版本、校验和的外部 go-erofs 依赖保留，不打包独立来源记录。
 
-分别在 guest-runtime、sandboxer、Envd 的 module 目录记录 Go 编译器选择。
+许可证收集分别解析 guest-runtime、所选 sandbox-init 二进制和 Envd 的 Go 编译器选择。
 若这些目录选择不同的编译器版本,则按各载荷实际版本收集对应安装的 Go 及随附
 依赖声明,不以父 module 上下文替代载荷自身的选择。Module 材料使用生效的替换
-及匹配的 module 校验和,沿用正常 Go 缓存与路由。现有内部组件及 Envd shared
-module 本地替换继续支持;官方包不支持其他无版本的第三方替换。这些材料收集器
+及匹配的 module 校验和,沿用正常 Go 缓存与路由。选定内部组件使用显式 workspace；Envd 保持隔离的 shared module 本地替换；官方包不支持其他无版本的第三方替换。这些材料收集器
 不下载或认证编译器分发,独立验证也不要求安装与载荷相同版本的编译器。
 
-材料隔离放在 `share/licenses/runtime`、`share/sources/runtime` 或独立的
-`vmlinux` 命名空间。每个单元包含 `SOURCES.tsv`、`GO-BUILD-INFO.tsv`、
-`GO-MODULES.tsv` 和 `MATERIALS.sha256`。声明缺失、子目录不可读、遍历不完整
-或不同输入发生材料冲突时收集失败。项目、Envd、Linux、Go 依赖及内部/shared
-module 记录必须指向各自的材料目录。Kernel 包含所选源码中的 Linux
-`COPYING` 和完整 `LICENSES` 树;记录的 COPYING 摘要须与包内文件一致。
+许可证和声明分别放在 `share/licenses/runtime` 或 `share/licenses/vmlinux`。声明缺失、目录不可读、遍历不完整或不同输入冲突时收集失败。Kernel 保留所选 Linux 源码的 `COPYING` 和完整 `LICENSES` 树。不发布来源表或历史构建、测试记录。
 
-验证只接受所选单元的载荷:Runtime 的 `bin/` 下为
-`sandbox-runtime.bundle`、`flatten-ctl`；Kernel 只有
-`bin/vmlinux`。检查精确路径、重复条目、类型、root 属主、权限、清单、来源记录
-相符性及校验和。其他单元的材料和无关目录在解包前被拒绝。Runtime 包不能替换
-独立选择的 Kernel,也不能改变无关安装根目录的权限。
+验证只接受所选单元的载荷：Runtime 的 `bin/` 下为 `sandbox-runtime.bundle` 和 `flatten-ctl`；Kernel 为 `bin/vmlinux` 及运行身份文件 `bin/vmlinux.sha256`。验证精确路径、重复条目、类型、root 属主、权限和载荷完整性。其他单元的材料和无关目录在解包前被拒绝。Runtime 包不能替换独立选择的 Kernel，也不能改变无关安装根目录的权限。
 
 Runtime 独立验证使用已安装在 `PATH` 中的可信主机 `fsck.erofs` 和
 `dump.erofs`,不下载 EROFS 源码或现场编译读取器。读取器须支持镜像格式、
 `fsck.erofs --extract` 及 `dump.erofs --path/--cat`。
 验证检查 bundle 对齐和前缀摘要,不展开目录树地验证完整 EROFS 文件系统,只把
 init、Envd、flatten-ctl 读入固定私有文件。镜像内属主/权限、Go main
-身份/目标及构建记录须一致；init 还须绑定所选 Sandboxer commit。内嵌
+身份和目标架构须一致。发布前，内嵌 init 与 Envd 必须分别等于本次选定的输入二进制；消费发布包不要求来源证明。内嵌
 flatten-ctl 必须等于外部对应载荷。残留的内嵌或外部 mkfs 载荷会被拒绝。不执行任何归档可执行文件。Kernel 验证
 不需要 EROFS 读取器、Runtime 载荷或依赖 checkout。
 
@@ -93,13 +77,8 @@ flatten-ctl 必须等于外部对应载荷。残留的内嵌或外部 mkfs 载�
 
 #### 发布与验证边界
 
-发布者在 Tag/Release 写入前将选定项目 `SOURCE_SHA` 传入验证器,采用 bundle
-的 `release-notes.md` 正文,追加既有来源/Preview 标记。生产者提供的说明不得夹带
-这些保留标记。源码选择、构建/发布
-权限分离及拒绝替换已发布资产的要求保持不变。独立验证是离线包内检查,不获取
-项目/依赖 Git 对象或 Go 模块,不与远端源码树比较许可正文。校验和及 VCS 记录
-不能证明任意生产者身份,也不构成对不可信 CI 候选的隔离。这些材料服务于发行
-检视,不构成法律认证。
+发布者在 Tag/Release 写入前检查本次项目构建输出，使用人类说明，验证上传资产大小和摘要，并拒绝覆盖已有不同字节。不发布来源/Preview 标记及独立 `SHA256SUMS`；源码选择和当次验收仅作为流水线输入。消费者使用 GitHub 原生资产完整性校验和离线载荷检查，不获取历史 Git 或 Actions 证明。许可证保留在包内。
+
 
 `librocksdb`(`accelerator` 的 CGO 链接依赖)在该仓内构建,不在此处。
 
