@@ -50,9 +50,10 @@ for scenario in object array duplicate-roots two-roots two-versions missing-vers
         || fail "$scenario failed for an unrelated reason" ;;
     *)
       release_materials_finish
-      [ "$(awk -F '\t' '$2 == "Go toolchain" { n++ } END { print n }' "$TMP/$scenario/stage/share/sources/runtime/SOURCES.tsv")" -eq "$expected" ] \
-        || fail "$scenario recorded the wrong number of compiler versions"
+      [ ! -e "$TMP/$scenario/stage/share/sources" ] || fail "$scenario published compiler proof records"
       license_root="$TMP/$scenario/stage/share/licenses/runtime/go-toolchain"
+      [ "$(find "$license_root" -mindepth 1 -maxdepth 1 -type d | wc -l)" -eq "$expected" ] \
+        || fail "$scenario copied the wrong number of compiler notice trees"
       cmp -s "$TMP/roots/one/LICENSE" "$license_root/go1.24.0/LICENSE" || fail "selected Go license missing"
       cmp -s "$TMP/roots/one/src/vendor/example/NOTICE" "$license_root/go1.24.0/src/vendor/example/NOTICE" || fail "nested Go notice missing"
       if [ "$scenario" = two-versions ]; then

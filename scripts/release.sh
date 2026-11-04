@@ -170,11 +170,11 @@ validate_archive_paths() {
       path=$0; sub(/^\.\//, "", path)
       directory=(path == "" || path ~ /\/$/); sub(/\/$/, "", path)
       if (path ~ /(^|\/)\.\.?($|\/)|\/\// || path !~ /^[A-Za-z0-9._+@:\/~=-]*$/ || seen[path]++) exit 1
-      material=(path ~ ("^share/(licenses|sources)/" unit "/"))
+      material=(path ~ ("^share/licenses/" unit "/"))
       if (directory) {
         if (path == "" || path == "bin" || path == "share" ||
-            path == "share/licenses" || path == "share/sources" ||
-            path == "share/licenses/" unit || path == "share/sources/" unit || material) next
+            path == "share/licenses" ||
+            path == "share/licenses/" unit || material) next
         exit 1
       }
       if (material) next
@@ -195,37 +195,6 @@ validate_archive_paths() {
   ' || fail "$archive contains an unsafe type, mode or ownership"
 }
 
-validate_source_inventory() {
-  local table="$1/share/sources/$2/SOURCES.tsv" unit="$2"
-  awk -F '\t' -v unit="$unit" '
-    NR == 1 { if ($0 != "payload\tname\tversion\tsource\tintegrity\tlicense_directory") exit 1; next }
-    NF != 6 || seen[$1 FS $2]++ { exit 1 }
-    unit == "runtime" {
-      if ($2 == "guest-runtime" || $2 == "accelerator") {
-        if ($1 != "bin/sandbox-runtime.bundle,bin/flatten-ctl") exit 1
-        next
-      }
-      if ($2 == "sandboxer") {
-        if ($1 != "bin/sandbox-runtime.bundle:/sbin/init") exit 1
-        next
-      }
-      if ($2 == "envd" || $2 == "github.com/e2b-dev/infra/packages/shared") {
-        if ($1 != "bin/sandbox-runtime.bundle:/opt/sandbox-runtime/bin/envd") exit 1
-        next
-      }
-      if ($2 == "Go toolchain") {
-        if ($1 != "bin/flatten-ctl" && $1 != "bin/sandbox-runtime.bundle:/sbin/init" &&
-            $1 != "bin/sandbox-runtime.bundle:/opt/sandbox-runtime/bin/envd") exit 1
-        next
-      }
-    }
-    unit == "vmlinux" && ($2 == "linux" || $2 == "guest-runtime-kernel-inputs") {
-      if ($1 != "bin/vmlinux") exit 1
-      next
-    }
-    { exit 1 }
-  ' "$table" || fail "unrecognized or inconsistent source inventory record"
-}
 
 prepare_runtime_verifier() {
   # Use trusted host readers; never run a binary supplied by the archive.
@@ -247,9 +216,6 @@ validate_runtime_payloads() {
   for binary in init envd flatten-ctl; do
     check_target_binary "$payloads/$binary" "$target_arch" "embedded $binary"
   done
-  sandboxer_sha="$(awk -F '\t' '$2 == "sandboxer" { sub(/^git:/, "", $5); print $5 }' \
-    "$extract/share/sources/runtime/SOURCES.tsv")"
-  release_materials_require_go_revision "$payloads/init" "$sandboxer_sha"
   for binary in init envd; do
     case "$binary" in
       init) module=github.com/kuasar-sandbox/sandboxer; package="$module/cmd/sandbox-init" ;;
@@ -264,22 +230,8 @@ validate_runtime_payloads() {
       END { exit bad || paths != 1 || modules != 1 || os != 1 || arch != 1 }
     ' <<< "$info" || fail "embedded $binary has the wrong Go main identity or target"
   done
-  (
-    local validation="$WORK/runtime-records" payload binary
-    release_materials_init "$validation/stage" "$validation/materials" runtime
-    for binary in init envd; do
-      case "$binary" in
-        init) payload=bin/sandbox-runtime.bundle:/sbin/init ;;
-        envd) payload=bin/sandbox-runtime.bundle:/opt/sandbox-runtime/bin/envd ;;
-      esac
-      release_materials_add_go_binary "$payloads/$binary" "$payload"
-    done
-    LC_ALL=C sort -u "$validation/materials/go-build-info" > "$validation/expected"
-    awk -F '\t' 'NR > 1 && $1 ~ /^bin\/sandbox-runtime[.]bundle:/ { print }' \
-      "$extract/share/sources/runtime/GO-BUILD-INFO.tsv" | LC_ALL=C sort -u > "$validation/actual"
-    cmp -s "$validation/expected" "$validation/actual" \
-      || fail "Go build records differ from embedded Runtime payloads"
-  ) || return 1
+  release_materials_validate_go "$extract" runtime bin/sandbox-runtime.bundle:/sbin/init "$payloads/init"
+  release_materials_validate_go "$extract" runtime bin/sandbox-runtime.bundle:/opt/sandbox-runtime/bin/envd "$payloads/envd"
 }
 
 validate_bundle() {
@@ -304,45 +256,13 @@ validate_bundle() {
   rm -rf "$extract"
   mkdir -p "$extract"
   tar -xzf "$bundle/assets/$archive" -C "$extract"
-  local selected_sha="${SOURCE_SHA:-}" selected_url="" selected_integrity=""
-  if [ "$kind" = runtime ]; then
-    check_go_binary "$extract/bin/flatten-ctl" "$arch"
-    if [ -z "$selected_sha" ]; then
-      selected_sha="$(go version -m "$extract/bin/flatten-ctl" | \
-        awk -F '\t' '$2 == "build" && $3 ~ /^vcs.revision=/ {print substr($3, 14)}')"
-    fi
-    [[ "$selected_sha" =~ ^[0-9a-f]{40}$ ]] || fail "flatten-ctl must bind its full selected source commit"
-    release_materials_require_go_revision "$extract/bin/flatten-ctl" "$selected_sha"
-    # Runtime source admission previously occurred while checking the native
-    # generator's patch material. Keep it explicit after removing that payload.
-    git -C "$ROOT" cat-file -e "$selected_sha^{commit}" 2>/dev/null \
-      || fail "selected source commit is unavailable for Runtime validation"
-  elif [ -z "$selected_sha" ]; then
-    selected_sha="$(awk -F '\t' '$1 == "bin/vmlinux" && $2 == "guest-runtime-kernel-inputs" {
-      split($5, fields, ";"); sub(/^git:/, "", fields[1]); print fields[1]
-    }' "$extract/share/sources/vmlinux/SOURCES.tsv")"
-  fi
-  validate_source_inventory "$extract" "$kind"
   release_materials_validate "$extract" "$kind"
-  if [ -n "$selected_sha" ]; then
-    [[ "$selected_sha" =~ ^[0-9a-f]{40}$ ]] || fail "SOURCE_SHA must be a full lowercase commit"
-    selected_url="https://github.com/kuasar-sandbox/guest-runtime/commit/$selected_sha"
-    selected_integrity="git:$selected_sha"
-  fi
   case "$kind" in
     runtime)
-      release_materials_require_source "$extract" "$kind" 'bin/sandbox-runtime.bundle,bin/flatten-ctl' 'guest-runtime' "$version" "$selected_url" "$selected_integrity"
-      release_materials_require_source "$extract" "$kind" 'bin/sandbox-runtime.bundle:/sbin/init' sandboxer ""
-      release_materials_require_source "$extract" "$kind" 'bin/sandbox-runtime.bundle,bin/flatten-ctl' accelerator ""
-      release_materials_require_source "$extract" "$kind" 'bin/sandbox-runtime.bundle:/opt/sandbox-runtime/bin/envd' 'envd' "2026.22" \
-        'https://github.com/e2b-dev/runtime/archive/refs/tags/2026.22.tar.gz' \
-        'sha256:8f074b23dcb2c9db48f8e674a8ab8082b54a16088fb29b66376178feeb7fe040'
-      release_materials_require_source "$extract" "$kind" 'bin/sandbox-runtime.bundle:/opt/sandbox-runtime/bin/envd' 'github.com/e2b-dev/infra/packages/shared' "2026.22" \
-        'https://github.com/e2b-dev/runtime/archive/refs/tags/2026.22.tar.gz' \
-        'sha256:8f074b23dcb2c9db48f8e674a8ab8082b54a16088fb29b66376178feeb7fe040'
-      release_materials_require_go_key "$extract" "$kind" 'bin/flatten-ctl'
-      release_materials_require_go_key "$extract" "$kind" 'bin/sandbox-runtime.bundle:/sbin/init'
-      release_materials_require_go_key "$extract" "$kind" 'bin/sandbox-runtime.bundle:/opt/sandbox-runtime/bin/envd'
+      release_materials_require_license "$extract" runtime sandboxer
+      release_materials_require_license "$extract" runtime accelerator
+      release_materials_require_license "$extract" runtime envd
+      release_materials_validate_go "$extract" runtime bin/flatten-ctl
       [ -f "$extract/bin/sandbox-runtime.bundle" ] \
         || fail "$archive is missing bin/sandbox-runtime.bundle"
       [ -x "$extract/bin/flatten-ctl" ] || fail "$archive is missing bin/flatten-ctl"
@@ -362,16 +282,8 @@ validate_bundle() {
         cmp -s "$WORK/vmlinux.sha256" "$extract/bin/vmlinux.sha256" \
           || fail "bin/vmlinux.sha256 does not match the packaged kernel"
       fi
-      local linux_license_sha
-      linux_license_sha="$(sha256sum "$extract/share/licenses/vmlinux/linux/COPYING" | awk '{print $1}')"
-      release_materials_require_source "$extract" "$kind" 'bin/vmlinux' 'linux' "6.1.169" \
-        'https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.1.169.tar.gz' \
-        'sha256:ab28b4ca2a2eca38b3da9aa33b231288168c3560bbc866359045f1c8f4d48d94'
-      if [ -n "$selected_sha" ]; then
-        selected_url="https://github.com/kuasar-sandbox/guest-runtime/tree/$selected_sha/native-deps/deps"
-        selected_integrity="git:$selected_sha;linux-copying-sha256:$linux_license_sha"
-      fi
-      release_materials_require_source "$extract" "$kind" 'bin/vmlinux' 'guest-runtime-kernel-inputs' "$version" "$selected_url" "$selected_integrity"
+      [ -s "$extract/share/licenses/vmlinux/linux/COPYING" ] \
+        || fail "Linux COPYING is missing"
       ;;
   esac
 }
@@ -479,6 +391,12 @@ $kind $version for Linux.
 Download the archive for your architecture, verify its native GitHub asset size and digest, then extract it into a Kuasar Sandbox deployment root. Documentation and E2E suites from this exact tag are collected by the aggregate platform release.
 EOF
   SOURCE_SHA="$project_sha" validate_bundle "$kind" "$version" "$arch" "$output"
+  if [ "$kind" = runtime ]; then
+    cmp -s "$WORK/runtime-payloads/init" "$sandbox_init_bin" \
+      || fail "embedded sandbox-init differs from the selected release binary"
+    cmp -s "$WORK/runtime-payloads/envd" "$envd_bin" \
+      || fail "embedded envd differs from the selected build binary"
+  fi
   echo "==> prepared $output for $version"
 }
 

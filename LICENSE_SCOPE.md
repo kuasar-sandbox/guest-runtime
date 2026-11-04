@@ -16,4 +16,4 @@ Project scripts that fetch and build the kernel, and project-maintained configur
 
 ## Go submodule notices
 
-`scripts/release-notices/rootless-containers-proto/COPYING` is the unmodified Apache-2.0 license from upstream commit `4cd87ebadd670f849a518618bc9862e703f9baa5`. That commit's `go-proto` module archive omits the repository-root license. Packaging supplements only `github.com/rootless-containers/proto/go-proto@v0.0.0-20230421021042-4cd87ebadd67` with this pinned notice, verifies its digest and retains the module's ordinary source/checksum inventory. The adjacent `NOTICE` records provenance; this does not exempt other modules or versions from license collection.
+`scripts/release-notices/rootless-containers-proto/COPYING` contains the upstream Apache-2.0 license omitted by the Go submodule archive. Packaging supplements the selected `github.com/rootless-containers/proto/go-proto` dependency with this license and its human attribution. Other modules and versions still require their own license material.

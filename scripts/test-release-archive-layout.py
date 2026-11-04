@@ -18,11 +18,10 @@ class ArchiveLayout(unittest.TestCase):
             root = Path(directory)
             archive = root / "test.tar.gz"
             entries = [("./", True), ("./bin/", True), ("./share/", True),
-                       ("./share/licenses/", True), ("./share/sources/", True),
+                       ("./share/licenses/", True),
                        ("./share/licenses/" + kind + "/", True),
                        ("./share/licenses/" + kind + "/project/", True),
-                       ("./share/licenses/" + kind + "/project/LICENSE", False),
-                       ("./share/sources/" + kind + "/", True)]
+                       ("./share/licenses/" + kind + "/project/LICENSE", False)]
             entries += [("./bin/" + name, False) for name in (
                 ("sandbox-runtime.bundle", "flatten-ctl") if kind == "runtime" else ("vmlinux",))]
             if extra is not None:
@@ -65,6 +64,13 @@ class ArchiveLayout(unittest.TestCase):
             result = self.validate(kind, (name, False))
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("outside the exact", result.stderr)
+
+    def test_retired_source_namespace_is_rejected(self):
+        for kind in ("runtime", "vmlinux"):
+            for name in ("./share/sources/", "./share/sources/" + kind + "/SOURCES.tsv"):
+                result = self.validate(kind, (name, name.endswith("/")))
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("outside the exact", result.stderr)
 
     def test_aliases_and_duplicate_entries_are_rejected(self):
         for name in ("bin/vmlinux", "./bin//vmlinux", "./bin/./vmlinux", "./bin/../vmlinux"):

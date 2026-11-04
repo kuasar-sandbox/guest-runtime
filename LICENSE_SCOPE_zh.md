@@ -12,4 +12,4 @@
 
 ## Go 子模块声明
 
-`scripts/release-notices/rootless-containers-proto/COPYING` 是上游提交 `4cd87ebadd670f849a518618bc9862e703f9baa5` 中未经修改的 Apache-2.0 许可证。该提交的 `go-proto` 模块归档遗漏了仓库根目录许可证。打包仅为 `github.com/rootless-containers/proto/go-proto@v0.0.0-20230421021042-4cd87ebadd67` 补充这份固定声明，校验其摘要，并保留模块原有的来源和校验和清单。相邻 `NOTICE` 记录来源；其他模块或版本仍必须收集许可证材料。
+`scripts/release-notices/rootless-containers-proto/COPYING` 是 Go 子模块归档遗漏的上游 Apache-2.0 许可证。打包为选定的 `github.com/rootless-containers/proto/go-proto` 依赖补充许可证和人类可读的归属说明；其他模块和版本仍须提供各自的许可证材料。
