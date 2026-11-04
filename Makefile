@@ -148,11 +148,22 @@ VMLINUX_VERSION ?= vmlinux-v0.1.0
 ACCELERATOR_VERSION ?= v0.1.7
 SANDBOXER_VERSION ?= v0.1.3
 
-release-runtime: sandbox-runtime
+# Release assembly must consume a verified selected archive, never a leftover
+# development binary. The generic sandbox-runtime target remains a dev entry.
+release-runtime:
+	python3 -B scripts/prepare-sandbox-init.py --fetch \
+		--version "$(SANDBOXER_VERSION)" --arch "$(TARGET_ARCH)" \
+		--source-sha "$$(git -C "$(SANDBOXER_DIR)" rev-parse HEAD)" \
+		--output "$(abspath $(BUILD_DIR))/release-inputs/sandbox-init" \
+		--go-toolchain-output "$(abspath $(BUILD_DIR))/release-inputs/sandboxer-go"
+	$(MAKE) sandbox-runtime SANDBOX_INIT="$(abspath $(BUILD_DIR))/release-inputs/sandbox-init"
 	rm -rf $(BUILD_DIR)/release-runtime-bundle
 	SOURCE_DATE_EPOCH="$$(git show -s --format=%ct HEAD)" \
 	RELEASE_ACCELERATOR_VERSION="$(ACCELERATOR_VERSION)" \
 	RELEASE_SANDBOXER_VERSION="$(SANDBOXER_VERSION)" \
+	RELEASE_SANDBOXER_SOURCE_DIR="$$(cd "$(SANDBOXER_DIR)" && pwd)" \
+	RELEASE_SANDBOX_INIT_BIN="$(abspath $(BUILD_DIR))/release-inputs/sandbox-init" \
+	RELEASE_MATERIALS_GO_NOTICE_ROOT="$(abspath $(BUILD_DIR))/release-inputs/sandboxer-go" \
 		bash scripts/release.sh package runtime "$(RUNTIME_VERSION)" "$(TARGET_ARCH)" \
 		$(BUILD_DIR)/release-runtime-bundle
 
