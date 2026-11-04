@@ -181,7 +181,6 @@ jobs:
       contents: read
     env:
       TARGET_ARCH: ${{ matrix.arch }}
-      GOWORK: 'off'
       ACCELERATOR_VERSION: ${{ needs.preflight.outputs.accelerator_version }}
       SANDBOXER_VERSION: ${{ needs.preflight.outputs.sandboxer_version }}
     steps:
@@ -336,13 +335,13 @@ jobs:
           memory-gib: '8'
           run: |
             set -euo pipefail
-            export GOWORK=off
             bash /inputs/release/ci/native-cache/native-cache.sh restore-or-build envd
+            GOWORK="$(python3 -B /inputs/release/ci/integration/go_workspace.py --root /src --owners guest-runtime)"
+            export GOWORK
             if [ "$TARGET_ARCH" = x86_64 ]; then make -C guest-runtime test; make -C guest-runtime vet; fi
             make -C guest-runtime flatten-ctl
             make -C guest-runtime sandbox-runtime BUILD_MKFS_EROFS="$(command -v mkfs.erofs)"
             cd /src/guest-runtime
-            export GOWORK=off
             export VERSION='${{ needs.preflight.outputs.version }}'
             export ACCELERATOR_VERSION='${{ needs.preflight.outputs.accelerator_version }}'
             export SANDBOXER_VERSION='${{ needs.preflight.outputs.sandboxer_version }}'

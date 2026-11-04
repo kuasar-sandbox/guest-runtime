@@ -40,7 +40,7 @@ The runtime image places its initial guest tools under `/opt/sandbox-runtime/bin
 
 ## Source workspace
 
-The source build uses sibling repositories. `go.mod` resolves `accelerator` through `../accelerator`, and the Runtime image consumes or builds `sandbox-init` through `../sandboxer`:
+The selected-source Go build uses a workspace with the sibling `accelerator` module. Standalone `go.mod` resolves a published version. The release workflow installs `sandbox-init` from the selected sandboxer release archive; local development may also build it from the sibling sandboxer checkout:
 
 ```text
 <workspace>/
@@ -51,18 +51,22 @@ The source build uses sibling repositories. `go.mod` resolves `accelerator` thro
 
 For coordinated development, use compatible `main` revisions from these sibling repositories. To reproduce a released composition, use the exact component tags selected by the corresponding [project aggregate release](https://github.com/kuasar-sandbox/kuasar-sandbox/releases) rather than independently choosing GitHub Latest tags. The complete six-repository workspace is documented in the [project README](https://github.com/kuasar-sandbox/kuasar-sandbox).
 
-Go-only `flatten-ctl` builds require a sibling `accelerator` checkout. Building the
-Runtime from source also requires `sandboxer` for `sandbox-init`, plus the
-host/target native tools below. Use `GOWORK=off` for this minimal source closure:
-the guest `sandbox-init` target does not import Connector, while a shared Go
-workspace can load unrelated host-side Sandboxer dependencies. The full host
-Sandboxer build still needs Connector; Runtime does not add it as a release input.
-The standalone
-Kernel target uses its own Native build inputs; it does not require starting the
-platform. Internal `require` versions identify target formal component releases,
-with Daily Preview suffixes removed. Those tags may not exist yet: local `replace`
-directives select the sibling sources, including when `GOWORK=off`. Record their
-actual SHAs when reporting a build or test result.
+Standalone `flatten-ctl` builds resolve the obtainable versions committed in `go.mod`.
+Coordinated Preview builds use only the selected `guest-runtime` and `accelerator`
+source modules. Generate that closure before building or testing:
+
+```bash
+GOWORK="$(python3 ../kuasar-sandbox/ci/integration/go_workspace.py --root .. --owners guest-runtime)" || exit 1
+export GOWORK
+```
+
+The workspace validates module paths without rewriting `go.mod`/`go.sum`. Runtime
+publication consumes `sandbox-init` from the specified sandboxer release binary;
+Sandboxer and Connector are not Runtime Go workspace members. Install that executable
+at `../sandboxer/bin/<arch>/sandbox-init` or set `SANDBOX_INIT` explicitly before assembly.
+Envd and versitygw keep their independent Go module builds. The standalone Kernel
+target uses native inputs and does not join a Go workspace. `go-erofs` remains a
+versioned external dependency.
 
 ## Build prerequisites
 
@@ -84,10 +88,10 @@ Other prerequisites and native-source locations are documented in [Native build 
 
 ```bash
 GOWORK=off make native-deps                # VMLinux, target EROFS tools, Envd, and native inputs
-GOWORK=off make flatten-ctl                # OCI/directory -> deterministic EROFS builder
-GOWORK=off make build                      # assemble sandbox-runtime.bundle
-GOWORK=off make sandbox-runtime            # build the runtime image, building sandbox-init if needed
-GOWORK=off make build TARGET_ARCH=aarch64  # cross-build where documented dependencies support it
+make flatten-ctl                # OCI/directory -> deterministic EROFS builder
+make build                      # assemble sandbox-runtime.bundle
+make sandbox-runtime            # assemble with the selected sandbox-init binary
+make build TARGET_ARCH=aarch64  # cross-build where documented dependencies support it
 ```
 
 `make sandbox-runtime` consumes:

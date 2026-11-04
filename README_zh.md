@@ -37,7 +37,7 @@ Runtime image 将初始 guest tool 放在 `/opt/sandbox-runtime/bin/`。VMLinux 
 
 ## 源码工作区
 
-源码构建使用兄弟仓。`go.mod` 通过 `../accelerator` 解析 `accelerator`,Runtime image 通过 `../sandboxer` 使用或构建 `sandbox-init`:
+选定源码的 Go 构建通过 workspace 使用兄弟仓 `accelerator`;独立 `go.mod` 解析已发布版本。发布流程从选定 sandboxer 发布包安装 `sandbox-init`;本地开发也可以从兄弟仓 sandboxer 构建它:
 
 ```text
 <workspace>/
@@ -48,14 +48,14 @@ Runtime image 将初始 guest tool 放在 `/opt/sandbox-runtime/bin/`。VMLinux 
 
 协调开发使用这些兄弟仓相互兼容的 `main` revision。复现已发布组合时,使用对应[项目聚合 Release](https://github.com/kuasar-sandbox/kuasar-sandbox/releases)精确选择的组件 Tag,不要分别选择各仓 GitHub Latest。完整六仓工作区见[项目 README](https://github.com/kuasar-sandbox/kuasar-sandbox)。
 
-Go-only `flatten-ctl` 构建需要兄弟 `accelerator`。从源码构建 Runtime 还需要
-`sandboxer` 提供 `sandbox-init`,以及下述 host/target Native tool。此最小源码闭包
-使用 `GOWORK=off`:guest `sandbox-init` target 不导入 Connector,但共享 Go workspace
-可能加载无关的 Host 侧 Sandboxer 依赖。完整 Host Sandboxer 构建仍需要 Connector;
-Runtime 不将它新增为发行输入。独立 Kernel target 使用自己的 Native 构建输入,
-不要求启动平台。内部 `require` 版本标识目标正式组件 Release,Daily Preview 后缀已
-去除。这些 Tag 可以尚不存在:即使设置 `GOWORK=off`,本地 `replace` 仍选择兄弟仓
-源码。报告 build/test 结果时记录实际 SHA。
+独立 `flatten-ctl` 构建解析 `go.mod` 中真实可获取的版本。协调 Preview 构建只使用选定的 `guest-runtime` 与 `accelerator` 源码模块；构建和测试前生成该闭包：
+
+```bash
+GOWORK="$(python3 ../kuasar-sandbox/ci/integration/go_workspace.py --root .. --owners guest-runtime)" || exit 1
+export GOWORK
+```
+
+工作区验证 module path，不改写 `go.mod`/`go.sum`。Runtime 发布从指定 sandboxer Release 消费 `sandbox-init` 二进制；Sandboxer、Connector 不加入 Runtime Go 工作区。组装前将该程序安装到 `../sandboxer/bin/<arch>/sandbox-init`，或显式设置 `SANDBOX_INIT`。Envd、versitygw 保持独立 Go 模块构建；Kernel 使用 Native 输入，不加入 Go workspace。`go-erofs` 继续作为版本化外部依赖。
 
 ## 构建前置
 
@@ -77,10 +77,10 @@ Host packer 仅在构建时组装 runtime bundle，必须匹配宿主架构。`f
 
 ```bash
 GOWORK=off make native-deps                # VMLinux、目标 EROFS tools、Envd 及 Native 输入
-GOWORK=off make flatten-ctl                # OCI/directory -> deterministic EROFS builder
-GOWORK=off make build                      # 组装 sandbox-runtime.bundle
-GOWORK=off make sandbox-runtime            # 构建 Runtime,按需构建 sandbox-init
-GOWORK=off make build TARGET_ARCH=aarch64  # 在依赖支持的范围内交叉构建
+make flatten-ctl                # OCI/directory -> deterministic EROFS builder
+make build                      # 组装 sandbox-runtime.bundle
+make sandbox-runtime            # 使用选定的 sandbox-init 二进制组装 Runtime
+make build TARGET_ARCH=aarch64  # 在依赖支持的范围内交叉构建
 ```
 
 `make sandbox-runtime` 使用:
