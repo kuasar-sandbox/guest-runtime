@@ -209,6 +209,10 @@ def fetch(version, source_sha, output, go_toolchain_output=None, arch="x86_64"):
             "invalid sandboxer version")
     require(arch in ("x86_64", "aarch64"), "invalid sandbox-init target architecture")
     repo = "repos/kuasar-sandbox/sandboxer"
+    # gh 2.97+ guards raw output; older CLIs emit bytes without this option.
+    # Probe local capabilities instead of requiring a particular CLI version.
+    api_help = subprocess.check_output(["gh", "api", "--help"], text=True)
+    raw_option = ["--allow-escape-sequences"] if "--allow-escape-sequences" in api_help else []
     release = json.loads(subprocess.check_output(["gh", "api", f"{repo}/releases/tags/{version}"], text=True))
     name = f"sandboxer-{version}-linux-{arch}.tar.gz"
     matches = [asset for asset in release.get("assets", []) if asset.get("name") == name]
@@ -217,7 +221,7 @@ def fetch(version, source_sha, output, go_toolchain_output=None, arch="x86_64"):
     with tempfile.TemporaryDirectory(prefix="selected-sandbox-init-") as directory:
         directory = Path(directory)
         with (directory / name).open("wb") as stream:
-            subprocess.run(["gh", "api", "--allow-escape-sequences",
+            subprocess.run(["gh", "api", *raw_option,
                             "-H", "Accept: application/octet-stream",
                             f"{repo}/releases/assets/{matches[0]['id']}"], stdout=stream, check=True)
         prepare(release, directory, version, source_sha, output, go_toolchain_output, arch)

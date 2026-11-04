@@ -66,23 +66,37 @@ class SelectedSandboxInitTests(unittest.TestCase):
                 self.assertFalse((self.root / 'SHA256SUMS').exists())
 
     def test_fetch_uses_one_native_asset_id_and_replaces_stale_local_binary(self):
-        self.output.parent.mkdir()
-        self.output.write_bytes(b"old development binary")
-        commands = []
-        def download(command, **kwargs):
-            commands.append(command)
-            kwargs["stdout"].write(self.archive.read_bytes())
-            return subprocess.CompletedProcess(command, 0)
-        with mock.patch.object(helper.subprocess, 'check_output', return_value=json.dumps(self.release)) as metadata, \
-             mock.patch.object(helper.subprocess, 'run', side_effect=download), \
-             mock.patch.object(helper, '_binary_go_toolchain', return_value=self.toolchain):
-            helper.fetch(self.version, self.sha, self.output, self.notices)
-        metadata.assert_called_once_with(['gh', 'api',
-            f'repos/kuasar-sandbox/sandboxer/releases/tags/{self.version}'], text=True)
-        self.assertEqual(commands, [['gh', 'api', '--allow-escape-sequences',
-            '-H', 'Accept: application/octet-stream', 'repos/kuasar-sandbox/sandboxer/releases/assets/123']])
-        self.assertEqual(self.output.read_bytes(), self.payload)
-        self.assertEqual((self.notices / self.toolchain / 'LICENSE').read_bytes(), b'Go license')
+        for help_text, raw_option in [('gh api options', []),
+                                     ('gh api --allow-escape-sequences', ['--allow-escape-sequences'])]:
+            with self.subTest(raw_option=raw_option):
+                self.output.parent.mkdir(exist_ok=True)
+                self.output.write_bytes(b"old development binary")
+                commands = []
+                def download(command, **kwargs):
+                    commands.append(command)
+                    kwargs["stdout"].write(self.archive.read_bytes())
+                    return subprocess.CompletedProcess(command, 0)
+                with mock.patch.object(helper.subprocess, 'check_output',
+                        side_effect=[help_text, json.dumps(self.release)]) as metadata, \
+                     mock.patch.object(helper.subprocess, 'run', side_effect=download), \
+                     mock.patch.object(helper, '_binary_go_toolchain', return_value=self.toolchain):
+                    helper.fetch(self.version, self.sha, self.output, self.notices)
+                self.assertEqual(metadata.call_args_list, [mock.call(['gh', 'api', '--help'], text=True),
+                    mock.call(['gh', 'api', f'repos/kuasar-sandbox/sandboxer/releases/tags/{self.version}'], text=True)])
+                self.assertEqual(commands, [['gh', 'api', *raw_option,
+                    '-H', 'Accept: application/octet-stream', 'repos/kuasar-sandbox/sandboxer/releases/assets/123']])
+                self.assertEqual(self.output.read_bytes(), self.payload)
+                self.assertEqual((self.notices / self.toolchain / 'LICENSE').read_bytes(), b'Go license')
+
+    def test_cli_help_failure_stops_before_release_lookup_or_download(self):
+        with mock.patch.object(helper.subprocess, 'check_output',
+                side_effect=subprocess.CalledProcessError(1, ['gh', 'api', '--help'])) as query, \
+             mock.patch.object(helper.subprocess, 'run') as download:
+            with self.assertRaises(subprocess.CalledProcessError):
+                helper.fetch(self.version, self.sha, self.output, self.notices)
+        query.assert_called_once_with(['gh', 'api', '--help'], text=True)
+        download.assert_not_called()
+        self.assertFalse(self.output.exists())
 
     def test_fetch_failure_never_accepts_stale_input(self):
         for failure in ('download', 'digest', 'missing'):
