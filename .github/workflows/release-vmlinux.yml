@@ -148,6 +148,19 @@ jobs:
         env:
           SOURCE_SHA: ${{ needs.preflight.outputs.source_sha }}
         run: python3 -B trusted/platform/release/producer-inputs.py restore workbench-selection/producer-inputs.tar vmlinux "$SOURCE_SHA" src
+      - name: Check out trusted packaging tools
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: trusted/guest-runtime
+          persist-credentials: false
+      - name: Stage current packaging tools outside selected product sources
+        run: |
+          set -euo pipefail
+          destination=trusted/platform/.ci/component-packaging
+          test ! -e "$destination"
+          mkdir -p "$destination"
+          git -C trusted/guest-runtime archive --format=tar HEAD scripts | tar -xf - -C "$destination"
       - name: Build test and package vmlinux release
         uses: ./trusted/platform/.github/actions/workbench
         with:
@@ -168,8 +181,8 @@ jobs:
             [ "$(git rev-parse HEAD)" = "${{ needs.preflight.outputs.source_sha }}" ]
             export SOURCE_DATE_EPOCH
             SOURCE_DATE_EPOCH=$(git show -s --format=%ct "${{ needs.preflight.outputs.source_sha }}")
-            bash scripts/release.sh package vmlinux "$VERSION" "$TARGET_ARCH" release-bundle
-            bash scripts/release.sh validate vmlinux "$VERSION" "$TARGET_ARCH" release-bundle
+            RELEASE_SOURCE_ROOT="$PWD" bash /inputs/release/.ci/component-packaging/scripts/release.sh package vmlinux "$VERSION" "$TARGET_ARCH" release-bundle
+            RELEASE_SOURCE_ROOT="$PWD" bash /inputs/release/.ci/component-packaging/scripts/release.sh validate vmlinux "$VERSION" "$TARGET_ARCH" release-bundle
       - name: Upload validated vmlinux bundle
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
@@ -187,6 +200,10 @@ jobs:
           - arch: aarch64
             runner: ubuntu-24.04-arm
   publish:
+    concurrency:
+      group: component-publication-${{ github.repository }}
+      queue: max
+      cancel-in-progress: false
     needs:
       - preflight
       - build

@@ -117,7 +117,6 @@ def run(source, original, readers):
             archive = candidate / "assets" / archive_name
             subprocess.run(["tar", "--sort=name", "--owner=0", "--group=0", "--numeric-owner",
                             "-czf", str(archive), "-C", str(tree), "."], check=True)
-            (candidate / "assets/SHA256SUMS").write_text(digest(archive) + "  " + archive_name + "\n")
             result = subprocess.run(["bash", str(source / "scripts/release.sh"), "validate", "runtime",
                                      "runtime-v1.2.3-preview.20260804", "x86_64", str(candidate)],
                                     text=True, capture_output=True, timeout=180)

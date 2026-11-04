@@ -104,7 +104,7 @@ def check_platform_fixture_failures():
 
 def check(platform):
     workflows = {}
-    for filename in ("release-runtime.yml", "release-vmlinux.yml", "reconcile-latest.yml", "delete-preview.yml"):
+    for filename in ("release-runtime.yml", "release-vmlinux.yml", "delete-preview.yml"):
         text = (ROOT / ".github/workflows" / filename).read_text()
         jobs = yaml.safe_load(text)["jobs"]
         workflows[filename] = jobs
@@ -112,7 +112,7 @@ def check(platform):
             assert job["runs-on"] == ("${{ matrix.runner }}" if name == "build" else "ubuntu-latest"), (filename, name)
             assert "github.event.repository.visibility == 'public'" in job["if"]
             assert "github.event.repository.full_name == github.repository" in job["if"]
-            assert job["permissions"].get("contents", "read") == ("write" if name in ("publish", "reconcile", "delete") else "read")
+            assert job["permissions"].get("contents", "read") == ("write" if name in ("publish", "delete") else "read")
             for step in job["steps"]:
                 assert "create-github-app-token" not in step.get("uses", "")
                 assert "actions/cache@" not in step.get("uses", "")
@@ -169,7 +169,7 @@ def check(platform):
     runtime = {s["name"]: s for s in workflows["release-runtime.yml"]["build"]["steps"]}
     names = list(runtime)
     assert names.index("Download Workbench selection") < names.index("Restore fixed producer inputs")
-    assert runtime["Check out trusted build checks"]["with"]["ref"] == "${{ github.sha }}"
+    assert runtime["Check out trusted build checks"]["with"]["ref"] == "${{ github.workflow_sha }}"
     preflight = {row['name']: row for row in workflows['release-runtime.yml']['preflight']['steps']}
     admitted = preflight['Freeze admitted source and selected dependency tags']
     for name in ('accelerator', 'sandboxer'):

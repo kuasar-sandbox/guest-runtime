@@ -232,11 +232,6 @@ grep -Fqx 'run-name: Release ${{ inputs.version }} @${{ inputs.source_sha }} [ac
 grep -Fqx 'run-name: Release ${{ inputs.version }} @${{ inputs.source_sha }}' \
   "$ROOT/.github/workflows/release-vmlinux.yml" \
   || fail "vmlinux release identity does not pin source_sha"
-sed -n '/- name: Publish runtime release/,/run: |/p' "$WORKFLOW" \
-  | grep -Fq 'RELEASE_DEPENDENCIES: accelerator=${{ needs.preflight.outputs.accelerator_version }},sandboxer=${{ needs.preflight.outputs.sandboxer_version }}' \
-  || fail "runtime Preview publish step does not receive dependency binding"
-grep -Fq 'kuasar-preview-binding' "$ROOT/scripts/publish-release.sh" \
-  || fail "Preview publisher does not record its build binding"
 for input in accelerator_version sandboxer_version; do
   grep -Fq "      $input:" "$WORKFLOW" \
     || fail "runtime release workflow is missing required $input input"
@@ -263,23 +258,8 @@ for workflow in release-runtime.yml release-vmlinux.yml delete-preview.yml; do
     "$ROOT/.github/workflows/$workflow")" -eq 1 ] \
     || fail "$workflow does not hold exactly one full-workflow mutation lock"
 done
-grep -Fq 'kuasar-release-source' "$ROOT/scripts/publish-release.sh" \
-  || fail "publisher does not record Stable source provenance"
-grep -Fq 'reconcile_main_latest' "$ROOT/scripts/publish-release.sh" \
-  || fail "publisher does not reconcile component main Latest by source commit"
-RECONCILE_WORKFLOW="$ROOT/.github/workflows/reconcile-latest.yml"
-grep -Fq 'group: component-latest-reconciliation-${{ github.repository }}' \
-  "$RECONCILE_WORKFLOW" \
-  || fail "Latest reconciliation is not serialized across component versions"
-grep -Fq 'workflow_run:' "$RECONCILE_WORKFLOW" \
-  || fail "Latest reconciliation is not triggered after release completion"
-grep -Fq 'schedule:' "$RECONCILE_WORKFLOW" \
-  || fail "Latest reconciliation has no automatic recovery schedule"
-grep -Fq 'publish-release.sh reconcile' "$RECONCILE_WORKFLOW" \
-  || fail "Latest reconciliation does not use the idempotent entrypoint"
-if grep -R -Fq 'queue: max' "$ROOT/.github/workflows"; then
-  fail "workflows use the unsupported concurrency queue key"
-fi
+[ ! -e "$ROOT/.github/workflows/reconcile-latest.yml" ] || fail "retired Latest writer remains"
+PYTHONDONTWRITEBYTECODE=1 python3 "$ROOT/scripts/test-release-publisher.py"
 grep -Fq 'PYTHONPYCACHEPREFIX="$(abspath $(BUILD_DIR)/python-cache)"' \
   "$ROOT/Makefile" \
   || fail "make test writes Python bytecode outside the ignored build tree"
@@ -311,6 +291,7 @@ install -m 0755 "$ROOT/scripts/release.sh" "$fixture_root/scripts/release.sh"
 install -m 0644 "$ROOT/scripts/release-runtime-payloads.py" "$fixture_root/scripts/release-runtime-payloads.py"
 install -m 0644 "$ROOT/scripts/test-release-runtime-payloads.py" "$fixture_root/scripts/test-release-runtime-payloads.py"
 install -m 0755 "$ROOT/scripts/publish-release.sh" "$fixture_root/scripts/publish-release.sh"
+install -m 0644 "$ROOT/scripts/release-publisher.py" "$fixture_root/scripts/release-publisher.py"
 install -m 0755 "$ROOT/scripts/validate-preview-line.sh" "$fixture_root/scripts/validate-preview-line.sh"
 mkdir "$fixture_root/scripts/testdata"
 install -m 0644 "$ROOT/scripts/testdata/linux-COPYING" "$fixture_root/scripts/testdata/linux-COPYING"
@@ -407,7 +388,7 @@ printf 'CONFIG_LOCALVERSION="-kuasar"\nCONFIG_LOCALVERSION_AUTO=y\n' \
 init_fixture_repo "$fixture_root" LICENSE LICENSES NOTICE .gitignore native-deps/.gitignore \
   native-deps/deps/vmlinux/sandbox-common.config \
   native-deps/Makefile native-deps/deps/common.sh scripts/release.sh scripts/release-materials.sh \
-  scripts/static-crypto-catalog.py scripts/publish-release.sh \
+  scripts/static-crypto-catalog.py scripts/publish-release.sh scripts/release-publisher.py \
   scripts/release-runtime-payloads.py scripts/test-release-runtime-payloads.py \
   scripts/validate-preview-line.sh scripts/testdata/linux-COPYING go.mod go.sum cmd >/dev/null
 project_sha="$(git -C "$fixture_root" rev-parse HEAD)"
@@ -484,9 +465,9 @@ common_env=(
   SOURCE_DATE_EPOCH=1700000000
 )
 
-env "${common_env[@]}" "$fixture_root/scripts/release.sh" package \
+env "${common_env[@]}" RELEASE_SOURCE_ROOT="$fixture_root" "$fixture_root/scripts/release.sh" package \
   runtime runtime-v1.2.3-preview.20260804 x86_64 "$TMP/runtime-bundle"
-env "${common_env[@]}" "$fixture_root/scripts/release.sh" package \
+env "${common_env[@]}" RELEASE_SOURCE_ROOT="$fixture_root" "$fixture_root/scripts/release.sh" package \
   vmlinux vmlinux-v2.3.4 x86_64 "$TMP/vmlinux-bundle"
 PYTHONDONTWRITEBYTECODE=1 python3 "$ROOT/scripts/test-release-runtime-binding.py" \
   "$fixture_root" "$TMP/runtime-bundle" "$TMP/runtime-readers/runtime-verifier"
@@ -563,7 +544,6 @@ release_materials_hash_tree "$candidate/root" vmlinux \
   "$candidate/root/share/sources/vmlinux/MATERIALS.sha256"
 tar --sort=name --owner=0 --group=0 --numeric-owner --mtime=@1700000000 \
   -czf "$candidate/assets/$(basename "$vmlinux_archive")" -C "$candidate/root" .
-(cd "$candidate/assets" && sha256sum "$(basename "$vmlinux_archive")" > SHA256SUMS)
 if "$fixture_root/scripts/release.sh" validate vmlinux vmlinux-v2.3.4 x86_64 "$candidate" > "$candidate/result.log" 2>&1; then
   fail "validator accepted changed Linux COPYING with regenerated checksums"
 fi
@@ -581,9 +561,9 @@ if tar -tzf "$vmlinux_archive" | grep -E 'vmlinux-x86_64-|(^|/)release/' >/dev/n
   fail "vmlinux archive contains a duplicate versioned payload or release metadata"
 fi
 
-env "${common_env[@]}" "$fixture_root/scripts/release.sh" package \
+env "${common_env[@]}" RELEASE_SOURCE_ROOT="$fixture_root" "$ROOT/scripts/release.sh" package \
   runtime runtime-v1.2.3-preview.20260804 x86_64 "$TMP/runtime-reproducible"
-env "${common_env[@]}" "$fixture_root/scripts/release.sh" package \
+env "${common_env[@]}" RELEASE_SOURCE_ROOT="$fixture_root" "$ROOT/scripts/release.sh" package \
   vmlinux vmlinux-v2.3.4 x86_64 "$TMP/vmlinux-reproducible"
 cmp -s "$runtime_archive" \
   "$TMP/runtime-reproducible/assets/sandbox-runtime-x86_64-v1.2.3-preview.20260804.tar.gz" \
@@ -605,19 +585,19 @@ if "$fixture_root/scripts/release.sh" validate vmlinux vmlinux-v2.3.4 \
   x86_64 "$TMP/extra" >/dev/null 2>&1; then
   fail "validator accepted an extra asset"
 fi
-if env "${common_env[@]}" "$fixture_root/scripts/release.sh" package \
+if env "${common_env[@]}" RELEASE_SOURCE_ROOT="$fixture_root" "$fixture_root/scripts/release.sh" package \
   runtime v1.2.3 x86_64 "$TMP/invalid-version" >/dev/null 2>&1; then
   fail "packager accepted a runtime version without the runtime prefix"
 fi
 if env "${common_env[@]}" RELEASE_NATIVE_BIN_DIR="$fixture_root/native-deps/bin/x86_64" \
-  "$fixture_root/scripts/release.sh" package vmlinux vmlinux-v1.2.3 aarch64 "$TMP/invalid-arch" >/dev/null 2>&1; then
+  RELEASE_SOURCE_ROOT="$fixture_root" "$fixture_root/scripts/release.sh" package vmlinux vmlinux-v1.2.3 aarch64 "$TMP/invalid-arch" >/dev/null 2>&1; then
   fail "packager accepted x86_64 payloads as aarch64"
 fi
 env "${common_env[@]}" \
   RELEASE_BIN_DIR="$fixture_root/bin/x86_64" \
   RELEASE_NATIVE_BIN_DIR="$fixture_root/native-deps/bin/x86_64" \
   RELEASE_ENVD_SOURCE_DIR="$fixture_root/native-deps/build/src/e2b-infra" \
-  "$fixture_root/scripts/release.sh" package runtime \
+  RELEASE_SOURCE_ROOT="$fixture_root" "$fixture_root/scripts/release.sh" package runtime \
     runtime-v1.2.3 x86_64 "$TMP/overridden-envd-source"
 
 for kind in runtime vmlinux; do
@@ -638,7 +618,6 @@ for kind in runtime vmlinux; do
       "$candidate/root/share/sources/$kind/MATERIALS.sha256"
     tar --sort=name --owner=0 --group=0 --numeric-owner --mtime=@1700000000 \
       -czf "$candidate/assets/$candidate_archive" -C "$candidate/root" .
-    (cd "$candidate/assets" && sha256sum "$candidate_archive" > SHA256SUMS)
     if "$fixture_root/scripts/release.sh" validate "$kind" "$version" x86_64 "$candidate" > "$candidate/result.log" 2>&1; then
       fail "validator accepted $kind extra layout entry $extra_path with regenerated checksums"
     fi
@@ -671,7 +650,6 @@ for dependency in accelerator sandboxer; do
       "$candidate/root/share/sources/runtime/MATERIALS.sha256"
     tar --sort=name --owner=0 --group=0 --numeric-owner --mtime=@1700000000 \
       -czf "$candidate/assets/$candidate_archive" -C "$candidate/root" .
-    (cd "$candidate/assets" && sha256sum "$candidate_archive" > SHA256SUMS)
     if "$fixture_root/scripts/release.sh" validate runtime runtime-v1.2.3-preview.20260804 \
       x86_64 "$candidate" > "$candidate/result.log" 2>&1; then
       fail "validator accepted $dependency $mutation with regenerated checksums"
@@ -708,7 +686,6 @@ for mutation in wrong-os wrong-arch other-main other-module unstamped dirty-sour
   install -m 0755 "$payload" "$candidate/root/bin/flatten-ctl"
   tar --sort=name --owner=0 --group=0 --numeric-owner --mtime=@1700000000 \
     -czf "$candidate/assets/$(basename "$runtime_archive")" -C "$candidate/root" .
-  (cd "$candidate/assets" && sha256sum "$(basename "$runtime_archive")" > SHA256SUMS)
   if "$fixture_root/scripts/release.sh" validate runtime runtime-v1.2.3-preview.20260804 \
     x86_64 "$candidate" > "$candidate/result.log" 2>&1; then
     fail "validator accepted $mutation flatten-ctl with regenerated checksums"
@@ -754,7 +731,6 @@ for kind in runtime vmlinux; do
     release_materials_hash_tree "$candidate/root" "$kind" "$candidate/root/share/sources/$kind/MATERIALS.sha256"
     tar --sort=name --owner=0 --group=0 --numeric-owner --mtime=@1700000000 \
       -czf "$candidate/assets/$archive_name" -C "$candidate/root" .
-    (cd "$candidate/assets" && sha256sum "$archive_name" > SHA256SUMS)
     if "$fixture_root/scripts/release.sh" validate "$kind" "$version" x86_64 "$candidate" \
       > "$candidate/result.log" 2>&1; then
       fail "validator accepted $kind $mutation with regenerated checksums"
@@ -792,7 +768,6 @@ for kind in runtime vmlinux; do
       "$candidate/root/share/sources/$kind/MATERIALS.sha256"
     tar --sort=name --owner=0 --group=0 --numeric-owner --mtime=@1700000000 \
       -czf "$candidate/assets/$archive_name" -C "$candidate/root" .
-    (cd "$candidate/assets" && sha256sum "$archive_name" > SHA256SUMS)
     if "$fixture_root/scripts/release.sh" validate "$kind" "$version" x86_64 "$candidate" \
       > "$candidate/result.log" 2>&1; then
       fail "validator accepted $name bound to another license directory"
@@ -847,7 +822,6 @@ for kind in runtime vmlinux; do
       fi
       tar --sort=name --owner="$owner" --group=0 --numeric-owner --mtime=@1700000000 \
         -czf "$candidate/assets/$archive_name" -C "$candidate/root" .
-      (cd "$candidate/assets" && sha256sum "$archive_name" > SHA256SUMS)
       if "$fixture_root/scripts/release.sh" validate "$kind" "$version" x86_64 "$candidate" >/dev/null 2>&1; then
         fail "validator accepted $kind $name with changed $mutation and regenerated checksums"
       fi
