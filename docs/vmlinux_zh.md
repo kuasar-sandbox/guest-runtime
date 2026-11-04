@@ -46,7 +46,7 @@ bin/aarch64/vmlinux       PE 格式 Image,EFI stub + ACPI 启动
 和精确 SHA 独立发布 `vmlinux-vX.Y.Z`,制品名为
 `vmlinux-<arch>-vX.Y.Z.tar.gz`。该版本线与 `runtime-vX.Y.Z` 独立,
 两者版本号不要求一致;平台聚合版本显式选择各自版本。这里 `<arch>` 为所选发布版声明的 `x86_64` 或 `aarch64`。
-应核对该版本实际资产和原生验证范围；源码支持不等于运行验收，历史版本保留原有架构集合。
+应核对该版本的实际资产大小、摘要和包的目标架构。历史版本保留原有架构集合；消费不要求旧验收记录。
 
 两个架构新生成的 Stable 和 Preview kernel 包均包含这一对文件：
 
@@ -57,8 +57,8 @@ bin/vmlinux.sha256
 
 打包时根据最终暂存的原始 kernel 生成 `vmlinux.sha256`，不使用压缩包摘要，也不复制
 构建输入旁可能过期的 checksum。sidecar 权限为 0644，内容严格为
-`<64 个小写十六进制字符>  vmlinux`，末尾带 LF 换行。发布包旁的 `SHA256SUMS`
-仍然校验各压缩包，不替代这一内核身份文件。解包后可执行
+`<64 个小写十六进制字符>  vmlinux`，末尾带 LF 换行。各压缩包使用 GitHub 原生资产大小和摘要校验，
+不替代这一内核身份文件。解包后可执行
 `(cd bin && sha256sum --check vmlinux.sha256)` 校验文件对。
 
 验包流程重新计算原始 kernel 的摘要，并校验包内存在的 sidecar；仍接受没有 sidecar

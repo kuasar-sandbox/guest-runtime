@@ -35,7 +35,7 @@ bin/aarch64/vmlinux       PE-format Image, EFI stub + ACPI boot
 
 Both architectures use the filename `vmlinux`; the internal format differs by architecture. Cloud Hypervisor selects the matching supported boot path from the kernel format, while sandbox-ctl uses the same upper-level kernel-path interface. Measure the actual built/released file size; this document does not specify a universal image-size or boot-time result.
 
-The trusted `Vmlinux Release` workflow on this repository's `main` independently publishes `vmlinux-vX.Y.Z` from the source branch and exact SHA pinned by the dispatcher. Its archive is `vmlinux-<arch>-vX.Y.Z.tar.gz`. This release line is independent of `runtime-vX.Y.Z`: their version numbers need not match, and the platform aggregate explicitly selects each. Here `<arch>` is `x86_64` or `aarch64` as declared by the selected release. Check that release's actual assets and recorded native validation scope; source support alone is not runtime qualification, and historical releases retain their original architecture sets.
+The trusted `Vmlinux Release` workflow on this repository's `main` independently publishes `vmlinux-vX.Y.Z` from the source branch and exact SHA pinned by the dispatcher. Its archive is `vmlinux-<arch>-vX.Y.Z.tar.gz`. This release line is independent of `runtime-vX.Y.Z`: their version numbers need not match, and the platform aggregate explicitly selects each. Here `<arch>` is `x86_64` or `aarch64` as declared by the selected release. Check that release's actual asset sizes/digests and the package's target architecture. Historical releases retain their original architecture sets; consumption does not require old acceptance records.
 
 New Stable and Preview kernel packages include this pair for either architecture:
 
@@ -47,8 +47,8 @@ bin/vmlinux.sha256
 Packaging generates `vmlinux.sha256` from the final staged raw kernel, not from
 its compressed archive or a checksum beside the build input. The sidecar is a
 mode-0644 file containing exactly `<64 lowercase hex digits>  vmlinux` followed
-by LF. `SHA256SUMS` beside the release archives continues to cover the archives;
-it is not a replacement for this per-kernel identity file. After extraction,
+by LF. The release archives are checked using native GitHub asset sizes and digests;
+those checks do not replace this per-kernel identity file. After extraction,
 `(cd bin && sha256sum --check vmlinux.sha256)` verifies the pair.
 
 The package validator recomputes the raw-kernel digest and checks any included

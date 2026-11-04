@@ -40,49 +40,24 @@ payload. Kernel uses
 `RELEASE_LINUX_SOURCE_DIR` select the corresponding source trees;
 `RELEASE_SANDBOX_INIT_BIN` and `RELEASE_ENVD_BIN` select the matching init
 and Envd binaries for material collection and image consistency checks. Keep source versions, native link maps and these outputs
-together. Native pin changes require updating the recipe, digests and source
-records together; a path override is not permission to label different source
+together. Native pin changes require updating the recipe, input digests and license collection together; a path override is not permission to label different source
 bytes as the configured version.
 
-The Runtime source build uses `GOWORK=off` and the minimal
-Accelerator/Sandboxer dependency closure. Internal records use a release version
-only when its local Git tag identifies the selected commit, otherwise
-`git:<commit>`; future target tags need not exist. `flatten-ctl` must be the
-Linux `github.com/kuasar-sandbox/guest-runtime/cmd/flatten-ctl` main package
-for the selected amd64 or arm64 target, with clean Go VCS metadata matching the
-selected project commit and a versioned, checksummed external go-erofs build record.
-The package records its requested Runtime or Kernel version separately from
-source commits.
+Runtime Go builds use a workspace containing exactly the selected guest-runtime and accelerator modules. `sandbox-init` comes from the selected published sandboxer binary; sandboxer is not a Runtime Go workspace member. `flatten-ctl` must identify the Linux `github.com/kuasar-sandbox/guest-runtime/cmd/flatten-ctl` main package and selected amd64 or arm64 target. The current producer checks its own clean Go VCS metadata. Normal binary build information and the versioned, checksummed external go-erofs dependency remain intact; no separate source records are packaged.
 
-Go compiler selection is recorded separately in the guest-runtime, sandboxer
-and Envd module directories. When these select different compiler versions,
+License collection resolves the Go compiler selection separately for guest-runtime, the selected sandbox-init binary and Envd. When these select different compiler versions,
 each payload's actual version and the corresponding installed Go/bundled
 dependency notices are collected. The parent module's context does not replace
 a payload's own selection. Module materials use the effective replacements and
-matching module checksums with the normal Go cache and routing. Existing
-internal and Envd shared-module local replacements remain supported; other
+matching module checksums with the normal Go cache and routing. Selected internal modules use the explicit workspace, while Envd keeps its isolated shared-module replacements; other
 unversioned third-party replacements are not supported in official packages.
 Compiler distributions are neither downloaded nor authenticated by these
 material collectors, and standalone validation does not require the payload's
 compiler version.
 
-Materials are isolated under `share/licenses/runtime` and
-`share/sources/runtime`, or the separate `vmlinux` namespaces. Each unit
-carries `SOURCES.tsv`, `GO-BUILD-INFO.tsv`, `GO-MODULES.tsv` and
-`MATERIALS.sha256`. Collection rejects missing notices, unreadable subtrees,
-partial traversals and collisions between different inputs. Project, Envd,
-Linux, Go dependency and internal/shared-module records must reference their
-own material directories. Kernel includes Linux `COPYING` and the complete
-`LICENSES` tree from its selected source; the recorded COPYING digest must
-agree with the bundled file.
+Licenses and notices are isolated under `share/licenses/runtime` or `share/licenses/vmlinux`. Collection rejects missing notices, unreadable subtrees, partial traversals and collisions between different inputs. Kernel includes Linux `COPYING` and the complete `LICENSES` tree from its selected source. No source tables or historical build/test records are shipped.
 
-Validation accepts only the selected unit's payloads: Runtime has
-`sandbox-runtime.bundle` and `flatten-ctl` under `bin/`;
-Kernel has only `bin/vmlinux`. It checks exact paths, duplicate entries,
-types, root ownership, modes, inventory, source-record consistency and
-checksums. Foreign unit materials and unrelated directories are refused before
-extraction. A Runtime archive cannot replace the independently selected Kernel
-or alter unrelated deployment-root modes.
+Validation accepts only the selected unit's payloads: Runtime has `sandbox-runtime.bundle` and `flatten-ctl` under `bin/`; Kernel has `bin/vmlinux` and its runtime identity file `bin/vmlinux.sha256`. It checks exact paths, duplicate entries, types, root ownership, permissions and payload integrity. Foreign unit materials and unrelated directories are refused before extraction. A Runtime archive cannot replace the independently selected Kernel or alter unrelated deployment-root modes.
 
 Standalone Runtime validation uses trusted host `fsck.erofs` and
 `dump.erofs` already installed on `PATH`. It does not download EROFS sources
@@ -91,8 +66,7 @@ or compile readers on demand. These readers must support the image format,
 Validation checks the bundle's alignment and prefix digest, verifies the
 complete EROFS filesystem without extracting its tree, and reads only init,
 Envd and flatten-ctl into fixed private files. In-image ownership/modes,
-Go main identities/targets and build records must match; init must also bind
-the selected Sandboxer commit. Embedded flatten-ctl must equal its outer
+Go main identities and target architectures must match. Before publication, embedded init and Envd must equal the actual selected input binaries; published package consumption does not require source provenance. Embedded flatten-ctl must equal its outer
 payload. An obsolete embedded or outer mkfs payload is rejected. No archive executable is run. Kernel validation needs no EROFS
 reader, Runtime payload or dependency checkout.
 
@@ -102,15 +76,8 @@ Historical Runtime packages containing mkfs retain their original source, licens
 
 #### Publishing and validation boundaries
 
-The publisher supplies the selected project `SOURCE_SHA` to validation before
-Tag/Release writes, uses the bundle's `release-notes.md` body and appends the
-existing source/Preview markers. Producer-supplied notes may not contain those
-reserved markers. Source selection, build/publish permission
-separation and refusal to replace published assets remain required. Independent
-validation is an offline bundle check: it does not fetch project/dependency Git
-objects or Go modules, or compare notices with remote source trees. Checksums
-and VCS records do not attest an arbitrary producer or isolate untrusted CI
-candidates. These materials support release review, not legal certification.
+The publisher checks the current project's build output before Tag/Release writes, uses human release notes, verifies uploaded asset sizes/digests and refuses to replace different existing bytes. Source/Preview markers and independent `SHA256SUMS` are not published. Current source selection and acceptance remain pipeline inputs. Independent package consumption uses native GitHub asset integrity and offline payload checks without fetching historical Git or Actions evidence. Licenses remain part of the archive.
+
 
 `librocksdb`, accelerator's CGO link dependency, is built in that repository, not here.
 
