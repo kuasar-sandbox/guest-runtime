@@ -114,7 +114,7 @@ GOWORK=off make build TARGET_ARCH=aarch64  # 在依赖支持的范围内交叉�
 
 GitHub 组件资产在组件 build/package 检查后从所选 source ref 和精确 commit 发布，架构集合由各个所选 Release 声明。这里 `<arch>` 为该版本实际发布的 `x86_64` 或 `aarch64`。项目聚合 Release 随后选择精确 Runtime、VMLinux 和其他组件 Tag,并对该组合执行跨组件集成测试及已发布资产的 MicroVM 验证。Source Makefile 支持其他 `TARGET_ARCH` 不等于已为该架构发布预构建 artifact。
 
-Runtime 发布内嵌所选 sandboxer Release 中的 `sandbox-init`。安装该二进制前会校验 Release 的 Tag/源码、资产大小、GitHub 摘要及 `SHA256SUMS`；所选 sandboxer 源码仍用于来源和许可证校验。重新编译同一提交可能改变 Go 构建元数据或工作区派生的默认值，因此源码重编译不能证明与已发布依赖逐字节一致。
+Runtime 发布内嵌所选 sandboxer Release 中的 `sandbox-init`。安装前从所选 Tag 的完整 Release 包集合固定本机架构资产 ID，并校验 GitHub 原生大小与摘要。忽略历史正文 marker、校验和附件及来源旁车，只下载本机架构。校验归档路径、文件类型、所有权、权限与 ELF 架构，并按实际二进制中读取的编译器版本复制 Go 法律声明。重新编译同一提交可能改变 Go 构建元数据或工作区派生的默认值，因此源码重编译不能证明与已发布依赖逐字节一致。
 
 ## Kernel source 与许可证
 
@@ -132,6 +132,8 @@ Runtime bundle 可包含采用多种许可证的软件。Package/Native dependen
 - `kuasar-sandbox/kuasar-sandbox` 选择精确发行单元,运行跨组件验证并发布聚合 Release。
 
 ## Release 模型
+
+Preview 清理忽略历史 `SHA256SUMS` 和正文记录。完整性按精确包名、原生资产 ID、大小、摘要与上传状态判断；历史单 x86_64 包和完整双架构包均受保护，缺失或歧义元数据保留并报错。删除前复核实际 Tag 与 Release，部分删除可重试；只有明确 404 视为不存在。保留范围与期限由项目发行清理规则决定。
 
 Runtime 与 VMLinux 组件 Release 从所选 source ref 和精确 commit 构建。Preview Release 是供开发和评估使用的 GitHub prerelease;mainline Stable 分别对每个发行单元协调。项目聚合 Release 始终选择精确 Tag,不依赖 GitHub Latest,随后通过项目级集成测试和已发布资产测试验证所选组合。
 

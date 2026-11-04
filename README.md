@@ -119,7 +119,7 @@ The two version numbers may advance independently. The project aggregate release
 
 GitHub component assets are published for the architectures declared by each selected release, from exact source refs/commits after component build and packaging checks. Here `<arch>` is `x86_64` or `aarch64` when that release publishes it. The project aggregate release later selects exact Runtime, VMLinux, and other component tags and performs cross-component integration tests plus released-asset MicroVM validation for that composition. Source Makefiles may support another `TARGET_ARCH`, but source-build support does not by itself mean a prebuilt artifact is published for that architecture.
 
-Runtime publication embeds `sandbox-init` from the selected sandboxer Release. It verifies the Release tag/source, asset sizes and GitHub digests, and `SHA256SUMS` before installing the binary; the selected sandboxer source remains available for provenance and license validation. Rebuilding the same commit can change Go build metadata or workspace-derived defaults, so a source rebuild does not establish byte identity with the published dependency.
+Runtime publication embeds `sandbox-init` from the selected sandboxer Release. It fixes the selected native asset ID from the tag’s complete Release package set and checks GitHub size/digest before installing the binary. Historical body markers, checksum attachments and source sidecars are ignored. Only the local architecture is downloaded. Archive paths, types, ownership, permissions and ELF architecture are checked; Go notices are copied using the compiler version read from the actual binary. Rebuilding the same commit can change Go build metadata or workspace-derived defaults, so a source rebuild does not establish byte identity with the published dependency.
 
 ## Kernel source and licensing
 
@@ -137,6 +137,8 @@ The repository-wide license boundaries are described in [`LICENSE_SCOPE.md`](LIC
 - `kuasar-sandbox/kuasar-sandbox` selects exact release units, runs cross-component validation, and publishes aggregate releases.
 
 ## Release model
+
+Preview cleanup ignores historical `SHA256SUMS` and body records. Completeness uses exact package names and native asset IDs, sizes, digests and upload states; historical x86_64-only and complete dual-architecture packages are protected. Missing or ambiguous metadata is retained and reported. Cleanup rechecks the actual tag and Release before deletion, supports partial retries and treats only confirmed 404 as absence. The project release policy continues to define scope and retention.
 
 The selected owner source explicitly declares its compiled E2E helper inventory in `release/helper-inputs.json`. The current inventory is empty. Future helpers and their build recipe belong in this owner declaration; aggregate packaging discovers them without a platform filename list.
 

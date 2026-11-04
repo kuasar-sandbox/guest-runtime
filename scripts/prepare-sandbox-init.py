@@ -2,10 +2,8 @@
 """Install the exact sandbox-init from the selected sandboxer release."""
 
 import argparse
-import csv
 import hashlib
 import json
-import io
 import os
 from pathlib import Path, PurePosixPath
 import re
@@ -38,12 +36,30 @@ def _member(bundle, name):
     return matches[0]
 
 
-def _verified_material(bundle, checksums, name):
-    member = _member(bundle, name)
-    payload = bundle.extractfile(member).read()
-    require(checksums.get(name) == hashlib.sha256(payload).hexdigest(),
-            f"sandboxer material checksum mismatch: {name}")
-    return payload
+def _safe_members(bundle):
+    members = {}
+    for member in bundle.getmembers():
+        name = _archive_name(member)
+        if name == "." and member.isdir():
+            continue
+        require(name and not name.startswith("/") and "\\" not in name
+                and not any(ord(char) < 32 or ord(char) == 127 for char in name)
+                and all(part not in ("", ".", "..") for part in name.split("/")),
+                "sandboxer archive has an unsafe path")
+        require(name not in members, "sandboxer archive has duplicate paths")
+        require(member.isdir() or member.isfile(), "sandboxer archive has an unsafe file type")
+        require(not member.mode & 0o7022 and member.uid == member.gid == 0,
+                "sandboxer archive has unsafe permissions or ownership")
+        members[name] = member
+    for name in members:
+        require(all(str(parent) not in members or members[str(parent)].isdir()
+                    for parent in PurePosixPath(name).parents), "sandboxer archive has a path conflict")
+    return members
+
+
+def _safe_output(path):
+    require(not path.is_symlink() and all(not parent.is_symlink() for parent in path.parents),
+            "sandbox-init output has a symlink path")
 
 
 def _go_toolchain(value):
@@ -81,37 +97,39 @@ def prepare(release, directory, version, source_sha, output, go_toolchain_output
     require(arch in ("x86_64", "aarch64"), "invalid sandbox-init target architecture")
     require(re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+(?:-preview\.[0-9]{8}(?:\.[1-9][0-9]*)?)?", version), "invalid sandboxer version")
     require(re.fullmatch(r"[0-9a-f]{40}", source_sha), "invalid sandboxer source SHA")
-    require(release["tag_name"] == version and release["target_commitish"] == source_sha,
-            "sandboxer Release does not match the selected tag/source")
+    require(release["tag_name"] == version, "sandboxer Release does not match the selected tag")
     require(release["draft"] is False and release["prerelease"] is ("-preview." in version),
             "sandboxer Release has the wrong publication state")
     archive_name = f"sandboxer-{version}-linux-{arch}.tar.gz"
-    assets = release["assets"]
+    # Freeze native metadata from one Release response. Old checksum attachments
+    # and body markers have no authority and need not be downloaded.
+    assets = [asset for asset in release["assets"] if asset.get("name") != "SHA256SUMS"]
     names = {asset["name"] for asset in assets}
     native = f"sandboxer-{version}-linux-x86_64.tar.gz"
     arm = f"sandboxer-{version}-linux-aarch64.tar.gz"
-    require(len(assets) == len(names) and names in ({native, "SHA256SUMS"}, {native, arm, "SHA256SUMS"})
-            and archive_name in names,
-            "sandboxer Release has an unexpected asset set")
+    require(len(assets) == len(names) and names in ({native}, {native, arm})
+            and archive_name in names, "sandboxer Release has an unexpected asset set")
+    require(len({asset.get("id") for asset in assets}) == len(assets), "duplicate sandboxer asset ID")
     for asset in assets:
-        if asset["name"] not in (archive_name, "SHA256SUMS"):
+        require(type(asset.get("id")) is int and asset["id"] > 0
+                and type(asset.get("size")) is int and asset["size"] > 0
+                and isinstance(asset.get("digest"), str)
+                and re.fullmatch(r"sha256:[0-9a-f]{64}", asset["digest"])
+                and asset.get("state") == "uploaded", "sandboxer asset lacks valid native metadata")
+        if asset["name"] != archive_name:
             continue
-        path = directory / asset["name"]
-        require(asset["state"] == "uploaded" and path.stat().st_size == asset["size"],
-                f"sandboxer asset size/state mismatch: {asset['name']}")
+        path = directory / archive_name
+        require(path.is_file() and not path.is_symlink() and path.stat().st_size == asset["size"],
+                f"sandboxer asset size/state mismatch: {archive_name}")
         require(asset["digest"] == "sha256:" + digest(path),
-                f"sandboxer GitHub asset digest mismatch: {asset['name']}")
+                f"sandboxer GitHub asset digest mismatch: {archive_name}")
     archive = directory / archive_name
-    expected = {asset["name"]: asset["digest"].removeprefix("sha256:") for asset in assets if asset["name"] != "SHA256SUMS"}
-    checksums = {}
-    for line in (directory / "SHA256SUMS").read_text().splitlines():
-        match = re.fullmatch(r"([0-9a-f]{64})  ([^\r\n]+)", line)
-        require(match is not None and match[2] not in checksums, "sandboxer SHA256SUMS is malformed")
-        checksums[match[2]] = match[1]
-    require(checksums == expected and checksums[archive_name] == digest(archive), "sandboxer SHA256SUMS does not match its archive")
+    _safe_output(output)
+    if go_toolchain_output is not None:
+        _safe_output(go_toolchain_output)
     with tarfile.open(archive, "r:gz") as bundle:
-        members = [member for member in bundle.getmembers()
-                   if _archive_name(member) == "bin/sandbox-init"]
+        safe = _safe_members(bundle)
+        members = [safe["bin/sandbox-init"]] if "bin/sandbox-init" in safe else []
         require(len(members) == 1 and members[0].isfile() and members[0].mode & 0o111,
                 "sandboxer archive must contain one regular executable bin/sandbox-init")
         payload = bundle.extractfile(members[0]).read()
@@ -120,45 +138,10 @@ def prepare(release, directory, version, source_sha, output, go_toolchain_output
                 "selected sandbox-init has the wrong architecture")
 
         if go_toolchain_output is not None:
-            material_member = _member(bundle, "share/sources/sandboxer/MATERIALS.sha256")
-            checksums = {}
-            for raw in bundle.extractfile(material_member).read().decode().splitlines():
-                digest_value, separator, name = raw.partition("  ")
-                require(separator and re.fullmatch(r"[0-9a-f]{64}", digest_value),
-                        "sandboxer MATERIALS.sha256 is malformed")
-                name = name.removeprefix("./")
-                require(name not in checksums,
-                        "sandboxer MATERIALS.sha256 has duplicate paths")
-                checksums[name] = digest_value
-
-            info_name = "share/sources/sandboxer/GO-BUILD-INFO.tsv"
-            sources_name = "share/sources/sandboxer/SOURCES.tsv"
-            info = _verified_material(bundle, checksums, info_name).decode()
-            sources = _verified_material(bundle, checksums, sources_name).decode()
-            rows = list(csv.DictReader(io.StringIO(info), delimiter="\t"))
-            selected = [row["version_or_value"] for row in rows
-                        if row["payload"] == "bin/sandbox-init"
-                        and row["record"] == "toolchain" and row["name"] == "go"]
-            require(len(selected) == 1,
-                    "sandbox-init must declare exactly one Go toolchain")
-            toolchain = _go_toolchain(selected[0])
-            require(_binary_go_toolchain(payload, directory) == toolchain,
-                    "sandbox-init binary Go toolchain does not match release metadata")
+            # Legal notices follow the compiler recorded in the actual binary;
+            # no historical source/build sidecar is a prerequisite.
+            toolchain = _go_toolchain(_binary_go_toolchain(payload, directory))
             license_directory = f"share/licenses/sandboxer/go-toolchain/{toolchain}"
-            source_rows = list(csv.DictReader(io.StringIO(sources), delimiter="\t"))
-            selected_sources = [
-                row for row in source_rows
-                if row["payload"] == "bin/sandbox-init"
-                and row["name"] == "Go toolchain"
-            ]
-            require(len(selected_sources) == 1,
-                    "sandbox-init must declare exactly one Go toolchain source")
-            source = selected_sources[0]
-            require(source["version"] == toolchain
-                    and source["source"] == f"https://go.dev/dl/#{toolchain}"
-                    and source["integrity"] == "-"
-                    and source["license_directory"] == license_directory,
-                    "sandbox-init Go toolchain source record is not canonical")
 
             prefix = license_directory + "/"
             notice_members = [member for member in bundle.getmembers()
@@ -181,7 +164,7 @@ def prepare(release, directory, version, source_sha, output, go_toolchain_output
                     continue
                 require(member.mode == 0o644,
                         "sandbox-init Go toolchain notice has an unsafe mode")
-                data = _verified_material(bundle, checksums, name)
+                data = bundle.extractfile(member).read()
                 files.append((relative, data))
             require(any(relative == "LICENSE" for relative, _ in files),
                     "sandbox-init Go toolchain LICENSE is missing")
