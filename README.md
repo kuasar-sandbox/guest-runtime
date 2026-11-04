@@ -173,3 +173,5 @@ Original project content is licensed under the [Apache License 2.0](LICENSE). Ke
 
 `make release-runtime SANDBOXER_VERSION=<tag>` also fetches and verifies that exact sandboxer Release using the authenticated GitHub CLI. It assembles and packages the same installed binary and compiler notices under the build directory; a missing release or failed verification stops before assembly, even when an old development binary exists.
 The local sandboxer checkout must be at that exact tag for license inputs; missing or different tags fail before download.
+
+`make release-runtime` also checks `ACCELERATOR_VERSION` against the clean sibling accelerator checkout and generates the two-module workspace before compilation. It rebuilds `flatten-ctl` and uses that same output for assembly and packaging, regardless of an inherited `GOWORK=off` or old `FLATTEN_CTL`. Set `KUASAR_PLATFORM_DIR` if the project checkout is not at `../kuasar-sandbox`. Conflicting source directories or missing tags/modules fail before the build.

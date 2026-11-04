@@ -44,7 +44,7 @@ GO_BUILD_FLAGS := -trimpath
 
 SANDBOXER_DIR ?= ../sandboxer
 SANDBOX_INIT  ?= $(SANDBOXER_DIR)/$(BINDIR)/sandbox-init
-ENVD          ?= native-deps/$(BINDIR)/envd
+ENVD          ?= native-deps/bin/$(TARGET_ARCH)/envd
 FLATTEN_CTL   ?= $(BINDIR)/flatten-ctl
 STORE_CTL     ?= ../accelerator/$(BINDIR)/store-ctl
 
@@ -70,8 +70,8 @@ build: flatten-ctl
 	$(MAKE) sandbox-runtime
 
 flatten-ctl:
-	@mkdir -p $(BINDIR)
-	GOOS=linux GOARCH=$(GO_ARCH) CGO_ENABLED=0 $(GO) build $(GO_BUILD_FLAGS) -o $(BINDIR)/flatten-ctl ./cmd/flatten-ctl
+	@mkdir -p "$(BINDIR)"
+	GOOS=linux GOARCH=$(GO_ARCH) CGO_ENABLED=0 $(GO) build $(GO_BUILD_FLAGS) -o "$(BINDIR)/flatten-ctl" ./cmd/flatten-ctl
 	$(call link_bin,flatten-ctl)
 
 native-deps:
@@ -81,7 +81,7 @@ sandbox-init:
 	$(MAKE) -C $(SANDBOXER_DIR) sandbox-init
 
 envd:
-	$(MAKE) -C native-deps envd
+	$(MAKE) -C native-deps envd BINDIR="bin/$(TARGET_ARCH)"
 
 vmlinux:
 	$(MAKE) -C native-deps vmlinux
@@ -111,8 +111,8 @@ sandbox-runtime:
 	cp "$(FLATTEN_CTL)" $(BUILD_DIR)/sandbox-runtime/opt/sandbox-runtime/bin/flatten-ctl
 	chmod 0755 $(BUILD_DIR)/sandbox-runtime/opt/sandbox-runtime/bin/envd \
 	           $(BUILD_DIR)/sandbox-runtime/opt/sandbox-runtime/bin/flatten-ctl
-	mkdir -p $(BINDIR)
-	rm -f $(BUILD_DIR)/sandbox-runtime.erofs $(BINDIR)/sandbox-runtime.bundle
+	mkdir -p "$(BINDIR)"
+	rm -f $(BUILD_DIR)/sandbox-runtime.erofs "$(BINDIR)/sandbox-runtime.bundle"
 	"$(BUILD_MKFS_EROFS)" \
 	    -Ededupe \
 	    --chunksize=4096 \
@@ -124,9 +124,9 @@ sandbox-runtime:
 	    $(BUILD_DIR)/sandbox-runtime.erofs $(BUILD_DIR)/sandbox-runtime 2>/dev/null
 	GOOS=linux GOARCH=$(shell $(GO) env GOHOSTARCH) CGO_ENABLED=0 $(GO) run ./cmd/runtime-bundle \
 	    -input $(BUILD_DIR)/sandbox-runtime.erofs \
-	    -output $(BINDIR)/sandbox-runtime.bundle
+	    -output "$(BINDIR)/sandbox-runtime.bundle"
 	$(call link_bin,sandbox-runtime.bundle)
-	@echo "==> built $(BINDIR)/sandbox-runtime.bundle"
+	@echo "==> built "$(BINDIR)/sandbox-runtime.bundle""
 
 test:
 	PYTHONDONTWRITEBYTECODE=1 python3 scripts/test-environment-tools.py
@@ -145,27 +145,37 @@ test-e2e-scripts:
 
 RUNTIME_VERSION ?= runtime-v0.1.0
 VMLINUX_VERSION ?= vmlinux-v0.1.0
-ACCELERATOR_VERSION ?= v0.1.7
-SANDBOXER_VERSION ?= v0.1.3
+KUASAR_PLATFORM_DIR ?= ../kuasar-sandbox
+ACCELERATOR_VERSION ?= v0.1.10
+SANDBOXER_VERSION ?= v0.1.13-preview.20261104.1
 
 # Release assembly must consume a verified selected archive, never a leftover
 # development binary. The generic sandbox-runtime target remains a dev entry.
 release-runtime:
-	@head="$$(git -C "$(SANDBOXER_DIR)" rev-parse HEAD)" \
+	@set -e; workspace="$$(python3 -B "$(KUASAR_PLATFORM_DIR)/ci/integration/go_workspace.py" \
+		--root .. --owners guest-runtime --dependency-tag "accelerator=$(ACCELERATOR_VERSION)")"; \
+	head="$$(git -C "$(SANDBOXER_DIR)" rev-parse HEAD)" \
 	  && tagged="$$(git -C "$(SANDBOXER_DIR)" rev-parse --verify "refs/tags/$(SANDBOXER_VERSION)^{commit}")" \
 	  && [ "$$head" = "$$tagged" ] \
-	  || { echo "release-runtime: check out the selected sandboxer tag $(SANDBOXER_VERSION) for license inputs" >&2; exit 1; }
+	  || { echo "release-runtime: check out the selected sandboxer tag $(SANDBOXER_VERSION) for license inputs" >&2; exit 1; }; \
 	python3 -B scripts/prepare-sandbox-init.py --fetch \
 		--version "$(SANDBOXER_VERSION)" --arch "$(TARGET_ARCH)" \
 		--source-sha "$$(git -C "$(SANDBOXER_DIR)" rev-parse HEAD)" \
 		--output "$(abspath $(BUILD_DIR))/release-inputs/sandbox-init" \
-		--go-toolchain-output "$(abspath $(BUILD_DIR))/release-inputs/sandboxer-go"
-	$(MAKE) sandbox-runtime SANDBOX_INIT="$(abspath $(BUILD_DIR))/release-inputs/sandbox-init"
-	rm -rf $(BUILD_DIR)/release-runtime-bundle
+		--go-toolchain-output "$(abspath $(BUILD_DIR))/release-inputs/sandboxer-go"; \
+	$(MAKE) flatten-ctl GOWORK="$$workspace" BINDIR="$(abspath $(BINDIR))"; \
+	$(MAKE) sandbox-runtime GOWORK="$$workspace" BINDIR="$(abspath $(BINDIR))" \
+		FLATTEN_CTL="$(abspath $(BINDIR))/flatten-ctl" \
+		SANDBOX_INIT="$(abspath $(BUILD_DIR))/release-inputs/sandbox-init"; \
+	rm -rf "$(BUILD_DIR)/release-runtime-bundle"; \
+	GOWORK="$$workspace" RELEASE_BIN_DIR="$(abspath $(BINDIR))" \
+	RELEASE_SOURCE_ROOT="$(CURDIR)" \
+	RELEASE_ACCELERATOR_SOURCE_DIR="$(abspath ../accelerator)" \
 	SOURCE_DATE_EPOCH="$$(git show -s --format=%ct HEAD)" \
 	RELEASE_ACCELERATOR_VERSION="$(ACCELERATOR_VERSION)" \
 	RELEASE_SANDBOXER_VERSION="$(SANDBOXER_VERSION)" \
 	RELEASE_SANDBOXER_SOURCE_DIR="$$(cd "$(SANDBOXER_DIR)" && pwd)" \
+	RELEASE_ENVD_BIN="$(abspath $(ENVD))" \
 	RELEASE_SANDBOX_INIT_BIN="$(abspath $(BUILD_DIR))/release-inputs/sandbox-init" \
 	RELEASE_MATERIALS_GO_NOTICE_ROOT="$(abspath $(BUILD_DIR))/release-inputs/sandboxer-go" \
 		bash scripts/release.sh package runtime "$(RUNTIME_VERSION)" "$(TARGET_ARCH)" \

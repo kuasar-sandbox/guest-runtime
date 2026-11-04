@@ -162,3 +162,5 @@ Runtime 与 VMLinux 组件 Release 从所选 source ref 和精确 commit 构建�
 
 `make release-runtime SANDBOXER_VERSION=<tag>` 同样通过已登录的 GitHub CLI 下载并校验该精确 sandboxer Release。装配与打包使用构建目录内同一个已安装二进制及编译器许可证；即使本地存在旧开发二进制，Release 缺失或校验失败也会在装配前停止。
 本地 sandboxer 源码必须位于该精确 tag，以提供对应许可证；缺少 tag 或 HEAD 不符会在下载前失败。
+
+`make release-runtime` 同时核对 `ACCELERATOR_VERSION` 与干净的相邻 accelerator checkout，并在编译前生成两个模块的 workspace。它重新编译 `flatten-ctl`，装配和打包使用同一输出，不受继承的 `GOWORK=off` 或旧 `FLATTEN_CTL` 影响。项目 checkout 不在 `../kuasar-sandbox` 时设置 `KUASAR_PLATFORM_DIR`。源码目录冲突或缺 Tag、缺模块会在构建前停止。

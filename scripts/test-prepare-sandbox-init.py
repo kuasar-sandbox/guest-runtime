@@ -117,7 +117,7 @@ class SelectedSandboxInitTests(unittest.TestCase):
                 self.assertFalse(self.notices.exists())
 
     def test_local_make_release_preserves_selected_paths_and_stops_on_fetch_failure(self):
-        make = shutil.which('make')
+        make = shutil.which('make', path=os.defpath)
         self.assertIsNotNone(make)
         project, tools = self.root / 'runtime', self.root / 'tools'
         project.mkdir(); tools.mkdir(); (project / 'scripts').mkdir()
@@ -129,6 +129,8 @@ class SelectedSandboxInitTests(unittest.TestCase):
         python = tools / 'python3'
         python.write_text('#!/usr/bin/python3\n' + """import os,sys,pathlib
 args=sys.argv[1:]
+if any(arg.endswith('/go_workspace.py') for arg in args):
+    print('/selected/go.work');raise SystemExit(0)
 assert '--fetch' in args and args[args.index('--version')+1] == 'v1.2.3'
 with open(os.environ['CALLS'],'a') as f:f.write('fetch\\n')
 if os.environ.get('FETCH_FAIL'):raise SystemExit(23)
@@ -146,8 +148,12 @@ else:print(123)
 """);git.chmod(0o755)
         child = tools / 'child-make'
         child.write_text('#!/usr/bin/python3\n' + """import os,sys,pathlib
+assert 'GOWORK=/selected/go.work' in sys.argv
+if sys.argv[1]=='flatten-ctl':
+    with open(os.environ['CALLS'],'a') as f:f.write('flatten\\n')
+    raise SystemExit(0)
 assert sys.argv[1]=='sandbox-runtime'
-path=pathlib.Path(sys.argv[2].removeprefix('SANDBOX_INIT='))
+path=pathlib.Path(next(arg.removeprefix('SANDBOX_INIT=') for arg in sys.argv if arg.startswith('SANDBOX_INIT=')))
 assert path.read_bytes()==b'selected release'
 with open(os.environ['CALLS'],'a') as f:f.write('assemble:'+str(path)+'\\n')
 """)
@@ -158,13 +164,15 @@ set -euo pipefail
 [ -d "$RELEASE_MATERIALS_GO_NOTICE_ROOT" ]
 printf 'package:%s\\nsource:%s\\n' "$RELEASE_SANDBOX_INIT_BIN" "$RELEASE_SANDBOXER_SOURCE_DIR" >> "$CALLS"
 """)
-        environment = dict(os.environ, PATH=str(tools)+os.pathsep+os.environ['PATH'], CALLS=str(log))
+        environment = dict(os.environ, PATH=str(tools)+os.pathsep+os.defpath, CALLS=str(log), GOWORK='off')
+        for key in ('MAKEFLAGS','MFLAGS','MAKELEVEL','MAKEOVERRIDES'):
+            environment.pop(key,None)
         command = [make, '-s', 'release-runtime', 'SANDBOXER_VERSION=v1.2.3',
                    'SANDBOXER_DIR='+str(selected), 'MAKE='+str(child)]
         result = subprocess.run(command, cwd=project, env=environment, text=True, capture_output=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         expected = project / 'build' / os.uname().machine / 'release-inputs/sandbox-init'
-        self.assertEqual(log.read_text().splitlines(), ['fetch','assemble:'+str(expected),
+        self.assertEqual(log.read_text().splitlines(), ['fetch','flatten','assemble:'+str(expected),
             'package:'+str(expected),'source:'+str(selected)])
         log.unlink()
         result = subprocess.run(command, cwd=project, env=dict(environment, FETCH_FAIL='1'), text=True, capture_output=True)
