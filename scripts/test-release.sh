@@ -26,7 +26,6 @@ bash "$ROOT/scripts/test-release-license-traversal.sh"
 bash "$ROOT/scripts/test-release-cleanup.sh"
 PYTHONDONTWRITEBYTECODE=1 python3 "$ROOT/scripts/test-release-archive-layout.py"
 PYTHONDONTWRITEBYTECODE=1 python3 "$ROOT/scripts/test-release-kernel-checksum.py"
-PYTHONDONTWRITEBYTECODE=1 python3 "$ROOT/scripts/test-release-source-inventory.py"
 PYTHONDONTWRITEBYTECODE=1 python3 "$ROOT/scripts/test-release-runtime-payloads.py" --prepare "$TMP/runtime-readers"
 bash "$ROOT/scripts/test-release-go-contexts.sh"
 bash "$ROOT/native-deps/deps/test-common.sh"
@@ -43,9 +42,7 @@ init_fixture_repo() {
   git -C "$directory" rev-parse HEAD
 }
 
-mkdir -p "$TMP/git-source" \
-  "$TMP/material-hash/share/licenses/hash-test/LICENSES" \
-  "$TMP/material-hash/share/sources/hash-test"
+mkdir -p "$TMP/git-source"
 printf 'fixture license\n' > "$TMP/git-source/LICENSE"
 fixture_git_sha="$(init_fixture_repo "$TMP/git-source" LICENSE)"
 [ "$(release_materials_git_version "$TMP/git-source" v1.2.3 "$fixture_git_sha")" = "git:$fixture_git_sha" ] \
@@ -75,112 +72,34 @@ if (
 ); then
   fail "license collection accepted material absent from the selected commit"
 fi
-printf 'nested license manifest\n' \
-  > "$TMP/material-hash/share/licenses/hash-test/LICENSES/MATERIALS.sha256"
-printf 'generated inventory\n' \
-  > "$TMP/material-hash/share/sources/hash-test/MATERIALS.sha256"
-release_materials_hash_tree "$TMP/material-hash" hash-test "$TMP/material-hash-actual"
-grep -Fq 'share/licenses/hash-test/LICENSES/MATERIALS.sha256' "$TMP/material-hash-actual" \
-  || fail "license file named MATERIALS.sha256 was omitted from the material inventory"
-if grep -Fq 'share/sources/hash-test/MATERIALS.sha256' "$TMP/material-hash-actual"; then
-  fail "generated material inventory included itself"
-fi
-
+# Package validation checks actual paths, permissions, notices and payloads.
 material_root="$TMP/material-validation"
 material_unit=validation
-mkdir -p "$material_root/bin"
-printf 'payload\n' > "$material_root/bin/tool"
-mkdir -p "$material_root/share/licenses/$material_unit/project" \
-  "$material_root/share/sources/$material_unit" "$TMP/material-validation-work"
+mkdir -p "$material_root/share/licenses/$material_unit/project" "$TMP/material-validation-work"
 printf 'fixture license\n' > "$material_root/share/licenses/$material_unit/project/LICENSE"
-{
-  printf 'payload\tname\tversion\tsource\tintegrity\tlicense_directory\n'
-  printf 'bin/tool\tfixture\tv1.0.0\thttps://example.invalid/source.tar.gz\tsha256:fixture\tshare/licenses/%s/project\n' \
-    "$material_unit"
-} > "$material_root/share/sources/$material_unit/SOURCES.tsv"
-printf 'payload\trecord\tname\tversion_or_value\tchecksum\n' \
-  > "$material_root/share/sources/$material_unit/GO-BUILD-INFO.tsv"
-printf 'module\tversion\tchecksum\n' \
-  > "$material_root/share/sources/$material_unit/GO-MODULES.tsv"
-release_materials_hash_tree "$material_root" "$material_unit" \
-  "$material_root/share/sources/$material_unit/MATERIALS.sha256"
 find "$material_root/share" -type d -exec chmod 0755 {} +
 find "$material_root/share" -type f -exec chmod 0644 {} +
-(
-  WORK="$TMP/material-validation-work"
-  release_materials_validate "$material_root" "$material_unit"
-)
-
-cp -a "$material_root" "$TMP/material-unsafe-license-path"
-{
-  printf 'payload\tname\tversion\tsource\tintegrity\tlicense_directory\n'
-  printf 'bin/tool\tfixture\tv1.0.0\thttps://example.invalid/source.tar.gz\tsha256:fixture\t../../../etc\n'
-} > "$TMP/material-unsafe-license-path/share/sources/$material_unit/SOURCES.tsv"
-release_materials_hash_tree "$TMP/material-unsafe-license-path" "$material_unit" \
-  "$TMP/material-unsafe-license-path/share/sources/$material_unit/MATERIALS.sha256"
-chmod 0644 "$TMP/material-unsafe-license-path/share/sources/$material_unit/MATERIALS.sha256"
-if (
-  WORK="$TMP/material-validation-work"
-  release_materials_validate "$TMP/material-unsafe-license-path" "$material_unit" \
-    >/dev/null 2>&1
-); then
-  fail "release material validator accepted a license directory outside its unit"
-fi
-
-cp -a "$material_root" "$TMP/material-invalid-record"
-{
-  printf 'payload\tname\tversion\tsource\tintegrity\tlicense_directory\n'
-  printf 'bin/tool\tfixture\tv1.0.0\thttps://example.invalid/source.tar.gz\tsha256:fixture\n'
-} > "$TMP/material-invalid-record/share/sources/$material_unit/SOURCES.tsv"
-release_materials_hash_tree "$TMP/material-invalid-record" "$material_unit" \
-  "$TMP/material-invalid-record/share/sources/$material_unit/MATERIALS.sha256"
-chmod 0644 "$TMP/material-invalid-record/share/sources/$material_unit/MATERIALS.sha256"
-if (
-  WORK="$TMP/material-validation-work"
-  release_materials_validate "$TMP/material-invalid-record" "$material_unit" \
-    >/dev/null 2>&1
-); then
-  fail "release material validator accepted a SOURCES.tsv row with fewer than six fields"
-fi
-
-cp -a "$material_root" "$TMP/material-unsafe-parent-mode"
-chmod 0777 "$TMP/material-unsafe-parent-mode/share"
-if (
-  WORK="$TMP/material-validation-work"
-  release_materials_validate "$TMP/material-unsafe-parent-mode" "$material_unit" \
-    >/dev/null 2>&1
-); then
-  fail "release material validator accepted an unsafe parent directory mode"
-fi
-
-cp -a "$material_root" "$TMP/material-empty-license"
-rm "$TMP/material-empty-license/share/licenses/$material_unit/project/LICENSE"
-release_materials_hash_tree "$TMP/material-empty-license" "$material_unit" \
-  "$TMP/material-empty-license/share/sources/$material_unit/MATERIALS.sha256"
-if (
-  WORK="$TMP/material-validation-work"
-  release_materials_validate "$TMP/material-empty-license" "$material_unit" >/dev/null 2>&1
-); then
-  fail "release material validator accepted an empty license directory"
-fi
-if (
-  release_materials_require_source "$material_root" "$material_unit" bin/tool fixture v2.0.0 \
-    >/dev/null 2>&1
-); then
-  fail "release material validator accepted a different release version"
-fi
-if (
-  release_materials_require_go "$material_root" "$material_unit" bin/tool >/dev/null 2>&1
-); then
-  fail "release material validator accepted missing Go build records"
-fi
-cp -a "$material_root" "$TMP/material-missing-payload"
-rm "$TMP/material-missing-payload/bin/tool"
-if (
-  WORK="$TMP/material-validation-work"
-  release_materials_validate "$TMP/material-missing-payload" "$material_unit" >/dev/null 2>&1
-); then
-  fail "release material validator accepted a record for an unshipped payload"
+WORK="$TMP/material-validation-work" release_materials_validate "$material_root" "$material_unit"
+for mutation in parent-mode file-mode link fifo empty missing unsafe-path source-record; do
+  altered="$TMP/material-$mutation"
+  cp -a "$material_root" "$altered"
+  license="$altered/share/licenses/$material_unit/project/LICENSE"
+  case "$mutation" in
+    parent-mode) chmod 0777 "$altered/share" ;;
+    file-mode) chmod 0666 "$license" ;;
+    link) rm "$license"; ln -s /etc/passwd "$license" ;;
+    fifo) rm "$license"; mkfifo "$license" ;;
+    empty) : > "$license" ;;
+    missing) rm "$license" ;;
+    unsafe-path) mv "$license" "${license} unsafe" ;;
+    source-record) mkdir -p "$altered/share/sources/$material_unit"; printf 'retired\n' > "$altered/share/sources/$material_unit/SOURCES.tsv" ;;
+  esac
+  if (WORK="$TMP/material-validation-work" release_materials_validate "$altered" "$material_unit" >/dev/null 2>&1); then
+    fail "license validator accepted $mutation"
+  fi
+done
+if (WORK="$TMP/material-validation-work" release_materials_validate_go "$material_root" "$material_unit" bin/missing >/dev/null 2>&1); then
+  fail "validator accepted missing Go binary"
 fi
 
 bash "$ROOT/scripts/test-preview-line.sh"
@@ -499,6 +418,29 @@ RELEASE_KIND=vmlinux bash "$ROOT/scripts/test-publisher.sh" \
   kuasar-sandbox/guest-runtime vmlinux-v2.3.4 \
   "$project_sha" release/v2.3.x
 
+# Keep the same ELF/module/architecture metadata while changing the selected
+# input bytes. Package must compare its embedded binaries with these inputs.
+for input in init envd; do
+  if [ "$input" = init ]; then
+    source_input="$TMP/sandboxer/bin/x86_64/sandbox-init"
+    override=RELEASE_SANDBOX_INIT_BIN
+    expected='embedded sandbox-init differs from the selected release binary'
+  else
+    source_input="$fixture_root/native-deps/bin/x86_64/envd"
+    override=RELEASE_ENVD_BIN
+    expected='embedded envd differs from the selected build binary'
+  fi
+  cp "$source_input" "$TMP/changed-$input"
+  printf 'different selected bytes\n' >> "$TMP/changed-$input"
+  if env "${common_env[@]}" "$override=$TMP/changed-$input" RELEASE_SOURCE_ROOT="$fixture_root" \
+    "$ROOT/scripts/release.sh" package runtime runtime-v1.2.3-preview.20260804 x86_64 \
+    "$TMP/changed-input-$input" > "$TMP/changed-input-$input.log" 2>&1; then
+    fail "packager accepted different selected $input bytes"
+  fi
+  grep -Fq "$expected" "$TMP/changed-input-$input.log" \
+    || { tail -n 10 "$TMP/changed-input-$input.log"; fail "selected $input bytes failed for an unrelated reason"; }
+done
+
 runtime_archive="$TMP/runtime-bundle/assets/sandbox-runtime-x86_64-v1.2.3-preview.20260804.tar.gz"
 # The generator is linked into flatten-ctl; retired native inputs are not shipped.
 if tar -tzf "$runtime_archive" | grep -E '^./bin/mkfs[.]erofs$|^./share/sources/runtime/(EROFS-INPUTS[.]tsv|erofs-patches/)'; then
@@ -511,26 +453,15 @@ for path in ./bin/sandbox-runtime.bundle ./bin/flatten-ctl \
   ./share/licenses/runtime/sandboxer/LICENSE \
   ./share/licenses/runtime/accelerator/LICENSE \
   ./share/licenses/runtime/envd/LICENSE \
-  ./share/licenses/runtime/go-toolchain/"$go_toolchain"/LICENSE \
-  ./share/sources/runtime/SOURCES.tsv \
-  ./share/sources/runtime/GO-BUILD-INFO.tsv \
-  ./share/sources/runtime/GO-MODULES.tsv \
-  ./share/sources/runtime/MATERIALS.sha256; do
+  ./share/licenses/runtime/go-toolchain/"$go_toolchain"/LICENSE; do
   tar -tzf "$runtime_archive" | grep -Fx "$path" >/dev/null \
     || fail "runtime archive is missing $path"
 done
-tar -xOf "$runtime_archive" ./share/sources/runtime/SOURCES.tsv \
-  | grep -F $'\tGo toolchain\t'"$go_toolchain"$'\t' > /dev/null \
-  || fail "runtime archive does not associate its Go toolchain with license material"
 vmlinux_archive="$TMP/vmlinux-bundle/assets/vmlinux-x86_64-v2.3.4.tar.gz"
 for path in ./bin/vmlinux ./bin/vmlinux.sha256 \
   ./share/licenses/vmlinux/project/LICENSE \
   ./share/licenses/vmlinux/linux/COPYING \
-  ./share/licenses/vmlinux/linux/LICENSES/preferred/GPL-2.0 \
-  ./share/sources/vmlinux/SOURCES.tsv \
-  ./share/sources/vmlinux/GO-BUILD-INFO.tsv \
-  ./share/sources/vmlinux/GO-MODULES.tsv \
-  ./share/sources/vmlinux/MATERIALS.sha256; do
+  ./share/licenses/vmlinux/linux/LICENSES/preferred/GPL-2.0; do
   tar -tzf "$vmlinux_archive" | grep -Fx "$path" >/dev/null \
     || fail "vmlinux archive is missing $path"
 done
@@ -539,15 +470,14 @@ cp -a "$TMP/vmlinux-bundle" "$candidate"
 mkdir "$candidate/root"
 tar --same-permissions -xzf "$vmlinux_archive" -C "$candidate/root"
 copying="$candidate/root/share/licenses/vmlinux/linux/COPYING"
-printf 'unselected notice bytes\n' >> "$copying"
-release_materials_hash_tree "$candidate/root" vmlinux \
-  "$candidate/root/share/sources/vmlinux/MATERIALS.sha256"
+: > "$copying"
+
 tar --sort=name --owner=0 --group=0 --numeric-owner --mtime=@1700000000 \
   -czf "$candidate/assets/$(basename "$vmlinux_archive")" -C "$candidate/root" .
 if "$fixture_root/scripts/release.sh" validate vmlinux vmlinux-v2.3.4 x86_64 "$candidate" > "$candidate/result.log" 2>&1; then
-  fail "validator accepted changed Linux COPYING with regenerated checksums"
+  fail "validator accepted empty Linux COPYING"
 fi
-grep -Fq 'missing or inconsistent source record for guest-runtime-kernel-inputs' "$candidate/result.log" \
+grep -Fq 'license material is empty' "$candidate/result.log" \
   || fail "Linux COPYING mutation failed for an unrelated reason"
 
 if tar -tzf "$runtime_archive" | grep -E '^\./(docs|test/e2e)(/|$)' >/dev/null \
@@ -614,8 +544,7 @@ for kind in runtime vmlinux; do
       */) mkdir -p "$candidate/root/$extra_path" ;;
       *) printf 'foreign payload must not be installed\n' > "$candidate/root/$extra_path" ;;
     esac
-    release_materials_hash_tree "$candidate/root" "$kind" \
-      "$candidate/root/share/sources/$kind/MATERIALS.sha256"
+
     tar --sort=name --owner=0 --group=0 --numeric-owner --mtime=@1700000000 \
       -czf "$candidate/assets/$candidate_archive" -C "$candidate/root" .
     if "$fixture_root/scripts/release.sh" validate "$kind" "$version" x86_64 "$candidate" > "$candidate/result.log" 2>&1; then
@@ -624,42 +553,8 @@ for kind in runtime vmlinux; do
     grep -Fq 'outside the exact' "$candidate/result.log" \
       || fail "extra layout entry failed for an unrelated reason"
   done
-  if SOURCE_SHA=0000000000000000000000000000000000000000 \
-    "$fixture_root/scripts/release.sh" validate "$kind" "$version" x86_64 "$TMP/$kind-bundle" >/dev/null 2>&1; then
-    fail "validator accepted $kind from another selected source commit"
-  fi
-  SOURCE_SHA="$project_sha" "$fixture_root/scripts/release.sh" validate "$kind" "$version" x86_64 "$TMP/$kind-bundle"
-done
-for dependency in accelerator sandboxer; do
-  for mutation in source integrity; do
-    candidate="$TMP/dependency-$dependency-$mutation"
-    cp -a "$TMP/runtime-bundle" "$candidate"
-    mkdir "$candidate/root"
-    candidate_archive="$(basename "$runtime_archive")"
-    tar --same-permissions -xzf "$runtime_archive" -C "$candidate/root"
-    case "$mutation" in
-      source|integrity)
-        column=4; [ "$mutation" != integrity ] || column=5
-        awk -F '\t' -v OFS='\t' -v dependency="$dependency" -v column="$column" \
-          '$2 == dependency { $column = (column == 4 ? "https://example.invalid/unselected-source" : "git:0000000000000000000000000000000000000000") } {print}' \
-          "$candidate/root/share/sources/runtime/SOURCES.tsv" > "$candidate/changed-sources"
-        install -m 0644 "$candidate/changed-sources" "$candidate/root/share/sources/runtime/SOURCES.tsv"
-        ;;
-    esac
-    release_materials_hash_tree "$candidate/root" runtime \
-      "$candidate/root/share/sources/runtime/MATERIALS.sha256"
-    tar --sort=name --owner=0 --group=0 --numeric-owner --mtime=@1700000000 \
-      -czf "$candidate/assets/$candidate_archive" -C "$candidate/root" .
-    if "$fixture_root/scripts/release.sh" validate runtime runtime-v1.2.3-preview.20260804 \
-      x86_64 "$candidate" > "$candidate/result.log" 2>&1; then
-      fail "validator accepted $dependency $mutation with regenerated checksums"
-    fi
-    expected='source record'
-    grep -Fq "$expected" "$candidate/result.log" \
-      || fail "$dependency $mutation failed for an unrelated reason"
-  done
-done
 
+done
 git clone --quiet --no-local "$fixture_root" "$TMP/target-source"
 for target in darwin/amd64 linux/arm64; do
   (cd "$TMP/target-source" && GOWORK=off CGO_ENABLED=0 GOOS="${target%/*}" GOARCH="${target#*/}" \
@@ -693,8 +588,8 @@ for mutation in wrong-os wrong-arch other-main other-module unstamped dirty-sour
   case "$mutation" in
     wrong-*) expected='must target linux/amd64' ;;
     other-*) expected='must use the selected guest-runtime module and main package' ;;
-    unstamped) expected='must bind its full selected source commit' ;;
-    dirty-source) expected='must be built from the clean selected commit' ;;
+    unstamped) expected='embedded flatten-ctl differs' ;;
+    dirty-source) expected='embedded flatten-ctl differs' ;;
   esac
   grep -Fq "$expected" "$candidate/result.log" || fail "$mutation failed for an unrelated reason"
 done
@@ -702,84 +597,28 @@ done
 for kind in runtime vmlinux; do
   if [ "$kind" = runtime ]; then
     version=runtime-v1.2.3-preview.20260804
-    payload=bin/flatten-ctl
+    labels=(project sandboxer accelerator envd)
   else
     version=vmlinux-v2.3.4
-    payload=bin/vmlinux
+    labels=(project linux)
   fi
   archive_name="$("$fixture_root/scripts/release.sh" archive-name "$kind" "$version" x86_64)"
-  for mutation in unknown-source uninventoried-system; do
-    candidate="$TMP/$kind-$mutation"
+  for label in "${labels[@]}"; do
+    candidate="$TMP/$kind-missing-$label"
     cp -a "$TMP/$kind-bundle" "$candidate"
     mkdir "$candidate/root"
     tar --same-permissions -xzf "$candidate/assets/$archive_name" -C "$candidate/root"
-    inventory="$candidate/root/share/sources/$kind/SOURCES.tsv"
-    if [ "$mutation" = unknown-source ]; then
-      printf '%s\tfabricated-source\t1.2.3\thttps://example.invalid/source\tsha256:%064d\tshare/licenses/%s/project\n' \
-        "$payload" 0 "$kind" >> "$inventory"
-    else
-      label="share/licenses/$kind/system/uninventoried.a"
-      install -d -m 0755 "$candidate/root/$label"
-      install -m 0644 "$candidate/root/share/licenses/$kind/project/LICENSE" "$candidate/root/$label/LICENSE"
-      native_payload=bin/vmlinux
-      if [ "$kind" = runtime ]; then
-        native_payload=bin/mkfs.erofs,bin/sandbox-runtime.bundle:/opt/sandbox-runtime/bin/mkfs.erofs
-      fi
-      printf '%s\tsystem:uninventoried.a\t1.2.3\tdeb-source:fixture@1.2.3\tsha256:%064d;package:fixture\t%s\n' \
-        "$native_payload" 0 "$label" >> "$inventory"
-    fi
-    release_materials_hash_tree "$candidate/root" "$kind" "$candidate/root/share/sources/$kind/MATERIALS.sha256"
+    rm -rf "$candidate/root/share/licenses/$kind/$label"
     tar --sort=name --owner=0 --group=0 --numeric-owner --mtime=@1700000000 \
       -czf "$candidate/assets/$archive_name" -C "$candidate/root" .
-    if "$fixture_root/scripts/release.sh" validate "$kind" "$version" x86_64 "$candidate" \
-      > "$candidate/result.log" 2>&1; then
-      fail "validator accepted $kind $mutation with regenerated checksums"
+    if "$fixture_root/scripts/release.sh" validate "$kind" "$version" x86_64 "$candidate" > "$candidate/result.log" 2>&1; then
+      fail "validator accepted missing $kind/$label licenses"
     fi
-    expected="unrecognized or inconsistent source inventory record"
-    grep -Fq "$expected" "$candidate/result.log" \
-      || { sed -n '1,$p' "$candidate/result.log" >&2; fail "$kind $mutation failed for an unrelated reason"; }
+    grep -Eq 'license material is missing|Linux COPYING is missing' "$candidate/result.log" || fail 'license absence failed for an unrelated reason'
   done
-done
-
-for kind in runtime vmlinux; do
-  if [ "$kind" = runtime ]; then
-    version=runtime-v1.2.3-preview.20260804
-    names=(guest-runtime sandboxer accelerator envd github.com/e2b-dev/infra/packages/shared)
-  else
-    version=vmlinux-v2.3.4
-    names=(guest-runtime-kernel-inputs linux)
+  if tar -tzf "$TMP/$kind-bundle/assets/$archive_name" | grep -E '(^|/)sources/|SOURCES[.]tsv|GO-BUILD-INFO[.]tsv|GO-MODULES[.]tsv|MATERIALS[.]sha256' >/dev/null; then
+    fail "new $kind package contains source records"
   fi
-  archive_name="$("$fixture_root/scripts/release.sh" archive-name "$kind" "$version" x86_64)"
-  for name in "${names[@]}"; do
-    candidate="$TMP/$kind-license-${name//\//-}"
-    cp -a "$TMP/$kind-bundle" "$candidate"
-    mkdir "$candidate/root"
-    tar --same-permissions -xzf "$candidate/assets/$archive_name" -C "$candidate/root"
-    inventory="$candidate/root/share/sources/$kind/SOURCES.tsv"
-    label="share/licenses/$kind/project"
-    case "$name" in
-      guest-runtime) label="share/licenses/runtime/envd" ;;
-      guest-runtime-kernel-inputs) label="share/licenses/vmlinux/linux" ;;
-    esac
-    awk -F '\t' -v OFS='\t' -v name="$name" -v label="$label" \
-      '$2 == name {$6=label} {print}' "$inventory" > "$candidate/changed.tsv"
-    install -m 0644 "$candidate/changed.tsv" "$inventory"
-    release_materials_hash_tree "$candidate/root" "$kind" \
-      "$candidate/root/share/sources/$kind/MATERIALS.sha256"
-    tar --sort=name --owner=0 --group=0 --numeric-owner --mtime=@1700000000 \
-      -czf "$candidate/assets/$archive_name" -C "$candidate/root" .
-    if "$fixture_root/scripts/release.sh" validate "$kind" "$version" x86_64 "$candidate" \
-      > "$candidate/result.log" 2>&1; then
-      fail "validator accepted $name bound to another license directory"
-    fi
-    case "$name" in
-      system:*) expected="unrecognized or inconsistent source inventory record" ;;
-      github.com/e2b-dev/infra/packages/shared|erofs-utils|guest-runtime-erofs-patches) expected="missing or inconsistent source record for $name" ;;
-      *) expected="unclaimed release license material" ;;
-    esac
-    grep -Fq "$expected" "$candidate/result.log" \
-      || { sed -n '1,$p' "$candidate/result.log" >&2; fail "$name license binding failed for an unrelated reason"; }
-  done
 done
 
 for kind in runtime vmlinux; do
@@ -791,7 +630,7 @@ for kind in runtime vmlinux; do
     names=(linux)
   fi
   archive_name="$("$fixture_root/scripts/release.sh" archive-name "$kind" "$version" x86_64)"
-  for mutation in owner source integrity setuid setgid writable-directory writable-payload; do
+  for mutation in owner setuid setgid writable-directory writable-payload; do
     for name in "${names[@]}"; do
       candidate="$TMP/$kind-$mutation-$name"
       cp -a "$TMP/$kind-bundle" "$candidate"
@@ -809,16 +648,6 @@ for kind in runtime vmlinux; do
           writable-directory) chmod 0777 "$candidate/root/bin" ;;
           writable-payload) chmod 0777 "$candidate/root/$payload" ;;
         esac
-      else
-        column=4
-        [ "$mutation" != integrity ] || column=5
-        inventory="$candidate/root/share/sources/$kind/SOURCES.tsv"
-        awk -F '\t' -v OFS='\t' -v name="$name" -v column="$column" \
-          '$2 == name {$column="https://example.invalid/not-the-selected-source"} {print}' \
-          "$inventory" > "$candidate/changed.tsv"
-        install -m 0644 "$candidate/changed.tsv" "$inventory"
-        release_materials_hash_tree "$candidate/root" "$kind" \
-          "$candidate/root/share/sources/$kind/MATERIALS.sha256"
       fi
       tar --sort=name --owner="$owner" --group=0 --numeric-owner --mtime=@1700000000 \
         -czf "$candidate/assets/$archive_name" -C "$candidate/root" .
@@ -829,30 +658,18 @@ for kind in runtime vmlinux; do
   done
 done
 
-# Runtime patch authentication needs the selected local Git objects, not a
-# checkout, downloads or a build. Kernel validation still needs no Git objects.
+# Standalone validation reads package bytes and notices, with no Git history,
+# checkout, downloads, or rebuild of the embedded released sandbox-init.
 mkdir -p "$TMP/standalone-tools" "$TMP/standalone-bin"
 cp -a "$fixture_root/scripts" "$TMP/standalone-tools/scripts"
 for command in git curl wget cargo make gcc; do
   printf '#!/bin/sh\nexit 97\n' > "$TMP/standalone-bin/$command"
   chmod 0755 "$TMP/standalone-bin/$command"
 done
-if env PATH="$TMP/standalone-bin:$PATH" GOPROXY=off GOSUMDB=off GOTOOLCHAIN=local \
-  SOURCE_SHA="$project_sha" "$TMP/standalone-tools/scripts/release.sh" validate \
-  runtime runtime-v1.2.3-preview.20260804 x86_64 "$TMP/runtime-bundle" > "$TMP/no-patch-source.log" 2>&1; then
-  fail 'standalone Runtime validation accepted an unavailable selected source'
-fi
-grep -Fq 'selected source commit is unavailable' "$TMP/no-patch-source.log" \
-  || { cat "$TMP/no-patch-source.log"; fail 'missing selected source failed for an unrelated reason'; }
-env PATH="$TMP/standalone-bin:$PATH" GOPROXY=off GOSUMDB=off GOTOOLCHAIN=local \
-  SOURCE_SHA="$project_sha" "$TMP/standalone-tools/scripts/release.sh" validate \
-  vmlinux vmlinux-v2.3.4 x86_64 "$TMP/vmlinux-bundle"
-# The object database comes from the selected source fixture, never the archive.
-cp -a "$fixture_root/.git" "$TMP/standalone-tools/.git"
-rm "$TMP/standalone-bin/git"
-env PATH="$TMP/standalone-bin:$PATH" GOPROXY=off GOSUMDB=off GOTOOLCHAIN=local \
-  SOURCE_SHA="$project_sha" "$TMP/standalone-tools/scripts/release.sh" validate \
-  runtime runtime-v1.2.3-preview.20260804 x86_64 "$TMP/runtime-bundle"
-echo "test-release: standalone validation with selected local objects; no checkout/download/build PASS"
-
+for kind in runtime vmlinux; do
+  if [ "$kind" = runtime ]; then version=runtime-v1.2.3-preview.20260804; else version=vmlinux-v2.3.4; fi
+  env PATH="$TMP/standalone-bin:$PATH" GOPROXY=off GOSUMDB=off GOTOOLCHAIN=local \
+    "$TMP/standalone-tools/scripts/release.sh" validate "$kind" "$version" x86_64 "$TMP/$kind-bundle"
+done
+echo "test-release: standalone validation without checkout/download/build PASS"
 echo "test-release: PASS"

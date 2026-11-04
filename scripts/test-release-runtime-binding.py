@@ -1,5 +1,4 @@
 """Repack real EROFS fixtures and exercise the complete archive validator."""
-import hashlib
 import importlib.util
 from pathlib import Path
 import shutil
@@ -11,11 +10,6 @@ ROOT = Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location("runtime_fixture", ROOT / "scripts/test-release-runtime-payloads.py")
 FIXTURE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(FIXTURE)
-
-
-def digest(path):
-    with path.open("rb") as data:
-        return hashlib.file_digest(data, "sha256").hexdigest()
 
 
 def run(source, original, readers):
@@ -37,13 +31,13 @@ def run(source, original, readers):
             ("missing-init", "Runtime embedded payload verification failed"),
             ("linked-init", "Runtime embedded payload verification failed"),
             ("wrong-mode", "mode 0755"),
-            ("swapped-init", "Go payload must be built from the clean selected commit"),
+            ("swapped-init", "embedded init has the wrong Go main identity or target"),
             ("non-go-envd", "embedded"),
             ("obsolete-outer-mkfs", "outside the exact runtime release layout"),
             ("obsolete-embedded-mkfs", "must not contain obsolete mkfs.erofs"),
             ("missing-flatten", "Runtime embedded payload verification failed"),
             ("different-flatten", "embedded flatten-ctl differs"),
-            ("forged-envd-record", "Go build records differ from embedded Runtime payloads"),
+            ("forged-envd-record", "outside the exact runtime release layout"),
             ("corrupt-erofs", "Runtime embedded payload verification failed"),
         )
         for mutation, expected in mutations:
@@ -65,6 +59,7 @@ def run(source, original, readers):
                 target.write_text("#!/bin/sh\ntouch " + str(marker) + "\n")
                 target.chmod(0o755)
             elif mutation == "forged-envd-record":
+                (tree / "share/sources/runtime").mkdir(parents=True)
                 with (tree / "share/sources/runtime/GO-BUILD-INFO.tsv").open("a") as data:
                     data.write("bin/sandbox-runtime.bundle:/opt/sandbox-runtime/bin/envd\tbuild-setting\t-tags\tfixture-forged\t-\n")
             else:
@@ -108,12 +103,6 @@ def run(source, original, readers):
                     with erofs.open("r+b") as data:
                         data.truncate(4096)
                 FIXTURE.make_bundle(erofs, image)
-            source_files = sorted((path for parent in (tree / "share/licenses/runtime", tree / "share/sources/runtime")
-                                   for path in parent.rglob("*") if path.is_file()
-                                   and path != tree / "share/sources/runtime/MATERIALS.sha256"),
-                                  key=lambda path: str(path.relative_to(tree)))
-            (tree / "share/sources/runtime/MATERIALS.sha256").write_text("".join(
-                digest(path) + "  " + str(path.relative_to(tree)) + "\n" for path in source_files))
             archive = candidate / "assets" / archive_name
             subprocess.run(["tar", "--sort=name", "--owner=0", "--group=0", "--numeric-owner",
                             "-czf", str(archive), "-C", str(tree), "."], check=True)
