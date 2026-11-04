@@ -234,10 +234,13 @@ jobs:
           mkdir -p selected-sandboxer
           headers=$(mktemp)
           trap 'rm -f "$headers"' EXIT
-          for name in "sandboxer-${SANDBOXER_VERSION}-linux-${TARGET_ARCH}.tar.gz" SHA256SUMS; do
+          for name in "sandboxer-${SANDBOXER_VERSION}-linux-${TARGET_ARCH}.tar.gz"; do
             url=$(jq -er --arg name "$name" '
-              [.assets[] | select(.name == $name)] | select(length == 1) | .[0].url
-              | select(test("^https://api.github.com/repos/kuasar-sandbox/sandboxer/releases/assets/[0-9]+$"))
+              [.assets[] | select(.name == $name)] | select(length == 1) | .[0]
+              | select((.id | type == "number") and .id > 0 and (.id | floor) == .id
+                and .state == "uploaded" and (.size | type == "number") and .size > 0
+                and (.size | floor) == .size and (.digest | test("^sha256:[0-9a-f]{64}$")))
+              | "https://api.github.com/repos/kuasar-sandbox/sandboxer/releases/assets/\(.id)"
             ' sandboxer-release.json)
             output="selected-sandboxer/$name"
             : > "$output"

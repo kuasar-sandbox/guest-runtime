@@ -1,230 +1,176 @@
 #!/usr/bin/env python3
 import copy
-import hashlib
 import importlib.util
 import io
 from pathlib import Path
+import subprocess
 import tarfile
 import tempfile
 import unittest
 from unittest import mock
 
-spec = importlib.util.spec_from_file_location("prepare_sandbox_init", Path(__file__).with_name("prepare-sandbox-init.py"))
+spec = importlib.util.spec_from_file_location('prepare_sandbox_init', Path(__file__).with_name('prepare-sandbox-init.py'))
 helper = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(helper)
 
 
 class SelectedSandboxInitTests(unittest.TestCase):
     def setUp(self):
-        self.temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temporary.cleanup)
+        self.temporary = tempfile.TemporaryDirectory(); self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
-        self.version = "v1.2.3-preview.20260914"
-        self.sha = "a" * 40
-        self.archive = self.root / f"sandboxer-{self.version}-linux-x86_64.tar.gz"
-        self.output = self.root / "bin/sandbox-init"
-        self.go_materials = self.root / "selected-go"
-        self.payload = b"\x7fELF\x02\x01\x01" + bytes(11) + b"\x3e\x00" + bytes(44) + b"selected release binary; do not rebuild"
-        self.toolchain = "go1.26.7"
-        self.actual_toolchain = self.toolchain
+        self.version, self.sha = 'v1.2.3-preview.20261104.1', 'a' * 40
+        self.archive = self.root / f'sandboxer-{self.version}-linux-x86_64.tar.gz'
+        self.output, self.notices = self.root / 'bin/sandbox-init', self.root / 'selected-go'
+        self.payload = b'\x7fELF\x02\x01\x01' + bytes(11) + b'\x3e\x00' + bytes(44) + b'exact selected binary'
+        self.toolchain = 'go1.26.8'
         self.write_archive()
 
-    def write_archive(self, kind=tarfile.REGTYPE, duplicate=False,
-                      source_url=None, source_extra="", extra_notice=None,
-                      toolchain_record=None):
-        with tarfile.open(self.archive, "w:gz") as bundle:
-            for _ in range(2 if duplicate else 1):
-                entry = tarfile.TarInfo("./bin/sandbox-init")
-                entry.mode, entry.type = 0o755, kind
-                entry.size = len(self.payload) if kind == tarfile.REGTYPE else 0
-                entry.linkname = "/outside" if kind == tarfile.SYMTYPE else ""
-                bundle.addfile(entry, io.BytesIO(self.payload) if entry.size else None)
-            if kind == tarfile.REGTYPE and not duplicate:
-                materials = {
-                    "share/sources/sandboxer/GO-BUILD-INFO.tsv":
-                        ("payload\trecord\tname\tversion_or_value\tchecksum\n"
-                         f"bin/sandbox-init\ttoolchain\tgo\t"
-                         f"{toolchain_record or self.toolchain}\t-\n").encode(),
-                    "share/sources/sandboxer/SOURCES.tsv":
-                        ("payload\tname\tversion\tsource\tintegrity\tlicense_directory\n"
-                         f"bin/sandbox-init\tGo toolchain\t{self.toolchain}\t"
-                         f"{source_url or ('https://go.dev/dl/#' + self.toolchain)}\t-\t"
-                         f"share/licenses/sandboxer/go-toolchain/{self.toolchain}\n"
-                         f"{source_extra}").encode(),
-                    f"share/licenses/sandboxer/go-toolchain/{self.toolchain}/LICENSE":
-                        b"selected compiler license\n",
-                    f"share/licenses/sandboxer/go-toolchain/{self.toolchain}/PATENTS":
-                        b"selected compiler patents\n",
-                }
-                if extra_notice is not None:
-                    materials[extra_notice] = b"unsafe selected compiler notice\n"
-                checksum_lines = []
-                for name, data in materials.items():
-                    entry = tarfile.TarInfo("./" + name)
-                    entry.mode, entry.size = 0o644, len(data)
-                    bundle.addfile(entry, io.BytesIO(data))
-                    checksum_lines.append(
-                        f"{hashlib.sha256(data).hexdigest()}  {name}\n")
-                data = "".join(checksum_lines).encode()
-                entry = tarfile.TarInfo("./share/sources/sandboxer/MATERIALS.sha256")
-                entry.mode, entry.size = 0o644, len(data)
-                bundle.addfile(entry, io.BytesIO(data))
-        sums = self.root / "SHA256SUMS"
-        sums.write_text(f"{helper.digest(self.archive)}  {self.archive.name}\n")
-        self.release = {"tag_name": self.version, "target_commitish": self.sha,
-                        "draft": False, "prerelease": True,
-                        "assets": [{"name": path.name, "size": path.stat().st_size,
-                                    "digest": "sha256:" + helper.digest(path), "state": "uploaded"}
-                                   for path in (self.archive, sums)]}
+    def write_archive(self, name='bin/sandbox-init', mode=0o755, kind=tarfile.REGTYPE,
+                      legacy=False, extras=(), omit_license=False):
+        rows = [(name, self.payload, mode, kind)]
+        if not omit_license:
+            rows.append((f'share/licenses/sandboxer/go-toolchain/{self.toolchain}/LICENSE', b'Go license', 0o644, tarfile.REGTYPE))
+        if legacy:
+            for suffix in ('MATERIALS.sha256', 'SOURCES.tsv', 'GO-BUILD-INFO.tsv'):
+                rows.append(('share/sources/sandboxer/' + suffix, b'ignored historical record', 0o644, tarfile.REGTYPE))
+        rows.extend(extras)
+        with tarfile.open(self.archive, 'w:gz') as bundle:
+            for path, data, permissions, entry_type in rows:
+                entry = tarfile.TarInfo('./' + path)
+                entry.mode, entry.type = permissions, entry_type
+                entry.size = len(data) if entry_type == tarfile.REGTYPE else 0
+                entry.linkname = '/outside' if entry_type in (tarfile.SYMTYPE, tarfile.LNKTYPE) else ''
+                bundle.addfile(entry, io.BytesIO(data) if entry.size else None)
+        self.release = dict(tag_name=self.version, target_commitish='main', draft=False, prerelease=True,
+                            body='Human notes only.', assets=[dict(id=123, name=self.archive.name,
+                            size=self.archive.stat().st_size, digest='sha256:' + helper.digest(self.archive), state='uploaded')])
+        if legacy:
+            # No local checksum file is needed, and its invalid metadata is ignored.
+            self.release['assets'].append(dict(name='SHA256SUMS'))
+            self.release['body'] = '<!-- kuasar-release-source invalid legacy marker -->'
 
-    def prepare(self):
-        with mock.patch.object(
-                helper, "_binary_go_toolchain",
-                return_value=self.actual_toolchain):
-            helper.prepare(self.release, self.root, self.version, self.sha,
-                           self.output, self.go_materials)
+    def prepare(self, arch='x86_64'):
+        with mock.patch.object(helper, '_binary_go_toolchain', return_value=self.toolchain):
+            helper.prepare(self.release, self.root, self.version, self.sha, self.output, self.notices, arch)
 
-    def test_installs_exact_published_bytes(self):
-        self.prepare()
-        self.assertEqual(self.output.read_bytes(), self.payload)
-        self.assertEqual(self.output.stat().st_mode & 0o777, 0o755)
-        self.assertEqual(
-            (self.go_materials / self.toolchain / "LICENSE").read_bytes(),
-            b"selected compiler license\n")
-        self.assertEqual(
-            (self.go_materials / self.toolchain / "PATENTS").read_bytes(),
-            b"selected compiler patents\n")
+    def test_installs_exact_new_and_old_packages_without_historical_records(self):
+        for legacy in (False, True):
+            with self.subTest(legacy=legacy):
+                self.write_archive(legacy=legacy); self.prepare()
+                self.assertEqual(self.output.read_bytes(), self.payload)
+                self.assertEqual(self.output.stat().st_mode & 0o7777, 0o755)
+                self.assertEqual((self.notices / self.toolchain / 'LICENSE').read_bytes(), b'Go license')
+                self.assertFalse((self.root / 'SHA256SUMS').exists())
 
-    def test_installs_exact_bytes_from_a_numbered_preview(self):
-        self.version += ".1"
-        self.archive = self.root / f"sandboxer-{self.version}-linux-x86_64.tar.gz"
+    def test_rejects_wrong_tag_or_publication_state(self):
+        initial = copy.deepcopy(self.release)
+        for key, value in (('tag_name', 'v1.2.2'), ('draft', True), ('prerelease', False)):
+            self.release = dict(initial, **{key: value})
+            with self.assertRaises(ValueError): self.prepare()
+            self.assertFalse(self.output.exists())
+
+    def test_only_local_architecture_is_required(self):
+        arm = dict(self.release['assets'][0], id=124, name=self.archive.name.replace('x86_64', 'aarch64'))
+        self.release['assets'].append(arm)
+        self.prepare(); self.assertEqual(self.output.read_bytes(), self.payload)
+        self.assertFalse((self.root / arm['name']).exists())
+
+    def test_arm_binary_is_checked_independently(self):
+        self.payload = self.payload[:18] + b'\xb7\x00' + self.payload[20:]
+        self.archive = self.root / self.archive.name.replace('x86_64', 'aarch64')
         self.write_archive()
-        self.prepare()
+        self.release['assets'].append(dict(self.release['assets'][0], id=124,
+            name=self.archive.name.replace('aarch64', 'x86_64')))
+        self.prepare('aarch64')
         self.assertEqual(self.output.read_bytes(), self.payload)
 
-    def test_rejects_wrong_selection_and_publication_state(self):
+    def test_incomplete_remote_architecture_set_is_rejected(self):
+        self.release['assets'][0]['name'] = self.archive.name.replace('x86_64', 'aarch64')
+        with self.assertRaisesRegex(ValueError, 'unexpected asset set'): self.prepare('aarch64')
+
+    def test_wrong_architecture_is_rejected(self):
+        self.payload = self.payload[:18] + b'\xb7\x00' + self.payload[20:]
+        self.write_archive()
+        with self.assertRaisesRegex(ValueError, 'wrong architecture'): self.prepare()
+        self.assertFalse(self.output.exists())
+
+    def test_corrupt_download_preserves_existing_binary(self):
+        self.output.parent.mkdir(); self.output.write_bytes(b'existing')
+        self.archive.write_bytes(self.archive.read_bytes() + b'corruption')
+        with self.assertRaisesRegex(ValueError, 'size/state'): self.prepare()
+        self.assertEqual(self.output.read_bytes(), b'existing')
+
+    def test_digest_mismatch_is_rejected(self):
+        self.release['assets'][0]['digest'] = 'sha256:' + '0'*64
+        with self.assertRaisesRegex(ValueError, 'GitHub asset digest'): self.prepare()
+
+    def test_missing_or_invalid_native_metadata_is_rejected(self):
+        initial = copy.deepcopy(self.release)
+        for key, value in (('id', None), ('id', True), ('size', 0), ('digest', None),
+                           ('digest', 'sha256:wrong'), ('state', 'starter')):
+            self.release = copy.deepcopy(initial); self.release['assets'][0][key] = value
+            with self.assertRaises(ValueError): self.prepare()
+            self.assertFalse(self.output.exists())
+
+    def test_missing_file_or_duplicate_assets_are_rejected(self):
         original = copy.deepcopy(self.release)
-        for key, value in (("tag_name", "v1.2.2"), ("target_commitish", "b" * 40),
-                           ("draft", True), ("prerelease", False)):
-            with self.subTest(key=key):
-                self.release = {**copy.deepcopy(original), key: value}
-                with self.assertRaises(ValueError):
-                    self.prepare()
-                self.assertFalse(self.output.exists())
-
-    def test_rejects_corrupt_asset_without_replacing_existing_binary(self):
-        self.output.parent.mkdir()
-        self.output.write_bytes(b"existing")
-        self.archive.write_bytes(self.archive.read_bytes() + b"corruption")
-        with self.assertRaisesRegex(ValueError, "size/state"):
-            self.prepare()
-        self.assertEqual(self.output.read_bytes(), b"existing")
-
-    def test_rejects_github_digest_and_checksum_disagreement(self):
-        self.release["assets"][0]["digest"] = "sha256:" + "0" * 64
-        with self.assertRaisesRegex(ValueError, "GitHub asset digest"):
-            self.prepare()
-        self.write_archive()
-        sums = self.root / "SHA256SUMS"
-        sums.write_text(f"{'0' * 64}  {self.archive.name}\n")
-        self.release["assets"][1]["digest"] = "sha256:" + helper.digest(sums)
-        with self.assertRaisesRegex(ValueError, "SHA256SUMS"):
-            self.prepare()
-
-    def test_rejects_unsafe_notice_paths(self):
-        unsafe = (
-            f"share/licenses/sandboxer/go-toolchain/{self.toolchain}//tmp/owned")
-        self.write_archive(extra_notice=unsafe)
-        with self.assertRaisesRegex(ValueError, "unsafe path"):
-            self.prepare()
+        for assets in ([], original['assets'] * 2, [dict(original['assets'][0], name='unknown.tar.gz')]):
+            self.release = dict(original, assets=assets)
+            with self.assertRaises(ValueError): self.prepare()
         self.assertFalse(self.output.exists())
 
-    def test_rejects_unsafe_toolchain_path_component(self):
-        self.toolchain = "go1.26.7/../../tmp/owned"
-        self.write_archive()
-        with self.assertRaisesRegex(ValueError, "toolchain record is invalid"):
-            self.prepare()
+    def test_missing_init_or_license_is_rejected(self):
+        self.write_archive(name='bin/other')
+        with self.assertRaisesRegex(ValueError, 'one regular executable'): self.prepare()
+        self.write_archive(omit_license=True)
+        with self.assertRaisesRegex(ValueError, 'notices are missing'): self.prepare()
         self.assertFalse(self.output.exists())
 
-    def test_rejects_noncanonical_or_ambiguous_go_source(self):
-        canonical = (
-            f"bin/sandbox-init\tGo toolchain\t{self.toolchain}\t"
-            f"https://go.dev/dl/#{self.toolchain}\t-\t"
-            f"share/licenses/sandboxer/go-toolchain/{self.toolchain}\n")
-        for kwargs, message in (
-                ({"source_url": "https://example.invalid/toolchain"},
-                 "not canonical"),
-                ({"source_extra": canonical},
-                 "exactly one Go toolchain source")):
-            with self.subTest(kwargs=kwargs):
-                self.write_archive(**kwargs)
-                with self.assertRaisesRegex(ValueError, message):
-                    self.prepare()
-                self.assertFalse(self.output.exists())
+    def test_dangerous_permissions_are_rejected_before_chmod(self):
+        for mode in (0o4755, 0o2755, 0o1777, 0o775, 0o757, 0o644):
+            self.write_archive(mode=mode)
+            with self.assertRaises(ValueError): self.prepare()
+            self.assertFalse(self.output.exists())
 
-    def test_normalizes_supported_go_experiment_suffix(self):
-        self.write_archive(toolchain_record=f"{self.toolchain} X:arenas")
-        self.prepare()
-        self.assertEqual(self.output.read_bytes(), self.payload)
-        self.assertTrue((self.go_materials / self.toolchain / "LICENSE").is_file())
-
-    def test_rejects_binary_toolchain_mismatch(self):
-        self.actual_toolchain = "go1.26.8"
-        with self.assertRaisesRegex(ValueError, "binary Go toolchain"):
-            self.prepare()
+    def test_linked_duplicate_and_conflicting_members_are_rejected(self):
+        for kind in (tarfile.SYMTYPE, tarfile.LNKTYPE, tarfile.FIFOTYPE):
+            self.write_archive(kind=kind)
+            with self.assertRaises(ValueError): self.prepare()
+        for name in ('bin/sandbox-init', 'bin'):
+            self.write_archive(extras=[(name, b'conflict', 0o644, tarfile.REGTYPE)])
+            with self.assertRaises(ValueError): self.prepare()
         self.assertFalse(self.output.exists())
 
-    def test_rejects_tampered_selected_toolchain_material(self):
-        self.write_archive()
-        with tarfile.open(self.archive, "r:gz") as source:
-            members = source.getmembers()
-            payloads = {
-                member.name: source.extractfile(member).read()
-                for member in members if member.isfile()
-            }
-        target = "./share/licenses/sandboxer/go-toolchain/" + self.toolchain + "/LICENSE"
-        payloads[target] = b"tampered compiler license\n"
-        with tarfile.open(self.archive, "w:gz") as bundle:
-            for member in members:
-                data = payloads.get(member.name)
-                bundle.addfile(member, io.BytesIO(data) if data is not None else None)
-        sums = self.root / "SHA256SUMS"
-        sums.write_text(f"{helper.digest(self.archive)}  {self.archive.name}\n")
-        self.release["assets"] = [
-            {"name": path.name, "size": path.stat().st_size,
-             "digest": "sha256:" + helper.digest(path), "state": "uploaded"}
-            for path in (self.archive, sums)
-        ]
-        with self.assertRaisesRegex(ValueError, "material checksum mismatch"):
-            self.prepare()
+    def test_unsafe_paths_anywhere_in_archive_are_rejected(self):
+        for name in ('../owned', '/absolute', 'foo//bar', 'foo/./bar', 'foo/../bar',
+                     'foo\\bar', 'foo\nbar'):
+            with self.subTest(name=name):
+                self.write_archive(extras=[(name, b'bad', 0o644, tarfile.REGTYPE)])
+                with self.assertRaisesRegex(ValueError, 'unsafe path'): self.prepare()
         self.assertFalse(self.output.exists())
 
-
-    def test_rejects_parent_path_alias_for_sandbox_init(self):
-        with tarfile.open(self.archive, "w:gz") as bundle:
-            entry = tarfile.TarInfo("../bin/sandbox-init")
-            entry.mode, entry.size = 0o755, len(self.payload)
-            bundle.addfile(entry, io.BytesIO(self.payload))
-        sums = self.root / "SHA256SUMS"
-        sums.write_text(f"{helper.digest(self.archive)}  {self.archive.name}\n")
-        self.release["assets"] = [
-            {"name": path.name, "size": path.stat().st_size,
-             "digest": "sha256:" + helper.digest(path), "state": "uploaded"}
-            for path in (self.archive, sums)
-        ]
-        with self.assertRaisesRegex(ValueError, "one regular executable"):
-            self.prepare()
+    def test_toolchain_comes_from_binary_and_unsafe_value_is_rejected(self):
+        for toolchain in ('go1.26.8/../../owned', 'unexpected'):
+            self.toolchain = toolchain
+            with self.assertRaisesRegex(ValueError, 'toolchain record'): self.prepare()
         self.assertFalse(self.output.exists())
 
+    def test_missing_binary_toolchain_notices_are_rejected(self):
+        self.toolchain = 'go1.26.9'
+        with self.assertRaisesRegex(ValueError, 'notices are missing'): self.prepare()
 
-    def test_rejects_ambiguous_or_linked_archive_member(self):
-        for kind, duplicate in ((tarfile.SYMTYPE, False), (tarfile.REGTYPE, True)):
-            with self.subTest(kind=kind, duplicate=duplicate):
-                self.write_archive(kind, duplicate)
-                with self.assertRaisesRegex(ValueError, "one regular executable"):
-                    self.prepare()
-                self.assertFalse(self.output.exists())
+    def test_output_symlink_ancestor_is_rejected(self):
+        elsewhere = self.root / 'elsewhere'; elsewhere.mkdir()
+        self.output.parent.symlink_to(elsewhere, target_is_directory=True)
+        with self.assertRaisesRegex(ValueError, 'symlink path'): self.prepare()
+        self.assertEqual(list(elsewhere.iterdir()), [])
+
+    def test_go_version_parser_checks_actual_output(self):
+        with mock.patch.object(helper.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0,
+                '/tmp/binary: go1.26.8 X:arenas\n', '')):
+            self.assertEqual(helper._binary_go_toolchain(self.payload, self.root), 'go1.26.8')
+        with mock.patch.object(helper.subprocess, 'run', return_value=subprocess.CompletedProcess([], 1, '', 'invalid')):
+            with self.assertRaisesRegex(ValueError, 'cannot read'): helper._binary_go_toolchain(self.payload, self.root)
 
 
-if __name__ == "__main__":
-    unittest.main()
+if __name__ == '__main__': unittest.main()
