@@ -161,3 +161,4 @@ Runtime 与 VMLinux 组件 Release 从所选 source ref 和精确 commit 构建�
 项目原创内容采用 [Apache License 2.0](LICENSE)。内核构建输入的许可证边界见 [`LICENSE_SCOPE_zh.md`](LICENSE_SCOPE_zh.md)。Runtime package、EROFS tool、Envd、Buildroot/distribution input 和其他第三方 material 保留各自 license、notice、source 与 redistribution obligation。
 
 `make release-runtime SANDBOXER_VERSION=<tag>` 同样通过已登录的 GitHub CLI 下载并校验该精确 sandboxer Release。装配与打包使用构建目录内同一个已安装二进制及编译器许可证；即使本地存在旧开发二进制，Release 缺失或校验失败也会在装配前停止。
+本地 sandboxer 源码必须位于该精确 tag，以提供对应许可证；缺少 tag 或 HEAD 不符会在下载前失败。

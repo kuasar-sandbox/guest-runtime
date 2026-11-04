@@ -172,3 +172,4 @@ Do not report vulnerabilities or disclose private package sources, credentials, 
 Original project content is licensed under the [Apache License 2.0](LICENSE). Kernel build inputs retain the licensing boundary documented in [`LICENSE_SCOPE.md`](LICENSE_SCOPE.md). Runtime packages, EROFS tools, Envd, Buildroot/distribution inputs, and other third-party materials retain their own licenses, notices, source, and redistribution obligations.
 
 `make release-runtime SANDBOXER_VERSION=<tag>` also fetches and verifies that exact sandboxer Release using the authenticated GitHub CLI. It assembles and packages the same installed binary and compiler notices under the build directory; a missing release or failed verification stops before assembly, even when an old development binary exists.
+The local sandboxer checkout must be at that exact tag for license inputs; missing or different tags fail before download.

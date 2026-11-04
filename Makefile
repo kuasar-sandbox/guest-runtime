@@ -151,6 +151,9 @@ SANDBOXER_VERSION ?= v0.1.3
 # Release assembly must consume a verified selected archive, never a leftover
 # development binary. The generic sandbox-runtime target remains a dev entry.
 release-runtime:
+	@[ "$$(git -C "$(SANDBOXER_DIR)" rev-parse HEAD)" = \
+	   "$$(git -C "$(SANDBOXER_DIR)" rev-parse --verify "refs/tags/$(SANDBOXER_VERSION)^{commit}")" ] \
+	  || { echo "release-runtime: check out the selected sandboxer tag $(SANDBOXER_VERSION) for license inputs" >&2; exit 1; }
 	python3 -B scripts/prepare-sandbox-init.py --fetch \
 		--version "$(SANDBOXER_VERSION)" --arch "$(TARGET_ARCH)" \
 		--source-sha "$$(git -C "$(SANDBOXER_DIR)" rev-parse HEAD)" \
