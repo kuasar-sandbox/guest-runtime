@@ -127,7 +127,7 @@ pathlib.Path(args[args.index('--go-toolchain-output')+1]).mkdir()
 if any('refs/tags/' in arg for arg in sys.argv):
     if os.environ.get('TAG_MISSING'):raise SystemExit(1)
     print(os.environ.get('TAG_REVISION','1').zfill(40))
-elif 'rev-parse' in sys.argv:print('1'.zfill(40))
+elif 'rev-parse' in sys.argv:\n    if os.environ.get('HEAD_FAIL'):raise SystemExit(1)\n    print('1'.zfill(40))
 else:print(123)
 """);git.chmod(0o755)
         child = tools / 'child-make'
@@ -156,7 +156,8 @@ printf 'package:%s\\nsource:%s\\n' "$RELEASE_SANDBOX_INIT_BIN" "$RELEASE_SANDBOX
         result = subprocess.run(command, cwd=project, env=dict(environment, FETCH_FAIL='1'), text=True, capture_output=True)
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(log.read_text().splitlines(), ['fetch'])
-        for changes in ({'TAG_MISSING': '1'}, {'TAG_REVISION': '2'}):
+        for changes in ({'TAG_MISSING': '1'}, {'TAG_REVISION': '2'}, {'HEAD_FAIL': '1'},
+                        {'HEAD_FAIL': '1', 'TAG_MISSING': '1'}):
             log.unlink(missing_ok=True)
             result = subprocess.run(command, cwd=project, env=dict(environment, **changes),
                                     text=True, capture_output=True)
