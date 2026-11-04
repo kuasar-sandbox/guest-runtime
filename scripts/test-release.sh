@@ -24,7 +24,13 @@ source "$ROOT/scripts/release-materials.sh"
 bash "$ROOT/scripts/test-release-materials.sh"
 bash "$ROOT/scripts/test-release-go-notices.sh"
 PYTHONDONTWRITEBYTECODE=1 python3 "$ROOT/scripts/test-selected-go-materials.py"
-PYTHONDONTWRITEBYTECODE=1 python3 "$ROOT/scripts/test-release-workspace.py"
+# Cross-repository integration is opt-in; the CI source wrapper supplies its
+# selected platform explicitly. Standalone packaging needs no sibling checkout.
+if [[ -n "${KUASAR_PLATFORM_DIR:-${KUASAR_PLATFORM_ROOT:-}}" ]]; then
+  PYTHONDONTWRITEBYTECODE=1 python3 "$ROOT/scripts/test-release-workspace.py"
+else
+  echo 'test-release: workspace integration not selected (set KUASAR_PLATFORM_DIR to run)'
+fi
 PYTHONDONTWRITEBYTECODE=1 python3 "$ROOT/scripts/test-prepare-sandbox-init.py"
 PYTHONDONTWRITEBYTECODE=1 python3 "$ROOT/scripts/test-release-go-environment.py"
 bash "$ROOT/scripts/test-release-license-traversal.sh"
@@ -166,7 +172,7 @@ for input in accelerator_version sandboxer_version; do
   fi
 done
 # Validate the named native build step rather than YAML single-line formatting.
-python3 "$ROOT/scripts/ci-test-workflows.py" "${KUASAR_PLATFORM_ROOT:-}" \
+python3 "$ROOT/scripts/ci-test-workflows.py" "${KUASAR_PLATFORM_DIR:-${KUASAR_PLATFORM_ROOT:-}}" \
   || fail "release workflow contracts do not preserve native inputs and trust boundaries"
 if grep -Fq 'connector_version' "$WORKFLOW" \
   || grep -Fq 'src/connector' "$WORKFLOW"; then
