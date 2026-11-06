@@ -90,7 +90,18 @@ Raw EROFS starts at offset 0. The trailing ZIP contains only one zero-size marke
 .kuasar.digest.<64-lowercase-hex>
 ```
 
-The `digest:` identity covers every byte before the ZIP, including EROFS and alignment padding. The builder computes carrier identity while copying EROFS, then writes the marker. Run/restore reads the marker at EOF without rescanning EROFS. Final bundle size is aligned to 2 MiB, so Cloud Hypervisor can map it directly without offset support; EROFS uses its own superblock to ignore trailing padding and ZIP.
+The `digest:` identity is SHA-256 of every byte before the ZIP, including EROFS
+and alignment padding. It excludes the ZIP and is not the SHA-256 of the complete
+bundle file. The builder hashes that prefix before writing the marker. Run/restore
+checks the bundle/footer format and reads the declared identity at EOF without
+rehashing the prefix. This is an identity comparison, not independent content or
+origin verification; deploy trusted, separately verified release artifacts. The
+[release payload validator](../scripts/release-runtime-payloads.py) does recompute
+the prefix hash and compare it with the marker.
+
+Final bundle size is aligned to 2 MiB, so Cloud Hypervisor can map it directly
+without offset support; EROFS uses its own superblock to ignore trailing padding
+and ZIP.
 
 ## Runtime consumption contract
 
@@ -99,7 +110,10 @@ The `digest:` identity covers every byte before the ZIP, including EROFS and ali
 Key constraints:
 
 - The runtime image is read-only and cannot contain per-sandbox state.
-- Restoring a snapshot requires a compatible runtime image. Production should pin it by digest or release version.
+- Snapshot restore requires the captured runtime identity: the file basename and
+  footer-declared digest must both match. Wire compatibility or a release label
+  alone is insufficient. Pin and retain the required artifact; see the
+  [restore runtime selection contract](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/runtime.md#restore).
 - The sandbox-init and sandbox-ctl wire ABIs must match. Before upgrading runtime, upgrade sandboxer accordingly or validate backward compatibility.
 - `/opt/sandbox-runtime` is reserved. A preexisting directory at that path in the user image is obscured by the platform bind mount.
 
@@ -122,7 +136,12 @@ The runtime package contains:
 ```text
 bin/sandbox-runtime.bundle
 bin/flatten-ctl
+share/licenses/runtime/...
 ```
+
+The outer archive also carries required license, source and Go build/dependency
+materials under `share/licenses/runtime/`. These are release-package material,
+not files in the runtime EROFS image.
 
 `sandbox-runtime.bundle` is the stable filename shared by scripts, default configuration and external distribution.
 
