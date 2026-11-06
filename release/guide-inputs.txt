@@ -1,14 +1,16 @@
 # Owner-maintained user documentation inputs, relative to this repository.
 # The platform reads this file from the selected source revision.
 # Entries may be Markdown files, directories, or glob patterns; each must match.
-# Keep source/developer-only documentation outside the selected inputs.
+# Source/developer-only material (CONTRIBUTING, native maintenance and build) stays in source.
 README.md
 README_zh.md
-docs/flatten.md
-docs/flatten_zh.md
-docs/sandbox-runtime.md
-docs/sandbox-runtime_zh.md
+docs/using-guest-runtime.md
+docs/using-guest-runtime_zh.md
+docs/runtime-bundle.md
+docs/runtime-bundle_zh.md
 docs/vmlinux.md
 docs/vmlinux_zh.md
+docs/flatten-cli.md
+docs/flatten-cli_zh.md
 test/e2e/README.md
 test/e2e/README_zh.md

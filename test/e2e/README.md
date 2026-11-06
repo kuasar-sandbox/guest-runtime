@@ -1,4 +1,4 @@
-[English](README.md) | [简体中文](README_zh.md)
+[English](#registry-and-flattening-e2e) | [简体中文](README_zh.md)
 
 # Registry and flattening E2E
 

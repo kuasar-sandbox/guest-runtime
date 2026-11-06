@@ -1,32 +1,34 @@
 [English](vmlinux.md) | [简体中文](vmlinux_zh.md)
 
-# vmlinux — guest kernel image
+# Guest kernel: capabilities, boot and release identity
+
+This guide owns the selected guest-kernel capabilities, configuration decisions, architecture/boot ABI and delivery identity. [Build](build.md) owns source selection and production steps; [Using guest-runtime](using-guest-runtime.md) shows installed-artifact checks and consumption. A successful compile alone is not guest-behavior evidence.
 
 The platform supplies each sandbox with a **minimal, pinned-version** Linux kernel image (`bin/<arch>/vmlinux`). This document defines how that image is built, which features are enabled or disabled, and how those choices affect boot, devices, resource control and the guest security boundary.
 
 Vmlinux is a platform artifact. Tenants do not receive a general kernel-version/configuration API. A deployment needing a different kernel can select its own vmlinux with `boot.kernel: file://...`; the same kernel-path mechanism passes it to Cloud Hypervisor. The custom kernel's boot protocol, required devices, guest ABI and snapshot compatibility must be validated with the selected sandboxer/runtime/VMM combination. The platform does not guarantee arbitrary custom-kernel functionality or compatibility.
 
-## 1. Overview
+## Overview
 
-### 1.1 Design goals
+### Design goals
 
 | Goal | Implementation |
 |---|---|
 | Small image and fast boot | Sparse platform defconfig with explicit required subsystems, resolved by Kbuild; HZ=100; a minimal console configuration |
 | Inspectable version and ABI | Pin upstream version, LOCALVERSION, configuration fragments and platform patches; validate exact release assets |
-| One VM = one application | Disable user/net/uts/ipc/time namespaces and in-guest userfaultfd; a complete nested container runtime is outside the supported target (§3.2) |
+| One VM = one application | Disable user/net/uts/ipc/time namespaces and in-guest userfaultfd; a complete nested container runtime is outside the supported target ([Features disabled by the current minimal configuration](#features-disabled-by-the-current-minimal-configuration)) |
 | Host-controlled guest memory | Enable virtio-balloon for host-driven inflation through vm.resize; retain the virtio-mem driver as an extension point |
 | One rootfs construction path | virtio-pmem + DAX + read-only EROFS + writable ext4 + overlayfs |
-| In-sandbox resource isolation and storage mounts | cgroup v2 freezer plus cpu/memory/io/pids controllers; application delegation is selected by launch.cgroup_control (§5.2); NFS v3/v4 client and FUSE (s3fs) mounts (§3.1) |
+| In-sandbox resource isolation and storage mounts | cgroup v2 freezer plus cpu/memory/io/pids controllers; application delegation is selected by launch.cgroup_control ([cgroup v2: freezer and cpu/memory/io/pids controllers](#cgroup-v2-freezer-and-cpumemoryiopids-controllers)); NFS v3/v4 client and FUSE (s3fs) mounts ([Key enabled features](#key-enabled-features)) |
 
-### 1.2 Kernel version
+### Kernel version
 
 - Upstream: `linux-6.1.169` (LTS), from `cdn.kernel.org`.
 - Compiler: host gcc for native builds, or `${CROSS_PREFIX}gcc` for cross-builds.
 - Optimization: `CC_OPTIMIZE_FOR_SIZE=y` (-Os), rather than -O2 for this boot-oriented preset.
 - LOCALVERSION: `-sandbox`, making `uname -r` consistent for sandboxes using this pinned image and aiding diagnosis.
 
-### 1.3 Output
+### Output
 
 ```text
 bin/x86_64/vmlinux        ELF kernel, PVH boot protocol; size-optimized, without debug information
@@ -59,44 +61,7 @@ startup. Install and retain kernel and sidecar together, with stable bindings
 through startup; the sidecar is not a signature or runtime attestation. This
 packaging step does not change the standalone `make vmlinux` build output.
 
-## 2. Build workflow
-
-`make vmlinux` invokes fetch, patch application and build when the output is missing or tracked kernel inputs are newer. Explicit `linux-fetch`, `linux-patches-apply`, `linux-patches-format` and `linux-build` targets use `native-deps/deps/build-vmlinux.sh`, with the phase selected by `STAGE`: run these native targets with `make -C native-deps <target>` from the repository root, or run `make <target>` inside native-deps.
-
-```text
-fetch         Download and verify linux-6.1.169.tar.gz, with optional shared TARBALL_CACHE;
-              extract the cross-architecture shared source tree at build/src/linux;
-              git init, commit the imported tree and tag linux-patches-base.
-patches-apply Apply deps/linux-patches/*.patch with git am. An empty patch set
-              requires HEAD == linux-patches-base.
-              Already-applied patches are an idempotent no-op; unformatted or
-              divergent work is not overwritten.
-build         Concatenate sandbox-common.config + sandbox-<arch>.config into
-              arch/<kbuild_arch>/configs/sandbox_defconfig; run make sandbox_defconfig
-              and make olddefconfig to resolve dependencies, then make -j<jobs>
-              <kbuild_target> (x86_64: vmlinux ELF; arm64: Image PE), copying the output
-              to bin/<arch>/vmlinux.
-```
-
-`jobs` uses the positive integer `KUASAR_BUILD_JOBS` supplied by the task. Without an explicit task budget it defaults to `nproc`; a container CPU quota does not by itself constrain that value.
-
-Synthetic source-import author/committer timestamps and patch-application committer timestamps default to `SOURCE_DATE_EPOCH` (zero when unset). Explicit Git date overrides and patch author dates are preserved. These defaults apply only to the recipe's Git subprocesses, keeping SCM-derived kernel version strings reproducible without changing the kernel configuration or developer commits.
-
-Incrementality is input-aware: the native Makefile tracks the build/common scripts, both selected fragments, the patch directory and tracked patches. An existing output alone does not suppress a rebuild after those inputs change. Every explicit `linux-build` re-resolves configuration; Kbuild compilation remains incremental. Removing the output or cleaning before `make vmlinux` forces regeneration.
-
-**Patch development:** inside native-deps, `make linux-fetch` imports the source and creates `linux-patches-base`; edit `build/src/linux/` and commit; run `make linux-patches-format` to export commits into `deps/linux-patches/*.patch`; then run `make vmlinux` to apply/build. See [the native-build guide](../native-deps/README.md) §3 for idempotence and sanity rules. Patches are architecture-neutral and shared by x86_64 and arm64. Preserve unformatted work rather than resetting it merely to make a build proceed.
-
-### 2.1 Host build dependencies
-
-```text
-bc bison flex make tar pkg-config gcc
-libelf-dev / elfutils-libelf-devel
-libssl-dev  / openssl-devel
-```
-
-Fetching and patch development also require Git and the download/archive tools listed in the native-build guide. Cross-building additionally requires `gcc-aarch64-linux-gnu` or `gcc-x86-64-linux-gnu`, according to direction.
-
-## 3. Configuration system
+## Configuration system
 
 The defconfig is assembled from **two fragments** in `native-deps/deps/vmlinux/`:
 
@@ -108,7 +73,7 @@ sandbox-common.config          Architecture-neutral subsystems, base structures 
 
 The script runs `sandbox_defconfig` and `olddefconfig`; it does not run an `allnoconfig` target. Review the resolved `.config`, including Kconfig defaults and dependency closure, rather than assuming every omitted symbol is disabled.
 
-### 3.1 Key enabled features
+### Key enabled features
 
 Subsystems and device drivers:
 
@@ -126,7 +91,7 @@ VIRTIO_PMEM=y                   Mount sandbox-runtime.bundle through virtio-pmem
 VIRTIO_VSOCKETS=y               sandbox-init ↔ sandbox-ctl control plane.
 VIRTIO_BALLOON=y                Host memory reclamation through vm.resize inflation;
                                 compiled free-page reporting is not negotiated by the
-                                platform's CH balloon configuration (§5.5).
+                                platform's CH balloon configuration (Why free_page_reporting is not negotiated).
 VIRTIO_MEM=y                    Driver for host-requested memory-block unplugging.
 LIBNVDIMM + ZONE_DEVICE +       Filesystem DAX on virtio-pmem maps host page-cache pages;
 FS_DAX                          required resolved symbols are checked after olddefconfig.
@@ -171,7 +136,7 @@ Namespaces used by application isolation include PID, mount and cgroup namespace
 ```text
 NAMESPACES=y, PID_NS=y          sandbox-init creates PID/mount isolation so the primary
                                 application sees itself as PID 1.
-CGROUPS=y                       Application cgroup namespace rooted at real /app (§5.2).
+CGROUPS=y                       Application cgroup namespace rooted at real /app (cgroup v2 controls).
 # UTS_NS, TIME_NS, IPC_NS,       Additional nested isolation is not enabled by this
 # USER_NS, NET_NS not set       one-VM/one-application preset.
 ```
@@ -191,13 +156,13 @@ CGROUP_PIDS=y                   pids.max.
                                 available controllers to an empty real /app; managed
                                 application processes start in /app/init and user child
                                 cgroups stay below /app. Host cgroup/balloon authority
-                                still bounds the VM (§5.2).
+                                still bounds the VM (cgroup v2 controls).
 # CGROUP_FREEZER (legacy v1) / RT_GROUP_SCHED / CPUSETS / CGROUP_DEVICE /
 # CGROUP_PERF / CGROUP_BPF / CGROUP_HUGETLB / CGROUP_MISC / NET_CLS /
 # NET_PRIO not set              Unused by the preset.
 ```
 
-### 3.2 Features disabled by the current minimal configuration
+### Features disabled by the current minimal configuration
 
 The platform preset does not enable the following randomization or hardening options. This is a fact about the shipped configuration and an explicit security tradeoff, not a prerequisite for template-parent sharing or snapshot restore:
 
@@ -225,7 +190,7 @@ Unused subsystems are disabled to reduce image and runtime footprint:
 # SCSI / ATA / NVME / LOOP        Block devices use virtio-blk.
 # MD / BCACHE                     No software RAID/cache layer.
 # BTRFS / F2FS / XFS / CIFS /     Local filesystems use EROFS, ext4, tmpfs and overlayfs;
-# VFAT / NTFS / AUTOFS4           network/object mounts use NFS and FUSE (§3.1).
+# VFAT / NTFS / AUTOFS4           network/object mounts use NFS and FUSE (Key enabled features).
 # HUGETLBFS                       Guest HugeTLBFS is outside the current 4 KiB preset.
 # BRIDGE / VLAN / BONDING / TUN   No in-guest L2 bridge stack.
 # VETH / VXLAN / GENEVE / WLAN
@@ -279,9 +244,9 @@ Auditing and security frameworks currently disabled:
 # FORTIFY_SOURCE not set          No kernel fortify checks.
 ```
 
-## 4. Architecture differences
+## Architecture differences
 
-### 4.1 Boot protocol
+### Boot protocol
 
 | Item | x86_64 | aarch64 |
 |---|---|---|
@@ -295,7 +260,7 @@ Auditing and security frameworks currently disabled:
 
 PVH lets x86_64 skip BIOS/PXE; the arm64 fragment enables EFI-stub/ACPI support. Boot latency must be measured with the exact image, VMM, hardware, workload and timing boundary. The configuration alone does not establish a 50 ms, 80 ms or sub-100 ms boot guarantee.
 
-### 4.2 Interrupt controllers
+### Interrupt controllers
 
 | Item | x86_64 | aarch64 |
 |---|---|---|
@@ -303,7 +268,7 @@ PVH lets x86_64 skip BIOS/PXE; the arm64 fragment enables EFI-stub/ACPI support.
 | Kconfig | `PCI_MSI=y`, with APIC support | `ARM_GIC_V3=y` + `ARM_GIC_V3_ITS=y` |
 | virtio-pci interrupt path | MSI-X | ITS |
 
-### 4.3 Serial ports and console
+### Serial ports and console
 
 | Item | x86_64 | aarch64 |
 |---|---|---|
@@ -311,13 +276,13 @@ PVH lets x86_64 skip BIOS/PXE; the arm64 fragment enables EFI-stub/ACPI support.
 | virtio-console (hvc) | `VIRTIO_CONSOLE=y` | `VIRTIO_CONSOLE=y` |
 | Kconfig | — | `ARM_AMBA=y` + `SERIAL_AMBA_PL011(_CONSOLE)=y` |
 
-**Runtime console:** the default CH command uses `--console tty --serial off`, with `console=hvc0` supplied in the kernel command line, so kernel dmesg uses virtio-console on both architectures. A deployment may select the sandbox-ctl console destination, including journald or file output, without changing the guest hvc0 interface. The x86_64 preset builds no UART driver; aarch64 includes PL011, which CH exposes there, for early-boot/debug use. Application stdin/stdout/stderr use vsock rather than a console device; see [sandbox-init.md](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/sandbox-init.md) §3.5 / §4.5.
+**Runtime console:** the default CH command uses `--console tty --serial off`, with `console=hvc0` supplied in the kernel command line, so kernel dmesg uses virtio-console on both architectures. A deployment may select the sandbox-ctl console destination, including journald or file output, without changing the guest hvc0 interface. The x86_64 preset builds no UART driver; aarch64 includes PL011, which CH exposes there, for early-boot/debug use. Application stdin/stdout/stderr use vsock rather than a console device; see [application stdio](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/guest-abi.md#stdio) / [MUX protocol](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/guest-abi.md#mux-wire).
 
-### 4.4 RTC
+### RTC
 
 x86_64 uses CH's CMOS RTC (`RTC_DRV_CMOS=y`); aarch64 uses the MMIO PL031 (`RTC_DRV_PL031=y`). The arm64 device model does not use a PC-compatible CMOS RTC.
 
-### 4.5 Page size
+### Page size
 
 Arm64 kernel configurations can use 4 KiB, 16 KiB or 64 KiB pages. The **bundled platform preset explicitly selects 4 KiB**. Host userfaultfd operations act on host memory; the platform's current host handler and artifact paths use 4 KiB units. Do not infer compatibility with a different guest page size solely from a successful kernel build. A 16 KiB/64 KiB custom guest kernel is outside this preset and requires end-to-end validation with the selected host, VMM and snapshot path.
 
@@ -329,56 +294,56 @@ CONFIG_ARM64_4K_PAGES=y           Explicitly pin 4 KiB.
 
 The x86_64 base page size is 4 KiB and has no equivalent preset choice.
 
-### 4.6 PCI topology
+### PCI topology
 
 | Item | x86_64 | aarch64 |
 |---|---|---|
 | Host-bridge discovery | MMCONFIG / MCFG ACPI table | Generic ECAM through ACPI/DT |
 | Kconfig | `PCI_MMCONFIG=y` | `PCI_HOST_GENERIC=y` + `PCI_ECAM=y` |
 
-## 5. Key decisions
+## Key decisions
 
-### 5.1 Why USERFAULTFD is disabled by default
+### Why USERFAULTFD is disabled by default
 
 `userfaultfd` is a platform **host-side** facility: sandbox-ctl registers host virtual addresses of the memfd backing guest RAM and handles their faults. Current platform workloads do not need to call `userfaultfd()` **inside the guest**, so the minimal preset does not expose that API.
 
 Applications needing in-guest userfaultfd, such as applications managing their own page cache, must use a validated custom vmlinux.
 
-### 5.2 cgroup v2: freezer and cpu/memory/io/pids controllers
+### cgroup v2: freezer and cpu/memory/io/pids controllers
 
 `CONFIG_CGROUPS=y` supplies the cgroup v2 hierarchy. The platform uses two aspects of it.
 
-**Freezer, part of the core:** before snapshot quiesce, sandbox-init must freeze the complete application subtree and confirm `cgroup.events:frozen 1`. It thaws only after restore initialization, including wall-clock repair, is ready. Otherwise `/vm.resume` can restart vCPUs before the guest processes `restore`, allowing application code to run with stale time or a disconnected MUX. The freezer mechanism is documented in [sandbox-init.md](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/sandbox-init.md) §3.4. The v2 freezer (`cgroup.freeze`, Linux ≥5.2) is part of CONFIG_CGROUPS; the separate CGROUP_FREEZER option is the legacy v1 freezer and is unnecessary.
+**Freezer, part of the core:** before snapshot quiesce, sandbox-init must freeze the complete application subtree and confirm `cgroup.events:frozen 1`. It thaws only after restore initialization, including wall-clock repair, is ready. Otherwise `/vm.resume` can restart vCPUs before the guest processes `restore`, allowing application code to run with stale time or a disconnected MUX. The freezer mechanism is documented in [Guest quiesce](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/guest-abi.md#quiesce). The v2 freezer (`cgroup.freeze`, Linux ≥5.2) is part of CONFIG_CGROUPS; the separate CGROUP_FREEZER option is the legacy v1 freezer and is unnecessary.
 
 **Resource controllers:** MEMCG; CGROUP_SCHED + FAIR_GROUP_SCHED + CFS_BANDWIDTH; BLK_CGROUP + BLK_CGROUP_IOCOST + BLK_DEV_THROTTLING; and CGROUP_PIDS provide guest `cpu.weight`, `cpu.max`, `memory.{high,max,min,low}`, `io.weight`, `io.max` and `pids.max`. An E2B application such as envd can create per-process child groups for ptys/socats/user workloads when application delegation is enabled. If a controller is absent, its interface files are unavailable; compiling it is not enough, because it must also be enabled through `cgroup.subtree_control` before descendants receive its interfaces.
 
-The [Guest ABI](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/sandbox-init.md#321-application-cgroup-namespace-and-controller-topology) completely defines the application cgroup namespace, `/app` freeze domain, delegation and process/FD lifetime. The kernel must provide the required controllers and namespaces. With `launch.cgroup_control` enabled, the ABI requires strict enablement/verification of advertised controllers rather than treating missing capabilities as success.
+The [Guest ABI](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/guest-abi.md#application-cgroups) completely defines the application cgroup namespace, `/app` freeze domain, delegation and process/FD lifetime. The kernel must provide the required controllers and namespaces. With `launch.cgroup_control` enabled, the ABI requires strict enablement/verification of advertised controllers rather than treating missing capabilities as success.
 
 Guest controllers **subdivide the VM's budget**; they do not replace host authority. Host cgroup v2 limits the CH process and balloon control governs available guest memory. Leaving guest child `memory.max=max` does not impose a separate child maximum, but it also does not prevent guest OOM when guest capacity is exhausted, or guarantee that host `deflate_on_oom` acts first. Validate guest application completion and guest memory pressure separately from host cgroup OOM counters.
 
-A complete nested container runtime, such as podman or Docker-in-Docker, remains outside the supported target. Such workflows need additional namespaces including user_ns and net_ns, disabled by this preset (§3.2), and differ from the platform's short-lived, snapshot-oriented model.
+A complete nested container runtime, such as podman or Docker-in-Docker, remains outside the supported target. Such workflows need additional namespaces including user_ns and net_ns, disabled by this preset ([Features disabled by the current minimal configuration](#features-disabled-by-the-current-minimal-configuration)), and differ from the platform's short-lived, snapshot-oriented model.
 
-### 5.3 Why IP_PNP is disabled
+### Why IP_PNP is disabled
 
 The kernel `ip=...` command-line path performs DHCP/BOOTP autoconfiguration. The sandbox already receives explicit networking configuration from sandbox-ctl over the vsock launch protocol, and sandbox-init applies it with raw netlink. The preset therefore omits the redundant kernel autoconfiguration path. Measure any startup-time and binary-size effect on the exact build instead of treating historical estimates as universal savings.
 
-### 5.4 Why NR_CPUS=4
+### Why NR_CPUS=4
 
 The bundled kernel sets NR_CPUS=4 so its CPU masks and per-CPU structures target at most four vCPUs. Larger values can increase structures and the fixed memory footprint unused by small guests.
 
-This is a **kernel-preset limit**, not a platform API rule restricting `resources.capacity.cpu` to the set 1/2/4. The current sandbox configuration validates a positive CPU count; it does not impose that three-value enum. Requested capacity still must be supported by the selected kernel and VMM. A configuration accepted by the parser is not proof that the bundled four-CPU kernel can run it. See [sandbox.md](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/sandbox.md) §4 for Capacity and resource semantics.
+This is a **kernel-preset limit**, not a platform API rule restricting `resources.capacity.cpu` to the set 1/2/4. The current sandbox configuration validates a positive CPU count; it does not impose that three-value enum. Requested capacity still must be supported by the selected kernel and VMM. A configuration accepted by the parser is not proof that the bundled four-CPU kernel can run it. See [resource model](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/resources.md#memory-terms) for Capacity and resource semantics.
 
-### 5.5 Why free_page_reporting is not negotiated, and the role of VIRTIO_MEM
+### Why free_page_reporting is not negotiated, and the role of VIRTIO_MEM
 
 `virtio-balloon free_page_reporting` lets a guest continuously report free pages to the host during reclaim. CH's `release_memory_range` can respond with `madvise(MADV_DONTNEED)` on its mapping. In the platform's unified memfd / external-uffd path, invalidation propagates through mmu_notifier to KVM mappings. The platform's reported failure mode involved repeated invalidation/IPI activity and guest vsock starvation with host-to-guest ping timeouts. This is the rationale for **not negotiating free_page_reporting in the platform CH balloon configuration**; it is not a universal timing or failure guarantee.
 
 The distinction is explicit: the kernel fragment contains CONFIG_VIRTIO_BALLOON=y, CONFIG_VIRTIO_BALLOON_FREE_PAGE_REPORTING=y and CONFIG_PAGE_REPORTING=y. Compiled capability does not mean the host advertises/enables the feature at runtime.
 
-The kernel supplies capabilities, not node resource policy. [Guest ABI](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/sandbox-init.md) owns `mem_report` and its fields; [sandboxer resource control](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/sandbox.md#93-balloon) owns target/current, growth/shrink, reservation release and fresh-report conditions; the [VMM patch](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/cloud-hypervisor.md#34-0004--skip-hole-only-runs-during-balloon-release) owns sparse-range release. `/proc/meminfo`’s `Balloon:` is not an input in this Guest ABI: current comes from CH `memory_actual_size`, and Capacity must not be inferred from guest MemTotal.
+The kernel supplies capabilities, not node resource policy. [Guest ABI](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/guest-abi.md) owns `mem_report` and its fields; [sandboxer resource control](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/resources.md#balloon-controller) owns target/current, growth/shrink, reservation release and fresh-report conditions; the [VMM patch](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/vmm.md#patch-0004) owns sparse-range release. `/proc/meminfo`’s `Balloon:` is not an input in this Guest ABI: current comes from CH `memory_actual_size`, and Capacity must not be inferred from guest MemTotal.
 
 `VIRTIO_MEM=y` is retained as an extension point for host-driven guest memory-block unplugging. Its coarse, less frequent events can support separately designed memory-hotplug/NUMA scenarios. The platform's current fixed-capacity Budget model rejects memory hotplug and does not use virtio-mem. Retaining the driver is only an extension point; enabling a new hotplug design would also require corresponding host support and end-to-end validation.
 
-### 5.6 Balloon behavior under memory pressure
+### Balloon behavior under memory pressure
 
 On Linux 6.1.169, the guest allocates ordinary order-0 pages into a private
 list for each inflate request. Under the balloon lock it creates the PFNs,
@@ -388,11 +353,11 @@ This also bounds the number of native pages enqueued with interrupts disabled.
 The size worker waits for the request to be acknowledged, publishes actual
 and rereads the target on its next invocation. When inflation cannot allocate a page, it ends the current batch and the size worker retries the pending host target. When `deflate_on_oom` is negotiated, the upstream OOM notifier can release balloon pages. The driver does not turn a transient allocation failure into a permanent ceiling on balloon size.
 
-Host resource control owns the requested target, Budget and reservation accounting. CH `memory_actual_size` reports the current guest Budget (effective guest memory size); the observed balloon size is `Capacity - memory_actual_size`. Target/current disagreement does not itself establish a sustainable memory limit. The current growth, shrink and pressure-feedback rules are defined by §5.5 and [sandbox.md §9.3](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/sandbox.md#93-balloon).
+Host resource control owns the requested target, Budget and reservation accounting. CH `memory_actual_size` reports the current guest Budget (effective guest memory size); the observed balloon size is `Capacity - memory_actual_size`. Target/current disagreement does not itself establish a sustainable memory limit. The current growth, shrink and pressure-feedback rules are defined by [Why free_page_reporting is not negotiated, and the role of VIRTIO_MEM](#why-free_page_reporting-is-not-negotiated-and-the-role-of-virtio_mem) and [sandboxer balloon controller](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/resources.md#balloon-controller).
 
 Validate balloon pressure and recovery with the matching host controller and real MicroVM workloads, including startup and snapshot/restore. Neither a successful kernel build nor upstream OOM deflation guarantees that arbitrary guest workloads complete without OOM.
 
-## 6. Validation
+## Validation
 
 Basic post-build sanity:
 
@@ -413,16 +378,16 @@ The trusted `release-vmlinux.yml` workflow builds and validates the **exact sele
 
 For configuration review, inspect the resolved olddefconfig diff for silent Kconfig changes. Do not use the proportion of identical RAM bytes across instances as a release gate.
 
-## 7. Maintenance
+## Maintenance
 
-- When upgrading the kernel line, such as 6.1 to another 6.x release, review sandbox-common.config features, security choices and diagnostics, and inspect olddefconfig output for silent regressions. If `deps/linux-patches/*.patch` contains patches, rebase them onto the new source: create the new imported baseline with linux-fetch, preserve and rebase/reapply the working commits in build/src/linux, then export with linux-patches-format. Revalidate balloon pressure and recovery (§5.6) with the selected host sources.
+- When upgrading the kernel line, such as 6.1 to another 6.x release, review sandbox-common.config features, security choices and diagnostics, and inspect olddefconfig output for silent regressions. If `deps/linux-patches/*.patch` contains patches, rebase them onto the new source: create the new imported baseline with linux-fetch, preserve and rebase/reapply the working commits in build/src/linux, then export with linux-patches-format. Revalidate balloon pressure and recovery ([Balloon behavior under memory pressure](#balloon-behavior-under-memory-pressure)) with the selected host sources.
 - When changing an architecture fragment, review whether CH's device model for that architecture adds dependencies such as GICv4 or another RTC driver.
 - The project does not seek to upstream this defconfig as a general server-distribution configuration. Its choices intentionally differ: guest userfaultfd is disabled, namespaces are trimmed, and cgroups retain the freezer plus the cpu/memory/io/pids controllers needed by sandbox workloads.
 
-## 8. See also
+## Related contracts
 
-- [sandboxer/docs/cloud-hypervisor.md](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/cloud-hypervisor.md): VMM boot protocols, device model and patch scope.
-- [sandbox-runtime.md](sandbox-runtime.md): packaging and layout of the runtime image above this kernel; [sandboxer/docs/sandbox-init.md](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/sandbox-init.md) owns rootfs assembly, application startup and the guest ABI.
-- [sandboxer/docs/sandbox.md](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/sandbox.md) §3.1 defines `boot.kernel` references. A custom kernel must satisfy this document's capabilities, the selected Guest ABI and VMM contracts, and the validation in §6; [artifact incompatibility](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/sandbox.md#artifact-compatibility) separately describes rejected snapshot formats.
+- [Sandboxer VMM contract](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/vmm.md): VMM boot protocols, device model and patch scope.
+- [Runtime bundle contract](runtime-bundle.md): packaging and layout of the runtime image above this kernel; [Guest ABI](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/guest-abi.md) owns rootfs assembly, application startup and the guest ABI.
+- [Sandbox YAML](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/configuration.md#sandbox-yaml) defines `boot.kernel` references. A custom kernel must satisfy this document's capabilities, the selected Guest ABI and VMM contracts, and the [validation](#validation); [artifact incompatibility](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/artifacts.md#compatibility) separately describes rejected snapshot formats.
 - [Native-build workflow](../native-deps/README.md): make vmlinux, patch development and cross-compilation.
-- [Project system overview](https://github.com/kuasar-sandbox/kuasar-sandbox/blob/main/docs/kuasar-sandbox.md) §4: template parents and stateful pause/resume semantics.
+- [Snapshot and instance semantics](https://github.com/kuasar-sandbox/kuasar-sandbox/blob/main/docs/concepts.md#snapshot-and-instance-semantics): template parents and stateful pause/resume semantics.

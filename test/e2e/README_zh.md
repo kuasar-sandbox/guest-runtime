@@ -1,4 +1,4 @@
-[English](README.md) | [简体中文](README_zh.md)
+[English](README.md) | [简体中文](#registry-与镜像展平-e2e)
 
 # Registry 与镜像展平 E2E
 

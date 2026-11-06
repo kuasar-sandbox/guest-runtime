@@ -1,4 +1,4 @@
-[English](LICENSE_SCOPE.md) | [简体中文](LICENSE_SCOPE_zh.md)
+[English](#license-scope) | [简体中文](LICENSE_SCOPE_zh.md)
 
 <a id="许可证范围"></a>
 

@@ -1,14 +1,16 @@
-[English](sandbox-runtime.md) | [简体中文](sandbox-runtime_zh.md)
+[English](runtime-bundle.md) | [简体中文](runtime-bundle_zh.md)
 
-# sandbox-runtime — guest runtime image
+# Runtime bundle: payload, identity and compatibility
+
+This is the delivery contract for `sandbox-runtime.bundle` and its Runtime release unit. It owns filesystem layout, PMEM alignment, footer identity, reserved paths and compatibility requirements. Follow [Using guest-runtime](using-guest-runtime.md) to consume a selected pair of Runtime/Kernel artifacts, or [Build](build.md) to produce and validate them.
 
 `sandbox-runtime.bundle` is the read-only Guest runtime image attached to each MicroVM. It contains the guest PID 1 (`sandbox-init`) built by `sandboxer` and the platform's guest-side helper tools. This repository packages and releases it; `sandboxer/sandbox-ctl` supplies it to the guest as a virtio-pmem device when starting a sandbox.
 
-This document defines image packaging, filesystem layout, versioning and consumption. The startup rootfs assembly, vsock control plane, stdio MUX and exec/attach/quiesce ABI of `sandbox-init` are maintained in [the sandboxer guest ABI specification](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/sandbox-init.md).
+This document defines image packaging, filesystem layout, versioning and consumption. The startup rootfs assembly, vsock control plane, stdio MUX and exec/attach/quiesce ABI of `sandbox-init` are maintained in [the sandboxer guest ABI specification](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/guest-abi.md).
 
-## 1. Overview
+## Overview
 
-### 1.1 Ownership boundaries
+### Ownership boundaries
 
 | Component | Responsibility |
 | --- | --- |
@@ -19,7 +21,7 @@ This document defines image packaging, filesystem layout, versioning and consump
 
 `sandbox-runtime.bundle` does not contain the user rootfs, user dependencies, guest kernel or Cloud Hypervisor. The user rootfs comes from `boot.root.base`/`boot.disks[]`. The kernel is published in the vmlinux package; the VMM is published by sandboxer.
 
-### 1.2 Place in the system
+### Place in the system
 
 ```text
                  build time                                      run time
@@ -33,7 +35,7 @@ This document defines image packaging, filesystem layout, versioning and consump
 
 The image is a node-shared artifact. Sandboxes using the same version on a node map the same host file through virtio-pmem and DAX instead of copying runtime file pages independently.
 
-### 1.3 Design goals
+### Design goals
 
 - **One image:** the E2B and builder runtimes share one runtime image.
 - **Read-only and versioned:** the release process produces the image; runtime execution does not modify it.
@@ -41,7 +43,7 @@ The image is a node-shared artifact. Sandboxes using the same version on a node 
 - **Clear ownership:** sandboxer owns the PID 1 protocol; guest-runtime owns image packaging and guest payload.
 - **Independent releases:** the runtime bundle can be published through the repository's dedicated release line and selected independently for rollback.
 
-## 2. Image layout
+## Image layout
 
 The image root contains:
 
@@ -64,7 +66,7 @@ The `/sysdisks/` mountpoints are precreated by the current Makefile for data-dis
 
 `sandbox-init` performs early mounting and switch-root through Go syscalls. The rootfs actually seen by the user application comes from its image. Before switch-root, `/opt/sandbox-runtime` is bind-mounted at the same path in the user rootfs. Applications can read the platform tools but should not place their own files under that reserved path.
 
-### 2.1 Guest payload
+### Guest payload
 
 | File | Source | Purpose |
 | --- | --- | --- |
@@ -74,7 +76,7 @@ The `/sysdisks/` mountpoints are precreated by the current Makefile for data-dis
 
 `fsck.erofs` is a diagnostic/test tool and is not included in the runtime image. `vmlinux` is not runtime-image content; it is released independently as `vmlinux-<arch>-vX.Y.Z.tar.gz`.
 
-### 2.2 Host bundle
+### Host bundle
 
 The delivered file is not bare EROFS, but a bundle directly usable as virtio-pmem backing:
 
@@ -90,38 +92,7 @@ Raw EROFS starts at offset 0. The trailing ZIP contains only one zero-size marke
 
 The `digest:` identity covers every byte before the ZIP, including EROFS and alignment padding. The builder computes carrier identity while copying EROFS, then writes the marker. Run/restore reads the marker at EOF without rescanning EROFS. Final bundle size is aligned to 2 MiB, so Cloud Hypervisor can map it directly without offset support; EROFS uses its own superblock to ignore trailing padding and ZIP.
 
-## 3. Build
-
-Common entry points:
-
-```bash
-make flatten-ctl                 # Build the target-architecture guest tool.
-make native-deps                 # Build vmlinux / envd.
-make sandbox-runtime             # Produce bin/<arch>/sandbox-runtime.bundle.
-make build                       # Build flatten-ctl + sandbox-runtime.
-make build TARGET_ARCH=aarch64
-```
-
-A **host-executable `mkfs.erofs` must already be available** before `make sandbox-runtime`. Install host erofs-utils or set `BUILD_MKFS_EROFS`. The project does not build mkfs. It only packs the runtime bundle; the target Guest uses the Go generator linked into static `flatten-ctl`, with no `GUEST_MKFS_EROFS` payload.
-
-The target's input and build sequence is:
-
-1. Resolve and check `BUILD_MKFS_EROFS`. Use the explicitly selected tool or the preinstalled executable on host PATH. A missing host tool fails before image assembly.
-2. If the selected `SANDBOX_INIT` (default `../sandboxer/bin/<arch>/sandbox-init`) is absent, delegate to `make -C ../sandboxer sandbox-init`.
-3. Resolve target `ENVD` (default `native-deps/bin/<arch>/envd`), building it when missing.
-4. Resolve this repository's target `FLATTEN_CTL` (default `bin/<arch>/flatten-ctl`), building it when missing.
-5. Verify the selected `flatten-ctl` build record links the external go-erofs module. A stale incremental binary fails explicitly; run `make flatten-ctl` or select a matching binary. Assemble the staging tree and use host `BUILD_MKFS_EROFS` to create temporary runtime EROFS.
-6. The host `runtime-bundle` tool copies EROFS, adds PMEM alignment padding, computes SHA256 and appends the empty-marker ZIP, publishing `bin/<arch>/sandbox-runtime.bundle` atomically.
-
-See [the native-build workflow](../native-deps/README.md) for host EROFS prerequisites and Envd builds and the [sandboxer guest ABI](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/sandbox-init.md) for sandbox-init.
-
-### 3.1 Architectures
-
-The runtime image is built for the target architecture. Its build-directory filename is always `sandbox-runtime.bundle`. `/sbin/init`, `envd`, `flatten-ctl` inside the EROFS prefix must all be executable files for that same target architecture.
-
-`TARGET_ARCH=amd64` normalizes to `x86_64`; `TARGET_ARCH=arm64` normalizes to `aarch64`. Cross-builds do not update host-architecture symlinks, avoiding host entry points to non-runnable binaries. The host packing tool remains separate from this target payload.
-
-## 4. Runtime consumption contract
+## Runtime consumption contract
 
 `sandbox-ctl` supplies `sandbox-runtime.bundle` to Cloud Hypervisor as a read-only virtio-pmem device. The guest kernel mounts the pmem image and executes `/sbin/init`, which is sandbox-init.
 
@@ -134,7 +105,7 @@ Key constraints:
 
 `sandbox-runtime.bundle` does not participate in deriving manifest keys, API keys or access tokens. Those keys are managed by orchestrator/placer/providers and Manifest configuration; the runtime image carries execution tools only.
 
-## 5. Release artifacts
+## Release artifacts
 
 The trusted `Runtime Release` workflow on this repository's main branch independently publishes the runtime image from the source branch and exact SHA pinned by the coordinator. Component `main` is used for the development line; `release/vX.Y.x` is used for runtime maintenance. Runtime, aggregate and vmlinux versions are independent:
 
@@ -161,64 +132,11 @@ The project repository's `release-vX.Y.Z` aggregate release uploads the platform
 
 Envd is already embedded in the image and is not published separately as `bin/envd`. `fsck.erofs` is a host diagnostic/test tool, not part of the general component packages.
 
-## 6. Reliability and upgrades
+## Related contracts
 
-### 6.1 Node upgrades
-
-A node can keep multiple runtime images, for example:
-
-```text
-/opt/sandbox/runtime/v0.1.0/sandbox-runtime.bundle
-/opt/sandbox/runtime/v0.2.0/sandbox-runtime.bundle
-```
-
-New sandboxes use the new version; running sandboxes retain their original pmem file. Before deleting an old image, ensure no running VM or snapshot awaiting restore depends on it.
-
-ABI compatibility alone does not make a new runtime eligible for an old memory
-snapshot. Here S denotes the memory snapshot artifact and E its referenced cold
-sandbox artifact, which records the runtime identity. Restore compares the runtime **basename and declared Bundle footer
-digest** with the E artifact referenced by S; see [sandboxer restore selection](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/sandbox.md#7-memory-restore-data-flow).
-
-For example, S1 captured with `/runtime/v1/sandbox-runtime.bundle` cannot use
-`/runtime/v2/sandbox-runtime.bundle` merely because v2 has a compatible wire ABI.
-Explicitly bind `boot.runtime` to the retained v1 file. The directory layout above
-supports this explicit binding; restore does not search sibling version directories.
-For automatic fallback, capture v1 with basename `sandbox-runtime-v1.bundle`, keep
-that immutable file alongside `sandbox-runtime-v2.bundle`, and point the default
-at v2. Restoring S1 then tries the configured v2 file followed by exactly
-`<default-directory>/sandbox-runtime-v1.bundle`, checking both against S1's E.
-Renaming an already captured v1 file to a different basename is not a migration.
-
-Retain original bytes/names while any live VM, retained template, snapshot or
-parent chain needs them, including backups and rollback candidates. Keep the
-matching kernel/VMM inputs too. Before retirement, the deployment owner must
-inventory those references and test restore on an eligible destination; retaining
-only the latest ABI-compatible runtime is insufficient.
-
-### 6.2 Host reboot
-
-Sandboxes do not automatically resume after a host reboot. On node startup, the runtime image must still exist in the deployment directory for subsequent sandbox creation.
-
-### 6.3 Rollback
-
-Point configuration back to an old runtime file and restart node-ctl, or have the scheduling layer stop placing new sandboxes on the node. Already running sandboxes are unaffected by the new configuration.
-
-## 7. Troubleshooting
-
-| Symptom | Check |
-| --- | --- |
-| Guest cannot start `/sbin/init` | Confirm the runtime-image architecture matches vmlinux/CH. |
-| Build sandbox cannot find `flatten-ctl` | Inspect `/opt/sandbox-runtime/bin/flatten-ctl` in the image. |
-| Build sandbox cannot generate EROFS | Check guest `flatten-ctl`, source read permissions and planner budgets. |
-| Host cannot pack a cross-architecture image | Check that `BUILD_MKFS_EROFS` is executable on the build host. |
-| Behavior changes after restore | Compare the snapshot's runtime digest with restore configuration. |
-| Scripts cannot find runtime after package extraction | Confirm the runtime archive was extracted and `bin/sandbox-runtime.bundle` exists. |
-
-## 8. See also
-
-- [sandbox-init](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/sandbox-init.md): guest PID 1 ABI and host/guest protocol.
-- [sandbox](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/sandbox.md): runtime-image consumption, startup and restore.
+- [sandbox-init](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/guest-abi.md): guest PID 1 ABI and host/guest protocol.
+- [sandbox](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/runtime.md): runtime-image consumption, startup and restore.
 - [Native-build workflow](../native-deps/README.md): host EROFS prerequisites, vmlinux and Envd builds.
 - [vmlinux](vmlinux.md): guest kernel and runtime-image relationship.
-- [flatten](flatten.md): flatten-ctl execution in a build sandbox.
+- [flatten](flatten-cli.md): flatten-ctl execution in a build sandbox.
 - [Aggregate validation](https://github.com/kuasar-sandbox/kuasar-sandbox/blob/main/test/QUICKSTART.md): package extraction and E2E entry points.
