@@ -111,7 +111,7 @@ Sandboxes do not automatically resume after a host reboot. On node startup, the 
 
 ### Rollback
 
-Point configuration back to an old runtime file and restart node-ctl, or have the scheduling layer stop placing new sandboxes on the node. Already running sandboxes are unaffected by the new configuration.
+Pause new placements while preparing rollback; this contains impact but does not select an old runtime. On an orchestrator-managed node, set the conductor configuration's `sandbox.boot.runtime` to the retained compatible file and restart the conductor service (`node-ctl conductor serve`), then verify a new cold start before reopening admission. For standalone `sandbox-ctl`, select `boot.runtime` in the configuration for the next launch. Preserve existing runner units and referenced files: changing the default does not migrate running VMs or override the snapshot identity rules above.
 
 ## Troubleshooting
 

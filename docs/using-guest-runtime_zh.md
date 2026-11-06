@@ -110,8 +110,11 @@ ABI 兼容并不意味着新 runtime 可恢复旧内存快照。这里 S 指内�
 
 ### 回滚
 
-回滚 = 配置重新指向旧 runtime 文件 + 重启 `node-ctl` 或让调度层停止向该节点
-放置新沙箱。已运行沙箱不受新配置影响。
+准备回滚时先暂停新放置；这能控制影响，但不等于已选回旧 runtime。对于 orchestrator
+管理的节点，把 conductor 配置的 `sandbox.boot.runtime` 指向保留的兼容文件，
+重启 conductor 服务（`node-ctl conductor serve`），验证一次新的冷启动后再恢复准入。
+独立使用 `sandbox-ctl` 时，在下次启动的配置中选择 `boot.runtime`。保留既有 runner
+单元及其引用文件：修改默认值不会迁移运行中的 VM，也不覆盖上文的快照身份规则。
 
 ## 排错
 
