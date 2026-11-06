@@ -1,6 +1,8 @@
-# Contributing
+[English](CONTRIBUTING.md) | [简体中文](CONTRIBUTING_zh.md)
 
-Thank you for contributing to `kuasar-sandbox/guest-runtime`.
+# Contributing to guest-runtime
+
+Use this entry for source changes, component validation and release preparation. Public contribution and shared CI policy are maintained by the project; the component-specific steps below show what to run and what the evidence proves.
 
 ## Contribution workflow
 
@@ -99,56 +101,24 @@ Only submit work that you have the right to contribute. Preserve applicable
 copyright, attribution, NOTICE, and SPDX declarations when modifying
 third-party or differently licensed material.
 
-## CI and merge policy
-
-The repository's trusted default-branch wrapper handles pull-request events;
-candidate workflow files never decide admission or obtain control-plane secrets.
-The [central CI contract](https://github.com/kuasar-sandbox/kuasar-sandbox/blob/main/docs/ci.md)
-owns the current workflow entry points, exact status names, companion declaration
-syntax, source selection and executable evidence checks. Do not copy those
-identifiers into another independently maintained workflow guide.
-
-All contributors may submit public Fork PRs. Access to a privileged integration
-runner is a separate trust decision, not a condition for opening an issue or PR.
-Automatic candidate execution accepts non-draft same-repository PRs and Fork PRs
-whose author is an active organization member; it does not run arbitrary external
-Fork code with organization credentials. For other contributors, a maintainer
-reviews the change and may prepare a trusted upstream candidate PR, preserving
-commit authorship, linking the original discussion and recording the source and
-reviewed diff. The trusted candidate receives the normal tests and review. Do not
-change membership, weaken admission or execute unreviewed Fork code merely to get
-a check result. Drafts defer integration execution and are not merge candidates.
-
-Before normal squash merge, verify all of the following against live GitHub state:
-
-1. The PR is open and ready, targets `main` or a supported
-   `release/vMAJOR.MINOR.x`, and all blocking review conversations are resolved.
-2. The admitted integration commit has exactly the current target base and
-   reviewed head as its ordered parents. The successful exact-integration status
-   belongs to that commit, not merely to the PR head or an old run.
-3. The linked trusted run completed the required tests; a skipped, cancelled or
-   failed execution is not successful evidence. Its resolved control and execution
-   workflows, source set and result must agree with the central CI contract.
-4. Each declared companion was independently admitted and tested. Its repository,
-   PR, base, head, target ref and integration commit still match the recorded set.
-   A primary PR's success never substitutes for a companion's own required check.
-5. Base/head changes, companion changes or edits to the companion declaration
-   invalidate prior evidence. Produce a fresh supported PR event and verify the
-   new result. Body edits alone do not trigger validation; mark Draft and then
-   Ready again when a new event is needed without a new commit.
-
-A rerun of an existing event is appropriate only for a diagnosed transient failure
-when its admitted base, head, integration and companion inputs remain unchanged.
-Do not add a manual-dispatch entry, manufacture a successful status or bypass
-branch protection. Recheck the current source set immediately before merging.
-After one companion merges, remove its obsolete declaration from the remaining
-PRs and rerun against the selected target-line sources.
-
-Candidate execution must not retain the source-fetch App token or inherit release
-write credentials. Keep execution and control identities, caches and workspaces
-within their documented trust boundaries. Auto-merge, merge commits and rebase
-merges are not used; maintainers perform the normal reviewed squash merge.
-
 ## Review expectations
 
 Be constructive and specific. Authors should resolve review conversations or explain why a requested change is not applicable. Maintainers may close stale, superseded, unsafe, or out-of-scope pull requests with an explanation.
+
+## CI admission and merge evidence
+
+The [central CI contract](https://github.com/kuasar-sandbox/kuasar-sandbox/blob/main/docs/ci.md) is the authority for trusted admission, workflow/status identifiers, companions, source selection and merge evidence. The default-branch wrapper owns admission; candidate workflows do not acquire control-plane or release credentials. Any contributor may open a public Fork PR; privileged execution is a separate trust decision. External candidates that are not admitted need maintainer review and a trusted upstream candidate preserving authorship and the reviewed source, rather than weaker admission.
+
+Before requesting a normal reviewed squash merge:
+
+1. Make the PR ready, target `main` or a supported maintenance branch, and resolve blocking review conversations.
+2. Validate the current exact target-base/reviewed-head integration and required tests; skipped, cancelled, failed or old runs do not establish success.
+3. Validate each declared companion independently and recheck its repository, PR, base, head, target ref and integration against the recorded source set.
+4. Refresh evidence after base/head/companion changes. Body edits do not trigger execution; use the supported Draft-to-Ready event when necessary. Rerun an old event only for a diagnosed transient failure with unchanged admitted inputs.
+5. Immediately before merge recheck the live source set. After a companion merges, remove obsolete declarations and rerun remaining candidates.
+
+Do not manufacture statuses, add manual dispatches to bypass admission, weaken branch protection or retain source-fetch credentials in candidate execution. Auto-merge, merge commits and rebase merges are not used. The central contract supplies exact current checks and full trust-boundary details.
+
+## Component build and validation
+
+Follow [Build](docs/build.md) for exact source modes and production inputs. Run package tests using the selected workspace, and use the [prepared E2E guide](test/e2e/README.md) for prebuilt-product tests. The [kernel validation section](docs/vmlinux.md#validation) distinguishes static artifact checks from real boot/ABI evidence. Patch-tree maintenance and safe cleanup are in [native-deps](native-deps/README.md). Shared workflow names and runner routing remain in the central CI contract.

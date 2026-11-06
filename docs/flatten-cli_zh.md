@@ -1,21 +1,23 @@
-[English](flatten.md) | [简体中文](flatten_zh.md)
+[English](flatten-cli.md) | [简体中文](flatten-cli_zh.md)
 
-# flatten — 容器镜像展平工具
+# flatten-ctl：制备、检查与管理镜像工件
+
+本篇提供完整 CLI、远程镜像/本地目录流程、输出检查、拉取缓存维护与工作负载检查。Runtime 发行单元发布 `flatten-ctl`；[共享制备契约](https://github.com/kuasar-sandbox/accelerator/blob/main/docs/image-preparation_zh.md)和[通用工件格式](https://github.com/kuasar-sandbox/accelerator/blob/main/docs/artifacts_zh.md)由 Accelerator 维护。
 
 把多层 OCI/Docker 镜像合并(展平)成单个 EROFS 文件系统 payload,再封装成
 **tarstream 镜像工件**,供 `manifest-ctl` 或沙箱的只读根 `boot.root.base` 使用。
 正常导出的 `.img` 含名为 `image` 的 payload 和摘要 marker,不是可直接交给
 `mount -t erofs` 的裸文件系统。平台 reader 负责解封装;直接挂载前须先提取
-`image` payload(§2.5、§3.1)。
+`image` payload([`flatten-ctl tar` — tar 流提取与单文件稀疏流](#flatten-ctl-tar--tar-流提取与单文件稀疏流)、[字节布局](https://github.com/kuasar-sandbox/accelerator/blob/main/docs/image-preparation_zh.md#字节布局))。
 
 `flatten-ctl` 强调**确定性**——相同的不可变源、runtime config、工具版本与
 构建设置应产出相同的 payload 字节,使后续 chunk dedup、manifest content-key
 保持稳定。payload **自带 OCI runtime config**(末尾追加 ZIP),沙箱启动时无需
 额外索引文件就能拿到 Entrypoint / Env / WorkingDir 等启动参数。
 
-## 1. 概述
+## 概述
 
-### 1.1 为什么要展平
+### 为什么要展平
 
 容器镜像由多个 tar layer 叠加而成,容器运行时通常用 overlayfs / fuse-overlay
 等机制合并。沙箱镜像路径选择**离线合并成一个 EROFS payload**:
@@ -26,29 +28,29 @@
   数据路径与工作负载;不能仅凭展平就保证某个内存密度收益。
 - EROFS 只读且不可变,与 manifest 的 chunk / content key 寻址一致。
 
-### 1.2 输入与输出
+### 输入与输出
 
 输入,三选一:
 
 - **远程 registry 镜像**——镜像引用如 `nginx:1.27`、`gcr.io/ns/app@sha256:...`;
-  `flatten-ctl` 直接拉取并展平(§2.3),拉取凭据经 `FLATTEN_REGISTRY_*` 环境变量注入,
+  `flatten-ctl` 直接拉取并展平([远程拉取、本地缓存与 Referrers 回写](#远程拉取本地缓存与-referrers-回写)),拉取凭据经 `FLATTEN_REGISTRY_*` 环境变量注入,
   显式 OCI-layout 缓存可跨进程共享；未设置 `cache.dir` 时层直接流式输入；
 - **Docker archive**(`docker save` 产物的 tar 流,stdin 或本地文件);
 - **已展平的 rootfs 目录**——位置参数是一个本地目录时,Go 规划器直接就地读取
-  该目录出图,不复制 staging 树、不修改源树(§2.1 的目录源小节);仍会读取数据并写输出。
+  该目录出图,不复制 staging 树、不修改源树([`flatten-ctl export`](#flatten-ctl-export) 的目录源小节);仍会读取数据并写输出。
 
-(OCI layout 目录暂不直读,见 §5.5。)
+(OCI layout 目录暂不直读,见 [不实现 / 暂不实现的功能](https://github.com/kuasar-sandbox/accelerator/blob/main/docs/image-preparation_zh.md#不实现--暂不实现的功能)。)
 
 输出:**单个 tarstream 工件**,内含 `image` payload(`EROFS + 末尾 ZIP`)及
-平台摘要 marker(§3)。ZIP 存放 OCI runtime config 投影。registry 与 docker-archive
+平台摘要 marker([镜像格式](https://github.com/kuasar-sandbox/accelerator/blob/main/docs/image-preparation_zh.md#镜像-payload-与运行配置))。ZIP 存放 OCI runtime config 投影。registry 与 docker-archive
 两条层源汇入同一 sink;相同的未压缩层和 runtime config 在相同工具/设置下产出
 相同的 EROFS payload。目录源也要求源树与配置不变;mtime 在 Go 规划器中固定为零,不触碰源树。整个工件的复现还须包含权威稀疏图和容器编码条件。
 
 展平本身不签名、不加密、不做内容寻址。可选 `--upload` 调用下一阶段的 manifest
-ingest,完成加密/去重,见[manifest_zh.md](https://github.com/kuasar-sandbox/accelerator/blob/main/docs/manifest_zh.md)。
+ingest,完成加密/去重,见[manifest_zh.md](https://github.com/kuasar-sandbox/accelerator/blob/main/docs/transfer_zh.md)。
 manifest 完整性与加密不能直接当作镜像签名校验流程。
 
-### 1.3 在系统中的位置
+### 在系统中的位置
 
 ```mermaid
 flowchart TD
@@ -62,7 +64,7 @@ flowchart TD
   M --> B["sandbox-ctl: manifest:// base"]
 ```
 
-## 2. 命令行接口
+## 命令行接口
 
 CLI 不提供 `flatten-ctl verify` 双次导出比较命令. 确定性通过单元测试和可复现的 Manifest key 检查.
 
@@ -74,11 +76,11 @@ guest 内导出配套)。
 | 子命令 | 用途 |
 |--------|------|
 | `export` | registry 镜像 / docker-archive / rootfs 目录 → 确定性 EROFS 的 **tarstream 镜像工件**(条目 `image`,约定后缀 `.img`);`--upload` 时顺带 ingest 进 store 并打印 manifest key |
-| `referer` | `lookup` 查询源镜像是否已有可复用 manifest id;`put` 将宿主上传得到的 manifest id 回写到源 repo 的 OCI Referrers(§2.3) |
+| `referer` | `lookup` 查询源镜像是否已有可复用 manifest id;`put` 将宿主上传得到的 manifest id 回写到源 repo 的 OCI Referrers([远程拉取、本地缓存与 Referrers 回写](#远程拉取本地缓存与-referrers-回写)) |
 | `info` | 读镜像工件(经信封)的 EROFS superblock + 末尾 ZIP 里的 OCI runtime config 并打印 |
-| `cache` | `cache info` 看缓存占用、`cache gc` 按 LRU 回收到上限(§2.4) |
+| `cache` | `cache info` 看缓存占用、`cache gc` 按 LRU 回收到上限([`flatten-ctl cache` — 检视/回收拉取缓存](#flatten-ctl-cache--检视回收拉取缓存)) |
 | `config` | 输出规范化的 flatten 配置(`--config`/`FLATTEN_CONFIG`,加载即校验),或 `--template` 骨架;`-o <file>` 写文件(默认 stdout) |
-| `tar` | 通用 tar 提取(全路径声明洞精确)与单文件封装(§2.5) |
+| `tar` | 通用 tar 提取(全路径声明洞精确)与单文件封装([`flatten-ctl tar` — tar 流提取与单文件稀疏流](#flatten-ctl-tar--tar-流提取与单文件稀疏流)) |
 | `mountpoint` | `mountpoint <dir>`:MkdirAll + 自 bind,使 `<dir>` 成为挂载点 → `export --skip-mounts` 自动排除之;guest 内导出自身 rootfs 时作 tmpdir/输出落点(防自吞,Linux only) |
 
 `export` 的输入是**位置参数**。先识别本地目录;目录源拒绝 registry/archive 强制
@@ -95,7 +97,7 @@ guest 内导出配套)。
 参数必填,接受镜像工件路径或 `manifest://<hex>`。位置参数须置于 flags 之后(Go stdlib
 flag 在首个非 flag 实参处停止解析)。
 
-registry/archive 展平保留属主与权限位(§4.3),需要 root 或 `CAP_CHOWN`,启动时即
+registry/archive 展平保留属主与权限位([布局与元数据政策](https://github.com/kuasar-sandbox/accelerator/blob/main/docs/image-preparation_zh.md#布局与元数据政策)),需要 root 或 `CAP_CHOWN`,启动时即
 预检。目录导出不 chown 源树,只要求足够的读取权限;导出完整 rootfs 通常仍须 root。
 `referer`/`info`/`cache`/`config` 不需要特权;`mountpoint` 执行挂载,需要相应权限。
 
@@ -108,7 +110,7 @@ manifest key,而 `--upload --print-digest` 会输出多个值。捕获 key 时�
 
 目录导出在规划或写入进度之前，按打开文件的身份排除 stdout、stderr 对应的普通文件及源内别名，无需通过 procfs 解析路径；管道仍直接流式输出。显式输出路径、scratch 和这些重定向文件共用规划、读取及最终校验的同一选集。
 
-### 2.1 `flatten-ctl export`
+### `flatten-ctl export`
 
 ```
 flatten-ctl export [flags] <ref|path|->
@@ -120,7 +122,7 @@ flatten-ctl export [flags] <ref|path|->
   --upload                展平后把 EROFS ingest 进 store,stdout 打印 manifest key
   --manifest-config <p>   manifest 配置 YAML(覆盖 MANIFEST_CONFIG env);--upload 必需
   --config <p>            flatten 配置 YAML(覆盖 FLATTEN_CONFIG env):tmpdir/platform/
-                          tls/cache/referer(详见 §2.3)
+                          tls/cache/referer(详见 远程拉取、本地缓存与 Referrers 回写)
   --platform <os/arch>    覆盖配置里的拉取 platform(os/arch[/variant])
   --tmpdir <dir>          覆盖配置 tmpdir(自动创建)。guest 内导出自身 rootfs 时
                           必须指向 mountpoint 子命令造出的挂载点(连同 mkfs 临时
@@ -128,7 +130,7 @@ flatten-ctl export [flags] <ref|path|->
   --insecure              registry 源:允许 plain HTTP;TLS 证书校验由配置中的 tls.* 独立控制
   --no-progress           禁用 stderr 进度输出
 
-  # 远程 registry 源(详见 §2.3)
+  # 远程 registry 源(详见 远程拉取、本地缓存与 Referrers 回写)
   --print-digest          stdout 打印解析后的源镜像 digest(repo@sha256:..);与 --output - 互斥
   --registry / --archive  强制把位置参数当 registry 引用 / 本地文件(消歧)
   # rootfs 目录源(位置参数是本地目录时;见下文)
@@ -203,7 +205,7 @@ stdout 等 writer 输出现有工件，不保存整镜像压缩层、mkfs 私有
 | Docker-save 输入 | 可 seek 文件原位建索引；不可 seek 输入只保留一份有界外层 spool，全部层校验后、规划前删除。不再单独解出内层 tar。 |
 | 最终工件 P | 仅 stdout 时直接流式输出；上传/复读保留一份必要 P，成功或失败后尝试清理。ingest 成功且 key 写出后，后续清理失败通过 stderr 告警，不将已完成上传判为失败。 |
 | 命名 `--output` | 先写同目录 pending 文件；writer Close、最终校验、prepared 资源释放和请求的上传均成功后才原子改名。提交前失败保留已有目标文件；rename 后空暂存目录清理失败通过 stderr 告警，不将已提交文件判为失败。 |
-| 显式持久缓存 | 完成态 blob 不随任务删除。取消先等待预取退出，再删除本次 pending；GC 独立执行（§2.4）。 |
+| 显式持久缓存 | 完成态 blob 不随任务删除。取消先等待预取退出，再删除本次 pending；GC 独立执行（[`flatten-ctl cache` — 检视/回收拉取缓存](#flatten-ctl-cache--检视回收拉取缓存)）。 |
 | 调用者目录、输入归档、无关文件及 scratch 父目录 | 不由任务资源清理删除。 |
 
 新文件使用 `0666` 并受调用者 umask 约束；替换已有普通文件时保留 UID、GID、rwx 权限位及 POSIX 访问 ACL。无法保留这些属性时，已有文件保持不变。临时文件仍由调用者拥有时先恢复权限和 ACL，再设置目标 UID/GID；执行这一所有权转移时，已有 `CAP_CHOWN` 的调用者无需额外持有 `CAP_FOWNER`。输出 artifact 不保留 setuid/setgid 执行位或其他扩展属性。 原子替换还需要替换目录项的权限：父目录带粘滞位时，调用者必须拥有父目录或目标文件，或持有 `CAP_FOWNER`。检测到缺少该权限时，在镜像准备前报错并保留旧文件；仅能写入文件内容并不足够。目标文件自身若为挂载点，不能被原子替换；内核提供挂载 ID 时，在准备前拒绝该目标。挂载目录中的普通文件仍受支持。内核不提供挂载 ID 时，仍由最后的 rename 检查决定，不回退为原地覆盖。临时 artifact 位于私有目录，目录的所有者访问权限不受最终文件 umask 影响，并保留 setgid 目录对新文件 GID 的继承，包括调用者不属于该组且 umask 导致目录访问权限需要修复的情况；写入、复读和上传使用同一个预留文件描述符；提交前若发现临时对象被替换，则拒绝提交。命名目标必须是普通文件或尚不存在：设备、FIFO、目录及符号链接在准备前被拒绝，提交前再次检查。 Linux 6.1 上的特权导出可在没有 procfs 时恢复暂存目录访问权限。在该内核上，若非特权调用者的 umask 屏蔽目录访问权限，则需要 `/proc` 完成描述符回退；不可用时导出失败并保留已有输出。
@@ -226,7 +228,7 @@ GOFLAGS=-p=2 GOMAXPROCS=2 go test -race ./cmd/flatten-ctl
 artifact 入口的一致性；无需安装 mkfs。独立 fsck、内核挂载和实际 Guest 内容/元数据
 验证沿用[既有 E2E 入口](../test/e2e/README.md)。
 
-### 2.2 `flatten-ctl info` — 检视镜像
+### `flatten-ctl info` — 检视镜像
 
 ```
 flatten-ctl info [--json] [--manifest-config <path>] <path|manifest://hex>
@@ -292,11 +294,11 @@ flatten-ctl info --json my-app.img | jq .config
 flatten-ctl info --json my-app.img | jq '.config.Entrypoint'
 ```
 
-直接使用 ZIP 工具时,先提取原始 `image` payload(§3.1)。
+直接使用 ZIP 工具时,先提取原始 `image` payload([字节布局](https://github.com/kuasar-sandbox/accelerator/blob/main/docs/image-preparation_zh.md#字节布局))。
 
-### 2.3 远程拉取、本地缓存与 Referrers 回写
+### 远程拉取、本地缓存与 Referrers 回写
 
-位置参数判定为 registry 引用时(§2 判别规则),`flatten-ctl` 经 [go-containerregistry]
+位置参数判定为 registry 引用时([命令行接口](#命令行接口) 判别规则),`flatten-ctl` 经 [go-containerregistry]
 直接拉取、展平,无需先 `docker save`。所有 registry 行为由 **`--config` YAML**
 (或 `FLATTEN_CONFIG` env)配置,密钥不入文件:
 
@@ -317,12 +319,12 @@ referer:
   validity: 720h               # 可选;referer put 写入 valid_at 的过期段
 ```
 
-artifact_type 固定为常量 `application/vnd.kuasar.flatten-manifest.v1`(不可配置,保证跨工具/版本一致)。
+转换记录使用固定 artifact type，精确 schema 见下文链接的共享库契约。
 
 **凭据(命名空间环境变量,匿名回落)**:`FLATTEN_REGISTRY_TOKEN`(Bearer,优先)或
 `FLATTEN_REGISTRY_USERNAME` + `FLATTEN_REGISTRY_PASSWORD`(Basic);都不设则匿名拉公有
 镜像。密钥只走 env(不上 argv、不入配置文件),契合 orchestrator 经 exec env 把租户拉取凭据
-下发进构建沙箱的模型([deployment_zh.md](https://github.com/kuasar-sandbox/kuasar-sandbox/blob/main/docs/deployment_zh.md) §5)。
+下发进构建沙箱的模型([deployment_zh.md](https://github.com/kuasar-sandbox/kuasar-sandbox/blob/main/docs/deployment_zh.md#build-部署))。
 
 **TLS(`tls.*`)**:作用于全部 HTTPS 请求——既包括 registry API,也包括层 blob 的 CDN
 重定向(拦截式代理会用私有 CA 重签这些证书,系统信任库默认拒绝)。`ca_cert` 把额外的
@@ -330,19 +332,14 @@ PEM CA bundle 追加进系统信任库,是信任此类私有根 CA 的正路;`in
 整体关闭证书校验,仅作 CA 不可得时的逃生口。与 `insecure` 正交:后者只决定 registry
 是否可走纯 HTTP,不影响 TLS 校验。
 
-**本地缓存**：标准 OCI layout。只有显式 `cache.dir` 才暂存压缩候选层。当前层先
-取得预算，下一层完整 descriptor 能装入剩余字节预算时才预取；超预算层直接 stream
-bypass，`cache.required=true` 则拒绝。EOF 不发布命中：完整压缩 size/digest、解压
-DiffID/trailer 和 Close 全部成功才提交；命中仍在应用时重验。重复写入保留已有 inode。
-读写 lease 防止 GC 删除活动数据；超过宽限期的遗留 pending 可回收。完成态缓存不随
-任务删除；`max_size` 是 LRU 目标，不是即时文件系统配额。
+**本地缓存**：显式设置 `cache.dir` 才保留层缓存。`cache.required=true` 使超出 in-flight 预算的层失败，否则旁路流式读取；`max_size` 是 LRU 回收目标。完成验证后才能复用。完整的候选发布、lease 与 GC 契约见[层缓存与转换记录](https://github.com/kuasar-sandbox/accelerator/blob/main/docs/image-preparation_zh.md#层缓存与转换记录)。
 
 **多架构**:registry 引用常指 manifest index,按 `platform` 选出具体 image 再展平;
-`Architecture`/`Os` 仍原样投影进 config.json(§3.2),不做校验。
+`Architecture`/`Os` 仍原样投影进 config.json([config.json schema](https://github.com/kuasar-sandbox/accelerator/blob/main/docs/image-preparation_zh.md#configjson-schema)),不做校验。
 
 **确定性提醒**:tag 可变,`:latest` 不可复现;可复现构建请钉 `@sha256:`。`export` 把
 解析到的 `repo@sha256:..` 打到 stderr(`--no-progress` 关闭),`--print-digest` 另打到
-stdout。digest 固定源字节;完整输出复现还需固定配置、工具链与构建设置(§3.3)。tag 的稳定性取决于当前指向。
+stdout。digest 固定源字节;完整输出复现还需固定配置、工具链与构建设置([跨次确定性来源](https://github.com/kuasar-sandbox/accelerator/blob/main/docs/image-preparation_zh.md#跨次确定性来源))。tag 的稳定性取决于当前指向。
 
 #### Referrers 原子操作(`referer lookup` / `referer put`)
 
@@ -372,21 +369,13 @@ miss 处理；原始层缓存和显式旧工件仍可读取。Builder 向 lookup
 `--conversion-semantics`，旧或不兼容 Guest 工具会失败，不能把旧转换标成当前政策。
 该版本不进入制品身份，并独立于内部 Plan schema。
 
-`lookup` 严格校验 `valid_at`。缺失或格式错误的时间、未来的 import 时间、已经到期
-或早于 import 的 expiry 都作为 miss 跳过;存在多条有效记录时返回 import 时间最新者。
+无效或过期记录返回 miss，多条有效记录选择最新 import；时间字段的精确接收规则由[转换记录契约](https://github.com/kuasar-sandbox/accelerator/blob/main/docs/image-preparation_zh.md#层缓存与转换记录)定义。
 
 `put` 构造 referrer artifact(OCI image manifest:subject=`D`、artifact type 经 config
 media type 承载、注解 `owner`/`id`/`valid_at`)并推回源 repo。`put` 需要源 repo push
 权限;失败由调用方决定是否使构建失败。
 
-referrer 注解:
-
-```
-vnd.kuasar.flatten-manifest.owner    = <hmac-hex> <referer_desc>
-vnd.kuasar.flatten-manifest.id       = <manifest_id>                        # ingest 产出的内容键
-vnd.kuasar.flatten-manifest.conversion = umoci-go-erofs-no-xattr-v1
-vnd.kuasar.flatten-manifest.valid_at = <import RFC3339>[ <expiry RFC3339>]
-```
+[精确注解 schema 与接收规则](https://github.com/kuasar-sandbox/accelerator/blob/main/docs/image-preparation_zh.md#层缓存与转换记录)由 Accelerator 共享库维护；CLI 以此解释 lookup 结果并执行 put。
 
 其中 owner token 通常由宿主计算:`hmac = HMAC-SHA256(key = 客户秘钥 MANIFEST_KEY,
 msg = referer.key)`,注解值为 `<hmac-hex> <referer_desc>`。Guest 的 `referer` 命令只接收
@@ -400,7 +389,7 @@ referrer(owner token / id / 时间)对能读该 repo 者可见——owner 经 HM
 
 [go-containerregistry]: https://github.com/google/go-containerregistry
 
-### 2.4 `flatten-ctl cache` — 检视/回收拉取缓存
+### `flatten-ctl cache` — 检视/回收拉取缓存
 
 ```
 flatten-ctl cache info [--config <p>] [--cache-dir <D>]
@@ -413,7 +402,7 @@ flatten-ctl cache gc   [--config <p>] [--cache-dir <D>] [--cache-max-size <S>] [
 执行回收(`export` 每次拉取后也会顺带回收)。grace 期与并发写入仍可能使占用
 暂时超过目标,这不是即时文件系统配额。
 
-### 2.5 `flatten-ctl tar` — tar 流提取与单文件稀疏流
+### `flatten-ctl tar` — tar 流提取与单文件稀疏流
 
 tar 工具面,两个方向都是**纯 Go、零 tar 二进制依赖**:
 
@@ -460,7 +449,7 @@ stdin 报错引导)。`..` 成员跳过告警,穿 symlink 写出是硬错误;条
 取 `uid:gid`:数字直用,**名字**则按解包目标根的 `/etc/passwd`/`/etc/group` 解析
 (Docker `COPY --chown=name` 同款;CGO 关,os/user 直读文件不经 NSS);`user`(无组)
 取该用户主组,纯数字 `1000` 镜像为 `1000:1000`。node-ctl 的 COPY step 即以
-`extract --dense --chown` 把上下文 tar 摊进 guest rootfs(见 [按目标执行与发布](https://github.com/kuasar-sandbox/orchestrator/blob/main/docs/node-build_zh.md#5-按目标执行与发布))。
+`extract --dense --chown` 把上下文 tar 摊进 guest rootfs(见 [按目标执行与发布](https://github.com/kuasar-sandbox/orchestrator/blob/main/docs/node-build_zh.md#execution-and-publication))。
 
 **stream** 把**一个文件**封装为 tarstream(一个稀疏 payload +
 `.kuasar.digest.<hex>` marker metadata,`accelerator/pkg/tarstream`)。writer 在写 payload
@@ -492,90 +481,15 @@ gen-disk | flatten-ctl tar stream --size $((16<<20)) disk.img:- | flatten-ctl ta
 # 程序化读写(含洞图精确取回、tar 内随机访问)见 accelerator/pkg/tarstream
 ```
 
-编程接口:`accelerator/pkg/tarstream` 的 `WriteTo`(吃任意 `sparse.Source`,返回
-写入时生成的摘要)/`ReadFrom`/`ReadSeekFrom`(洞图精确往返、tar 内零拷贝随机
-访问)/`SourceFrom`(tar 流直接开成 `sparse.Source`,可直通 manifest ingest
-等管线消费者)/`SourceAt`(随机访问,完整平台工件通过可选 `Digester` 暴露 marker),
-本仓与各下游仓均可 import。
+程序化 sparse/tarstream 入口与完成规则见 [Accelerator 数据契约](https://github.com/kuasar-sandbox/accelerator/blob/main/docs/artifacts_zh.md#程序化-tarstream-入口)。
 
-## 3. 镜像格式
+## 理解并消费输出
 
-### 3.1 字节布局
+正常导出的 `.img` 是含 `image` payload 的 tarstream 工件，不是可直接挂载的裸文件系统。payload 包含单设备、未压缩 EROFS，末尾追加 OCI 运行配置投影 ZIP。先用 `info` 检查投影；直接检查文件系统前，用 `tar extract` 取得逻辑镜像字节。最终 EROFS 不保留 xattr、file capability、ACL 或安全标签。镜像层来源的根目录规范化为 `0755`、UID/GID `0:0`；目录来源保留其源根元数据。属主、权限、链接和数据仍要求文中权限条件及稳定输入。
 
-外层 `.img` 是 tarstream 工件,含一个 `image` payload 和 `.kuasar.digest.<hex>`
-marker。以下偏移均相对于**解封后的 payload**:
+精确的[布局、config schema、确定性身份和完成条件](https://github.com/kuasar-sandbox/accelerator/blob/main/docs/image-preparation_zh.md#镜像-payload-与运行配置)由共享库统一维护。只有完整载体和 producer/ingester 均成功，结果才可复用或写回 Referrers；收到 payload 不代表成功。上文 CLI 流程和失败处理示例继续是操作入口。
 
-| payload 偏移 | 内容 |
-|---|---|
-| `[0, erofs_end)` | 自描述 EROFS 文件系统;偏移 1024 的 superblock 给出 image size。 |
-| `[erofs_end, payload EOF)` | STORED 无压缩 ZIP,含 OCI runtime config 投影 `config.json`。 |
-
-两段不改变彼此的格式:
-
-- **EROFS reader**:在 payload 偏移 1024 读 superblock,用 `blocks << blkszbits`
-  确定文件系统边界,不把尾部 ZIP 当文件系统内容。平台 vhost-user-blk reader 先
-  提供 payload 视图;直接 `mount -t erofs` 必须使用提取后的 payload,不能传外层 tar。
-- **ZIP reader**:从 payload EOF 反向扫描 EOCD;ZIP 内部 offset 相对于 ZIP 自身
-  起点,支持前缀数据的 reader 会处理 EROFS 前缀。直接 ZIP 工具也应接收提取后的 payload。
-
-`erofs_end = blocks × (1 << blkszbits)`,由 superblock 解析。EROFS 有明确的磁盘
-字节序,支持跨 Host 架构构建;Guest 仍需支持所用 EROFS 特性,应用二进制仍需匹配执行架构。
-
-```bash
-# 使用直接文件系统/ZIP 工具前,先解封工件
-flatten-ctl tar extract -f my-app.img image:my-app.erofs
-unzip -p my-app.erofs config.json
-```
-
-### 3.2 config.json schema
-
-ZIP 内 `config.json` 是 OCI image config 的运行时相关投影。**只保留启动需要
-的字段**,跳过 `created` / `author` / `history` / `rootfs.diff_ids` 等会破坏
-跨次确定性的元数据。
-
-字段集合(运行时投影 schema):
-
-```
-Architecture     string                 (passthrough,例如 "amd64" / "arm64")
-Os               string                 (passthrough,例如 "linux")
-User             string,omitempty
-Env              []string,omitempty
-Entrypoint       []string,omitempty
-Cmd              []string,omitempty
-WorkingDir       string,omitempty
-ExposedPorts     map[string]struct{},omitempty
-Volumes          map[string]struct{},omitempty
-StopSignal       string,omitempty
-Labels           map[string]string,omitempty
-Healthcheck      *Healthcheck,omitempty   (Test/Interval/Timeout/StartPeriod/Retries,
-                                            Duration 字段是 OCI 原生 nanoseconds int64)
-```
-
-**为什么 Architecture / Os 不 omitempty**:即使空值也要写入,让下游观察者
-看到"源镜像没填这两项"的问题,而不是默默继承默认值。flatten-ctl 是字节级
-转换工具,不验证平台兼容(amd64 vs arm64 决策属于上层调度器)。
-
-未列出的源字段(`OnBuild` / `ArgsEscaped` / `Domainname` / `Hostname` /
-`AttachStdin` / `Tty` / `MacAddress` 等)被静默丢弃——不在沙箱启动模型中
-使用。
-
-### 3.3 跨次确定性来源
-
-ZIP 部分:
-
-- 单 entry,文件名固定 `config.json`
-- 无压缩(stored,内容直接可见)
-- 修改时间固定为纪元常量 `1980-01-01 00:00 UTC`,绝不用挂钟
-- 确定性 JSON 序列化:map keys 按字典序、slice 顺序保留(Env/Cmd/Entrypoint
-  语义需要)、零值字段抑制
-
-EROFS 部分见 §4.3 元数据归一化。
-
-相等的运行时投影产生相同的 JSON 与 ZIP 字节。**仅 config 相同不能推出整镜像
-hash 相同**:rootfs 数据/元数据、构建工具/参数,以及工件稀疏图和容器编码也须
-一致。比较 payload hash 或 manifest key 时应保存这些输入。
-
-### 3.4 沙箱怎么用 config.json
+### 沙箱怎么用 config.json
 
 `sandbox-ctl run` 在启动前经 boot.root.base 的 payload 视图读尾部 ZIP,拿到运行时投影作为
 LaunchSpec 的 fallback:`sandbox.yaml` `launch.*` 字段优先,`Env` 取镜像在下、
@@ -583,183 +497,17 @@ override 在上的合并,`Volumes` 并入 `mounts`。因此 image config 有 Ent
 时 `launch.exec` 即可省略。合并规则的权威定义见
 [宿主镜像默认配置合并](https://github.com/kuasar-sandbox/sandboxer/blob/main/pkg/sandbox/imageconf.go)。
 
-## 4. 算法
-
-### 4.1 输入与层生命周期
-
-`remote.Stream` 在打开层之前固定平台 manifest、config、descriptor 和对应 DiffID。
-每次 `LayerInput.Open` 必须为同一不可变身份返回从零开始的新 body；prepared 操作
-拥有它，精确关闭一次并检查 Close 错误。gzip/zstd/plain 由明确媒体类型决定。
-tar EOF 不等于流结束：有界尾部读取覆盖完整未压缩 DiffID、压缩 size/digest 和
-decoder trailer。错误、超限或取消停止输入，不无限 drain。全部层成功前不输出工件。
-`remote.Pull` 保留完整下载、可重开的 Source 合同；旧 `Build(Source, ...)` 仍接受
-未压缩、可重开的层。
-
-`PrepareArchive` 校验外层成员、offset/length、结束标志及索引预算，按 manifest
-顺序开启层。可 seek 输入原位读取，管道只 spool 一次。`PrepareImage`、
-`PrepareArchive`、`PrepareDir` 返回的 `PreparedImage` 持有选定源、layout、计划和 FD。
-旧 `Flatten` 借用 reader；`PrepareArchive` 拥有并关闭传入 body。
-选定的 config 和层必须是普通成员。既有 Skopeo 旧格式别名
-`<hex>/layer.tar -> ../<diff-id>.tar` 仅在目标为选定普通层时接受，只建立索引，
-不跟随或提取该链接。其他外层链接和 sparse 成员均拒绝。
-
-### 4.2 OCI 应用与稳定源
-
-Linux 适配调用 **umoci v0.6.0** 层 API，不引入其 CLI、CAS 或 runtime bundle 生成。
-保留数值 UID/GID、mode、普通目录和类型替换、implicit parent、硬链接身份及特殊文件。
-迟到的 `.wh.<name>`、`.wh..wh..opq` 只影响下层条目，不删除同层新增条目。
-权限不足明确失败。受支持的层 xattr 在私有 rootfs 中应用并核对；最终输出政策见 §4.3。
-半应用树整体废弃，不原地重放同层模拟回滚。
-
-私有 rootfs 在层应用后停止写入。已有目录须由调用者在准备和输出全程保持稳定；
-选集和摘要只能检测变化，不能把并发目录变成原子快照。规划、读取和最终校验共享
-同一选集，包括 `Skip`、`SkipMounts` 及全部自有 scratch/spool/layout/输出排除。
-读取产生的 atime 和排除区域内部变化不导致失效；纳入选集的元数据、链接、对象及
-目录成员变化会导致失效。
-
-### 4.3 布局与元数据政策
-
-`accelerator` 使用固定版本的外部模块 `github.com/kuasar-sandbox/go-erofs`，复用其
-目录、inode/NID、硬链接、superblock、块分配和紧凑单设备 chunk 索引。调用方沿共同
-选集按确定顺序扫描，以约 1 MiB 缓冲逐 4 KiB 计算完整 SHA-256 去重，并顺序写出
-数据来源记录。库只规划并输出结构元数据，不暂存 payload。raw 与 artifact 共用
-同一 KERPLAN v1 布局；新旧生成器不要求字节相同，新生成器自身保持确定性。
-
-| 字段 | 处理 |
-|---|---|
-| 时间与 UUID | 零时间与全零 UUID 固定输出身份，不修改调用者目录。 |
-| UID/GID/mode | 保留源的数值属主和权限位；层应用权限不足失败。 |
-| inode、遍历、硬链接 | 共同选集的确定性排序和真实共享 inode；内容去重独立进行。 |
-| xattr | 最终 EROFS **不输出 xattr、file capability、ACL 或安全标签**，即使它们已成功应用到私有 rootfs。 |
-| 压缩与设备 | 不压缩、单设备、4 KiB chunk，无隐式 raw/data-blob fallback。 |
-
-内部 Plan schema/能力、`image.ConversionSemantics` 和制品身份分别管理。Plan 声明
-逻辑长度、源身份/路径、有序目标和源 offset、length、SHA-256 及 padding。Reader
-拒绝未知能力、溢出、数量/字节超限、缺源/截断、重叠和越界。
-
-库的 `LayerLimits.MetadataBytes` 和 `PlanLimits` 字段是可选准入配额。零值不再
-额外限制层元数据、规划、落盘 Plan 或索引；整数/分配表示范围及格式边界检查仍然
-生效。CLI 使用这些零值选项，因此增加 Builder 资源不再被这些固定的层/计划配额
-抵消，不需要新的 CLI 参数或 Builder API。执行资源仍是外层内存/存储边界；独立
-调用方必须约束自己的执行环境。这不保证任意大的输入都能完成。
-
-显式正值保留原有保守计费。兼容字段名 `NativeMemoryBytes` 限制 Go 规划器的受控
-分配，分给库和调用方去重/硬链接表，各占一半；扩容计入新旧存储并存。
-`PlanBytes` 限制计划文件及结构元数据；`IndexMemoryBytes` 保留选集、reader 和
-writer 的份额。原先的一百万来源上限改为可寻址来源切片边界。这些估算不是进程
-RSS 硬上限；GC、栈及分配器残留还须计量。解码器、归档、路径、摘要和完成条件
-检查仍然生效。
-
-### 4.4 顺序输出与接收条件
-
-规划完成后释放对构建索引的引用，再开始 emit；不强制全局 GC，也不承诺内存立即归还系统。layout 中计划 payload 尚未物化的洞标为
-**Data**；`RunAt` 是可重复的纯元数据查询，不消费游标、不扫描零字节推断洞。
-每个 payload 块进入 writer 前核验计划摘要。现有 runtime-config 投影、tailzip 和
-加密 writer 保持不变。
-
-可选 tarstream 最终校验钩子在 payload 完成后、carrier digest marker、完整尾和
-加密终结记录之前执行，空源和全 Hole/Zero 源也执行。Prepared 输出用它重验选集和
-Plan/layout 身份。接收方必须同时要求完整工件身份/尾以及 producer/ingester 成功，
-才能 Ready 或写回转换结果；仅收到 payload 字节不表示成功。
-
-显式 `WriteRaw` 使用同一 Plan；正常 CLI 不生成 raw 暂存。命名 raw 和 artifact
-均使用 pending 文件原子提交。rename 是提交点，发生在输出/文件关闭、源校验及源资源
-清理成功之后。后续空暂存目录清理不能撤销提交：CLI 向 stderr 告警；raw 文件 API 在
-提供 `Options.CleanupWarning` 时同步调用它（nil 时静默），已提交文件仍返回成功。
-`Close` 取消并等待活动工作，然后释放拥有的资源；
-调用者提供的任意输出 writer 须自行让阻塞的 Write 返回。
-
-`make flatten-ctl` 构建单个静态 Go 可执行文件，运行时不查找 mkfs，
-`MKFS_EROFS_PATH` 不再选择生产生成器。`make build` 使用宿主预安装的 erofs-utils
-打包 runtime bundle。项目不再编译 mkfs 或维护其补丁；独立 fsck/dump 校验使用
-宿主工具，历史 native 性能对照保留其原始源码版本。
-没有隐式旧生成器或高空间 fallback。回退应恢复上一组源码/制品及对应转换语义版本。
-
-## 5. 设计决策
-
-### 5.1 为什么是 EROFS 而非 ext4 / squashfs
-
-- **只读、不可变 base**:EROFS 适合内容寻址 chunk 和可复用 backing 数据。
-- **单一 payload**:适合单工件传递、manifest 上传和块设备访问；CLI 从稳定源和
-  Plan 顺序输出工件，不需要完整 raw 临时文件。
-- **可移植磁盘格式**:可跨 Host 架构构建;应用仍须匹配实际执行架构。
-- **squashfs 对比**:平台选择不压缩、chunk 布局的 EROFS 以配合数据/去重路径。
-  squashfs 也可共享不可变 backing 数据,这里没有普适的密度劣势证据。
-- **ext4 对比**:平台用 ext4 提供可写 upper。可变文件系统跨 sandbox 使用需要
-  隔离/COW 策略,并有 fsck 等维护事项。这说明当前 EROFS base / ext4 upper
-  的职责划分,不能当成所有方案之间的密度基准结论。
-
-### 5.2 为什么离线合并而非运行时 overlayfs
-
-离线合并省去每个 sandbox 单独组装原始容器层栈的步骤。平台经数据路径提供
-一个不可变 base;可写沙箱仍可在 Guest 内挂 overlayfs。此方案并不是把一个
-Host EROFS mount 当作多个 Guest 的挂载,本文也没有据此建立 Host mount 数量
-与密度上限的定量关系。
-
-代价是源镜像更新时多一次构建。镜像构建可在 CI/CD 流水线中完成一次,供多个
-sandbox 复用,摊销该成本。
-
-### 5.3 为什么 config.json 内嵌而不是边车文件
-
-外加 `app.erofs.config.json` 边车文件的方案有两个问题:
-
-- **拷贝 / 上传分裂**:用户必须记住"两个文件一对",`scp` 漏一个就坏
-- **manifest:// 无副车机制**:manifest 是单一 reader,边车文件需要单独的
-  manifest key + 单独的拉取流程
-
-ZIP-at-end 使单个交付工件里的文件系统 payload 自描述。`manifest-ctl store`
-可一次 ingest 完整内容,沙箱从同一 payload 读取启动配置。EROFS 自描述边界与
-ZIP 的 EOCD 反向扫描允许两种内部格式共存;外层 tarstream 提供平台工件信封。
-
-### 5.4 为什么投影而不是原样转发
-
-OCI image config 字段繁多,大量与启动无关:`created` / `author` / `history`
-是构建元数据,跨实例不同;`rootfs.diff_ids` 是层 hash,展平后不再有意义;
-`OnBuild` 是构建指令而不是运行时设置。原样转发会:
-
-- 破坏跨次确定性(timestamps 漂移)
-- 让 manifest dedup 无谓波动(每次构建的 history 不同)
-- 混淆构建指令与运行时配置的边界
-
-显式投影把"运行时启动需要什么"作为唯一标准,下游可预测。
-
-### 5.5 不实现 / 暂不实现的功能
-
-- **任意 OCI layout 目录直读**:支持 registry 拉取(§2.3),缓存也使用 OCI layout,
-  但不把任意该格式目录解码为 OCI 镜像。可先用
-  `skopeo copy oci:./dir docker-archive:x.tar` 转换,或用 crane 推到 registry 后拉取。
-  直接传普通本地目录会选择 rootfs 导出,不会识别 OCI layout。
-- **展平阶段的镜像签名/加密**:加密与内容寻址由
-  [manifest 阶段](https://github.com/kuasar-sandbox/accelerator/blob/main/docs/manifest_zh.md)
-  负责;这不构成镜像签名校验流程。
-- **层级保留**:输出把各层合并为一个 EROFS payload。manifest chunk dedup 可复用
-  不变内容,但不保留原始层结构。
-
-## 6. 性能特征
-
-构建工作量通常随输入字节数和文件数增长,主要成本包括下载、层解压、文件系统
-条目应用与 Go EROFS 规划。缓存状态、元数据分布、存储、CPU 和工具版本均影响结果。
-追加单个无压缩 ZIP entry 相对典型镜像构建较小,但仓库没有建立普适的
-1 GiB/3–5 秒或 ZIP 小于 10 ms 保证。
-
-确定性自检:用相同配置/工具链对不可变输入导出两次,按目标比较 payload/工件
-hash,或复现 manifest key。单元测试覆盖确定性转换;`verify` 子命令已移除(§2)。
-
-`flatten-ctl info` 不解压或读取整个 EROFS,只经对应 payload reader 读 superblock
-(128 字节)、扫描 ZIP 尾部并解析单个 stored entry。manifest 路径可能触发网络/
-chunk 拉取,不能保证普适的亚毫秒延迟。
-
-## 7. 判断工作负载是否需要适配
+## 判断工作负载是否需要适配
 
 从目标节点原生架构的 digest 固定镜像开始，验证真实入口、用户、可写路径和
-依赖，而不只启动 shell。[runtime bundle](sandbox-runtime_zh.md) 提供 Guest
+依赖，而不只启动 shell。[runtime bundle](runtime-bundle_zh.md) 提供 Guest
 init，[所选 guest kernel](vmlinux_zh.md) 提供内核能力；OCI 镜像携带主机模块
 不能补足该内核未提供的能力。
 
 | 工作负载需求 | 判断与验收探针 |
 |---|---|
-| 普通用户态服务 | 用 `flatten-ctl info --json app.img` 检查 User、Entrypoint/Cmd、Env、WorkingDir；以实际用户检查可执行路径、DNS 和 upper layer 可写路径。显式 launch 覆盖镜像默认值（§3.4）。 |
-| 文件 capabilities、SELinux label 或其他 xattr | 此路径不保留 xattr（§4.3）；重建/适配应用或验证其他受支持部署，不能假设 capability 位和 label 保留。必须测试实际特权操作。 |
+| 普通用户态服务 | 用 `flatten-ctl info --json app.img` 检查 User、Entrypoint/Cmd、Env、WorkingDir；以实际用户检查可执行路径、DNS 和 upper layer 可写路径。显式 launch 覆盖镜像默认值（[沙箱怎么用 config.json](#沙箱怎么用-configjson)）。 |
+| 文件 capabilities、SELinux label 或其他 xattr | 此路径不保留 xattr（[布局与元数据政策](https://github.com/kuasar-sandbox/accelerator/blob/main/docs/image-preparation_zh.md#布局与元数据政策)）；重建/适配应用或验证其他受支持部署，不能假设 capability 位和 label 保留。必须测试实际特权操作。 |
 | 设备、内核模块、TUN/bridge 或嵌套容器网络 | 对照所选 kernel 配置；预设不支持可加载模块且裁剪若干设备/网络栈。export 成功不证明这些能力；定制 kernel 须通过内核指南的 ABI/VMM 与启动/恢复验证。 |
 | OCI 元数据驱动行为 | 元数据保留不代表消费者执行；检查镜像默认值合并和显式 mounts/launch，不假设 Docker 网络、Healthcheck 编排或 OnBuild 执行。提供并测试显式构建就绪命令。 |
 | 有状态或外连服务 | 暂停/恢复前后验证文件及应用状态，测试外部连接重建。进程快照不等于外部数据库 checkpoint，也不会续租远端 lease。 |
@@ -769,21 +517,16 @@ init，[所选 guest kernel](vmlinux_zh.md) 提供内核能力；OCI 镜像携�
 digest 与日志，通过 owner kill 测试沙箱，引用核查后才退役工件。flatten 成功
 不是工作负载兼容性认证。
 
-<a id="7-see-also"></a>
+## 相关契约
 
-## 8. See Also
-
-- [accelerator/docs/manifest_zh.md](https://github.com/kuasar-sandbox/accelerator/blob/main/docs/manifest_zh.md):
+- [Accelerator 数据传输](https://github.com/kuasar-sandbox/accelerator/blob/main/docs/transfer_zh.md):
   将镜像 ingest 进内容寻址存储,chunk dedup 跨镜像共享重复内容。
 - [宿主镜像默认配置合并](https://github.com/kuasar-sandbox/sandboxer/blob/main/pkg/sandbox/imageconf.go):
   启动时使用内嵌 OCI runtime config。
-- [sandboxer/docs/sandbox_zh.md](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/sandbox_zh.md) `boot.root.base`:
+- [sandboxer/docs/sandbox_zh.md](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/runtime_zh.md) `boot.root.base`:
   选择展平镜像作为只读 base。
 - [Native 构建指南](../native-deps/README_zh.md):在仓库根目录用
   宿主安装 erofs-utils；用 `make flatten-ctl` 构建 CLI;
   mkfs 只用于宿主打包和独立对照；CLI 内含 Go 生成器，不查找外部 mkfs。
-- [系统总览](https://github.com/kuasar-sandbox/kuasar-sandbox/blob/main/docs/kuasar-sandbox_zh.md) §2.2 / §3.1:
+- [系统总览](https://github.com/kuasar-sandbox/kuasar-sandbox/blob/main/docs/architecture_zh.md):
   展平在系统中的位置和目标。
-
-
-Image 打包使用 `accelerator/pkg/tailzip` 分离 EROFS payload 与配置后缀，再写入 tarstream envelope。声明的 payload commitment 覆盖 EROFS prefix，后缀使用独立的 metadata commitment。新生成器的 EROFS 布局和摘要可以变化；确定性配置 ZIP 及封装规则保持不变，已有工件按原有声明身份读取。

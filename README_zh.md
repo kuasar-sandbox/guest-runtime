@@ -14,7 +14,7 @@
 ## 职责
 
 - 从有文档记录的 kernel source、config 和 patch set 构建 guest VMLinux image;
-- 构建宿主 EROFS 打包/测试工具及 Envd 等原生 guest 依赖;
+- 构建 Envd 等原生 guest 依赖，并使用环境安装的宿主 EROFS 工具打包与校验;
 - 构建 OCI/directory 到 EROFS 的 image builder `flatten-ctl`;
 - 组装 `sandbox-runtime.bundle`,其中包括 `sandboxer` 提供的 `sandbox-init` 和本仓维护的 guest payload;
 - 验证生成的 guest/Runtime 文件系统结构;
@@ -27,102 +27,22 @@
 | 路径 | 用途 |
 | --- | --- |
 | `cmd/flatten-ctl` | 使用共享 `accelerator` package 将 OCI 或目录构建为 deterministic EROFS image |
-| `native-deps/` | Guest VMLinux/Envd、宿主 EROFS 打包/测试工具及其原生构建输入 |
-| `docs/sandbox-runtime.md` | Runtime image 布局、guest payload、build 和 Release contract |
-| `docs/vmlinux.md` | Guest kernel source/config contract 与 platform ABI |
-| `docs/flatten.md` | `flatten-ctl`、remote image retrieval、cache 和 OCI Referrers 行为 |
+| `native-deps/` | Guest VMLinux/Envd 源码输入、补丁树和 Native 维护 |
 | `scripts/guest-inspect.py` | 在兼容的 nonrandomized x86_64 布局中从 Host 读取 guest kernel memory counter |
 
 Runtime image 将初始 guest tool 放在 `/opt/sandbox-runtime/bin/`。VMLinux 与 Cloud Hypervisor binary 不嵌入 Runtime bundle:VMLinux 作为独立发行单元发布,Cloud Hypervisor 由 `sandboxer` 构建和发布。
 
-## 源码工作区
+## 按流程或交付契约阅读
 
-选定源码的 Go 构建通过 workspace 使用兄弟仓 `accelerator`;独立 `go.mod` 解析已发布版本。发布流程从选定 sandboxer 发布包安装 `sandbox-init`;本地开发也可以从兄弟仓 sandboxer 构建它:
-
-```text
-<workspace>/
-├── guest-runtime/
-├── accelerator/
-└── sandboxer/
-```
-
-协调开发使用这些兄弟仓相互兼容的 `main` revision。复现已发布组合时,使用对应[项目聚合 Release](https://github.com/kuasar-sandbox/kuasar-sandbox/releases)精确选择的组件 Tag,不要分别选择各仓 GitHub Latest。完整六仓工作区见[项目 README](https://github.com/kuasar-sandbox/kuasar-sandbox)。
-
-独立 `flatten-ctl` 构建解析 `go.mod` 中真实可获取的版本。协调 Preview 构建只使用选定的 `guest-runtime` 与 `accelerator` 源码模块；构建和测试前生成该闭包：
-
-```bash
-GOWORK="$(python3 ../kuasar-sandbox/ci/integration/go_workspace.py --root .. --owners guest-runtime)" || exit 1
-export GOWORK
-```
-
-工作区验证 module path，不改写 `go.mod`/`go.sum`。Runtime 发布从指定 sandboxer Release 消费 `sandbox-init` 二进制；Sandboxer、Connector 不加入 Runtime Go 工作区。组装前将该程序安装到 `../sandboxer/bin/<arch>/sandbox-init`，或显式设置 `SANDBOX_INIT`。Envd、versitygw 保持独立 Go 模块构建；Kernel 使用 Native 输入，不加入 Go workspace。`go-erofs` 继续作为版本化外部依赖。
-
-## 构建前置
-
-本地构建使用环境提供的 Go, 继承 `GOROOT` 与 `GOTOOLCHAIN` 选择. Release 编排要求宿主 `PATH` 中已有支持 `api --slurp` 的 `gh`. EROFS 产品仍从项目选定的 source, patch 与 recipe 构建.
-
-CI 在受信 preflight 中一次选择已发布并验证的 Workbench, 将不可变镜像身份与精确 framework revision 传给构建 Job. Runtime 与 VMLinux 分别使用原生 `ubuntu-24.04` x86_64 和 `ubuntu-24.04-arm` aarch64 Runner. 编译, 普通测试和打包通过共享 Workbench action 执行, 使用 Runner 的 ordinary UID, 只读根文件系统, 移除 capabilities, 私有 `/src`, `/build`, `/work` 和显式 CPU 预算. 发布凭据留在宿主. 保留已有按架构声明的测试范围及独立硬件门禁; 原生 ARM 构建不代表 ARM KVM 覆盖. Runtime 发布直接使用已验证 Workbench 的 EROFS reader, 不在宿主编译 helper.
-
-构建 `sandbox-runtime.bundle` 需要**宿主架构**的 `mkfs.erofs` executable。在构建 Host 安装 `erofs-utils`,或设置:
-
-```bash
-BUILD_MKFS_EROFS=/path/to/host/mkfs.erofs make sandbox-runtime
-```
-
-Host packer 仅在构建时组装 runtime bundle，必须匹配宿主架构。`flatten-ctl` 内部使用纯 Go 的 `github.com/kuasar-sandbox/go-erofs` 库生成 EROFS；Guest 和 Runtime 发行包不再携带 `mkfs.erofs`。
-
-其他前置和 Native source 位置见 [Native 构建与维护](native-deps/README_zh.md)。
-
-## 构建
-
-```bash
-GOWORK=off make native-deps                # VMLinux、目标 EROFS tools、Envd 及 Native 输入
-make flatten-ctl                # OCI/directory -> deterministic EROFS builder
-make build                      # 组装 sandbox-runtime.bundle
-make sandbox-runtime            # 使用选定的 sandbox-init 二进制组装 Runtime
-make build TARGET_ARCH=aarch64  # 在依赖支持的范围内交叉构建
-```
-
-`make sandbox-runtime` 使用:
-
-- `../sandboxer/bin/<arch>/sandbox-init`;
-- `native-deps/bin/<arch>/envd`;
-- `bin/<arch>/flatten-ctl`;
-- 作为 Host image packer 的 `BUILD_MKFS_EROFS`。
-
-缺少 `sandbox-init`、Envd 或 `flatten-ctl` 时，Makefile 调用对应构建目标。宿主 `mkfs.erofs` 必须已在 `PATH` 中，或由 `BUILD_MKFS_EROFS` 指定；缺少时 Runtime 构建明确失败。项目不再维护 erofs-utils 补丁、编译或分发 mkfs。Workbench 或宿主可安装发行版的 erofs-utils，用于构建时打包和独立校验。
-
-## 输出
-
-| 输出 | Build target |
+| 读者任务 | 指南 |
 | --- | --- |
-| `bin/<arch>/flatten-ctl` | `make flatten-ctl` |
-| `bin/<arch>/sandbox-runtime.bundle` | `make sandbox-runtime` |
-| `native-deps/bin/<arch>/vmlinux` | `make native-deps` |
-| `native-deps/bin/<arch>/envd` | `make native-deps` |
+| 消费选定发行版、制备应用并绑定产物 | [使用 guest-runtime](docs/using-guest-runtime_zh.md)：验证、冷启动示例、升级与恢复 |
+| 查看 Runtime 字节布局、payload、身份和兼容 | [Runtime bundle](docs/runtime-bundle_zh.md) |
+| 核对 Guest 内核能力、架构及精确交付身份 | [VMLinux](docs/vmlinux_zh.md) |
+| 用发行 CLI 导出、检查、缓存或转换镜像 | [flatten-ctl](docs/flatten-cli_zh.md) |
+| 构建或复现选定 Runtime/Kernel 发行版 | [构建](docs/build_zh.md)：源码模式、依赖选择、Native 目标和包验证 |
 
-## 两个发行单元
-
-所选 owner 源码在 `release/helper-inputs.json` 显式声明编译型 E2E helper 清单。当前清单为空。后续 helper 及其构建配方由此 owner 声明维护，聚合打包自动发现，无需平台文件名清单。
-
-本仓不发布通用的 `guest-runtime-vX.Y.Z` Release,而是维护两条独立版本线:
-
-- **`runtime-vX.Y.Z`** - 发布 `sandbox-runtime-<arch>-vX.Y.Z.tar.gz`,包含 Runtime bundle、静态 `flatten-ctl` 及其许可和源码材料;
-- **`vmlinux-vX.Y.Z`** - 发布 `vmlinux-<arch>-vX.Y.Z.tar.gz`,在稳定路径 `bin/vmlinux` 包含 guest kernel，并在 `bin/vmlinux.sha256` 携带原始内核文件的 SHA-256。
-
-两者版本号可以独立演进。项目聚合 Release 精确选择一个 Runtime Tag 和一个 VMLinux Tag,不假定版本号相同。
-
-GitHub 组件资产在组件 build/package 检查后从所选 source ref 和精确 commit 发布，架构集合由各个所选 Release 声明。这里 `<arch>` 为该版本实际发布的 `x86_64` 或 `aarch64`。项目聚合 Release 随后选择精确 Runtime、VMLinux 和其他组件 Tag,并对该组合执行跨组件集成测试及已发布资产的 MicroVM 验证。Source Makefile 支持其他 `TARGET_ARCH` 不等于已为该架构发布预构建 artifact。
-
-Runtime 发布内嵌所选 sandboxer Release 中的 `sandbox-init`。安装前从所选 Tag 的完整 Release 包集合固定本机架构资产 ID，并校验 GitHub 原生大小与摘要。忽略历史正文 marker、校验和附件及来源旁车，只下载本机架构。校验归档路径、文件类型、所有权、权限与 ELF 架构，并按实际二进制中读取的编译器版本复制 Go 法律声明。重新编译同一提交可能改变 Go 构建元数据或工作区派生的默认值，因此源码重编译不能证明与已发布依赖逐字节一致。
-
-## Kernel source 与许可证
-
-VMLinux Release 必须可追溯到公开 kernel source version、config、项目 patch set、toolchain 和 source commit。Kernel patch 与复制的 kernel material 保留上游 copyright 和 GPL 义务。项目原创 build script 不会重许可 Linux kernel。
-
-Runtime bundle 可包含采用多种许可证的软件。Package/Native dependency input、notice、source availability 和 redistribution obligation 必须作为 Release contract 的一部分检视。不得向 guest image 添加 internal-only package、private CA、SSH host key、machine identity、production credential 或来源不可追溯的预构建 binary。
-
-仓库级许可证边界见 [`LICENSE_SCOPE_zh.md`](LICENSE_SCOPE_zh.md)。Native build 细节和 source location 见 [Native 构建与维护](native-deps/README_zh.md)。
+[共享镜像制备实现](https://github.com/kuasar-sandbox/accelerator/blob/main/docs/image-preparation_zh.md)归 accelerator。内核补丁开发与安全增量源码/缓存操作就近保留在 [native-deps](native-deps/README_zh.md)。[贡献指南](CONTRIBUTING_zh.md)说明源码修改、发行意图与验证。每篇目标指南均有完整英文版。
 
 ## 集成边界
 
@@ -131,24 +51,9 @@ Runtime bundle 可包含采用多种许可证的软件。Package/Native dependen
 - `orchestrator` 通过完整平台使用生成的 Runtime 和 VMLinux artifact;
 - `kuasar-sandbox/kuasar-sandbox` 选择精确发行单元,运行跨组件验证并发布聚合 Release。
 
-## Release 模型
+## 发行选择
 
-Preview 清理忽略历史 `SHA256SUMS` 和正文记录。完整性按精确包名、原生资产 ID、大小、摘要与上传状态判断；历史单 x86_64 包和完整双架构包均受保护，缺失或歧义元数据保留并报错。删除前复核实际 Tag 与 Release，部分删除可重试；只有明确 404 视为不存在。保留范围与期限由项目发行清理规则决定。
-
-Runtime 与 VMLinux 组件 Release 从所选 source ref 和精确 commit 构建。Preview Release 是供开发和评估使用的 GitHub prerelease;mainline Stable 分别对每个发行单元协调。项目聚合 Release 始终选择精确 Tag,不依赖 GitHub Latest,随后通过项目级集成测试和已发布资产测试验证所选组合。
-
-版本关系见[项目 Release 文档](https://github.com/kuasar-sandbox/kuasar-sandbox/blob/main/docs/release_zh.md),可用的 Stable 聚合版本由 [GitHub Latest Release](https://github.com/kuasar-sandbox/kuasar-sandbox/releases/latest) 渠道解析。
-
-## 文档
-
-详细设计与参考文档均有完整英中配对。英文使用默认文件名,语言选择器打开完整中文版本:
-
-- [`docs/sandbox-runtime_zh.md`](docs/sandbox-runtime_zh.md) - Runtime image 布局、guest payload、build、Release 和 consumption contract;
-- [`docs/vmlinux_zh.md`](docs/vmlinux_zh.md) - guest kernel config、build、platform ABI 和 source relationship;
-- [`docs/flatten_zh.md`](docs/flatten_zh.md) - `flatten-ctl`、deterministic flattening、remote retrieval、cache 和 OCI Referrers;
-- [Native 构建与维护](native-deps/README_zh.md) - Native dependency source 与 build workflow。
-
-按[文档策略](https://github.com/kuasar-sandbox/kuasar-sandbox/blob/main/CONTRIBUTING_zh.md#文档贡献)同步维护成对文档。
+同一仓库的 Runtime 与 VMLinux 是独立版本的发行单元。采用经验证聚合版选定的精确 Tag，并使用所声明架构的包。[使用 guest-runtime](docs/using-guest-runtime_zh.md)说明选择与验证，[构建](docs/build_zh.md)说明选定源码复现。共享发行线、Preview、清理与 Latest 规则由[项目发行契约](https://github.com/kuasar-sandbox/kuasar-sandbox/blob/main/docs/release_zh.md)统一定义。
 
 ## 贡献与安全
 
@@ -159,8 +64,3 @@ Runtime 与 VMLinux 组件 Release 从所选 source ref 和精确 commit 构建�
 ## License
 
 项目原创内容采用 [Apache License 2.0](LICENSE)。内核构建输入的许可证边界见 [`LICENSE_SCOPE_zh.md`](LICENSE_SCOPE_zh.md)。Runtime package、EROFS tool、Envd、Buildroot/distribution input 和其他第三方 material 保留各自 license、notice、source 与 redistribution obligation。
-
-`make release-runtime SANDBOXER_VERSION=<tag>` 同样通过已登录的 GitHub CLI 下载并校验该精确 sandboxer Release。装配与打包使用构建目录内同一个已安装二进制及编译器许可证；即使本地存在旧开发二进制，Release 缺失或校验失败也会在装配前停止。
-本地 sandboxer 源码必须位于该精确 tag，以提供对应许可证；缺少 tag 或 HEAD 不符会在下载前失败。
-
-`make release-runtime` 同时核对 `ACCELERATOR_VERSION` 与干净的相邻 accelerator checkout，并在编译前生成两个模块的 workspace。它重新编译 `flatten-ctl`，装配和打包使用同一输出，不受继承的 `GOWORK=off` 或旧 `FLATTEN_CTL` 影响。项目 checkout 不在 `../kuasar-sandbox` 时设置 `KUASAR_PLATFORM_DIR`。源码目录冲突或缺 Tag、缺模块会在构建前停止。

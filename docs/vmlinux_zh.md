@@ -1,6 +1,8 @@
 [English](vmlinux.md) | [简体中文](vmlinux_zh.md)
 
-# vmlinux — guest 内核镜像
+# Guest 内核：能力、启动与发行身份
+
+本篇定义选定 Guest 内核的能力、配置决策、架构/启动 ABI 和交付身份。[构建](build_zh.md)定义源选择与生产步骤，[使用 guest-runtime](using-guest-runtime_zh.md)提供已安装产物的检查和消费流程。编译成功本身不是 Guest 行为证据。
 
 平台为每个 sandbox 提供一份**最小化、固定版本**的 Linux 内核镜像
 (`bin/<arch>/vmlinux`).本文档定义这份镜像的构建方式、启用/禁用的功能集合,
@@ -11,27 +13,27 @@ vmlinux 是平台资产,**不**向租户提供通用内核版本/配置接口。
 Cloud Hypervisor。必须用选定的 sandboxer/runtime/VMM 组合验证自带内核的启动协议、
 必需设备、Guest ABI 与快照兼容性;平台不保证任意自带内核的功能或兼容性。
 
-## 1. 概述
+## 概述
 
-### 1.1 设计目标
+### 设计目标
 
 | 目标 | 实现方式 |
 |---|---|
 | 镜像小、启动快 | 稀疏平台 defconfig 显式保留所需子系统,由 Kbuild 解析;HZ=100;最小控制台配置 |
 | 版本与 ABI 可检查 | 固定 upstream 版本、LOCALVERSION、config fragments 和平台补丁;发布时校验精确资产 |
-| 单 VM = 单 app 模型 | 关闭 user/net/uts/ipc/time namespace、in-guest userfaultfd(完整 nested 容器运行时非目标,§3.2) |
+| 单 VM = 单 app 模型 | 关闭 user/net/uts/ipc/time namespace、in-guest userfaultfd(完整 nested 容器运行时非目标,[当前最小配置的禁用项](#当前最小配置的禁用项)) |
 | host 控制 guest 内存 | 启用 virtio-balloon(host-driven inflate via vm.resize);virtio-mem 驱动保留作扩展点 |
 | 单一 rootfs 路径 | virtio-pmem + DAX + EROFS(只读) + ext4(可写) + overlayfs |
-| 沙箱内资源隔离 + 存储挂载 | cgroup v2 freezer + cpu/memory/io/pids 控制器(由 launch.cgroup_control 选择应用侧委派,§5.2);NFS 客户端 v3/v4 + FUSE(s3fs)挂载(§3.1) |
+| 沙箱内资源隔离 + 存储挂载 | cgroup v2 freezer + cpu/memory/io/pids 控制器(由 launch.cgroup_control 选择应用侧委派,[cgroup v2:freezer + cpu/memory/io/pids 控制器](#cgroup-v2freezer--cpumemoryiopids-控制器));NFS 客户端 v3/v4 + FUSE(s3fs)挂载([关键启用项](#关键启用项)) |
 
-### 1.2 内核版本
+### 内核版本
 
 - 上游:`linux-6.1.169` (LTS),源 `cdn.kernel.org`
 - 编译器:host gcc(原生)/ `${CROSS_PREFIX}gcc`(交叉)
 - 优化:`CC_OPTIMIZE_FOR_SIZE=y`(-Os),不为 sandbox 启动场景做 -O2
 - LOCALVERSION:`-sandbox`(让 `uname -r` 在所有 sandbox 上一致,辅助调试)
 
-### 1.3 输出
+### 输出
 
 ```
 bin/x86_64/vmlinux        ELF 内核,PVH 启动协议,按大小优化且不含 debug-info
@@ -67,55 +69,7 @@ bin/vmlinux.sha256
 与 sidecar，并在启动期间保持绑定稳定；sidecar 不是签名或运行时证明。该打包步骤
 不改变单独执行 `make vmlinux` 的构建输出。
 
-## 2. 构建工作流
-
-`make vmlinux` 在输出缺失或受跟踪的内核输入更新时依次执行 fetch、patches-apply 和 build。
-显式 `linux-fetch`、`linux-patches-apply`、`linux-patches-format`、`linux-build` 目标通过
-`native-deps/deps/build-vmlinux.sh` 的 `STAGE` 选择阶段。从仓库根目录使用
-`make -C native-deps <target>`,或进入 native-deps 后使用 `make <target>`:
-
-```
-fetch         下载并校验 linux-6.1.169.tar.gz(支持 TARBALL_CACHE 共享缓存),
-              解压到 build/src/linux/(跨 arch 共享同一棵源码树),git init +
-              提交原始树 + 打 tag linux-patches-base
-patches-apply git am deps/linux-patches/*.patch 到该树。
-              空补丁集要求 HEAD == linux-patches-base。已应用的补丁幂等跳过;
-              未导出或与 patch 不一致的工作不会被覆盖
-build         把 sandbox-common.config + sandbox-<arch>.config 拼接成
-              arch/<kbuild_arch>/configs/sandbox_defconfig → make
-              sandbox_defconfig + make olddefconfig(关键:让 kbuild 解析依赖
-              闭包并暴露 silent regression)→ make -j<jobs> <kbuild_target>
-              (x86_64: vmlinux ELF;arm64: Image PE)→ cp 到 bin/<arch>/vmlinux
-```
-
-`jobs` 使用任务传入的正整数 `KUASAR_BUILD_JOBS`. 未设置任务预算时默认取 `nproc`; 容器 CPU quota 本身不会限制该值.
-
-合成源码 import 的 author/committer 时间及应用补丁时的 committer 时间默认取 `SOURCE_DATE_EPOCH` (未设置时为零). 保留显式 Git 日期参数和补丁 author 日期. 这些默认值只作用于配方的 Git 子进程, 使 SCM 派生的内核版本字符串可复现, 不改变内核配置或开发者提交.
-
-增量构建按输入决定:Native Makefile 跟踪 build/common 脚本、两份所选 fragment、patch
-目录及受跟踪的 patch。输入变化后,已有 `bin/<arch>/vmlinux` 不会阻止重新构建。
-显式 `linux-build` 每次重新解析配置,Kbuild 编译本身保持增量。删除输出或 clean 后再
-`make vmlinux` 可强制重新生成。
-
-**Patch 开发流**:在 native-deps 目录执行 `make linux-fetch`
-拉源码并打 `linux-patches-base` tag → 在 `build/src/linux/` 改代码 +
-`git commit` → `make linux-patches-format` 导出回 `deps/linux-patches/*.patch`
-→ `make vmlinux` 重新应用 + 构建。幂等与 sanity 语义统一见
-[Native 构建指南](../native-deps/README_zh.md) §3;补丁 arch-neutral,x86_64 /
-arm64 共用同一组。必须先保留尚未导出的工作,不能只为让构建继续而重置它。
-
-### 2.1 host 构建依赖
-
-```
-bc bison flex make tar pkg-config gcc
-libelf-dev / elfutils-libelf-devel
-libssl-dev  / openssl-devel
-```
-
-获取源码与 patch 开发还需要 Git 以及 Native 构建指南列出的下载/归档工具。
-交叉构建额外需要 `gcc-aarch64-linux-gnu` / `gcc-x86-64-linux-gnu`(取决于方向)。
-
-## 3. 配置体系
+## 配置体系
 
 defconfig 由 `native-deps/deps/vmlinux/` 中的**两段拼接**:
 
@@ -128,7 +82,7 @@ sandbox-common.config           跨 arch 通用(子系统启用、基础数据�
 脚本实际执行 `sandbox_defconfig` 和 `olddefconfig`,没有执行 `allnoconfig` 目标。
 应检查包含 Kconfig 默认值与依赖闭包的最终 `.config`,不能假定所有未写出的符号都已关闭。
 
-### 3.1 关键启用项
+### 关键启用项
 
 子系统 / 设备驱动:
 
@@ -143,7 +97,7 @@ VIRTIO_NET=y                    eth0(连到 host TAP)
 VIRTIO_PMEM=y                   sandbox-runtime.bundle 通过 virtio-pmem 挂入
 VIRTIO_VSOCKETS=y               sandbox-init ↔ sandbox-ctl 控制面
 VIRTIO_BALLOON=y                host 内存回收(host 通过 vm.resize 推 inflate;
-                                内核编译了 free-page reporting,但 CH balloon 配置不协商启用,见 §5.5)
+                                内核编译了 free-page reporting,但 CH balloon 配置不协商启用,见 free_page_reporting 未协商原因)
 VIRTIO_MEM=y                    host 主动 unplug 内存块
 LIBNVDIMM + ZONE_DEVICE +       virtio-pmem FS DAX 直接映射 host page cache;
 FS_DAX                          最终配置在 olddefconfig 后强制校验
@@ -186,7 +140,7 @@ PARAVIRT=y, KVM_GUEST=y         (x86_64) PV 优化:tlb shootdown / spinlock
 
 ```
 NAMESPACES=y, PID_NS=y          sandbox-init 建立 PID/mount 隔离,使主应用看到自己 PID=1
-CGROUPS=y                       应用 cgroup namespace 以真实 /app 为根(§5.2)
+CGROUPS=y                       应用 cgroup namespace 以真实 /app 为根(cgroup v2 控制)
 # UTS_NS, TIME_NS, IPC_NS,       1-VM = 1-app preset 未启用这些额外嵌套隔离
 # USER_NS, NET_NS not set
 ```
@@ -198,7 +152,7 @@ CGROUPS=y                       cgroup v2 层级。v2 freezer 属核心(无独�
                                 Kconfig):sandbox-init 在 quiesce 前原子冻结
                                 应用进程树、restore 环境就绪后解冻,消除
                                 resume-vs-env-init 竞态(机制见
-                                sandboxer/docs/sandbox-init.md §3.4;详见 §5.2)
+                                sandboxer/docs/guest-abi_zh.md#quiesce;详见 cgroup v2 控制)
 MEMCG=y                         memory.{high,max,min,low}
 CGROUP_SCHED + FAIR_GROUP_SCHED cpu.weight(+ CFS_BANDWIDTH 给 cpu.max)
 BLK_CGROUP + BLK_CGROUP_IOCOST  io.weight(io.cost 模型;+ BLK_DEV_THROTTLING
@@ -207,13 +161,13 @@ CGROUP_PIDS=y                   pids.max
                                 launch.cgroup_control=true 时,sandbox-init 向空的
                                 真实 /app 委派可用控制器,受管理应用在 /app/init 启动,
                                 用户子 cgroup 全部留在 /app 内。host cgroup + balloon
-                                仍框定整台 VM(§5.2)
+                                仍框定整台 VM(cgroup v2 控制)
 # CGROUP_FREEZER(v1 旧冻结器)/ RT_GROUP_SCHED / CPUSETS / CGROUP_DEVICE /
 # CGROUP_PERF / CGROUP_BPF / CGROUP_HUGETLB / CGROUP_MISC / NET_CLS /
 # NET_PRIO not set —— 未用
 ```
 
-### 3.2 当前最小配置的禁用项
+### 当前最小配置的禁用项
 
 当前平台 preset 没有启用以下随机化或 hardening 选项.这是发布内核的配置事实和
 显式安全取舍,不是模板父层共享或快照恢复成立的前提:
@@ -248,7 +202,7 @@ CGROUP_PIDS=y                   pids.max
 # SCSI / ATA / NVME / LOOP        块设备只走 virtio-blk
 # MD / BCACHE                     软 RAID / 缓存层
 # BTRFS / F2FS / XFS / CIFS /    本地只用 EROFS + ext4 + tmpfs + overlayfs;
-# VFAT / NTFS / AUTOFS4          网络/对象挂载用 NFS + FUSE(已开,见 §3.1)
+# VFAT / NTFS / AUTOFS4          网络/对象挂载用 NFS + FUSE(已开,见 关键启用功能)
 # HUGETLBFS                       Guest HugeTLBFS 不属于当前 4 KiB preset
 # BRIDGE / VLAN / BONDING / TUN   guest 内不需要二层桥接
 # VETH / VXLAN / GENEVE / WLAN
@@ -301,9 +255,9 @@ MAGIC_SYSRQ=y                     按需 sysrq-t/-w/-m
 # FORTIFY_SOURCE not set          未启用内核 fortify checks
 ```
 
-## 4. 架构差异
+## 架构差异
 
-### 4.1 启动协议
+### 启动协议
 
 | 项 | x86_64 | aarch64 |
 |---|---|---|
@@ -319,7 +273,7 @@ PVH 让 x86_64 跳过 BIOS/PXE 阶段;arm64 fragment 启用 EFI stub/ACPI。启�
 精确内核、VMM、硬件、workload 与计时边界测量;配置本身不能证明 50 ms、80 ms 或
 亚百毫秒的启动保证。
 
-### 4.2 中断控制器
+### 中断控制器
 
 | 项 | x86_64 | aarch64 |
 |---|---|---|
@@ -327,7 +281,7 @@ PVH 让 x86_64 跳过 BIOS/PXE 阶段;arm64 fragment 启用 EFI stub/ACPI。启�
 | Kconfig | `PCI_MSI=y`(隐含 APIC) | `ARM_GIC_V3=y` + `ARM_GIC_V3_ITS=y` |
 | virtio-pci 中断路径 | MSI-X | ITS |
 
-### 4.3 串口 / 控制台
+### 串口 / 控制台
 
 | 项 | x86_64 | aarch64 |
 |---|---|---|
@@ -340,14 +294,14 @@ PVH 让 x86_64 跳过 BIOS/PXE 阶段;arm64 fragment 启用 EFI stub/ACPI。启�
 sandbox-ctl 选择 journald 或文件等控制台目的地,Guest hvc0 接口不变。x86_64 内核
 不编任何 UART 驱动;aarch64 编入 PL011(CH 在 arm64 暴露 PL011 设备,留作启动早期
 与调试控制台)。应用的 stdin/stdout/stderr 不走任何 console 设备(走 vsock,见
-[sandboxer Guest ABI 文档](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/sandbox-init_zh.md) §3.5 / §4.5)。
+[应用标准流](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/guest-abi_zh.md#stdio) / [MUX 协议](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/guest-abi_zh.md#mux-wire))。
 
-### 4.4 RTC
+### RTC
 
 x86_64 用 CH 提供的 CMOS RTC(`RTC_DRV_CMOS=y`),aarch64 用 PL031(MMIO,
 `RTC_DRV_PL031=y`)——arm64 没有 PC 兼容 CMOS 的概念。
 
-### 4.5 页大小
+### 页大小
 
 arm64 内核配置可以使用 4 KiB / 16 KiB / 64 KiB。**随附的平台 preset 显式选择
 4 KiB**。Host userfaultfd 作用于 host 内存;当前 host handler 与工件路径使用 4 KiB
@@ -362,16 +316,16 @@ CONFIG_ARM64_4K_PAGES=y           显式锁 4 KiB
 
 x86_64 页大小固定 4 KiB,无此问题。
 
-### 4.6 PCI 拓扑
+### PCI 拓扑
 
 | 项 | x86_64 | aarch64 |
 |---|---|---|
 | host bridge 发现 | MMCONFIG / MCFG ACPI 表 | generic ECAM(ACPI/DT) |
 | Kconfig | `PCI_MMCONFIG=y` | `PCI_HOST_GENERIC=y` + `PCI_ECAM=y` |
 
-## 5. 关键决策
+## 关键决策
 
-### 5.1 为什么默认关 USERFAULTFD
+### 为什么默认关 USERFAULTFD
 
 `userfaultfd` 是平台 host 端的能力——sandbox-ctl 在 host 上对 backing memfd
 的 chVA 注册 uffd,接管 guest RAM 缺页.当前平台 workload 不需要在 **Guest 内**
@@ -380,14 +334,14 @@ x86_64 页大小固定 4 KiB,无此问题。
 需要在 guest 内做用户态 uffd 的应用(罕见——多是数据库自己管 page cache 的
 场景)走"自带 vmlinux"路径。
 
-### 5.2 cgroup v2:freezer + cpu/memory/io/pids 控制器
+### cgroup v2:freezer + cpu/memory/io/pids 控制器
 
 `CONFIG_CGROUPS=y` 提供 cgroup v2 层级,平台使用两类能力。
 
 **freezer(核心,无独立 Kconfig)**:快照 quiesce 前,sandbox-init 必须冻结完整应用子树并确认
 `cgroup.events:frozen 1`;restore 的墙钟等环境初始化完成后再解冻。否则 `/vm.resume`
 可能先于 Guest 处理 `restore` 而解冻 vCPU,使应用在旧墙钟或尚未重连的 MUX 上抢跑。
-机制见 [sandboxer Guest ABI 文档](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/sandbox-init_zh.md) §3.4。v2 freezer(`cgroup.freeze`,Linux ≥5.2)
+机制见 [Guest quiesce](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/guest-abi_zh.md#quiesce)。v2 freezer(`cgroup.freeze`,Linux ≥5.2)
 属于 CONFIG_CGROUPS 核心;CGROUP_FREEZER 是不需要的 v1 旧冻结器。
 
 **资源控制器**:MEMCG、CGROUP_SCHED+FAIR_GROUP_SCHED+CFS_BANDWIDTH、
@@ -397,7 +351,7 @@ BLK_CGROUP+BLK_CGROUP_IOCOST+BLK_DEV_THROTTLING、CGROUP_PIDS 提供 Guest
 控制器不会提供对应接口文件;仅编入也不够,还须在 `cgroup.subtree_control` 中启用,
 后代 cgroup 才能获得接口。
 
-应用 cgroup namespace、`/app` 冻结域、委派和进程/FD 生命周期完整定义在 [Guest ABI](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/sandbox-init_zh.md#321-应用-cgroup-namespace-与-controller-拓扑)中。内核必须提供所要求的控制器与 namespace；开启 `launch.cgroup_control` 时，ABI 要求严格启用并校验 advertised controller，不能把缺失能力静默视为成功。
+应用 cgroup namespace、`/app` 冻结域、委派和进程/FD 生命周期完整定义在 [Guest ABI](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/guest-abi_zh.md#application-cgroups)中。内核必须提供所要求的控制器与 namespace；开启 `launch.cgroup_control` 时，ABI 要求严格启用并校验 advertised controller，不能把缺失能力静默视为成功。
 
 Guest 控制器是在 **VM 预算内进一步细分**,不替代 host 权威。Host cgroup v2 限制
 CH 进程,balloon 控制 Guest 可用内存。Guest 子 cgroup 的 `memory.max=max` 表示没有
@@ -405,16 +359,16 @@ CH 进程,balloon 控制 Guest 可用内存。Guest 子 cgroup 的 `memory.max=m
 先发生。必须把 Guest 应用完成情况与 Guest 内存压力同 host cgroup OOM 计数分开验证。
 
 完整 nested 容器运行时(podman / Docker-in-Docker)仍非支持目标;它们需要本 preset
-关闭的 user_ns、net_ns 等额外 namespace(§3.2),工作流也不同于平台的短生命周期和快照模型。
+关闭的 user_ns、net_ns 等额外 namespace([当前最小配置的禁用项](#当前最小配置的禁用项)),工作流也不同于平台的短生命周期和快照模型。
 
-### 5.3 为什么 IP_PNP 关闭
+### 为什么 IP_PNP 关闭
 
 内核 `ip=...` cmdline 路径执行 DHCP/BOOTP 自动配网。沙箱已经通过 vsock launch
 协议从 sandbox-ctl 获得显式网络配置,由 sandbox-init 以 raw netlink 应用,因此 preset
 关闭重复的内核自动配网路径。启动时间与镜像大小的影响必须按精确构建测量,不能把历史
 估算当作普遍节省量。
 
-### 5.4 为什么 NR_CPUS=4
+### 为什么 NR_CPUS=4
 
 随附内核设置 NR_CPUS=4,使 CPU mask 和 per-CPU 数据结构针对最多 4 个 vCPU。
 更大的 NR_CPUS 可能增加小 Guest 不使用的结构与固定内存占用。
@@ -422,9 +376,9 @@ CH 进程,balloon 控制 Guest 可用内存。Guest 子 cgroup 的 `memory.max=m
 这是**内核 preset 限制**,不是把 `resources.capacity.cpu` 限定为 1/2/4 三档的平台 API
 规则。当前 sandbox 配置校验 CPU 数量为正,没有这组三值枚举。请求 Capacity 仍须由
 选定内核和 VMM 支持;配置被 parser 接受并不证明随附的 4-CPU 内核能运行它。
-Capacity 与资源语义见 [sandboxer 生命周期文档](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/sandbox_zh.md) §4。
+Capacity 与资源语义见 [资源模型](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/resources_zh.md#memory-terms)。
 
-### 5.5 为什么不启用 free_page_reporting,以及 VIRTIO_MEM 的角色
+### 为什么不启用 free_page_reporting,以及 VIRTIO_MEM 的角色
 
 `virtio-balloon free_page_reporting` 使 Guest 在 reclaim 期间持续向 host 报告空闲页。
 CH 的 `release_memory_range` 可对映射执行 `madvise(MADV_DONTNEED)`。在平台统一
@@ -436,14 +390,14 @@ balloon 配置**不协商启用 free_page_reporting**;这不是对所有配置�
 CONFIG_VIRTIO_BALLOON_FREE_PAGE_REPORTING=y、CONFIG_PAGE_REPORTING=y。
 编译了能力不代表 host 在运行时 advertise/启用它。
 
-内核提供能力而非节点资源策略。`mem_report` 与 Guest 报告字段由 [Guest ABI](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/sandbox-init_zh.md)定义；target/current、增长收缩、reservation 释放及 fresh-report 条件由 [sandboxer 资源闭环](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/sandbox_zh.md#93-balloon)定义；稀疏范围 release 由 [VMM 补丁](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/cloud-hypervisor_zh.md#34-0004--balloon-release-跳过-user-managed-zone-的空洞-run)定义。`/proc/meminfo` 的 `Balloon:` 不是该 Guest ABI 的来源，当前值取自 CH `memory_actual_size`，不能从 Guest MemTotal 反推 Capacity。
+内核提供能力而非节点资源策略。`mem_report` 与 Guest 报告字段由 [Guest ABI](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/guest-abi_zh.md)定义；target/current、增长收缩、reservation 释放及 fresh-report 条件由 [sandboxer 资源闭环](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/resources_zh.md#balloon-controller)定义；稀疏范围 release 由 [VMM 补丁](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/vmm_zh.md#patch-0004)定义。`/proc/meminfo` 的 `Balloon:` 不是该 Guest ABI 的来源，当前值取自 CH `memory_actual_size`，不能从 Guest MemTotal 反推 Capacity。
 
 `VIRTIO_MEM=y` 保留为 host 主动请求 Guest 内存块 unplug 的扩展点。其较粗、较少
 的事件可用于另外设计的内存热插拔/NUMA 场景。当前固定 Capacity Budget 模型拒绝
 memory hotplug,不使用 virtio-mem。保留驱动本身不能启用新设计;还须有相应 host
 支持并完成端到端验证。
 
-### 5.6 内存压力下的 balloon 行为
+### 内存压力下的 balloon 行为
 
 在 Linux 6.1.169 上，Guest 为每个充气请求批量分配普通 order-0 页，暂存到私有列表。
 在 balloon 锁内生成 PFN、完成已分配页的记账并将列表入链，再通知 Host。
@@ -457,14 +411,14 @@ actual，下次执行时重新读取目标。充气时无法分配页会结束
 Host 资源控制负责请求的 target、Budget 和 reservation 记账。CH 的
 `memory_actual_size` 提供当前 Guest Budget(有效内存大小);实际 balloon 大小为
 `Capacity - memory_actual_size`。target/current 不一致本身不能证明内存存在一个
-可持续上限。当前 grow、shrink 与压力反馈规则见 §5.5 和
-[sandbox_zh.md §9.3](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/sandbox_zh.md#93-balloon)。
+可持续上限。当前 grow、shrink 与压力反馈规则见 [为什么不启用 free_page_reporting,以及 VIRTIO_MEM 的角色](#为什么不启用-free_page_reporting以及-virtio_mem-的角色) 和
+[sandboxer balloon 控制器](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/resources_zh.md#balloon-controller)。
 
 Balloon 压力与恢复须使用配套的 host 控制器和真实 MicroVM 工作负载验证,覆盖启动
 及快照/恢复路径。内核编译成功或上游 OOM 放气都不能保证任意 Guest 工作负载
 无 OOM 地完成。
 
-## 6. 验证
+## 验证
 
 构建后基本 sanity:
 
@@ -491,27 +445,27 @@ Stable 与 Preview 聚合均使用 exact-asset 集成测试门禁。
 配置 review 使用 `make olddefconfig` diff 检查 silent Kconfig 变化;不要以跨实例
 RAM 字节相同比例作为发布门禁.
 
-## 7. 维护
+## 维护
 
 - 升级 kernel 主版本(6.1 → 6.x):review `sandbox-common.config` 的功能、安全和
   调试选项,运行 `make olddefconfig` 看 silent regression;若
   `deps/linux-patches/*.patch` 中有补丁,则在新源码树上 rebase
   (`make linux-fetch` 重打 base → 在 `build/src/linux/` `git rebase` /
   重打补丁 → `make linux-patches-format` 回写),并使用配套 host 源码
-  重新验证 balloon 压力与恢复(§5.6)
+  重新验证 balloon 压力与恢复([内存压力下的 balloon 行为](#内存压力下的-balloon-行为))
 - 升级架构 fragment:review CH 对该 arch 的设备模型是否有新依赖(例如
   GICv4 / 新 RTC 驱动)
 - 不上游化 defconfig:本配置选择跟通用 server distro 取向偏离明显
   (关闭 userfaultfd、裁剪 namespace、cgroup 只留 freezer + sandbox 必需的
   cpu/memory/io/pids 控制器等),不寻求合并到 upstream
 
-## 8. See Also
+## 相关契约
 
-- [sandboxer VMM 文档](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/cloud-hypervisor_zh.md) —— 平台 VMM 的启动协议、设备
+- [sandboxer VMM 文档](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/vmm_zh.md) —— 平台 VMM 的启动协议、设备
   模型、patch 范围
-- [sandbox-runtime_zh.md](sandbox-runtime_zh.md) —— 内核之上的 runtime 镜像打包与布局;
-  [sandboxer Guest ABI 文档](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/sandbox-init_zh.md) 负责 rootfs 组装、应用拉起与 Guest ABI
-- [sandboxer 生命周期文档](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/sandbox_zh.md) §3.1 定义 `boot.kernel` 引用。自带 kernel 须满足本篇的内核能力、所选 Guest ABI 与 VMM 契约及 §6 的验证要求；[工件不兼容边界](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/sandbox_zh.md#artifact-compatibility) 另行说明被拒绝的 snapshot 格式。
+- [sandbox-runtime_zh.md](runtime-bundle_zh.md) —— 内核之上的 runtime 镜像打包与布局;
+  [sandboxer Guest ABI 文档](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/guest-abi_zh.md) 负责 rootfs 组装、应用拉起与 Guest ABI
+- [Sandbox YAML](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/configuration_zh.md#sandbox-yaml) 定义 `boot.kernel` 引用。自带 kernel 须满足本篇的内核能力、所选 Guest ABI 与 VMM 契约及 [验证要求](#验证)；[工件不兼容边界](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/artifacts_zh.md#compatibility) 另行说明被拒绝的 snapshot 格式。
 - [Native 构建指南](../native-deps/README_zh.md) —— `make vmlinux` 工作流、patch 开发循环、
   交叉编译
-- [系统总览](https://github.com/kuasar-sandbox/kuasar-sandbox/blob/main/docs/kuasar-sandbox_zh.md) §4 —— 模板父层与暂停/恢复的系统语义
+- [快照与实例语义](https://github.com/kuasar-sandbox/kuasar-sandbox/blob/main/docs/concepts_zh.md#快照与实例语义) —— 模板父层与暂停/恢复的系统语义

@@ -1,88 +1,23 @@
 [English](README.md) | [简体中文](README_zh.md)
 
-<a id="native-deps"></a>
-# native-deps — 原生依赖构建与维护
+# Native 源码与内核补丁维护
+
+生产目标、输入与打包流程见[构建](../docs/build_zh.md)。本就近指南负责 Native 源码/缓存布局、安全增量清理和内核补丁开发工作树；其中 Make 目标从 `guest-runtime/native-deps/` 运行。
 
 native-deps 默认构建 `vmlinux`（Guest 内核）和 `envd`（E2B Guest agent）；`versitygw` 是可选目标。镜像导出使用链接在 `flatten-ctl` 内的 Go EROFS 库。Runtime bundle 打包使用宿主预安装的 mkfs，独立校验使用 fsck/dump。项目不再维护 erofs-utils 补丁或编译、分发 mkfs。
 
 公共流水线:按 URL pin 的上游 tarball(可选 SHA256 校验)→ 共享缓存与
 解压 → 本地补丁(vmlinux,`git am`)→ 构建 → `bin/<arch>/`。
-本文覆盖构建目标、patch 开发循环、交叉编译与缓存/清理约定;产物本身的设计契约不在
-本文:内核配置体系见 [Guest 内核规范](../docs/vmlinux_zh.md)。patched
+本文覆盖 patch 开发循环与源码/缓存清理；生产目标、交叉编译与打包统一见[构建](../docs/build_zh.md)。产物本身的设计契约不在本文：内核配置体系见 [Guest 内核规范](../docs/vmlinux_zh.md)。patched
 `cloud-hypervisor` 是 `sandbox-ctl` 的 VMM 运行件,构建与 patch 契约见
-[Cloud Hypervisor](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/cloud-hypervisor_zh.md)。
+[Cloud Hypervisor](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/vmm_zh.md)。
 
 平台级聚合由项目主仓编排:
 `make -C kuasar-sandbox build` 首先驱动本目录 `make build`,再把
 产物按 `kuasar-sandbox/release/bin-inputs.manifest` 收集进
 `kuasar-sandbox/bin/<arch>/`,供 e2e、demo 与本地集成复用。
 
-## 1. 概述
-
-### 1.1 产物与版本 pin
-
-| 产物 | 上游(pin) | 本仓输入 | 消费方 |
-|---|---|---|---|
-| `vmlinux` | linux 6.1.169(LTS,cdn.kernel.org) | `deps/linux-patches/` + `deps/vmlinux/*.config` | `sandboxer`/`sandbox-ctl`(guest 内核) |
-| `envd` | e2b-dev/runtime 2026.22(源码 tarball) | — | `guest-runtime`(注入 `sandbox-runtime.bundle`) |
-| `versitygw`(可选) | versity/versitygw v1.5.0 | — | 按需用于本地/单节点 S3-compatible 文件存储集成 |
-
-pin 落在 Makefile 变量(`LINUX_TARBALL` / `ENVD_TARBALL` 及可选
-`VERSITYGW_TARBALL`,支持 `url#filename` 与本地路径两种形式),配套的
-`*_TARBALL_SHA256` 为空时跳过校验。当前 Linux、Envd 默认输入配置了 hash;
-可选网关的 hash 按部署验证策略补充。升级版本 = 改变量 + 重验 patch 应用。
-
-先使用正常 Makefile 目标构建所选源码,再打包匹配的输出。在仓库根目录执行的
-`make release-runtime` 依赖 `sandbox-runtime`,`make release-vmlinux`
-只依赖 `vmlinux`。直接调用 `release.sh package` 会复用预构建文件,不重建
-原生依赖、不替换源码 checkout、不重置缓存。Runtime 与 Kernel 保持独立构建、
-打包及选择。
-
-Runtime 包输入为 `bin/<arch>/{sandbox-runtime.bundle,flatten-ctl}`；bundle
-预先由宿主 `mkfs.erofs` 构建，该工具不属于 Runtime 载荷。Kernel 使用
-`native-deps/bin/<arch>/vmlinux`。已有 `RELEASE_BIN_DIR`、
-`RELEASE_NATIVE_BIN_DIR` 可选择匹配输出目录。
-`RELEASE_SANDBOXER_SOURCE_DIR`、`RELEASE_ACCELERATOR_SOURCE_DIR`、
-`RELEASE_ENVD_SOURCE_DIR`、
-`RELEASE_LINUX_SOURCE_DIR` 选择对应源码树;
-`RELEASE_SANDBOX_INIT_BIN`、`RELEASE_ENVD_BIN` 选择与镜像匹配的 init 和 Envd
-二进制,用于材料收集与镜像一致性检查。
-源码版本、原生链接映射与这些产物应一并保留。原生 pin 变化需要同步更新配方、
-输入摘要与许可证收集；路径覆盖不表示可以把不同源码字节标记为配置的版本。
-
-Runtime Go 构建的 workspace 只包含本轮选定的 guest-runtime 和 accelerator 模块。`sandbox-init` 来自指定 sandboxer 发布二进制；sandboxer 不加入 Runtime Go workspace。`flatten-ctl` 必须标识 Linux `github.com/kuasar-sandbox/guest-runtime/cmd/flatten-ctl` 主入口及所选 amd64 或 arm64 目标。当次生产者检查自身干净的 Go VCS 元数据。正常二进制构建信息和具有版本、校验和的外部 go-erofs 依赖保留，不打包独立来源记录。
-
-许可证收集分别解析 guest-runtime、所选 sandbox-init 二进制和 Envd 的 Go 编译器选择。
-若这些目录选择不同的编译器版本,则按各载荷实际版本收集对应安装的 Go 及随附
-依赖声明,不以父 module 上下文替代载荷自身的选择。Module 材料使用生效的替换
-及匹配的 module 校验和,沿用正常 Go 缓存与路由。选定内部组件使用显式 workspace；Envd 保持隔离的 shared module 本地替换；官方包不支持其他无版本的第三方替换。这些材料收集器
-不下载或认证编译器分发,独立验证也不要求安装与载荷相同版本的编译器。
-
-许可证和声明分别放在 `share/licenses/runtime` 或 `share/licenses/vmlinux`。声明缺失、目录不可读、遍历不完整或不同输入冲突时收集失败。Kernel 保留所选 Linux 源码的 `COPYING` 和完整 `LICENSES` 树。不发布来源表或历史构建、测试记录。
-
-验证只接受所选单元的载荷：Runtime 的 `bin/` 下为 `sandbox-runtime.bundle` 和 `flatten-ctl`；Kernel 为 `bin/vmlinux` 及运行身份文件 `bin/vmlinux.sha256`。验证精确路径、重复条目、类型、root 属主、权限和载荷完整性。其他单元的材料和无关目录在解包前被拒绝。Runtime 包不能替换独立选择的 Kernel，也不能改变无关安装根目录的权限。
-
-Runtime 独立验证使用已安装在 `PATH` 中的可信主机 `fsck.erofs` 和
-`dump.erofs`,不下载 EROFS 源码或现场编译读取器。读取器须支持镜像格式、
-`fsck.erofs --extract` 及 `dump.erofs --path/--cat`。
-验证检查 bundle 对齐和前缀摘要,不展开目录树地验证完整 EROFS 文件系统,只把
-init、Envd、flatten-ctl 读入固定私有文件。镜像内属主/权限、Go main
-身份和目标架构须一致。发布前，内嵌 init 与 Envd 必须分别等于本次选定的输入二进制；消费发布包不要求来源证明。内嵌
-flatten-ctl 必须等于外部对应载荷。残留的内嵌或外部 mkfs 载荷会被拒绝。不执行任何归档可执行文件。Kernel 验证
-不需要 EROFS 读取器、Runtime 载荷或依赖 checkout。
-
-#### 历史原生工具材料
-
-携带 mkfs 的历史 Runtime 包及对应源码、许可和重新链接材料保持不变，使用其匹配的发行工具验证。当前包不再声明这些原生工具为载荷。旧制品仍可读取；重新构建当前 Runtime 使用 Go 生成器和宿主工具。
-
-#### 发布与验证边界
-
-发布者在 Tag/Release 写入前检查本次项目构建输出，使用人类说明，验证上传资产大小和摘要，并拒绝覆盖已有不同字节。不发布来源/Preview 标记及独立 `SHA256SUMS`；源码选择和当次验收仅作为流水线输入。消费者使用 GitHub 原生资产完整性校验和离线载荷检查，不获取历史 Git 或 Actions 证明。许可证保留在包内。
-
-
-`librocksdb`(`accelerator` 的 CGO 链接依赖)在该仓内构建,不在此处。
-
-### 1.2 构建源码组织
+## 构建源码组织
 
 | 路径 | 角色 |
 |---|---|
@@ -92,8 +27,7 @@ flatten-ctl 必须等于外部对应载荷。残留的内嵌或外部 mkfs 载�
 | `deps/linux-patches/` | guest 内核补丁(arch-neutral) |
 | `deps/vmlinux/*.config` | 内核 defconfig 片段(common + per-arch) |
 
-
-### 1.3 目录布局
+## 目录布局
 
 ```
 bin/
@@ -116,73 +50,11 @@ build/
 交叉构建不更新 host 入口软链,避免指向 host 不可执行的产物。
 可选网关仅在构建对应目标后才有输出。
 
-### 1.4 幂等与缓存
+## 幂等与缓存
 
 Envd 复用已存在的目标文件；内核根据脚本、配置和补丁执行增量 Kbuild。下载保留在 `build/tarball/` 并按预期摘要校验。`make clean` 删除 `bin/` 与目标构建输出，保留 tarball 缓存和架构无关源码树，尤其保留内核补丁开发中的工作。宿主 erofs-utils 由环境管理，不进入本项目的 native cache。
 
-## 2. 构建目标
-
-```bash
-make build      # =all: vmlinux + envd
-make vmlinux    # guest 内核
-make envd       # e2b guest agent
-make versitygw  # 可选网关,不包含在 build 中
-make clean      # 见 §1.4
-make help       # 列举目标
-```
-
-构建耗时取决于主机、工具链及缓存状态,以上命令不承诺固定耗时。
-
-Workbench 任务向配方传入正整数 `KUASAR_BUILD_JOBS`. 内核编译使用该预算代替宿主 CPU 数量; Envd 即使设置了 `ENVD_GOFLAGS`, 也通过 `go build -p` 显式传入预算. CPU quota 本身不会改变 `nproc` 报告的 CPU 数量.
-
-### 2.1 宿主 EROFS 工具
-
-从宿主发行版安装 erofs-utils，或通过 `BUILD_MKFS_EROFS` 选择宿主可执行的 mkfs。交叉构建也使用宿主架构的打包器。`make erofs`、补丁版 Plan ABI、私有静态链接配方和相应缓存已移除。独立校验需要支持当前格式及 `--extract`、`--path`、`--cat` 的 fsck/dump；可信 CI 可构建未修改的上游读取工具，但不构建或导出 mkfs。
-
-### 2.2 vmlinux(`make vmlinux`)
-
-目标需要重建时依次进入 `deps/build-vmlinux.sh` 的 fetch、patches-apply、build
-阶段(§3)。应用 `deps/linux-patches/*.patch` 后,把
-`deps/vmlinux/sandbox-common.config` 与 `sandbox-<arch>.config` 拼接成
-`arch/<kbuild_arch>/configs/sandbox_defconfig`,`make sandbox_defconfig` +
-`make olddefconfig`(解析依赖闭包)→ `make -j<jobs> <target>` → 拷出
-`bin/<arch>/vmlinux`. `jobs` 使用已设置的 `KUASAR_BUILD_JOBS`, 否则取 `nproc`.
-
-- `olddefconfig` 后校验 DAX 必需项及 arch 专属关键项；Kconfig 静默丢弃请求的关键项时
-  构建立刻失败。
-- Make 依赖包含构建脚本、common/arch 配置片段与 tracked kernel
-  patches；输入变化会重新求值配置并使用 Kbuild 增量重建。
-- 产物格式:x86_64 为 ELF(kbuild target `vmlinux`),aarch64 为 PE Image
-  (target `Image`,取 `arch/arm64/boot/Image`);文件名统一 `vmlinux`。
-- 源树 `build/src/linux/` 跨架构共享(kbuild 以 `ARCH=` 选目标,输出进 per-arch `O=` 目录)。
-- host 构建依赖:`bc bison flex make tar pkg-config gcc` + libelf 头(libelf-dev /
-  elfutils-libelf-devel)+ libssl 头(libssl-dev / openssl-devel);后两者是 host 侧
-  kbuild 工具(fixdep、sign-file 等)的依赖,不链入 vmlinux。
-- 配置体系语义(两段拼接的契约、关键启用/禁用项)见
-  [Guest 内核规范](../docs/vmlinux_zh.md) [构建工作流](../docs/vmlinux_zh.md#2-构建工作流)-[配置体系](../docs/vmlinux_zh.md#3-配置体系)。
-
-### 2.3 envd(`make envd`)
-
-`deps/build-envd.sh`:e2b-dev/runtime 源码 tarball 解压到跨架构共享的
-`build/src/e2b-infra/`,对 `packages/envd` 执行 `go build`(`GOWORK=off GOOS=linux
-CGO_ENABLED=0 -trimpath -ldflags "-s -w"`)→ `bin/<arch>/envd`。GOARCH 即选目标
-架构,交叉无需 C 工具链。
-
-- 产物由 `guest-runtime` 的 `make sandbox-runtime` 注入
-  `sandbox-runtime.bundle` 的 `/opt/sandbox-runtime/bin/envd`,作为 e2b profile
-  guest 内的数据面 agent(端口 49983)。
-- 工具链注意:envd 的 `go.mod` 可能要求较新的 Go(如 `go 1.26.3`),`GOTOOLCHAIN=auto`
-  按需下载;该下载要求 GOSUMDB 开启——Go 拒绝在 `GOSUMDB=off` 下下载并运行工具链。
-- 换 tag:覆盖 `ENVD_TARBALL`(`url#filename` 形式,filename 决定缓存名)。
-
-### 2.4 可选网关(`make versitygw`)
-
-`deps/build-versitygw.sh` 按所选 Go 架构构建配置的网关源码,不包含在 `build` 中。
-它供本地/单节点 `builder.files_storage` 在需要 S3-compatible 网关而非云对象存储时
-选择。源码、hash 与源码目录变量分别为 `VERSITYGW_TARBALL`、
-`VERSITYGW_TARBALL_SHA256` 和 `VERSITYGW_SRC`。
-
-## 3. patch 开发循环(vmlinux)
+## patch 开发循环(vmlinux)
 
 vmlinux 通过 `deps/build-vmlinux.sh` 的 STAGE dispatcher 维护补丁,
 Makefile 暴露 `linux-*` 目标:
@@ -214,7 +86,7 @@ make vmlinux           # 重新 apply + build,验证可重复
 - 其他任何状态:报错并指引先用 `make linux-patches-format` 保存 WIP,确认已保存后
   才 reset 到 base tag,再重跑。
 
-两个架构均应用 [vmlinux §5.6](../docs/vmlinux_zh.md#56-内存压力下的-balloon-行为) 所述的 balloon order-0 批处理补丁。补丁管线仍然 arch-neutral:两架构共用同一补丁目录,
+两个架构均应用 [内核 balloon 行为](../docs/vmlinux_zh.md#内存压力下的-balloon-行为) 所述的 balloon order-0 批处理补丁。补丁管线仍然 arch-neutral:两架构共用同一补丁目录,
 各自 defconfig 编译。
 
 空补丁集且 `HEAD != base` 时拒绝继续:源码可能仍带有已移除的补丁或未导出的
@@ -222,37 +94,7 @@ make vmlinux           # 重新 apply + build,验证可重复
 `LINUX_BUILD_OUT` 路径。`make clean` 保留源码树,因此不会移除之前应用的补丁。
 显式 `linux-build` 目标仍可用于直接构建开发中的源码树,不应用受跟踪的补丁集。
 
-## 4. 交叉编译
-
-### 4.1 TARGET_ARCH
-
-| 取值 | 别名 | GOARCH | KERNEL_ARCH |
-|---|---|---|---|
-| `x86_64` | `amd64` | `amd64` | `x86_64` |
-| `aarch64` | `arm64` | `arm64` | `arm64` |
-
-默认取 `uname -m`;`HOST_ARCH != TARGET_ARCH` 时自动启用交叉编译,`CROSS_PREFIX`
-自动推导为 `<target>-linux-gnu-`,支持显式覆盖。产物落 `bin/<target>/`,`bin/` 软链
-不更新;交叉产物运行验证需对应的 native host。
-
-```bash
-make TARGET_ARCH=aarch64 build
-```
-
-### 4.2 交叉工具链准备
-
-Kbuild 需要目标 C 工具链，例如在 x86_64 宿主安装 `gcc-aarch64-linux-gnu`。Envd 和 flatten-ctl 使用 Go 交叉构建。Runtime 打包器始终使用宿主 erofs-utils，不再需要为 EROFS 安装目标架构的静态 Libgcrypt、Libgpg-error 或 libuuid。
-
-## 5. WSL2 注意
-
-内核源码树有大量小文件操作。WSL2 的 `/mnt/<drive>/`(DrvFs)可能增加文件系统访问
-开销,这里不承诺固定的变慢倍数。
-
-- **vmlinux**:Makefile 检查内核版本是否含 microsoft 标记且 cwd 是否在 `/mnt/` 下;
-  此时若存在 `$HOME/linux-build/src` 目录,默认把 `LINUX_BUILD_SRC` /
-  `LINUX_BUILD_OUT` 放到 `$HOME/linux-build/` 下,以便使用 Linux-native 文件系统。
-
-## 6. See Also
+## 相关契约
 
 - [Guest 内核规范](../docs/vmlinux_zh.md) —— guest 内核配置体系、架构差异与关键决策。
 - [Release](https://github.com/kuasar-sandbox/kuasar-sandbox/blob/main/docs/release_zh.md) —— runtime、vmlinux 独立版本与平台聚合发布;
