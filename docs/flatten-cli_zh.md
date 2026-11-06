@@ -523,7 +523,7 @@ digest 与日志，通过 owner kill 测试沙箱，引用核查后才退役工�
   将镜像 ingest 进内容寻址存储,chunk dedup 跨镜像共享重复内容。
 - [宿主镜像默认配置合并](https://github.com/kuasar-sandbox/sandboxer/blob/main/pkg/sandbox/imageconf.go):
   启动时使用内嵌 OCI runtime config。
-- [sandboxer/docs/sandbox_zh.md](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/runtime_zh.md) `boot.root.base`:
+- [sandboxer/docs/runtime_zh.md](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/runtime_zh.md) `boot.root.base`:
   选择展平镜像作为只读 base。
 - [Native 构建指南](../native-deps/README_zh.md):在仓库根目录用
   宿主安装 erofs-utils；用 `make flatten-ctl` 构建 CLI;

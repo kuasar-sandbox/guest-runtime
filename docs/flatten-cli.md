@@ -442,6 +442,6 @@ Do not interpret successful flattening as workload compatibility certification.
 
 - [Accelerator transfer](https://github.com/kuasar-sandbox/accelerator/blob/main/docs/transfer.md): ingest the image into content-addressed storage; chunk deduplication shares repeated content across images.
 - [host image-default merging](https://github.com/kuasar-sandbox/sandboxer/blob/main/pkg/sandbox/imageconf.go): how startup uses the embedded OCI runtime configuration.
-- [sandboxer/docs/sandbox.md](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/runtime.md) `boot.root.base`: select a flattened image as the read-only base.
+- [sandboxer/docs/runtime.md](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/runtime.md) `boot.root.base`: select a flattened image as the read-only base.
 - [Native-build guide](../native-deps/README.md): install host erofs-utils; build the CLI with `make flatten-ctl`. mkfs is a host packaging/test tool; the CLI has no runtime dependency on it.
 - [Project system overview](https://github.com/kuasar-sandbox/kuasar-sandbox/blob/main/docs/architecture.md): flattening's role and goals.

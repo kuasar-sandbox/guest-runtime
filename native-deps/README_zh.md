@@ -14,7 +14,7 @@ native-deps 默认构建 `vmlinux`（Guest 内核）和 `envd`（E2B Guest agent
 
 平台级聚合由项目主仓编排:
 `make -C kuasar-sandbox build` 首先驱动本目录 `make build`,再把
-产物按 `kuasar-sandbox/release/bin-inputs.manifest` 收集进
+产物按 `kuasar-sandbox/release/inputs/bin-inputs.yaml` 收集进
 `kuasar-sandbox/bin/<arch>/`,供 e2e、demo 与本地集成复用。
 
 ## 构建源码组织
@@ -98,4 +98,4 @@ make vmlinux           # 重新 apply + build,验证可重复
 
 - [Guest 内核规范](../docs/vmlinux_zh.md) —— guest 内核配置体系、架构差异与关键决策。
 - [Release](https://github.com/kuasar-sandbox/kuasar-sandbox/blob/main/docs/release_zh.md) —— runtime、vmlinux 独立版本与平台聚合发布;
-  本目录运行期必需产物经 `kuasar-sandbox/release/bin-inputs.manifest` 收集进共享 `bin/`。
+  本目录运行期必需产物经 `kuasar-sandbox/release/inputs/bin-inputs.yaml` 收集进共享 `bin/`。

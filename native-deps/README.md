@@ -10,7 +10,7 @@ The common pipeline is: pinned upstream tarball URL with optional SHA256 verific
 
 This document covers patch development and source/cache cleanup. Production targets, cross-compilation and packaging are defined in [Build](../docs/build.md). Artifact-specific design belongs elsewhere: see [the kernel specification](../docs/vmlinux.md) for kernel configuration, and [Cloud Hypervisor](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/vmm.md) for the VMM and its patches.
 
-Project-level aggregation runs `make -C kuasar-sandbox build`, which invokes this directory's `make build`, then collects artifacts according to `kuasar-sandbox/release/bin-inputs.manifest` into `kuasar-sandbox/bin/<arch>/` for E2E, Demo and local integration reuse.
+Project-level aggregation runs `make -C kuasar-sandbox build`, which invokes this directory's `make build`, then collects artifacts according to `kuasar-sandbox/release/inputs/bin-inputs.yaml` into `kuasar-sandbox/bin/<arch>/` for E2E, Demo and local integration reuse.
 
 ## Build-source layout
 
@@ -83,4 +83,4 @@ An empty patch set with `HEAD != base` is rejected: the source may still contain
 ## Related contracts
 
 - [vmlinux.md](../docs/vmlinux.md): kernel configuration, architecture differences and design decisions.
-- [Release](https://github.com/kuasar-sandbox/kuasar-sandbox/blob/main/docs/release.md): independent runtime/vmlinux versions and aggregate releases. Runtime-required artifacts from this directory are collected through `kuasar-sandbox/release/bin-inputs.manifest` into shared `bin/`.
+- [Release](https://github.com/kuasar-sandbox/kuasar-sandbox/blob/main/docs/release.md): independent runtime/vmlinux versions and aggregate releases. Runtime-required artifacts from this directory are collected through `kuasar-sandbox/release/inputs/bin-inputs.yaml` into shared `bin/`.
