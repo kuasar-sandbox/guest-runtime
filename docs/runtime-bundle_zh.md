@@ -102,10 +102,14 @@ raw EROFS 保持从 offset 0 开始。尾部 ZIP 只包含一个 size=0 的 mark
 .kuasar.digest.<64-lowercase-hex>
 ```
 
-`digest:` identity 覆盖 ZIP 之前的全部字节,即 EROFS 和对齐 padding。构建器复制 EROFS 的
-同时计算 carrier identity,再写 marker;运行和恢复只从 EOF 读取 marker,不重新扫描
-EROFS。bundle 最终大小保持 2 MiB 对齐,因此 Cloud Hypervisor 无需 offset
-能力即可继续直接映射,EROFS 依据自身 superblock 忽略尾部 padding 和 ZIP。
+`digest:` identity 是 ZIP 之前全部字节（EROFS 与对齐 padding）的 SHA-256。
+它不覆盖 ZIP，也不是完整 bundle 文件的 SHA-256。构建器计算此前缀的哈希后再写 marker。
+运行和恢复检查 bundle/footer 格式并从 EOF 读取声明的身份，不重新计算前缀哈希。
+这是身份比较，不是独立的内容或来源验证；部署时应采用可信、另行验证过的发布产物。
+[发布载荷验证器](../scripts/release-runtime-payloads.py) 会重新计算前缀哈希并与 marker 比较。
+
+bundle 最终大小保持 2 MiB 对齐，因此 Cloud Hypervisor 无需 offset 能力即可直接映射；
+EROFS 依据自身 superblock 忽略尾部 padding 和 ZIP。
 
 ## 运行期消费契约
 
@@ -115,7 +119,9 @@ cloud-hypervisor。guest kernel 挂载该 pmem 后执行 `/sbin/init`,即 `sandb
 运行期关键约束:
 
 - runtime 镜像只读,不能承载 per-sandbox 状态。
-- 同一 snapshot restore 必须使用兼容 runtime 镜像;生产应按 digest 或发布版本钉住。
+- Snapshot restore 要求匹配捕获的 runtime 身份：文件 basename 与 footer 声明的
+  digest 都必须一致。仅 wire 兼容或发布标签相同并不足够。应钉住并保留所需产物；
+  参见[恢复时的 runtime 选择契约](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/runtime_zh.md#restore)。
 - `sandbox-init` 与 `sandbox-ctl` wire ABI 必须匹配。升级 runtime 前要同步升级
   `sandboxer` 或验证向后兼容。
 - `/opt/sandbox-runtime` 是平台保留路径。用户镜像已有该路径时会被平台 bind mount 遮蔽。
@@ -141,7 +147,11 @@ runtime 专用包内同时放置:
 ```
 bin/sandbox-runtime.bundle
 bin/flatten-ctl
+share/licenses/runtime/...
 ```
+
+外层压缩包还在 `share/licenses/runtime/` 中携带必需的许可、来源及 Go 构建/依赖材料。
+这些属于发布包，不是 runtime EROFS 镜像内的文件。
 
 `sandbox-runtime.bundle` 是当前脚本、默认配置和外部分发共同使用的稳定入口。
 
