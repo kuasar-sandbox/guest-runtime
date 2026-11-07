@@ -119,9 +119,13 @@ cloud-hypervisor。guest kernel 挂载该 pmem 后执行 `/sbin/init`,即 `sandb
 运行期关键约束:
 
 - runtime 镜像只读,不能承载 per-sandbox 状态。
-- Snapshot restore 要求匹配捕获的 runtime 身份：文件 basename 与 footer 声明的
-  digest 都必须一致。仅 wire 兼容或发布标签相同并不足够。应钉住并保留所需产物；
+- Snapshot restore 要求匹配捕获的 runtime 内容身份：digest scheme 与 footer 声明的
+  digest 必须一致。配置的文件只要身份相同，basename 可以不同；原 basename 仅用于
+  定位唯一允许的同目录回退候选。仅 wire 兼容或发布标签相同并不足够。
+  应钉住并保留所需产物的不可变内容；
   参见[恢复时的 runtime 选择契约](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/runtime_zh.md#restore)。
+- 冷启动（包括从来源派生的 `run --from`）使用选定的目标 runtime，并在新 C0 中记录其
+  身份，不要求来源 E 的旧 runtime 身份；Guest ABI 与 VMM 兼容要求仍然适用。
 - `sandbox-init` 与 `sandbox-ctl` wire ABI 必须匹配。升级 runtime 前要同步升级
   `sandboxer` 或验证向后兼容。
 - `/opt/sandbox-runtime` 是平台保留路径。用户镜像已有该路径时会被平台 bind mount 遮蔽。
