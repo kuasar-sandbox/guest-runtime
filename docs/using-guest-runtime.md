@@ -86,24 +86,40 @@ New sandboxes use the new version; running sandboxes retain their original pmem 
 
 ABI compatibility alone does not make a new runtime eligible for an old memory
 snapshot. Here S denotes the memory snapshot artifact and E its referenced cold
-sandbox artifact, which records the runtime identity. Restore compares the runtime **basename and declared Bundle footer
-digest** with the E artifact referenced by S; see [sandboxer restore selection](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/runtime.md#restore).
+sandbox artifact, which records the runtime identity. Restore compares the runtime's
+**digest scheme and declared Bundle footer digest**, not its basename, with E;
+see [sandboxer restore selection](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/runtime.md#restore).
 
 For example, S1 captured with `/runtime/v1/sandbox-runtime.bundle` cannot use
 `/runtime/v2/sandbox-runtime.bundle` merely because v2 has a compatible wire ABI.
-Explicitly bind `boot.runtime` to the retained v1 file. The directory layout above
-supports this explicit binding; restore does not search sibling version directories.
+If the content identity differs, explicitly bind `boot.runtime` to a retained file
+matching S1's E. A matching v1 file may have a new name or path; renaming a different
+runtime does not make it compatible. The directory layout above supports explicit
+binding; restore does not search sibling version directories.
+
 For automatic fallback, capture v1 with basename `sandbox-runtime-v1.bundle`, keep
 that immutable file alongside `sandbox-runtime-v2.bundle`, and point the default
-at v2. Restoring S1 then tries the configured v2 file followed by exactly
-`<default-directory>/sandbox-runtime-v1.bundle`, checking both against S1's E.
-Renaming an already captured v1 file to a different basename is not a migration.
+at v2. Restore checks the configured v2 file first. If that check fails because the file is absent, unreadable, malformed or has a
+different identity, it tries exactly `<default-directory>/sandbox-runtime-v1.bundle`.
+The original basename is only this fallback lookup hint: the first matching
+candidate is used, with no directory scan. If neither candidate passes, format,
+I/O and permission errors are not reported as identity incompatibility. Invalid
+reference configuration and cancellation do not trigger fallback.
 
-Retain original bytes/names while any live VM, retained template, snapshot or
-parent chain needs them, including backups and rollback candidates. Keep the
-matching kernel/VMM inputs too. Before retirement, the deployment owner must
-inventory those references and test restore on an eligible destination; retaining
-only the latest ABI-compatible runtime is insufficient.
+Retain immutable runtime bytes while any live VM, retained template, snapshot or
+parent chain needs them, including backups and rollback candidates. Keep paths
+stable while live VMs reference them; preserve the captured basename when relying
+on automatic fallback, or explicitly bind a matching retained file. Memory restore
+does not read an external kernel file or its identity sidecar, but still requires
+compatible architecture/VMM/device inputs. Retain kernel files and sidecars needed
+for cold starts and rollback. Before retirement, the deployment owner must inventory
+references and test restore on an eligible destination; retaining only the latest
+ABI-compatible runtime is insufficient.
+
+To adopt new kernel/runtime contents from a cold E artifact instead, start cold
+using the target configuration. Sandboxer derives a new C0 from the target identities
+while preserving the effective source disk graph. This is not a resume of S's saved
+memory; memory restore retains S's original E/C0 identity.
 
 ### Host reboot
 
