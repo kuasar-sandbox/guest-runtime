@@ -23,7 +23,7 @@ Cloud Hypervisor。必须用选定的 sandboxer/runtime/VMM 组合验证自带�
 | 版本与 ABI 可检查 | 固定 upstream 版本、LOCALVERSION、config fragments 和平台补丁;发布时校验精确资产 |
 | 单 VM = 单 app 模型 | 关闭 user/net/uts/ipc/time namespace、in-guest userfaultfd(完整 nested 容器运行时非目标,[当前最小配置的禁用项](#当前最小配置的禁用项)) |
 | host 控制 guest 内存 | 启用 virtio-balloon(host-driven inflate via vm.resize);virtio-mem 驱动保留作扩展点 |
-| 单一 rootfs 路径 | virtio-pmem + DAX + EROFS(只读) + ext4(可写) + overlayfs |
+| Runtime 根与应用磁盘 | Runtime 根：virtio-pmem + DAX + 只读 EROFS；应用根盘/数据盘：可写 ext4 single 或 EROFS + ext4 overlay |
 | 沙箱内资源隔离 + 存储挂载 | cgroup v2 freezer + cpu/memory/io/pids 控制器(由 launch.cgroup_control 选择应用侧委派,[cgroup v2:freezer + cpu/memory/io/pids 控制器](#cgroup-v2freezer--cpumemoryiopids-控制器));NFS 客户端 v3/v4 + FUSE(s3fs)挂载([关键启用项](#关键启用项)) |
 
 ### 内核版本
@@ -69,13 +69,19 @@ bin/vmlinux.sha256
 与 sidecar，并在启动期间保持绑定稳定；sidecar 不是签名或运行时证明。该打包步骤
 不改变单独执行 `make vmlinux` 的构建输出。
 
+启动与内存恢复使用不同的检查。内存恢复要求 kernel 是可读普通文件，但不读取其
+sidecar，也不重新计算 kernel 哈希。消费契约见[启动身份](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/runtime_zh.md#runtime-sdk)
+与[恢复](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/runtime_zh.md#restore)；
+不要把验包时的校验误认为恢复时会比较摘要。
+
 ## 配置体系
 
 defconfig 由 `native-deps/deps/vmlinux/` 中的**两段拼接**:
 
 ```
 sandbox-common.config           跨 arch 通用(子系统启用、基础数据结构、virtio)
-+ sandbox-<arch>.config         arch 专属(启动协议、中断控制器、串口)
++ sandbox-x86_64.config         用于 x86_64 目标
+  或 sandbox-arm64.config      用于 aarch64 目标(KERNEL_ARCH=arm64)
 = sandbox_defconfig             给 kbuild 的最终输入
 ```
 
@@ -87,12 +93,13 @@ sandbox-common.config           跨 arch 通用(子系统启用、基础数据�
 子系统 / 设备驱动:
 
 ```
-PCI=y, PCI_MSI=y                CH 通过 virtio-pci 透传所有设备;MSI-X 是
+PCI=y, PCI_MSI=y                CH 呈现 virtio-pci 设备;MSI-X 是
                                 现代 virtio-pci 的中断路径,必须启用
 NETDEVICES=y                    网络驱动伞;依赖缺失可使请求的 VIRTIO_NET 被静默移除
 NET=y, INET=y                   网络与 AF_INET 支持;同时保留 AF_VSOCK/AF_NETLINK 的依赖
 VIRTIO=y, VIRTIO_PCI=y          virtio 总线
-VIRTIO_BLK=y                    blk0/blk1(基础磁盘 + COW 上层)
+VIRTIO_BLK=y                    根盘/数据盘：single 为一个可写设备，
+                                overlay 为只读 base 加可写 upper
 VIRTIO_NET=y                    eth0(连到 host TAP)
 VIRTIO_PMEM=y                   sandbox-runtime.bundle 通过 virtio-pmem 挂入
 VIRTIO_VSOCKETS=y               sandbox-init ↔ sandbox-ctl 控制面
@@ -103,9 +110,9 @@ LIBNVDIMM + ZONE_DEVICE +       virtio-pmem FS DAX 直接映射 host page cache;
 FS_DAX                          最终配置在 olddefconfig 后强制校验
 ARM64_PMEM=y(aarch64)           选入 PMEM 缓存维护 API 和 WB page mapping;
                                 仅有 FS_DAX 不足以使 ARM 原始 PMEM 支持 DAX
-EROFS_FS=y                      只读根文件系统
-EXT4_FS=y                       overlayfs 写层
-OVERLAY_FS=y                    EROFS lower + ext4 upper 合并出 / 视图
+EROFS_FS=y                      只读 runtime 根与应用 overlay base
+EXT4_FS=y                       可写 single 磁盘与 overlay upper
+OVERLAY_FS=y                    组装使用 overlay 布局的应用根盘/数据盘
 TMPFS=y                         /tmp 等运行时挂载点
 NETWORK_FILESYSTEMS=y           NFS 伞门;须保留依赖使 NFS_FS 在最终配置中生效
 NFS_FS=y + NFS_V3 + NFS_V4(.1/.2) 沙箱挂载 NFS(SUNRPC/LOCKD 自动选入;KEYS=y
@@ -114,6 +121,9 @@ FUSE_FS=y                       沙箱经 s3fs 挂载 S3(用户态 FUSE;/dev/fus
                                 devtmpfs 自动创建)。mount.nfs / s3fs 等用户态
                                 工具在沙箱镜像内,内核只提供能力
 ```
+
+Runtime 的 pmem 启动根与应用根盘/数据盘不同。后者的 single/overlay 设备顺序及
+挂载组装由 [Guest 根与磁盘契约](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/guest-abi_zh.md#base-and-root)定义。
 
 对随附 runtime，既要检查最终配置，也要检查 Guest 的实际挂载：
 `/opt/sandbox-runtime` 必须是带 `dax=always` 的只读 EROFS。仅传入
@@ -184,10 +194,11 @@ CGROUP_PIDS=y                   pids.max
 需要不同 hardening、审计或 Guest 功能时,通过 `boot.kernel: file://...` 使用经过验证的
 自带内核.快照复用依赖显式父层关系,不以关闭这些机制换取跨虚机内存去重.
 
-仓库的 `scripts/guest-inspect.py` 当前固定使用未随机化的 `KERNEL_IMAGE_BASE` 和
-`PAGE_OFFSET`,因此只兼容同时关闭 `CONFIG_RANDOMIZE_BASE` 与
-`CONFIG_RANDOMIZE_MEMORY` 的内核.启用这些选项的自带内核不能继续使用该脚本,
-除非先让脚本能够发现运行时重定位.这是调试工具约束,不是快照恢复约束.
+仓库的 `scripts/guest-inspect.py` 假设当前非随机化 x86_64 Guest 布局，包括固定的
+`KERNEL_IMAGE_BASE`/`PAGE_OFFSET` 与物理 PCI hole。必须关闭 `CONFIG_RANDOMIZE_BASE`
+和 `CONFIG_RANDOMIZE_MEMORY`，但仅关闭这两项并不保证其他架构或内存布局兼容。
+发生重定位、布局不同或非 x86_64 的内核都需要适配 inspector。这些是调试工具约束，
+不是快照恢复约束。
 
 当前 preset 还关闭 `CONFIG_SLUB_CPU_PARTIAL`.该选项控制 per-CPU partial slab,
 属于分配性能与内存占用的权衡,不作为安全 hardening 能力描述.
@@ -399,7 +410,8 @@ memory hotplug,不使用 virtio-mem。保留驱动本身不能启用新设计;�
 
 ### 内存压力下的 balloon 行为
 
-在 Linux 6.1.169 上，Guest 为每个充气请求批量分配普通 order-0 页，暂存到私有列表。
+在应用平台 [balloon 补丁](../native-deps/deps/linux-patches/0001-virtio_balloon-batch-order-0-allocation-and-enqueue.patch)
+的 Linux 6.1.169 上，Guest 为每个充气请求批量分配普通 order-0 页，暂存到私有列表。
 在 balloon 锁内生成 PFN、完成已分配页的记账并将列表入链，再通知 Host。
 原有 PFN 数组最多容纳 256 个 4 KiB PFN（对应 1 MiB Guest 内存），
 这也限制了单次关中断入链的 native 页数。大小更新 worker 等待请求 ACK 后发布
@@ -448,10 +460,11 @@ RAM 字节相同比例作为发布门禁.
 ## 维护
 
 - 升级 kernel 主版本(6.1 → 6.x):review `sandbox-common.config` 的功能、安全和
-  调试选项,运行 `make olddefconfig` 看 silent regression;若
-  `deps/linux-patches/*.patch` 中有补丁,则在新源码树上 rebase
-  (`make linux-fetch` 重打 base → 在 `build/src/linux/` `git rebase` /
-  重打补丁 → `make linux-patches-format` 回写),并使用配套 host 源码
+  调试选项，检查 `olddefconfig` 的 silent regression。先保存旧源码树、提交和未提交工作，
+  为新内核导入选择新的 `LINUX_BUILD_SRC` 与 `LINUX_BUILD_OUT` 路径；
+  `linux-fetch` 遇到已有 baseline tag 的树会跳过，并不会升级它。若
+  `deps/linux-patches/*.patch` 中有补丁，将保存的工作 rebase/重新应用到新 baseline，
+  再使用同一组选定路径执行 `linux-patches-format` 回写。使用配套 host 源码
   重新验证 balloon 压力与恢复([内存压力下的 balloon 行为](#内存压力下的-balloon-行为))
 - 升级架构 fragment:review CH 对该 arch 的设备模型是否有新依赖(例如
   GICv4 / 新 RTC 驱动)
@@ -463,7 +476,7 @@ RAM 字节相同比例作为发布门禁.
 
 - [sandboxer VMM 文档](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/vmm_zh.md) —— 平台 VMM 的启动协议、设备
   模型、patch 范围
-- [sandbox-runtime_zh.md](runtime-bundle_zh.md) —— 内核之上的 runtime 镜像打包与布局;
+- [Runtime bundle 契约](runtime-bundle_zh.md) —— 内核之上的 runtime 镜像打包与布局;
   [sandboxer Guest ABI 文档](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/guest-abi_zh.md) 负责 rootfs 组装、应用拉起与 Guest ABI
 - [Sandbox YAML](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/configuration_zh.md#sandbox-yaml) 定义 `boot.kernel` 引用。自带 kernel 须满足本篇的内核能力、所选 Guest ABI 与 VMM 契约及 [验证要求](#验证)；[工件不兼容边界](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/artifacts_zh.md#compatibility) 另行说明被拒绝的 snapshot 格式。
 - [Native 构建指南](../native-deps/README_zh.md) —— `make vmlinux` 工作流、patch 开发循环、
