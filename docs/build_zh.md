@@ -40,6 +40,8 @@ export GOWORK
 
 ## 构建前置
 
+完整 Runtime 装配流程应在 Linux 宿主上执行（包括 WSL2 或 Linux 容器）：Makefile 以 `GOOS=linux` 执行宿主 `runtime-bundle` helper。下述交叉编译改变的是载荷架构，不是宿主操作系统。
+
 本地构建使用环境提供的 Go, 继承 `GOROOT` 与 `GOTOOLCHAIN` 选择. Release 编排要求宿主 `PATH` 中已有支持 `api --slurp` 的 `gh`. Guest 原生产物使用选定源码与 recipe，宿主 EROFS 打包和验证工具由构建环境安装。
 
 CI 在受信 preflight 中一次选择已发布并验证的 Workbench, 将不可变镜像身份与精确 framework revision 传给构建 Job. Runtime 与 VMLinux 分别使用原生 `ubuntu-24.04` x86_64 和 `ubuntu-24.04-arm` aarch64 Runner. 编译, 普通测试和打包通过共享 Workbench action 执行, 使用 Runner 的 ordinary UID, 只读根文件系统, 移除 capabilities, 私有 `/src`, `/build`, `/work` 和显式 CPU 预算. 发布凭据留在宿主. 保留已有按架构声明的测试范围及独立硬件门禁; 原生 ARM 构建不代表 ARM KVM 覆盖. Runtime 发布直接使用已验证 Workbench 的 EROFS reader, 不在宿主编译 helper.
@@ -71,7 +73,9 @@ make build TARGET_ARCH=aarch64  # 在依赖支持的范围内交叉构建
 - `bin/<arch>/flatten-ctl`;
 - 作为 Host image packer 的 `BUILD_MKFS_EROFS`。
 
-缺少 `sandbox-init`、Envd 或 `flatten-ctl` 时，Makefile 调用对应构建目标。宿主 `mkfs.erofs` 必须已在 `PATH` 中，或由 `BUILD_MKFS_EROFS` 指定；缺少时 Runtime 构建明确失败。项目不再维护 erofs-utils 补丁、编译或分发 mkfs。Workbench 或宿主可安装发行版的 erofs-utils，用于构建时打包和独立校验。
+普通装配会复用已有可执行输入，不会在源码或 pin 变化后自动刷新已有 `sandbox-init` 或 Envd。`make build` 先重编译 `flatten-ctl`，直接执行 `make sandbox-runtime` 则会复用已有可执行文件。发行复现应使用[下文](#精确复现发行依赖)的专用依赖选择流程。
+
+缺少 `sandbox-init`、Envd 或 `flatten-ctl`，或其不可执行时，Makefile 调用对应构建目标。宿主 `mkfs.erofs` 必须已在 `PATH` 中，或由 `BUILD_MKFS_EROFS` 指定；缺少时 Runtime 构建明确失败。项目不再维护 erofs-utils 补丁、编译或分发 mkfs。Workbench 或宿主可安装发行版的 erofs-utils，用于构建时打包和独立校验。
 
 ## 输出
 
@@ -103,9 +107,11 @@ make build TARGET_ARCH=aarch64
    委托 `make -C ../sandboxer sandbox-init`。
 3. 使用目标架构 `ENVD`(默认 `native-deps/bin/<arch>/envd`),缺失时触发构建。
 4. 使用本仓目标架构 `FLATTEN_CTL`(默认 `bin/<arch>/flatten-ctl`),缺失时触发构建。
-5. 检查所选 `flatten-ctl` 的构建记录中有外部 go-erofs 模块；旧增量产物会明确失败，须先执行 `make flatten-ctl` 或选择匹配的二进制。组装 staging，使用宿主 `BUILD_MKFS_EROFS` 生成临时 runtime EROFS。
+5. 检查所选 `flatten-ctl` 的构建记录中有外部 go-erofs 模块；缺少该带版本与校验和依赖的二进制会明确失败，须先执行 `make flatten-ctl` 或选择匹配的二进制。组装 staging，使用宿主 `BUILD_MKFS_EROFS` 生成临时 runtime EROFS。
 6. host `runtime-bundle` 工具复制 EROFS、补齐 PMEM 对齐、计算 SHA256,
-   追加空 marker ZIP,原子发布为 `bin/<arch>/sandbox-runtime.bundle`。
+   追加空 marker ZIP，将完成的临时文件原子重命名为 `bin/<arch>/sandbox-runtime.bundle`。
+
+最后的原子重命名不保证整个 Make 目标失败时保留旧产物：Makefile 在运行 mkfs 前已移除旧 bundle，后续失败可能导致没有 bundle。应在隔离的 checkout/输出目录构建并验证结果，再部署到新的不可变路径供后续启动使用。保留运行中 VM 或快照仍引用的旧产物，不要覆盖正在使用的文件。
 
 宿主 EROFS 工具要求和 `envd` 构建流程见[Native Build 文档](../native-deps/README_zh.md)。
 `sandbox-init` 实现与 ABI 见[sandboxer Guest ABI](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/guest-abi_zh.md)。
@@ -154,7 +160,7 @@ build         把 sandbox-common.config + sandbox-<arch>.config 拼接成
 拉源码并打 `linux-patches-base` tag → 在 `build/src/linux/` 改代码 +
 `git commit` → `make linux-patches-format` 导出回 `deps/linux-patches/*.patch`
 → `make vmlinux` 重新应用 + 构建。幂等与 sanity 语义统一见
-[Native 构建指南](../native-deps/README_zh.md) [配置体系](vmlinux_zh.md#配置体系);补丁 arch-neutral,x86_64 /
+[Native 构建指南](../native-deps/README_zh.md#patch-开发循环vmlinux)与[配置体系](vmlinux_zh.md#配置体系);补丁 arch-neutral,x86_64 /
 arm64 共用同一组。必须先保留尚未导出的工作,不能只为让构建继续而重置它。
 
 ### host 构建依赖
@@ -179,11 +185,11 @@ libssl-dev  / openssl-devel
 pin 落在 Makefile 变量(`LINUX_TARBALL` / `ENVD_TARBALL` 及可选
 `VERSITYGW_TARBALL`,支持 `url#filename` 与本地路径两种形式),配套的
 `*_TARBALL_SHA256` 为空时跳过校验。当前 Linux、Envd 默认输入配置了 hash;
-可选网关的 hash 按部署验证策略补充。升级版本 = 改变量 + 重验 patch 应用。
+可选网关的 hash 按部署验证策略补充。升级版本需要修改变量并重验 patch 应用。只改 pin 不会使已有二进制或已解压源码失效：Envd 解压复用 `.extracted` 标记，内核 fetch 复用 `linux-patches-base`。改变上游输入时，应先保留本地工作，再选择新的源码/输出路径；`make clean` 不会重置这些源码缓存。
 
 先使用正常 Makefile 目标构建所选源码,再打包匹配的输出。在仓库根目录执行的
-`make release-runtime` 依赖 `sandbox-runtime`,`make release-vmlinux`
-只依赖 `vmlinux`。直接调用 `release.sh package` 会复用预构建文件,不重建
+`make release-runtime` 准备选定依赖、重编译 `flatten-ctl` 并调用
+`sandbox-runtime` 后再打包；`make release-vmlinux` 只依赖 `vmlinux`。直接调用 `release.sh package` 会复用预构建文件,不重建
 原生依赖、不替换源码 checkout、不重置缓存。Runtime 与 Kernel 保持独立构建、
 打包及选择。
 
@@ -241,9 +247,11 @@ make build      # =all: vmlinux + envd
 make vmlinux    # guest 内核
 make envd       # e2b guest agent
 make versitygw  # 可选网关,不包含在 build 中
-make clean      # 见 Native 源码幂等与缓存
+make clean      # 移除 Native 输出，保留源码树与 tarball
 make help       # 列举目标
 ```
+
+此处 `make clean` 删除选定的 `LINUX_BUILD_OUT` 和整个 Native `bin/` 目录（所有架构），保留 `build/src/` 与 `build/tarball/`。根目录 `make clean` 先删除本仓根级 `bin/` 和 `build/`，再委派此 Native 清理，不会删除默认 Native 源码树。重置源码缓存或补丁工作前，先阅读[幂等与缓存](../native-deps/README_zh.md#幂等与缓存)。
 
 构建耗时取决于主机、工具链及缓存状态,以上命令不承诺固定耗时。
 
@@ -273,7 +281,7 @@ Workbench 任务向配方传入正整数 `KUASAR_BUILD_JOBS`. 内核编译使用
   elfutils-libelf-devel)+ libssl 头(libssl-dev / openssl-devel);后两者是 host 侧
   kbuild 工具(fixdep、sign-file 等)的依赖,不链入 vmlinux。
 - 配置体系语义(两段拼接的契约、关键启用/禁用项)见
-  [Guest 内核规范](vmlinux_zh.md) [构建工作流](#构建内核)-[配置体系](vmlinux_zh.md#配置体系)。
+  内核[配置体系](vmlinux_zh.md#配置体系)与[架构差异](vmlinux_zh.md#架构差异)。
 
 #### envd(`make envd`)
 

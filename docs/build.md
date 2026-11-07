@@ -48,6 +48,8 @@ versioned external dependency.
 
 ## Build prerequisites
 
+Run the full Runtime assembly workflow on a Linux host (including WSL2 or a Linux container): the Makefile executes its host `runtime-bundle` helper with `GOOS=linux`. Cross-compilation below changes the payload architecture, not the host operating system.
+
 Local builds use environment-provided Go and inherit its `GOROOT` and `GOTOOLCHAIN` selection. Release orchestration requires a working host `gh` with `api --slurp` support on `PATH`. Guest native products follow their selected source and recipe; host EROFS packing and validation tools are installed by the build environment.
 
 CI selects a verified, published Workbench once in trusted preflight and passes that immutable image selection with the exact framework revision to the build jobs. Runtime and VMLinux use native `ubuntu-24.04` x86_64 and `ubuntu-24.04-arm` aarch64 runners. Compilation, ordinary tests, and packaging run through the shared Workbench action as the runner's ordinary UID, with a read-only root filesystem, dropped capabilities, private `/src`, `/build`, and `/work`, and an explicit CPU budget. Publisher credentials stay on the host. Existing architecture-specific test coverage and separate hardware gates still apply; a native ARM build does not imply ARM KVM coverage. Runtime publication uses the verified Workbench's EROFS readers without compiling host helpers.
@@ -79,7 +81,9 @@ make build TARGET_ARCH=aarch64  # cross-build where documented dependencies supp
 - `bin/<arch>/flatten-ctl`;
 - `BUILD_MKFS_EROFS` as the host image packer.
 
-When `sandbox-init`, Envd or `flatten-ctl` is absent, the Makefile invokes its corresponding build target. Host `mkfs.erofs` must be installed on `PATH` or selected by `BUILD_MKFS_EROFS`; otherwise the Runtime build fails explicitly. The project no longer maintains erofs-utils patches or builds and distributes mkfs. Workbench and host environments may install distribution erofs-utils packages for build-time packing and independent validation.
+Ordinary assembly reuses executable input binaries; it does not refresh existing `sandbox-init` or Envd after source or pin changes. `make build` rebuilds `flatten-ctl` first, while direct `make sandbox-runtime` reuses it if executable. Use the release-specific dependency selection described [below](#reproduce-release-dependencies-exactly) for release reproduction.
+
+When `sandbox-init`, Envd or `flatten-ctl` is absent or not executable, the Makefile invokes its corresponding build target. Host `mkfs.erofs` must be installed on `PATH` or selected by `BUILD_MKFS_EROFS`; otherwise the Runtime build fails explicitly. The project no longer maintains erofs-utils patches or builds and distributes mkfs. Workbench and host environments may install distribution erofs-utils packages for build-time packing and independent validation.
 
 ## Outputs
 
@@ -110,8 +114,10 @@ The target's input and build sequence is:
 2. If the selected `SANDBOX_INIT` (default `../sandboxer/bin/<arch>/sandbox-init`) is absent, delegate to `make -C ../sandboxer sandbox-init`.
 3. Resolve target `ENVD` (default `native-deps/bin/<arch>/envd`), building it when missing.
 4. Resolve this repository's target `FLATTEN_CTL` (default `bin/<arch>/flatten-ctl`), building it when missing.
-5. Verify the selected `flatten-ctl` build record links the external go-erofs module. A stale incremental binary fails explicitly; run `make flatten-ctl` or select a matching binary. Assemble the staging tree and use host `BUILD_MKFS_EROFS` to create temporary runtime EROFS.
-6. The host `runtime-bundle` tool copies EROFS, adds PMEM alignment padding, computes SHA256 and appends the empty-marker ZIP, publishing `bin/<arch>/sandbox-runtime.bundle` atomically.
+5. Verify the selected `flatten-ctl` build record links the external go-erofs module. A binary lacking that versioned, checksummed dependency fails explicitly; run `make flatten-ctl` or select a matching binary. Assemble the staging tree and use host `BUILD_MKFS_EROFS` to create temporary runtime EROFS.
+6. The host `runtime-bundle` tool copies EROFS, adds PMEM alignment padding, computes SHA256 and appends the empty-marker ZIP, renaming its completed temporary file to `bin/<arch>/sandbox-runtime.bundle` atomically.
+
+That final rename is not a rollback guarantee for the whole Make target: the Makefile removes the previous bundle before running mkfs. A later failure can leave no bundle. Build in an isolated checkout/output directory, validate the result, then deploy it under a new immutable path for future launches. Retain old artifacts still referenced by running VMs or snapshots; do not overwrite files in use.
 
 See [the native-build workflow](../native-deps/README.md) for host EROFS prerequisites and Envd builds and the [sandboxer guest ABI](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/guest-abi.md) for sandbox-init.
 
@@ -146,7 +152,7 @@ Synthetic source-import author/committer timestamps and patch-application commit
 
 Incrementality is input-aware: the native Makefile tracks the build/common scripts, both selected fragments, the patch directory and tracked patches. An existing output alone does not suppress a rebuild after those inputs change. Every explicit `linux-build` re-resolves configuration; Kbuild compilation remains incremental. Removing the output or cleaning before `make vmlinux` forces regeneration.
 
-**Patch development:** inside native-deps, `make linux-fetch` imports the source and creates `linux-patches-base`; edit `build/src/linux/` and commit; run `make linux-patches-format` to export commits into `deps/linux-patches/*.patch`; then run `make vmlinux` to apply/build. See [the native-build guide](../native-deps/README.md) [Configuration system](vmlinux.md#configuration-system) for idempotence and sanity rules. Patches are architecture-neutral and shared by x86_64 and arm64. Preserve unformatted work rather than resetting it merely to make a build proceed.
+**Patch development:** inside native-deps, `make linux-fetch` imports the source and creates `linux-patches-base`; edit `build/src/linux/` and commit; run `make linux-patches-format` to export commits into `deps/linux-patches/*.patch`; then run `make vmlinux` to apply/build. See [the native-build guide](../native-deps/README.md#kernel-patch-development) and [Configuration system](vmlinux.md#configuration-system) for idempotence and sanity rules. Patches are architecture-neutral and shared by x86_64 and arm64. Preserve unformatted work rather than resetting it merely to make a build proceed.
 
 ### Host build dependencies
 
@@ -166,11 +172,12 @@ Fetching and patch development also require Git and the download/archive tools l
 | `envd` | e2b-dev/runtime 2026.22 source tarball | — | Guest agent in `sandbox-runtime.bundle` |
 | `versitygw` (opt-in) | versity/versitygw v1.5.0 | — | Local/single-node S3-compatible file-storage integration where required |
 
-Pins live in Makefile variables (`LINUX_TARBALL`, `ENVD_TARBALL`, and optional `VERSITYGW_TARBALL`), accepting `url#filename` or a local path. An empty corresponding `*_TARBALL_SHA256` skips verification. The current default Linux and Envd inputs have hashes configured; the optional gateway hash must be supplied when required by the deployment's verification policy. Updating a version means updating those variables and revalidating patch application.
+Pins live in Makefile variables (`LINUX_TARBALL`, `ENVD_TARBALL`, and optional `VERSITYGW_TARBALL`), accepting `url#filename` or a local path. An empty corresponding `*_TARBALL_SHA256` skips verification. The current default Linux and Envd inputs have hashes configured; the optional gateway hash must be supplied when required by the deployment's verification policy. Updating a version means updating those variables and revalidating patch application. A changed pin alone does not invalidate existing binaries or extracted sources: Envd extraction reuses its `.extracted` marker, and kernel fetch reuses `linux-patches-base`. Preserve local work and select fresh source/output paths when changing upstream inputs; `make clean` does not reset these source caches.
 
 Use the normal Makefile targets to build the selected sources, then package the
-matching outputs. From the repository root, `make release-runtime` depends on
-`sandbox-runtime`, while `make release-vmlinux` depends only on `vmlinux`.
+matching outputs. From the repository root, `make release-runtime` prepares the
+selected dependencies, rebuilds `flatten-ctl` and invokes `sandbox-runtime` before
+packaging, while `make release-vmlinux` depends only on `vmlinux`.
 Calling `release.sh package` directly reuses prebuilt files; it does not rebuild
 native dependencies, replace source checkouts or reset caches. Runtime and
 Kernel remain independently built, packaged and selected.
@@ -236,9 +243,11 @@ make build      # =all: vmlinux + envd
 make vmlinux    # Guest kernel
 make envd       # E2B guest agent
 make versitygw  # Optional gateway; not part of build
-make clean      # See section 1.4
+make clean      # Remove native output; preserve source trees and tarballs
 make help       # List targets
 ```
+
+`make clean` here removes the selected `LINUX_BUILD_OUT` and the entire native `bin/` directory (all architectures), but preserves `build/src/` and `build/tarball/`. Root-level `make clean` first removes this repository's root `bin/` and `build/`, then delegates to this native cleanup; it does not delete the default native source trees. See [idempotency and caching](../native-deps/README.md#idempotency-and-caching) before resetting any cached source or patch work.
 
 Build duration depends on the host, toolchain and cache state; these commands do not carry a fixed timing guarantee.
 
@@ -257,7 +266,7 @@ The target invokes the fetch, patch-application and build stages of `deps/build-
 - x86_64 output is ELF (Kbuild target `vmlinux`); aarch64 output is the PE Image from `arch/arm64/boot/Image` (target `Image`). Both installed filenames are `vmlinux`.
 - `build/src/linux/` is shared across architectures. Kbuild selects with `ARCH=` and writes to an architecture-specific `O=` directory.
 - Host requirements: `bc bison flex make tar pkg-config gcc`, libelf headers (`libelf-dev` / `elfutils-libelf-devel`) and libssl headers (`libssl-dev` / `openssl-devel`). The headers support host Kbuild tools such as fixdep/sign-file; they are not linked into vmlinux.
-- The two-fragment configuration contract and important enabled/disabled options are documented in [vmlinux.md](vmlinux.md), sections 2–3.
+- The two-fragment configuration contract and important enabled/disabled options are documented in the kernel [configuration system](vmlinux.md#configuration-system) and [architecture differences](vmlinux.md#architecture-differences).
 
 #### Envd (`make envd`)
 
