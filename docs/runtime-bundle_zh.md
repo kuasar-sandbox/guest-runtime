@@ -162,8 +162,8 @@ share/licenses/runtime/...
 聚合发布由项目主仓的 `release-vX.Y.Z` 承载,同时上传 platform 包、各独立
 版本的原始组件包，使用 GitHub 原生资产大小和摘要校验。platform 包从所选 runtime tag 聚合本仓
 runtime 文档与 `test/e2e/`,从独立选择的 vmlinux tag 取得内核文档对(`docs/vmlinux.md` 及该 tag 中存在的 `docs/vmlinux_zh.md`);组件包本身
-不重复携带这些内容。用户把需要的包解到同一目录即可得到共享 `bin/`、`docs/`、
-`test/`、`deploy/` 布局。双语文档交付与二进制版本选择分别验收。
+不重复携带这些内容。把需要的包解到同一目录后，组件包在 `bin/` 提供产品工具，当前 platform 包在 `guide/` 提供文档、
+在 `test/` 提供测试，并在 `workbench/` 提供轻量 Workbench 启动器。历史版本沿用其随包指南规定的布局。双语文档交付与二进制版本选择分别验收。
 
 `vmlinux` 不属于 runtime 版本,由本仓 `vmlinux-vX.Y.Z` 独立版本线发布。
 runtime workflow 显式选择已发布 sandboxer tag 构建镜像;runtime 与 vmlinux
