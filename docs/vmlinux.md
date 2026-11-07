@@ -226,8 +226,9 @@ Unused subsystems are disabled to reduce image and runtime footprint:
 Platform ABI boundaries: disabled features are unavailable to guest applications:
 
 ```text
-# USERFAULTFD not set             sandbox-ctl uses userfaultfd on the host backing memfd;
-                                  an in-guest userfaultfd() call returns ENOSYS.
+# USERFAULTFD not set             CH registers host RAM mappings with userfaultfd;
+                                  sandbox-ctl handles faults through the handed-off fd.
+                                  An in-guest userfaultfd() call returns ENOSYS.
 # UTS_NS / TIME_NS / IPC_NS /     Additional nested isolation is not enabled.
 # USER_NS / NET_NS not set
 NUMA not set                      Guest NUMA support is disabled; this alone does not
@@ -344,7 +345,7 @@ See the [VMM activation contract](https://github.com/kuasar-sandbox/sandboxer/bl
 
 ### Why USERFAULTFD is disabled by default
 
-`userfaultfd` is a platform **host-side** facility: sandbox-ctl registers host virtual addresses of the memfd backing guest RAM and handles their faults. Current platform workloads do not need to call `userfaultfd()` **inside the guest**, so the minimal preset does not expose that API.
+`userfaultfd` is a platform **host-side** facility: Cloud Hypervisor creates and registers it for its own mappings of the memfd backing guest RAM, then passes the descriptor through `SCM_RIGHTS` to sandbox-ctl for fault handling. Current platform workloads do not need to call `userfaultfd()` **inside the guest**, so the minimal preset does not expose that API.
 
 Applications needing in-guest userfaultfd, such as applications managing their own page cache, must use a validated custom vmlinux.
 

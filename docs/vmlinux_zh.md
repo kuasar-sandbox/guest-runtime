@@ -230,8 +230,9 @@ CGROUP_PIDS=y                   pids.max
 平台 ABI 边界(关闭 = guest app 看不到这些功能):
 
 ```
-# USERFAULTFD not set             userfaultfd() 是 host 能力(sandbox-ctl
-                                  在 memfd 上注册);guest 调用返回 ENOSYS
+# USERFAULTFD not set             CH 对 Host RAM 映射注册 userfaultfd；
+                                  sandbox-ctl 通过交接的 fd 处理缺页。
+                                  Guest 调用 userfaultfd() 返回 ENOSYS
 # UTS_NS / TIME_NS / IPC_NS /     1-VM = 1-app 模型不需要 nested 隔离
 # USER_NS / NET_NS not set
 NUMA not set                      关闭 Guest NUMA 支持;不能据此推导内核只有一个 memory zone
@@ -353,8 +354,8 @@ Guest 页选择与 Host 原生页大小是不同约束。当前 external-RAM CH 
 
 ### 为什么默认关 USERFAULTFD
 
-`userfaultfd` 是平台 host 端的能力——sandbox-ctl 在 host 上对 backing memfd
-的 chVA 注册 uffd,接管 guest RAM 缺页.当前平台 workload 不需要在 **Guest 内**
+`userfaultfd` 是平台 host 端的能力：Cloud Hypervisor 为自身地址空间中的 Guest RAM
+backing memfd 映射创建并注册 uffd，再通过 `SCM_RIGHTS` 将描述符交给 sandbox-ctl 处理缺页。当前平台 workload 不需要在 **Guest 内**
 调用 `userfaultfd()`,因此最小 preset 不暴露该 API.
 
 需要在 guest 内做用户态 uffd 的应用(罕见——多是数据库自己管 page cache 的
