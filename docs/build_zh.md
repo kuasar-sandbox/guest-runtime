@@ -219,7 +219,7 @@ Runtime Go 构建的 workspace 只包含本轮选定的 guest-runtime 和 accele
 
 Runtime 独立验证使用已安装在 `PATH` 中的可信主机 `fsck.erofs` 和
 `dump.erofs`,不下载 EROFS 源码或现场编译读取器。读取器须支持镜像格式、
-`fsck.erofs --extract` 及 `dump.erofs --path/--cat`。
+`fsck.erofs --extract` 及 `dump.erofs --path/--cat/--ls`。
 验证检查 bundle 对齐和前缀摘要,不展开目录树地验证完整 EROFS 文件系统,只把
 init、Envd、flatten-ctl 读入固定私有文件。镜像内属主/权限、Go main
 身份和目标架构须一致。发布前，内嵌 init 与 Envd 必须分别等于本次选定的输入二进制；消费发布包不要求来源证明。内嵌
@@ -259,7 +259,7 @@ Workbench 任务向配方传入正整数 `KUASAR_BUILD_JOBS`. 内核编译使用
 
 #### 宿主 EROFS 工具
 
-从宿主发行版安装 erofs-utils，或通过 `BUILD_MKFS_EROFS` 选择宿主可执行的 mkfs。交叉构建也使用宿主架构的打包器。`make erofs`、补丁版 Plan ABI、私有静态链接配方和相应缓存已移除。独立校验需要支持当前格式及 `--extract`、`--path`、`--cat` 的 fsck/dump；可信 CI 可构建未修改的上游读取工具，但不构建或导出 mkfs。
+从宿主发行版安装 erofs-utils，或通过 `BUILD_MKFS_EROFS` 选择宿主可执行的 mkfs。交叉构建也使用宿主架构的打包器。`make erofs`、补丁版 Plan ABI、私有静态链接配方和相应缓存已移除。独立校验需要支持当前格式及 `--extract`、`--path`、`--cat`、`--ls` 的 fsck/dump；可信 CI 可构建未修改的上游读取工具，但不构建或导出 mkfs。
 
 #### vmlinux(`make vmlinux`)
 
@@ -359,4 +359,4 @@ Runtime 与 VMLinux 组件 Release 从所选 source ref 和精确 commit 构建�
 
 所选 owner 源码在 `release/helper-inputs.json` 显式声明编译型 E2E helper 清单。当前清单为空。后续 helper 及其构建配方由此 owner 声明维护，聚合打包自动发现，无需平台文件名清单。
 
-Runtime 发布内嵌所选 sandboxer Release 中的 `sandbox-init`。安装前从所选 Tag 的完整 Release 包集合固定本机架构资产 ID，并校验 GitHub 原生大小与摘要。忽略历史正文 marker、校验和附件及来源旁车，只下载本机架构。校验归档路径、文件类型、所有权、权限与 ELF 架构，并按实际二进制中读取的编译器版本复制 Go 法律声明。重新编译同一提交可能改变 Go 构建元数据或工作区派生的默认值，因此源码重编译不能证明与已发布依赖逐字节一致。
+Runtime 发布内嵌所选 sandboxer Release 中的 `sandbox-init`。安装前从所选 Tag 的完整 Release 包集合固定所选目标架构资产 ID，并校验 GitHub 原生大小与摘要。忽略历史正文 marker、校验和附件及来源旁车，只下载所选目标架构。校验归档路径、文件类型、所有权、权限与 ELF 架构，并按实际二进制中读取的编译器版本复制 Go 法律声明。重新编译同一提交可能改变 Go 构建元数据或工作区派生的默认值，因此源码重编译不能证明与已发布依赖逐字节一致。

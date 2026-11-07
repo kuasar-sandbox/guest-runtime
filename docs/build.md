@@ -214,7 +214,7 @@ Validation accepts only the selected unit's payloads: Runtime has `sandbox-runti
 Standalone Runtime validation uses trusted host `fsck.erofs` and
 `dump.erofs` already installed on `PATH`. It does not download EROFS sources
 or compile readers on demand. These readers must support the image format,
-`fsck.erofs --extract` and `dump.erofs --path/--cat`.
+`fsck.erofs --extract` and `dump.erofs --path/--cat/--ls`.
 Validation checks the bundle's alignment and prefix digest, verifies the
 complete EROFS filesystem without extracting its tree, and reads only init,
 Envd and flatten-ctl into fixed private files. In-image ownership/modes,
@@ -255,7 +255,7 @@ Workbench jobs pass the positive integer `KUASAR_BUILD_JOBS` to each recipe. Ker
 
 #### Host EROFS tools
 
-Install erofs-utils from the host distribution, or select a host-executable mkfs through `BUILD_MKFS_EROFS`. Cross builds also use a host-architecture packer. The `make erofs` target, patched Plan ABI, private static-link recipe and associated cache are retired. Independent validation needs fsck/dump supporting the current format and `--extract`, `--path`, `--cat`; trusted CI may build unmodified upstream readers, but does not build or export mkfs.
+Install erofs-utils from the host distribution, or select a host-executable mkfs through `BUILD_MKFS_EROFS`. Cross builds also use a host-architecture packer. The `make erofs` target, patched Plan ABI, private static-link recipe and associated cache are retired. Independent validation needs fsck/dump supporting the current format and `--extract`, `--path`, `--cat`, `--ls`; trusted CI may build unmodified upstream readers, but does not build or export mkfs.
 
 #### vmlinux (`make vmlinux`)
 
@@ -330,4 +330,4 @@ See the [project release documentation](https://github.com/kuasar-sandbox/kuasar
 
 ## Selected sandbox-init and helper provenance
 
-Runtime publication embeds `sandbox-init` from the selected sandboxer Release. It fixes the selected native asset ID from the tag’s complete Release package set and checks GitHub size/digest before installing the binary. Historical body markers, checksum attachments and source sidecars are ignored. Only the local architecture is downloaded. Archive paths, types, ownership, permissions and ELF architecture are checked; Go notices are copied using the compiler version read from the actual binary. Rebuilding the same commit can change Go build metadata or workspace-derived defaults, so a source rebuild does not establish byte identity with the published dependency.
+Runtime publication embeds `sandbox-init` from the selected sandboxer Release. It fixes the selected native asset ID from the tag’s complete Release package set and checks GitHub size/digest before installing the binary. Historical body markers, checksum attachments and source sidecars are ignored. Only the selected target architecture is downloaded. Archive paths, types, ownership, permissions and ELF architecture are checked; Go notices are copied using the compiler version read from the actual binary. Rebuilding the same commit can change Go build metadata or workspace-derived defaults, so a source rebuild does not establish byte identity with the published dependency.
