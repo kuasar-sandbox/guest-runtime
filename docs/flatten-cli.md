@@ -102,6 +102,8 @@ flatten-ctl export [flags] <ref|path|->
   --insecure              Registry source: allow plain HTTP; TLS verification is controlled
                           separately by tls.* in the configuration.
   --no-progress           Disable stderr progress.
+  --conversion-semantics <id>
+                          Require this generator's conversion policy; mismatch fails.
 
   # Remote registry source (Remote pulling, local caching and Referrers writeback)
   --print-digest          Print resolved source repo@sha256:... to stdout;
@@ -132,14 +134,17 @@ docker save myapp:v1 | flatten-ctl export --output my-app.img
 # Local docker-archive; input follows flags
 flatten-ctl export --output my-app.img ./my-app.tar
 
-# Referrers: on a hit the host can reuse the manifest; after a miss, export/store,
-# then write the resulting manifest ID back.
-flatten-ctl referer lookup --json --owner "$OWNER" --config flatten.yaml \
-    registry.example.com/team/app:v1
-flatten-ctl export --output app.img --config flatten.yaml registry.example.com/team/app:v1
-APP_KEY=$(manifest-ctl store --manifest-config manifest.yaml app.img)
-flatten-ctl referer put --owner "$OWNER" --manifest-id "$APP_KEY" --config flatten.yaml \
-    registry.example.com/team/app@sha256:…
+# Referrers: handle a supported miss using one resolved subject.
+# On a hit, validate/reuse manifest_id; unsupported needs caller fallback policy.
+LOOKUP=$(flatten-ctl referer lookup --json --owner "$OWNER" --config flatten.yaml \
+    registry.example.com/team/app:v1)
+if printf '%s\n' "$LOOKUP" | jq -e '.supported and (.hit | not)' >/dev/null; then
+    SUBJECT=$(printf '%s\n' "$LOOKUP" | jq -er '.subject') &&
+    flatten-ctl export --registry --output app.img --config flatten.yaml "$SUBJECT" &&
+    APP_KEY=$(manifest-ctl store --manifest-config manifest.yaml app.img) &&
+    flatten-ctl referer put --owner "$OWNER" --manifest-id "$APP_KEY" \
+        --config flatten.yaml "$SUBJECT"
+fi
 
 # If /tmp is too small, set tmpdir: /var/tmp in flatten.yaml.
 flatten-ctl export --output big.img --config flatten.yaml ./big.tar
@@ -212,6 +217,11 @@ flatten-ctl info [--json] [--manifest-config <path>] <path|manifest://hex>
 
 The reader unwraps a local tarstream artifact or opens a manifest stream, reads the EROFS superblock, then decodes the trailing OCI runtime configuration ZIP. The manifest fetch path reads the required chunks for the superblock and ZIP instead of materializing the complete image.
 
+A successful `info` only establishes that those metadata reads succeeded. It does
+not recompute the whole payload/carrier digest, run filesystem consistency checks,
+verify a signature or establish workload compatibility. Verify artifacts and
+exercise the workload separately.
+
 Example human-readable output:
 
 ```text
@@ -267,7 +277,7 @@ To use a ZIP tool directly, extract the raw `image` payload first ([Byte layout]
 
 ### Remote pulling, local caching and Referrers writeback
 
-For a registry input ([Command-line interface](#command-line-interface)), `flatten-ctl` uses [go-containerregistry] to pull and flatten directly, without `docker save`. Registry behavior comes from **`--config` YAML** or `FLATTEN_CONFIG`; credentials stay outside the file:
+For a registry input ([Command-line interface](#command-line-interface)), `flatten-ctl` uses [go-containerregistry] to pull and flatten directly, without `docker save`. Registry behavior comes from **`--config` YAML** or `FLATTEN_CONFIG`; credentials stay outside the file. This is an example configuration, not a list of all defaults (in particular, an omitted `referer.validity` has no expiry):
 
 ```yaml
 tmpdir: ""                     # Per-run scratch parent; empty = $TMPDIR or /tmp
@@ -292,9 +302,15 @@ Conversion records use the fixed artifact type defined by the shared library con
 
 **TLS (`tls.*`):** applies to all HTTPS requests, including registry APIs and CDN blob redirects. An intercepting proxy may re-sign either with a private CA that the system trust store does not accept. `ca_cert` appends a PEM CA bundle to the system roots. `insecure_skip_verify` disables certificate verification entirely and is an explicit fallback when the CA cannot be supplied. It is independent of `insecure`, which only permits a plain-HTTP registry and does not change HTTPS verification.
 
-**Local cache:** set `cache.dir` to retain layers. `cache.required=true` rejects a layer that exceeds the in-flight budget; otherwise it streams directly. `max_size` is an LRU reclamation target. Reuse requires successful verification. The full candidate-publication, lease and GC contract is in [layer caching and conversion records](https://github.com/kuasar-sandbox/accelerator/blob/main/docs/image-preparation.md#layer-caching-and-conversion-records).
+**Local cache:** set `cache.dir` to retain layers. `cache.required=true` requires an explicit `cache.dir` and rejects a layer that exceeds the in-flight budget; otherwise it streams directly. `max_size` is an LRU reclamation target. Reuse requires successful verification. The full candidate-publication, lease and GC contract is in [layer caching and conversion records](https://github.com/kuasar-sandbox/accelerator/blob/main/docs/image-preparation.md#layer-caching-and-conversion-records).
 
-**Multiple architectures:** a registry reference can resolve to a manifest index. `platform` selects its concrete image before flattening. `Architecture` and `Os` are copied into config.json ([config.json schema](https://github.com/kuasar-sandbox/accelerator/blob/main/docs/image-preparation.md#configjson-schema)); flattening itself does not validate that the resulting application can execute on the selected sandbox.
+**Multiple architectures:** a registry reference can resolve to a manifest index.
+`platform` selects its concrete image. Registry preparation also checks the
+image config's OS and architecture against the selected platform; variant is
+compared when both the selection and config specify one. `Architecture` and `Os`
+are copied into config.json ([config.json schema](https://github.com/kuasar-sandbox/accelerator/blob/main/docs/image-preparation.md#configjson-schema)).
+These metadata checks do not validate that the resulting application can execute
+on the selected sandbox.
 
 **Determinism:** tags are mutable, including `:latest`; pin `@sha256:` for a reproducible source. `export` reports the resolved `repo@sha256:...` on stderr unless `--no-progress` is set; `--print-digest` also writes it to stdout. A digest pins source bytes, while complete output reproducibility additionally requires the same configuration, toolchain and build settings ([Sources of determinism](https://github.com/kuasar-sandbox/accelerator/blob/main/docs/image-preparation.md#sources-of-determinism)). A tag is only as stable as its current target.
 
@@ -303,8 +319,8 @@ Conversion records use the fixed artifact type defined by the shared library con
 The resulting manifest ID, the content key returned by ingest such as `--upload`, can be written through the **OCI Referrers API** to the **source image's repository**, providing a registry-side, owner-scoped reuse record. `flatten-ctl` exposes only lookup and put primitives. The caller, such as `node-ctl run-builder`, decides whether to skip export, when to upload, and whether writeback failure fails the build.
 
 ```text
-flatten-ctl referer lookup --json --owner <owner-token> [--config <p>] [--platform <p>] [--insecure] <ref>
-flatten-ctl referer put --owner <owner-token> --manifest-id <64hex> [--validity <dur>] [--config <p>] [--insecure] <subject>
+flatten-ctl referer lookup [--json] --owner <owner-token> [--config <p>] [--platform <p>] [--insecure] [--conversion-semantics <id>] <ref>
+flatten-ctl referer put [--json] --owner <owner-token> --manifest-id <64hex> [--validity <dur>] [--config <p>] [--platform <p>] [--insecure] [--conversion-semantics <id>] <subject>
 ```
 
 `lookup` resolves the source to the platform image digest `D` and probes the OCI 1.1 Referrers API. Output:
@@ -358,11 +374,28 @@ The cross-platform sparse-data rule is strict: **zero-valued data and holes are 
 
 **`extract`** handles a general tar stream in one pass, using the standard decoder without staging a pipeline on disk. Regular members are written densely: zero bytes within data remain allocated. Sparse members are detected through PAX sparse 1.0 records or the old GNU `S` type flag, with three paths:
 
-- **`-f` file input:** relocate the member by **entry ordinal** on a second handle through tarstream to recover the sparse map hidden by the standard reader. Punch only declared holes. The standard-reader side seeks past the body, avoiding reading its data twice. This works around the sparse-map API limitation tracked in [Go issue 22735](https://github.com/golang/go/issues/22735).
+- **`-f` file input with supported PAX sparse 1.0:** relocate the member by **entry ordinal** on a second handle through tarstream to recover the sparse map hidden by the standard reader. Punch only declared holes. The standard-reader side seeks past the body, avoiding reading its data twice. This works around the sparse-map API limitation tracked in [Go issue 22735](https://github.com/golang/go/issues/22735).
 - **General stdin input:** the standard decoder has consumed the map and staging is forbidden, so extraction reports a **hard error with guidance** instead of silently materializing a 32 GiB sparse member densely.
 - **`--dense`:** explicitly disable sparse handling and write standard-library logical bytes densely, including allocated zeroes for declared holes.
 
-Convenient cases use a direct tarstream view. With **no rules and `-f` pointing to a platform artifact** (one payload and a digest marker), the payload is automatically extracted with its declared holes: `tar extract -f image.img`. A **single explicit file rule**, `member[:output-file]`, can preserve holes even from stdin when the destination is a file path, not stdout, a directory or the archive root. If that member is actually a directory, file input falls back to general extraction, while stdin reports guidance. Members containing `..` are skipped with a warning; writes through symlinks are errors. If several rules match, the most specific wins.
+Detection is not support: the hole-preserving reader rejects legacy GNU binary
+sparse and PAX sparse 0.x encodings, including with `-f`. Use `--dense` for those
+formats if allocating all logical bytes is acceptable.
+
+Convenient cases use a direct tarstream view. With **no rules and `-f` pointing to a platform artifact** (one payload and a digest marker), the payload is automatically extracted with its declared holes: `tar extract -f image.img`. A **single explicit file rule**, `member[:output-file]`, can preserve holes even from stdin when the destination is a file path, not stdout, a directory or the archive root. If that member is actually a directory, file input falls back to general extraction, while stdin reports guidance.
+
+These two single-file shortcuts restore bytes and declared holes, not the
+archive's original metadata. They use mode `0644` unless `--chmod` overrides it;
+new files belong to the caller, while existing ownership remains unless
+`--chown` is given. Original mtime is not restored. They directly open the
+destination and can follow symlinks; they do not apply the general extractor's
+directory-rule confinement. Use trusted member names and trusted destination
+paths, including every parent directory.
+
+The general extractor skips names escaping the archive root through `..` and
+confines directory-prefix rules after resolving parent symlinks. This is not a
+blanket ban on symlinks, and explicit file destinations are caller-controlled.
+If several rules match, the most specific wins.
 
 Rule syntax is `path-in-tar[:destination]`:
 
@@ -376,7 +409,17 @@ Rule syntax is `path-in-tar[:destination]`:
 | `dir/:` | Extract into the current directory. |
 | `:dir/` | Map the whole archive root into `dir/`. |
 
-Without rules, extract all entries into the current directory. `--chown` and `--chmod` override ownership or permissions for each written entry; `--no-chown` skips ownership restoration. `--chown` accepts `uid:gid`; numeric values are used directly, while names are resolved against the extraction target's `/etc/passwd` and `/etc/group`, as in Docker `COPY --chown=name`. With CGO disabled, the file-based lookup does not use NSS. A username without a group uses that user's primary group; numeric `1000` maps to `1000:1000`. The node-ctl COPY step uses `extract --dense --chown` to unpack the context tar into guest rootfs; see [Target-aware execution and publication](https://github.com/kuasar-sandbox/orchestrator/blob/main/docs/node-build.md#execution-and-publication).
+Without rules, extract all entries into the current directory (subject to the
+platform-artifact shortcut above). In general extraction, `--chown` and `--chmod`
+override entry ownership/permissions, and `--no-chown` skips ownership restoration.
+The single-file shortcuts have the metadata behavior described above; an explicit
+`--chown` is applied there even if `--no-chown` is also supplied, so do not combine
+those flags. `--chown` accepts `uid:gid`. Numeric values are used directly; names
+are resolved from the account database visible to the running process, not from
+the chosen extraction destination. With CGO disabled this reads its `/etc/passwd`
+and `/etc/group` without NSS. Those are the image's accounts only when the tool
+already runs inside that Guest/rootfs. A username without a group uses that user's
+primary group; numeric `1000` maps to `1000:1000`. The node-ctl COPY step uses `extract --dense --chown` to unpack the context tar into guest rootfs; see [Target-aware execution and publication](https://github.com/kuasar-sandbox/orchestrator/blob/main/docs/node-build.md#execution-and-publication).
 
 **`stream`** wraps **one file** as a tarstream: a sparse payload plus `.kuasar.digest.<hex>` marker metadata, implemented by [accelerator/pkg/tarstream](https://github.com/kuasar-sandbox/accelerator/tree/main/pkg/tarstream). The writer computes the digest while writing the payload, without a second data read. File-source holes come from filesystem metadata (SEEK_HOLE). Stdin **requires `--size N`**, because the tar header precedes data and must contain the size. It streams directly without disk staging and is encoded densely: a one-shot stream has no authoritative hole map, and content is not scanned to invent one. `--size` is only valid for stdin; file size comes from the filesystem.
 
@@ -391,6 +434,12 @@ Argument syntax is `name-in-tar[:source]`:
 | `name:source` | Both are explicit. |
 
 The result is valid tar, readable by `extract`, GNU tar and `archive/tar`. Platform extraction treats the marker as reserved metadata and does not write it out. Declared holes occupy map bytes rather than their logical size in the stream.
+
+Unlike `export --output`, the tar commands do not atomically commit output.
+`tar stream -f` opens/truncates its destination before validating/opening the
+source; extraction also writes destinations directly. Never use the input file,
+a hardlink or a symlink alias as output. Protect existing files, use a distinct
+trusted output, and discard partial results after failure.
 
 ```bash
 # Sparse snapshot disk → tarstream → restore; transfer data plus metadata, not holes

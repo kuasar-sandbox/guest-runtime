@@ -125,16 +125,18 @@ flatten-ctl export [flags] <ref|path|->
                           tls/cache/referer(详见 远程拉取、本地缓存与 Referrers 回写)
   --platform <os/arch>    覆盖配置里的拉取 platform(os/arch[/variant])
   --tmpdir <dir>          覆盖配置 tmpdir(自动创建)。guest 内导出自身 rootfs 时
-                          必须指向 mountpoint 子命令造出的挂载点(连同 mkfs 临时
-                          文件一起被 --skip-mounts 排除,防自吞)
+                          使用 mountpoint 子命令造出的挂载点，使 --skip-mounts
+                          排除 scratch（包括规划器临时文件），防止自吞
   --insecure              registry 源:允许 plain HTTP;TLS 证书校验由配置中的 tls.* 独立控制
   --no-progress           禁用 stderr 进度输出
+  --conversion-semantics <id>
+                          要求生成器使用指定转换政策；不匹配则失败
 
   # 远程 registry 源(详见 远程拉取、本地缓存与 Referrers 回写)
   --print-digest          stdout 打印解析后的源镜像 digest(repo@sha256:..);与 --output - 互斥
   --registry / --archive  强制把位置参数当 registry 引用 / 本地文件(消歧)
   # rootfs 目录源(位置参数是本地目录时;见下文)
-  --skip <rel>            排除 rootfs 内的该路径(节点连同子树,mkfs --exclude-path 语义);可重复
+  --skip <rel>            按相对源路径排除 rootfs 内的节点及其子树；可重复
   --skip-mounts           排除严格位于 rootfs 之下的全部挂载点(/proc/self/mountinfo)
   --runtime-config <p>    追加的 runtime config JSON:OCI image config 或已投影的
                           config.json(按顶层键自动识别);不给则空配置
@@ -157,14 +159,17 @@ docker save myapp:v1 | flatten-ctl export --output my-app.img
 # 本地 docker-archive 文件(位置参数在 flags 之后)
 flatten-ctl export --output my-app.img ./my-app.tar
 
-# Referrers 原子流程:lookup 命中则宿主直接复用 manifest id;miss 后由宿主 export+store,
-# 再把得到的 manifest id 回写
-flatten-ctl referer lookup --json --owner "$OWNER" --config flatten.yaml \
-    registry.example.com/team/app:v1
-flatten-ctl export --output app.img --config flatten.yaml registry.example.com/team/app:v1
-APP_KEY=$(manifest-ctl store --manifest-config manifest.yaml app.img)
-flatten-ctl referer put --owner "$OWNER" --manifest-id "$APP_KEY" --config flatten.yaml \
-    registry.example.com/team/app@sha256:…
+# Referrers：supported miss 分支始终使用同一个已解析 subject。
+# hit 时校验/复用 manifest_id；unsupported 由调用方选择 fallback 策略。
+LOOKUP=$(flatten-ctl referer lookup --json --owner "$OWNER" --config flatten.yaml \
+    registry.example.com/team/app:v1)
+if printf '%s\n' "$LOOKUP" | jq -e '.supported and (.hit | not)' >/dev/null; then
+    SUBJECT=$(printf '%s\n' "$LOOKUP" | jq -er '.subject') &&
+    flatten-ctl export --registry --output app.img --config flatten.yaml "$SUBJECT" &&
+    APP_KEY=$(manifest-ctl store --manifest-config manifest.yaml app.img) &&
+    flatten-ctl referer put --owner "$OWNER" --manifest-id "$APP_KEY" \
+        --config flatten.yaml "$SUBJECT"
+fi
 
 # /tmp 不够大时在 flatten.yaml 设 tmpdir: /var/tmp,再 --config flatten.yaml
 flatten-ctl export --output big.img --config flatten.yaml ./big.tar
@@ -242,6 +247,10 @@ flatten-ctl info [--json] [--manifest-config <path>] <path|manifest://hex>
 取得 image size,从末尾 ZIP 解出 OCI runtime config 并打印。`manifest://` 输入经 cache-ctl/store-ctl 的 fetch 路径按 chunk 粒度只读
 superblock 与尾部 ZIP,不取回整个镜像。
 
+`info` 成功只表明这些元数据读取成功，并不重新计算完整 payload/carrier 摘要、
+检查文件系统一致性、验证签名或证明工作负载兼容。产物验证和实际工作负载测试
+须另行完成。
+
 人类可读输出示例:
 
 ```
@@ -300,7 +309,8 @@ flatten-ctl info --json my-app.img | jq '.config.Entrypoint'
 
 位置参数判定为 registry 引用时([命令行接口](#命令行接口) 判别规则),`flatten-ctl` 经 [go-containerregistry]
 直接拉取、展平,无需先 `docker save`。所有 registry 行为由 **`--config` YAML**
-(或 `FLATTEN_CONFIG` env)配置,密钥不入文件:
+(或 `FLATTEN_CONFIG` env)配置,密钥不入文件。以下是示例配置，不是全部默认值清单；
+尤其是省略 `referer.validity` 时没有过期时间：
 
 ```yaml
 tmpdir: ""                     # 每次运行临时目录的父目录(空 = $TMPDIR 或 /tmp)
@@ -332,10 +342,13 @@ PEM CA bundle 追加进系统信任库,是信任此类私有根 CA 的正路;`in
 整体关闭证书校验,仅作 CA 不可得时的逃生口。与 `insecure` 正交:后者只决定 registry
 是否可走纯 HTTP,不影响 TLS 校验。
 
-**本地缓存**：显式设置 `cache.dir` 才保留层缓存。`cache.required=true` 使超出 in-flight 预算的层失败，否则旁路流式读取；`max_size` 是 LRU 回收目标。完成验证后才能复用。完整的候选发布、lease 与 GC 契约见[层缓存与转换记录](https://github.com/kuasar-sandbox/accelerator/blob/main/docs/image-preparation_zh.md#层缓存与转换记录)。
+**本地缓存**：显式设置 `cache.dir` 才保留层缓存。`cache.required=true` 要求显式配置 `cache.dir`，并使超出 in-flight 预算的层失败，否则旁路流式读取；`max_size` 是 LRU 回收目标。完成验证后才能复用。完整的候选发布、lease 与 GC 契约见[层缓存与转换记录](https://github.com/kuasar-sandbox/accelerator/blob/main/docs/image-preparation_zh.md#层缓存与转换记录)。
 
-**多架构**:registry 引用常指 manifest index,按 `platform` 选出具体 image 再展平;
-`Architecture`/`Os` 仍原样投影进 config.json([config.json schema](https://github.com/kuasar-sandbox/accelerator/blob/main/docs/image-preparation_zh.md#configjson-schema)),不做校验。
+**多架构**：registry 引用可以指向 manifest index，`platform` 选择其具体 image。
+Registry preparation 还会检查 image config 的 OS、architecture 与所选平台一致；
+仅当选择和 config 都指定 variant 时才比较 variant。`Architecture`/`Os` 仍原样投影进
+config.json([config.json schema](https://github.com/kuasar-sandbox/accelerator/blob/main/docs/image-preparation_zh.md#configjson-schema))。
+这些元数据检查不验证应用能否在所选沙箱上实际执行。
 
 **确定性提醒**:tag 可变,`:latest` 不可复现;可复现构建请钉 `@sha256:`。`export` 把
 解析到的 `repo@sha256:..` 打到 stderr(`--no-progress` 关闭),`--print-digest` 另打到
@@ -349,8 +362,8 @@ stdout。digest 固定源字节;完整输出复现还需固定配置、工具链
 调用方(如 `node-ctl run-builder`)编排。
 
 ```
-flatten-ctl referer lookup --json --owner <owner-token> [--config <p>] [--platform <p>] [--insecure] <ref>
-flatten-ctl referer put --owner <owner-token> --manifest-id <64hex> [--validity <dur>] [--config <p>] [--insecure] <subject>
+flatten-ctl referer lookup [--json] --owner <owner-token> [--config <p>] [--platform <p>] [--insecure] [--conversion-semantics <id>] <ref>
+flatten-ctl referer put [--json] --owner <owner-token> --manifest-id <64hex> [--validity <dur>] [--config <p>] [--platform <p>] [--insecure] [--conversion-semantics <id>] <subject>
 ```
 
 `lookup` 解析源 → 平台镜像 digest `D`,直接探测 OCI 1.1 Referrers API。输出:
@@ -420,7 +433,7 @@ flatten-ctl tar stream  [-f tarfile] [--size N] [tar内名[:源]]
 **稀疏成员**(PAX sparse 1.0 经 `PAXRecords` 检测,老 GNU 'S' 经 typeflag)的还原
 分三档:
 
-- `-f` 文件输入:引擎按**条目序数**在第二个句柄上经 tarstream 重定位该成员,
+- `-f` 文件输入且编码为受支持的 PAX sparse 1.0：引擎按**条目序数**在第二个句柄上经 tarstream 重定位该成员,
   取回 stdlib reader 隐藏的洞图(相关 API 限制见 [Go issue 22735](https://github.com/golang/go/issues/22735)),
   只 punch 声明的洞;stdlib 侧 `Next()` Seek 跳过包体,数据不读两遍;
 - stdin(单遍,图已被 stdlib 消费,且禁落盘):**硬错误**并引导——绝不静默把
@@ -428,11 +441,23 @@ flatten-ctl tar stream  [-f tarfile] [--size N] [tar内名[:源]]
 - `--dense`:显式整体关闭稀疏处理,回 stdlib 逻辑字节致密落盘(声明洞落为
   已分配零)。
 
+识别出稀疏成员不代表支持其编码：保留洞的 reader 拒绝旧 GNU binary sparse 和
+PAX sparse 0.x，使用 `-f` 也不例外。只有能接受分配全部逻辑字节时，才对这些格式
+使用 `--dense`。
+
 便捷形态:**无规则 + `-f` 平台工件**(一个 payload + digest marker)自动洞精确解出 payload
 (`tar extract -f image.img` 即可);**单条显式文件规则**(`成员[:目标文件]`,目标必须是文件路径,不能是 stdout、目录或归档根)
 走 tarstream 视图,stdin 也能洞精确(成员实为目录等情形:`-f` 输入回退通用引擎,
-stdin 报错引导)。`..` 成员跳过告警,穿 symlink 写出是硬错误;条目命中多条规则时
-最具体者胜。规则 = `tar内路径[:外部路径]`:
+stdin 报错引导)。
+
+这两条单文件快捷路径还原字节与声明洞，不恢复归档原有元数据。默认使用 `0644`，
+可由 `--chmod` 覆盖；新文件归调用者所有，已有文件保留属主，除非显式给出 `--chown`。
+不恢复原 mtime。快捷路径直接打开目标，可能跟随符号链接，不应用通用引擎的目录规则
+边界检查。成员名、目标路径及全部父目录都必须可信。
+
+通用引擎会跳过通过 `..` 逃出归档根的名称，并在解析父目录符号链接后检查目录前缀
+规则的边界。这不是全面禁止符号链接；显式文件目标由调用者负责选择。
+条目命中多条规则时最具体者胜。规则 = `tar内路径[:外部路径]`:
 
 | 形式 | 含义 |
 |---|---|
@@ -444,11 +469,13 @@ stdin 报错引导)。`..` 成员跳过告警,穿 symlink 写出是硬错误;条
 | `dir/:` | 解到当前目录 |
 | `:dir/` | 整个归档根映射到 dir/ |
 
-不给规则取全部到当前目录;`--chown/--chmod` 改写每个落盘条目的属主/权限;
-`--no-chown` 跳过属主恢复。`--chown`
-取 `uid:gid`:数字直用,**名字**则按解包目标根的 `/etc/passwd`/`/etc/group` 解析
-(Docker `COPY --chown=name` 同款;CGO 关,os/user 直读文件不经 NSS);`user`(无组)
-取该用户主组,纯数字 `1000` 镜像为 `1000:1000`。node-ctl 的 COPY step 即以
+不给规则时取全部到当前目录（上文平台工件快捷路径除外）。通用提取中，
+`--chown/--chmod` 覆盖条目的属主/权限，`--no-chown` 跳过属主恢复。单文件快捷路径
+遵循上文元数据行为；即使同时给出 `--no-chown`，它仍应用显式 `--chown`，因此不要
+组合这两个标志。`--chown` 接受 `uid:gid`：数字直接使用，名字按运行进程可见的
+账户库解析，不按所选提取目标目录解析。CGO 关闭时读取该进程的 `/etc/passwd` 与
+`/etc/group`，不使用 NSS；只有工具已运行在 Guest/rootfs 内时，才是镜像账户库。
+`user` 未指定组时取该用户主组，纯数字 `1000` 映射为 `1000:1000`。node-ctl 的 COPY step 即以
 `extract --dense --chown` 把上下文 tar 摊进 guest rootfs(见 [按目标执行与发布](https://github.com/kuasar-sandbox/orchestrator/blob/main/docs/node-build_zh.md#execution-and-publication))。
 
 **stream** 把**一个文件**封装为 tarstream(一个稀疏 payload +
@@ -469,6 +496,10 @@ stdin 报错引导)。`..` 成员跳过告警,穿 symlink 写出是硬错误;条
 
 产物本身是合法 tar:`extract`、GNU tar、`archive/tar` 都能读回;平台
 `extract` 把 marker 当作保留元数据而不落盘。空洞只占 map 字节,不占流量。
+
+tar 命令不继承 `export --output` 的原子提交保证。`tar stream -f` 在校验/打开源
+之前就打开并截断目标；提取也直接写目标。输出绝不能是输入文件、其硬链接或符号链接
+别名。应保护已有文件，使用不同的可信输出路径，失败后丢弃不完整结果。
 
 ```bash
 # 稀疏快照盘 → tarstream → 异地还原(声明洞全程精确保持;16G 逻辑/100M 数据只传 ~100M)
