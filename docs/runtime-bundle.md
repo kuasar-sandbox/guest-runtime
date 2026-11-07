@@ -110,10 +110,15 @@ and ZIP.
 Key constraints:
 
 - The runtime image is read-only and cannot contain per-sandbox state.
-- Snapshot restore requires the captured runtime identity: the file basename and
-  footer-declared digest must both match. Wire compatibility or a release label
-  alone is insufficient. Pin and retain the required artifact; see the
+- Snapshot restore requires the captured runtime content identity: digest scheme
+  and footer-declared digest must match. A configured file with the same identity
+  may have a different basename; the original basename only identifies the one
+  permitted sibling fallback. Wire compatibility or a release label alone is
+  insufficient. Pin and retain the immutable required artifact; see the
   [restore runtime selection contract](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/runtime.md#restore).
+- Cold startup, including source-derived `run --from`, uses the selected target
+  runtime and records its identity in a new C0. It does not require the source E's
+  old runtime identity; Guest ABI and VMM compatibility still apply.
 - The sandbox-init and sandbox-ctl wire ABIs must match. Before upgrading runtime, upgrade sandboxer accordingly or validate backward compatibility.
 - `/opt/sandbox-runtime` is reserved. A preexisting directory at that path in the user image is obscured by the platform bind mount.
 
