@@ -18,7 +18,7 @@ Vmlinux is a platform artifact. Tenants do not receive a general kernel-version/
 | Inspectable version and ABI | Pin upstream version, LOCALVERSION, configuration fragments and platform patches; validate exact release assets |
 | One VM = one application | Disable user/net/uts/ipc/time namespaces and in-guest userfaultfd; a complete nested container runtime is outside the supported target ([Features disabled by the current minimal configuration](#features-disabled-by-the-current-minimal-configuration)) |
 | Host-controlled guest memory | Enable virtio-balloon for host-driven inflation through vm.resize; retain the virtio-mem driver as an extension point |
-| One rootfs construction path | virtio-pmem + DAX + read-only EROFS + writable ext4 + overlayfs |
+| Runtime root and application disks | Runtime root: virtio-pmem + DAX + read-only EROFS; application root/data disks: writable ext4 single or EROFS + ext4 overlay |
 | In-sandbox resource isolation and storage mounts | cgroup v2 freezer plus cpu/memory/io/pids controllers; application delegation is selected by launch.cgroup_control ([cgroup v2: freezer and cpu/memory/io/pids controllers](#cgroup-v2-freezer-and-cpumemoryiopids-controllers)); NFS v3/v4 client and FUSE (s3fs) mounts ([Key enabled features](#key-enabled-features)) |
 
 ### Kernel version
@@ -61,13 +61,20 @@ startup. Install and retain kernel and sidecar together, with stable bindings
 through startup; the sidecar is not a signature or runtime attestation. This
 packaging step does not change the standalone `make vmlinux` build output.
 
+Startup and memory restore use different checks. Memory restore requires a
+readable regular kernel file but does not read its sidecar or rehash the kernel.
+See [startup identity](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/runtime.md#runtime-sdk)
+and [restore](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/runtime.md#restore)
+for the consumer contract; package validation must not be mistaken for a restore-time digest check.
+
 ## Configuration system
 
 The defconfig is assembled from **two fragments** in `native-deps/deps/vmlinux/`:
 
 ```text
 sandbox-common.config          Architecture-neutral subsystems, base structures and virtio
-+ sandbox-<arch>.config        Architecture-specific boot, interrupt controller and console
++ sandbox-x86_64.config        For the x86_64 target
+  OR sandbox-arm64.config     For the aarch64 target (KERNEL_ARCH=arm64)
 = sandbox_defconfig            Final Kbuild input
 ```
 
@@ -85,7 +92,8 @@ NETDEVICES=y                    Network-driver umbrella; missing dependencies ca
 NET=y, INET=y                   Networking and AF_INET support; retain the dependencies
                                 needed by AF_VSOCK and AF_NETLINK as well.
 VIRTIO=y, VIRTIO_PCI=y          Virtio bus.
-VIRTIO_BLK=y                    blk0/blk1: base disk and COW upper layer.
+VIRTIO_BLK=y                    Root/data disks: one writable device for single,
+                                or a read-only base plus writable upper for overlay.
 VIRTIO_NET=y                    eth0, connected to the host TAP.
 VIRTIO_PMEM=y                   Mount sandbox-runtime.bundle through virtio-pmem.
 VIRTIO_VSOCKETS=y               sandbox-init ↔ sandbox-ctl control plane.
@@ -97,9 +105,9 @@ LIBNVDIMM + ZONE_DEVICE +       Filesystem DAX on virtio-pmem maps host page-cac
 FS_DAX                          required resolved symbols are checked after olddefconfig.
 ARM64_PMEM=y (aarch64)          Select PMEM cache-maintenance APIs and WB page mappings;
                                 FS_DAX alone cannot make raw ARM PMEM DAX-capable.
-EROFS_FS=y                      Read-only root filesystem.
-EXT4_FS=y                       Writable overlayfs upper layer.
-OVERLAY_FS=y                    Merge the EROFS lower and ext4 upper into the / view.
+EROFS_FS=y                      Read-only runtime root and application overlay bases.
+EXT4_FS=y                       Writable single disks and overlay upper layers.
+OVERLAY_FS=y                    Assemble application root/data disks using overlay layout.
 TMPFS=y                         Runtime mounts such as /tmp.
 NETWORK_FILESYSTEMS=y           NFS umbrella; preserve dependencies so NFS_FS survives.
 NFS_FS=y + NFS_V3 + NFS_V4(.1/.2) Guest NFS mounts; SUNRPC/LOCKD are selected dependencies.
@@ -108,6 +116,10 @@ FUSE_FS=y                       FUSE for s3fs and similar guest clients; devtmpf
                                 /dev/fuse. The sandbox image supplies mount.nfs/s3fs;
                                 the kernel supplies the capability, not those tools.
 ```
+
+The runtime's pmem boot root is distinct from application root/data disks.
+Their single/overlay device order and mount assembly are defined by the
+[Guest root and disk contract](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/guest-abi.md#base-and-root).
 
 For the bundled runtime, validate the resolved configuration and the actual Guest
 mount: `/opt/sandbox-runtime` must be read-only EROFS with `dax=always`. Merely
@@ -176,7 +188,13 @@ The platform preset does not enable the following randomization or hardening opt
 
 These mechanisms can strengthen guest-kernel defense in depth. Production deployments must evaluate the preset against their threat model. If different hardening, auditing or guest features are required, select a validated custom kernel through `boot.kernel: file://...`. Snapshot reuse depends on explicit parent relationships; disabling these mechanisms is not a way to obtain cross-VM memory deduplication.
 
-The repository's `scripts/guest-inspect.py` currently uses fixed, nonrandomized `KERNEL_IMAGE_BASE` and `PAGE_OFFSET` values. It therefore supports only kernels with both CONFIG_RANDOMIZE_BASE and CONFIG_RANDOMIZE_MEMORY disabled. A custom kernel enabling them cannot use that script unchanged; the script must first learn to discover runtime relocation. This is a debugging-tool constraint, not a snapshot-restore constraint.
+The repository's `scripts/guest-inspect.py` assumes the current nonrandomized
+x86_64 guest layout, including fixed `KERNEL_IMAGE_BASE`/`PAGE_OFFSET` values
+and the physical PCI hole. Both CONFIG_RANDOMIZE_BASE and CONFIG_RANDOMIZE_MEMORY
+must be disabled, but that alone does not make another architecture or memory
+layout compatible. A relocated, different-layout or non-x86_64 kernel requires
+an adapted inspector. These are debugging-tool constraints, not snapshot-restore
+constraints.
 
 The preset also disables CONFIG_SLUB_CPU_PARTIAL. That option controls per-CPU partial slabs and trades allocator performance against memory footprint; it is not described as a security-hardening feature.
 
@@ -345,7 +363,8 @@ The kernel supplies capabilities, not node resource policy. [Guest ABI](https://
 
 ### Balloon behavior under memory pressure
 
-On Linux 6.1.169, the guest allocates ordinary order-0 pages into a private
+With the platform's [balloon patch](../native-deps/deps/linux-patches/0001-virtio_balloon-batch-order-0-allocation-and-enqueue.patch)
+applied to Linux 6.1.169, the guest allocates ordinary order-0 pages into a private
 list for each inflate request. Under the balloon lock it creates the PFNs,
 accounts for the allocated pages and enqueues the list before telling the host.
 The existing PFN array holds up to 256 4 KiB PFNs (1 MiB of guest memory).
@@ -380,7 +399,7 @@ For configuration review, inspect the resolved olddefconfig diff for silent Kcon
 
 ## Maintenance
 
-- When upgrading the kernel line, such as 6.1 to another 6.x release, review sandbox-common.config features, security choices and diagnostics, and inspect olddefconfig output for silent regressions. If `deps/linux-patches/*.patch` contains patches, rebase them onto the new source: create the new imported baseline with linux-fetch, preserve and rebase/reapply the working commits in build/src/linux, then export with linux-patches-format. Revalidate balloon pressure and recovery ([Balloon behavior under memory pressure](#balloon-behavior-under-memory-pressure)) with the selected host sources.
+- When upgrading the kernel line, such as 6.1 to another 6.x release, review sandbox-common.config features, security choices and diagnostics, and inspect olddefconfig output for silent regressions. Preserve the old source tree, commits and uncommitted work first. Select fresh `LINUX_BUILD_SRC` and `LINUX_BUILD_OUT` paths for the new kernel import: linux-fetch skips an existing tree with the baseline tag and does not upgrade it. If `deps/linux-patches/*.patch` contains patches, rebase/reapply the preserved work onto the new baseline, then export with linux-patches-format using the same selected paths. Revalidate balloon pressure and recovery ([Balloon behavior under memory pressure](#balloon-behavior-under-memory-pressure)) with the selected host sources.
 - When changing an architecture fragment, review whether CH's device model for that architecture adds dependencies such as GICv4 or another RTC driver.
 - The project does not seek to upstream this defconfig as a general server-distribution configuration. Its choices intentionally differ: guest userfaultfd is disabled, namespaces are trimmed, and cgroups retain the freezer plus the cpu/memory/io/pids controllers needed by sandbox workloads.
 
