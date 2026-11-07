@@ -6,7 +6,7 @@ This guide owns the selected guest-kernel capabilities, configuration decisions,
 
 The platform supplies each sandbox with a **minimal, pinned-version** Linux kernel image (`bin/<arch>/vmlinux`). This document defines how that image is built, which features are enabled or disabled, and how those choices affect boot, devices, resource control and the guest security boundary.
 
-Vmlinux is a platform artifact. Tenants do not receive a general kernel-version/configuration API. A deployment needing a different kernel can select its own vmlinux with `boot.kernel: file://...`; the same kernel-path mechanism passes it to Cloud Hypervisor. The custom kernel's boot protocol, required devices, guest ABI and snapshot compatibility must be validated with the selected sandboxer/runtime/VMM combination. The platform does not guarantee arbitrary custom-kernel functionality or compatibility.
+Vmlinux is a platform artifact. Tenants do not receive a general kernel-version/configuration API. For cold startup, a deployment needing a different kernel can select its own vmlinux with `boot.kernel: file://...`; the same kernel-path mechanism passes it to Cloud Hypervisor. The custom kernel's boot protocol, required devices, guest ABI and snapshot compatibility must be validated with the selected sandboxer/runtime/VMM combination. The platform does not guarantee arbitrary custom-kernel functionality or compatibility.
 
 ## Overview
 
@@ -32,7 +32,7 @@ Vmlinux is a platform artifact. Tenants do not receive a general kernel-version/
 
 ```text
 bin/x86_64/vmlinux        ELF kernel, PVH boot protocol; size-optimized, without debug information
-bin/aarch64/vmlinux       PE-format Image, EFI stub + ACPI boot
+bin/aarch64/vmlinux       Linux Image with PE/EFI headers; CH direct boot with FDT
 ```
 
 Both architectures use the filename `vmlinux`; the internal format differs by architecture. Cloud Hypervisor selects the matching supported boot path from the kernel format, while sandbox-ctl uses the same upper-level kernel-path interface. Measure the actual built/released file size; this document does not specify a universal image-size or boot-time result.
@@ -61,11 +61,16 @@ startup. Install and retain kernel and sidecar together, with stable bindings
 through startup; the sidecar is not a signature or runtime attestation. This
 packaging step does not change the standalone `make vmlinux` build output.
 
-Startup and memory restore use different checks. Memory restore requires a
-readable regular kernel file but does not read its sidecar or rehash the kernel.
+Cold startup uses the target kernel's valid sidecar, or hashes that raw kernel
+once when the sidecar is absent. A source-derived cold start records the target
+boot identities in a new C0 rather than requiring E's old kernel identity.
+Memory restore instead resumes the kernel already captured in S. A legacy host
+`boot.kernel` field is accepted but ignored: no external kernel file, sidecar or
+kernel rehash is required, and the original S/E/C0 identities are retained.
+The external runtime PMEM backing still needs a compatible local binding.
 See [startup identity](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/runtime.md#runtime-sdk)
 and [restore](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/runtime.md#restore)
-for the consumer contract; package validation must not be mistaken for a restore-time digest check.
+for the consumer contract; package validation is not a restore-time kernel check.
 
 ## Configuration system
 
@@ -268,15 +273,27 @@ Auditing and security frameworks currently disabled:
 
 | Item | x86_64 | aarch64 |
 |---|---|---|
-| Image format | ELF | PE (EFI) |
-| Boot entry | PVH (`PARAVIRT=y` + `XEN_PVH=y` + `PVH=y`) | EFI stub + ACPI (`EFI_STUB=y` + `ACPI=y`) |
-| BIOS / firmware | None; CH enters the ELF kernel directly | CH loads the PE Image using the configured EFI-stub boot path |
-| Boot structures | CH supplies the zero page, memory map and command line | CH constructs FDT and ACPI tables |
+| Image format | ELF with PVH entry note | Linux Image with PE/EFI header support |
+| Boot entry | PVH (`PARAVIRT=y` + `XEN_PVH=y` + `PVH=y`) | Direct Linux Image entry through CH's PE loader; X0 points to the FDT |
+| BIOS / firmware | None; CH uses the ELF PVH entry | No firmware in this selected direct-kernel path; CH does not enter the EFI stub |
+| Boot structures | `hvm_start_info` through `%rbx`, with PVH memory map, command line and ACPI RSDP reference | FDT containing memory, CPUs, command line and device descriptions |
 | Secondary-CPU startup | APIC INIT-SIPI | PSCI (`ARM_PSCI=y`), rather than x86 INIT-SIPI |
 | Kernel-image subpath | `vmlinux` | `arch/arm64/boot/Image` |
 | Make target | `vmlinux` | `Image` |
 
-PVH lets x86_64 skip BIOS/PXE; the arm64 fragment enables EFI-stub/ACPI support. Boot latency must be measured with the exact image, VMM, hardware, workload and timing boundary. The configuration alone does not establish a 50 ms, 80 ms or sub-100 ms boot guarantee.
+These are the selected Cloud Hypervisor v51.1 direct-kernel paths. The x86 zero
+page belongs to its separate bzImage path, not PVH. The arm64 fragment still
+enables `EFI=y`, `EFI_STUB=y` and `ACPI=y`, and CH constructs ACPI tables, but
+those facts do not mean this Image/FDT boot invokes an EFI stub or uses a UEFI
+memory map. Firmware boot is a different VMM path. See the pinned
+[PVH setup](https://github.com/cloud-hypervisor/cloud-hypervisor/blob/v51.1/arch/src/x86_64/mod.rs#L1079-L1178),
+[ARM Image loading](https://github.com/cloud-hypervisor/cloud-hypervisor/blob/v51.1/vmm/src/vm.rs#L1428-L1441),
+[FDT construction](https://github.com/cloud-hypervisor/cloud-hypervisor/blob/v51.1/arch/src/aarch64/mod.rs#L138-L157)
+and [ARM entry registers](https://github.com/cloud-hypervisor/cloud-hypervisor/blob/v51.1/hypervisor/src/kvm/mod.rs#L2234-L2265).
+
+PVH skips BIOS/PXE. Boot latency must be measured with the exact image, VMM,
+hardware, workload and timing boundary. The configuration alone does not
+establish a 50 ms, 80 ms or sub-100 ms boot guarantee.
 
 ### Interrupt controllers
 
@@ -294,7 +311,7 @@ PVH lets x86_64 skip BIOS/PXE; the arm64 fragment enables EFI-stub/ACPI support.
 | virtio-console (hvc) | `VIRTIO_CONSOLE=y` | `VIRTIO_CONSOLE=y` |
 | Kconfig | — | `ARM_AMBA=y` + `SERIAL_AMBA_PL011(_CONSOLE)=y` |
 
-**Runtime console:** the default CH command uses `--console tty --serial off`, with `console=hvc0` supplied in the kernel command line, so kernel dmesg uses virtio-console on both architectures. A deployment may select the sandbox-ctl console destination, including journald or file output, without changing the guest hvc0 interface. The x86_64 preset builds no UART driver; aarch64 includes PL011, which CH exposes there, for early-boot/debug use. Application stdin/stdout/stderr use vsock rather than a console device; see [application stdio](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/guest-abi.md#stdio) / [MUX protocol](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/guest-abi.md#mux-wire).
+**Runtime console:** the default CH command uses `--console tty --serial off`, with `console=hvc0` supplied in the kernel command line, so kernel dmesg uses virtio-console on both architectures. A deployment may select the sandbox-ctl console destination, including journald or file output, without changing the guest hvc0 interface. The x86_64 preset builds no UART driver; aarch64 includes PL011 support for early-boot/debug use when serial is enabled. The default `--serial off` does not instantiate that UART. Application stdin/stdout/stderr use vsock rather than a console device; see [application stdio](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/guest-abi.md#stdio) / [MUX protocol](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/guest-abi.md#mux-wire).
 
 ### RTC
 
@@ -311,12 +328,16 @@ CONFIG_ARM64_4K_PAGES=y           Explicitly pin 4 KiB.
 ```
 
 The x86_64 base page size is 4 KiB and has no equivalent preset choice.
+Guest page selection and Host native page size are separate constraints. The
+current external-RAM CH patch series also requires 4 KiB Host pages during
+initialization; selecting this guest preset does not validate a 16/64 KiB Host.
+See the [VMM activation contract](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/vmm.md#activation).
 
 ### PCI topology
 
 | Item | x86_64 | aarch64 |
 |---|---|---|
-| Host-bridge discovery | MMCONFIG / MCFG ACPI table | Generic ECAM through ACPI/DT |
+| Host-bridge discovery | MMCONFIG / MCFG ACPI table | Generic ECAM described by FDT on the selected direct-Image boot path |
 | Kconfig | `PCI_MMCONFIG=y` | `PCI_HOST_GENERIC=y` + `PCI_ECAM=y` |
 
 ## Key decisions

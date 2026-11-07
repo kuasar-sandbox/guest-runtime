@@ -8,7 +8,7 @@
 (`bin/<arch>/vmlinux`).本文档定义这份镜像的构建方式、启用/禁用的功能集合,
 以及这些选择对启动、设备、资源控制和 Guest 安全边界的影响.
 
-vmlinux 是平台资产,**不**向租户提供通用内核版本/配置接口。部署需要不同 kernel 时,
+vmlinux 是平台资产,**不**向租户提供通用内核版本/配置接口。冷启动需要不同 kernel 时,
 可通过 `boot.kernel: file://...` 选择自带 vmlinux,仍由同一内核路径入口传给
 Cloud Hypervisor。必须用选定的 sandboxer/runtime/VMM 组合验证自带内核的启动协议、
 必需设备、Guest ABI 与快照兼容性;平台不保证任意自带内核的功能或兼容性。
@@ -37,7 +37,7 @@ Cloud Hypervisor。必须用选定的 sandboxer/runtime/VMM 组合验证自带�
 
 ```
 bin/x86_64/vmlinux        ELF 内核,PVH 启动协议,按大小优化且不含 debug-info
-bin/aarch64/vmlinux       PE 格式 Image,EFI stub + ACPI 启动
+bin/aarch64/vmlinux       带 PE/EFI header 的 Linux Image；CH 使用 FDT 直接启动
 ```
 
 文件名两 arch 都叫 `vmlinux`,内部格式按 arch 不同。cloud-hypervisor 自动检测
@@ -69,10 +69,14 @@ bin/vmlinux.sha256
 与 sidecar，并在启动期间保持绑定稳定；sidecar 不是签名或运行时证明。该打包步骤
 不改变单独执行 `make vmlinux` 的构建输出。
 
-启动与内存恢复使用不同的检查。内存恢复要求 kernel 是可读普通文件，但不读取其
-sidecar，也不重新计算 kernel 哈希。消费契约见[启动身份](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/runtime_zh.md#runtime-sdk)
+冷启动使用目标 kernel 的有效 sidecar；缺少 sidecar 时，对该原始 kernel 计算一次哈希。
+从来源派生的冷启动在新 C0 中记录目标 boot 身份，不要求匹配 E 的旧 kernel 身份。
+内存恢复则继续执行 S 已捕获的 kernel。兼容接收旧 host `boot.kernel` 字段但忽略它：
+无需外部 kernel 文件、sidecar 或重新计算 kernel 哈希，并保留原 S/E/C0 身份。
+外部 runtime PMEM backing 仍需要兼容的本地绑定。
+消费契约见[启动身份](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/runtime_zh.md#runtime-sdk)
 与[恢复](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/runtime_zh.md#restore)；
-不要把验包时的校验误认为恢复时会比较摘要。
+验包校验不是恢复时的 kernel 检查。
 
 ## 配置体系
 
@@ -272,17 +276,25 @@ MAGIC_SYSRQ=y                     按需 sysrq-t/-w/-m
 
 | 项 | x86_64 | aarch64 |
 |---|---|---|
-| 镜像格式 | ELF | PE(EFI) |
-| 启动入口 | PVH(`PARAVIRT=y` + `XEN_PVH=y` + `PVH=y`)| EFI stub + ACPI(`EFI_STUB=y` + `ACPI=y`)|
-| BIOS / 固件 | 无,CH 直接跳 ELF entry | 无,CH 加载 PE Image,跳 EFI stub entry |
-| 启动结构 | zero-page 由 CH 填(memmap、cmdline) | FDT + ACPI 表由 CH 构造 |
+| 镜像格式 | 含 PVH entry note 的 ELF | 带 PE/EFI header 支持的 Linux Image |
+| 启动入口 | PVH（`PARAVIRT=y` + `XEN_PVH=y` + `PVH=y`） | CH PE loader 直接进入 Linux Image；X0 指向 FDT |
+| BIOS / 固件 | 无；CH 使用 ELF PVH entry | 当前选择的直接内核路径不使用固件，CH 不进入 EFI stub |
+| 启动结构 | `%rbx` 指向 `hvm_start_info`，含 PVH memory map、cmdline 和 ACPI RSDP 引用 | 描述内存、CPU、cmdline 和设备的 FDT |
 | SMP 副 CPU 拉起 | APIC INIT-SIPI | PSCI(`ARM_PSCI=y`),不用 x86 INIT-SIPI |
 | 内核镜像 subpath | `vmlinux` | `arch/arm64/boot/Image` |
 | make target | `vmlinux` | `Image` |
 
-PVH 让 x86_64 跳过 BIOS/PXE 阶段;arm64 fragment 启用 EFI stub/ACPI。启动耗时必须用
-精确内核、VMM、硬件、workload 与计时边界测量;配置本身不能证明 50 ms、80 ms 或
-亚百毫秒的启动保证。
+这是选定的 Cloud Hypervisor v51.1 直接内核启动路径。x86 zero page 属于独立的 bzImage
+路径，不属于 PVH。arm64 fragment 仍启用 `EFI=y`、`EFI_STUB=y` 和 `ACPI=y`，CH 也构造
+ACPI 表，但这不代表当前 Image/FDT 启动调用 EFI stub 或使用 UEFI memory map。
+固件启动是另一条 VMM 路径。参见固定版本的
+[PVH 初始化](https://github.com/cloud-hypervisor/cloud-hypervisor/blob/v51.1/arch/src/x86_64/mod.rs#L1079-L1178)、
+[ARM Image 加载](https://github.com/cloud-hypervisor/cloud-hypervisor/blob/v51.1/vmm/src/vm.rs#L1428-L1441)、
+[FDT 构造](https://github.com/cloud-hypervisor/cloud-hypervisor/blob/v51.1/arch/src/aarch64/mod.rs#L138-L157)
+和 [ARM 入口寄存器](https://github.com/cloud-hypervisor/cloud-hypervisor/blob/v51.1/hypervisor/src/kvm/mod.rs#L2234-L2265)。
+
+PVH 跳过 BIOS/PXE。启动耗时必须用精确内核、VMM、硬件、workload 与计时边界测量；
+配置本身不能证明 50 ms、80 ms 或亚百毫秒的启动保证。
 
 ### 中断控制器
 
@@ -303,8 +315,8 @@ PVH 让 x86_64 跳过 BIOS/PXE 阶段;arm64 fragment 启用 EFI stub/ACPI。启�
 **运行时控制台**:默认 CH 命令使用 `--console tty --serial off`,内核 cmdline 注入
 `console=hvc0`——两架构的内核 dmesg 都走 virtio-console(hvc0)。部署还可通过
 sandbox-ctl 选择 journald 或文件等控制台目的地,Guest hvc0 接口不变。x86_64 内核
-不编任何 UART 驱动;aarch64 编入 PL011(CH 在 arm64 暴露 PL011 设备,留作启动早期
-与调试控制台)。应用的 stdin/stdout/stderr 不走任何 console 设备(走 vsock,见
+不编任何 UART 驱动；aarch64 编入 PL011 支持，启用 serial 时可用于启动早期与调试。
+默认 `--serial off` 不实例化该 UART。应用的 stdin/stdout/stderr 不走任何 console 设备（走 vsock，见
 [应用标准流](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/guest-abi_zh.md#stdio) / [MUX 协议](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/guest-abi_zh.md#mux-wire))。
 
 ### RTC
@@ -325,13 +337,16 @@ CONFIG_ARM64_4K_PAGES=y           显式锁 4 KiB
 # CONFIG_ARM64_64K_PAGES not set
 ```
 
-x86_64 页大小固定 4 KiB,无此问题。
+x86_64 基础页大小固定 4 KiB，没有类似选择。
+Guest 页选择与 Host 原生页大小是不同约束。当前 external-RAM CH 补丁系列在初始化时
+也要求 4 KiB Host 页；选择此 Guest preset 不能证明 16/64 KiB Host 可用。
+参见 [VMM 启用契约](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/vmm_zh.md#activation)。
 
 ### PCI 拓扑
 
 | 项 | x86_64 | aarch64 |
 |---|---|---|
-| host bridge 发现 | MMCONFIG / MCFG ACPI 表 | generic ECAM(ACPI/DT) |
+| host bridge 发现 | MMCONFIG / MCFG ACPI 表 | 当前 direct-Image 启动路径通过 FDT 描述 generic ECAM |
 | Kconfig | `PCI_MMCONFIG=y` | `PCI_HOST_GENERIC=y` + `PCI_ECAM=y` |
 
 ## 关键决策
