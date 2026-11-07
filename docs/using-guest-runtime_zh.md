@@ -87,21 +87,32 @@ EOF
 
 ABI 兼容并不意味着新 runtime 可恢复旧内存快照。这里 S 指内存快照工件，E 指
 它引用的冷沙箱工件，后者记录 runtime 身份。恢复会把 runtime 的
-**basename 与 Bundle footer 声明的 digest** 与 S 引用的 E 工件比较；规则见
-[sandboxer 恢复选择](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/runtime_zh.md)。
+**digest scheme 与 Bundle footer 声明的 digest** 与 E 比较，而不比较 basename；
+规则见 [sandboxer 恢复选择](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/runtime_zh.md)。
 
 例如 S1 使用 `/runtime/v1/sandbox-runtime.bundle` 捕获，即使 v2 wire ABI
-兼容，也不能直接使用 `/runtime/v2/sandbox-runtime.bundle`。应显式把
-`boot.runtime` 绑定到保留的 v1 文件。上面的分版本目录支持显式绑定，恢复不会
-搜索兄弟版本目录。若需要自动回退，应在捕获 v1 时使用 basename
-`sandbox-runtime-v1.bundle`，把它与 `sandbox-runtime-v2.bundle` 不可变地保留
-在同一目录，并让默认配置指向 v2。恢复 S1 时先检查默认 v2，再且仅再检查
-`<default-directory>/sandbox-runtime-v1.bundle`，两者均须匹配 S1 的 E。
-给已经捕获的 v1 文件改 basename 不是迁移手段。
+兼容，也不意味着能使用 `/runtime/v2/sandbox-runtime.bundle`。如果内容身份不同，
+应显式把 `boot.runtime` 绑定到匹配 S1 所引用 E 的保留文件。匹配的 v1 文件可以
+使用新的名称或路径；给不同内容的 runtime 改名并不会使其兼容。上面的分版本
+目录支持显式绑定，恢复不会搜索兄弟版本目录。
 
-只要运行中 VM、保留的模板、快照或父链仍依赖旧文件，就保留其原始字节与名称，
-包括备份和回滚候选；同时保留匹配的 kernel/VMM 输入。退役前由部署方盘点引用，
-并在合格目标节点验证恢复；只保留最新 ABI 兼容 runtime 不足以保障恢复。
+若需要自动回退，应在捕获 v1 时使用 basename `sandbox-runtime-v1.bundle`，
+把它与 `sandbox-runtime-v2.bundle` 不可变地保留在同一目录，并让默认配置指向 v2。
+恢复先检查配置的 v2 文件；若它不存在、不可读、格式错误或身份不匹配，则且仅再尝试
+`<default-directory>/sandbox-runtime-v1.bundle`。原 basename 仅用于这个回退候选
+定位：使用第一个匹配的候选，不扫描目录。若两个候选均未通过，格式、I/O 和权限
+错误不会被报告为身份不兼容。无效引用配置与取消不会触发回退。
+
+只要运行中 VM、保留的模板、快照或父链仍依赖旧 runtime，就保留其不可变字节，
+包括备份和回滚候选。运行中 VM 引用的路径应保持稳定；依赖自动回退时保留捕获时
+的 basename，否则显式绑定匹配的保留文件。内存恢复不读取外部 kernel 文件或其
+身份 sidecar，但仍要求兼容的架构、VMM 和设备输入。应保留冷启动及回滚需要的
+kernel 文件和 sidecar。退役前由部署方盘点引用，并在合格目标节点验证恢复；
+只保留最新 ABI 兼容 runtime 不足以保障恢复。
+
+若要从冷 E 工件采用新的 kernel/runtime 内容，应使用目标配置冷启动。
+Sandboxer 基于目标身份派生新的 C0，同时保留源的有效磁盘图。这不是恢复 S
+保存的内存；内存恢复仍保留 S 原始的 E/C0 身份。
 
 ### 整机重启
 
