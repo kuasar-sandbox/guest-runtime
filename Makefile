@@ -146,8 +146,8 @@ test-e2e-scripts:
 RUNTIME_VERSION ?= runtime-v0.1.0
 VMLINUX_VERSION ?= vmlinux-v0.1.0
 KUASAR_PLATFORM_DIR ?= ../kuasar-sandbox
-ACCELERATOR_VERSION ?= v0.1.10
-SANDBOXER_VERSION ?= v0.1.13-preview.20261104.1
+ACCELERATOR_VERSION ?= v0.1.12
+SANDBOXER_VERSION ?= v0.1.15
 
 # Release assembly must consume a verified selected archive, never a leftover
 # development binary. The generic sandbox-runtime target remains a dev entry.
