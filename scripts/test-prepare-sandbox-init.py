@@ -130,6 +130,8 @@ class SelectedSandboxInitTests(unittest.TestCase):
         python.write_text('#!/usr/bin/python3\n' + """import os,sys,pathlib
 args=sys.argv[1:]
 if any(arg.endswith('/go_workspace.py') for arg in args):
+    assert args[args.index('--version')+1] == 'runtime-v1.2.4-preview.20261112'
+    assert args[args.index('--dependency-tag')+1] == 'accelerator=v1.2.1'
     print('/selected/go.work');raise SystemExit(0)
 assert '--fetch' in args and args[args.index('--version')+1] == 'v1.2.3'
 with open(os.environ['CALLS'],'a') as f:f.write('fetch\\n')
@@ -167,7 +169,8 @@ printf 'package:%s\\nsource:%s\\n' "$RELEASE_SANDBOX_INIT_BIN" "$RELEASE_SANDBOX
         environment = dict(os.environ, PATH=str(tools)+os.pathsep+os.defpath, CALLS=str(log), GOWORK='off')
         for key in ('MAKEFLAGS','MFLAGS','MAKELEVEL','MAKEOVERRIDES'):
             environment.pop(key,None)
-        command = [make, '-s', 'release-runtime', 'SANDBOXER_VERSION=v1.2.3',
+        command = [make, '-s', 'release-runtime', 'GO=/bin/false',
+                   'RUNTIME_VERSION=runtime-v1.2.4-preview.20261112', 'ACCELERATOR_VERSION=v1.2.1', 'SANDBOXER_VERSION=v1.2.3',
                    'SANDBOXER_DIR='+str(selected), 'MAKE='+str(child)]
         result = subprocess.run(command, cwd=project, env=environment, text=True, capture_output=True)
         self.assertEqual(result.returncode, 0, result.stderr)
