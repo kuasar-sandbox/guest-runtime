@@ -336,7 +336,9 @@ jobs:
           run: |
             set -euo pipefail
             bash /inputs/release/ci/native-cache/native-cache.sh restore-or-build envd
-            GOWORK="$(python3 -B /inputs/release/ci/integration/go_workspace.py --root /src --owners guest-runtime)"
+            GOWORK="$(python3 -B /inputs/release/ci/integration/go_workspace.py \
+              --root /src --owners guest-runtime --bound-release --version '${{ needs.preflight.outputs.version }}' \
+              --dependency accelerator '${{ needs.preflight.outputs.accelerator_version }}' '${{ needs.preflight.outputs.accelerator_sha }}')"
             export GOWORK
             if [ "$TARGET_ARCH" = x86_64 ]; then make -C guest-runtime test; make -C guest-runtime vet; fi
             make -C guest-runtime flatten-ctl

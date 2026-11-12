@@ -95,7 +95,10 @@ class EnvironmentTools(unittest.TestCase):
             lines=workflow.read_text().splitlines()
             for index,line in enumerate(lines):
                 if 'GOWORK=' in line and 'go_workspace.py' in line:
-                    commands.append(line.strip()+'\n'+lines[index+1].strip())
+                    end = next(j for j in range(index + 1, len(lines)) if lines[j].strip() == 'export GOWORK')
+                    command = '\n'.join(lines[index:end + 1])
+                    # Workbench receives the admitted producer version and exact upstream pins.
+                    commands.append(re.sub(r'\$\{\{ needs\.preflight\.outputs\.[a-z_]+ \}\}', 'selected', command))
         self.assertTrue(commands)
         with tempfile.TemporaryDirectory() as directory:
             root=Path(directory);python=root/'python3'

@@ -146,14 +146,18 @@ test-e2e-scripts:
 RUNTIME_VERSION ?= runtime-v0.1.0
 VMLINUX_VERSION ?= vmlinux-v0.1.0
 KUASAR_PLATFORM_DIR ?= ../kuasar-sandbox
-ACCELERATOR_VERSION ?= v0.1.12
+# Explicit dependency tags select Preview inputs. Otherwise use this module's
+# declared release requirement without resolving the module graph.
+go_requirement = $(shell GOWORK=off $(GO) mod edit -json | \
+	jq -er --arg path "github.com/kuasar-sandbox/$(1)" '.Require[] | select(.Path == $$path) | .Version')
+ACCELERATOR_VERSION ?= $(call go_requirement,accelerator)
 SANDBOXER_VERSION ?= v0.1.15
 
 # Release assembly must consume a verified selected archive, never a leftover
 # development binary. The generic sandbox-runtime target remains a dev entry.
 release-runtime:
 	@set -e; workspace="$$(python3 -B "$(KUASAR_PLATFORM_DIR)/ci/integration/go_workspace.py" \
-		--root .. --owners guest-runtime --dependency-tag "accelerator=$(ACCELERATOR_VERSION)")"; \
+		--root .. --owners guest-runtime --version "$(RUNTIME_VERSION)" --dependency-tag "accelerator=$(ACCELERATOR_VERSION)")"; \
 	head="$$(git -C "$(SANDBOXER_DIR)" rev-parse HEAD)" \
 	  && tagged="$$(git -C "$(SANDBOXER_DIR)" rev-parse --verify "refs/tags/$(SANDBOXER_VERSION)^{commit}")" \
 	  && [ "$$head" = "$$tagged" ] \
