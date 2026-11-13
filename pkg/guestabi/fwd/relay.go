@@ -4,6 +4,7 @@ import (
 	"io"
 	"net"
 	"sync"
+	"time"
 )
 
 // Relay splices a framed reverse-channel connection (framed) to a plain
@@ -76,6 +77,19 @@ func (r *Relay) writeFrame(f Frame) error {
 	return WriteFrame(r.framed, f)
 }
 
+// A reset is best effort. Do not queue it behind a blocked DATA frame.
+// When the writer is free, allow a responsive peer to receive the RST,
+// then close both connections even if the peer never reads it.
+func (r *Relay) reset() {
+	if r.wmu.TryLock() {
+		timer := time.AfterFunc(time.Second, func() { r.teardown(nil) })
+		_ = WriteFrame(r.framed, Frame{Type: FrameRST})
+		timer.Stop()
+		r.wmu.Unlock()
+	}
+	r.teardown(nil)
+}
+
 // pumpOut copies plain → framed: bytes become DATA frames, a clean EOF
 // becomes an EOF frame (half-close, leaving framed open for pumpIn), a
 // read error becomes a RST frame + abort.
@@ -91,10 +105,11 @@ func (r *Relay) pumpOut() {
 		}
 		if err != nil {
 			if err == io.EOF {
-				_ = r.writeFrame(Frame{Type: FrameEOF})
+				if err := r.writeFrame(Frame{Type: FrameEOF}); err != nil {
+					r.teardown(nil)
+				}
 			} else {
-				_ = r.writeFrame(Frame{Type: FrameRST})
-				r.teardown(nil)
+				r.reset()
 			}
 			return
 		}
@@ -115,8 +130,7 @@ func (r *Relay) pumpIn() {
 		switch f.Type {
 		case FrameData:
 			if _, werr := r.plain.Write(f.Payload); werr != nil {
-				_ = r.writeFrame(Frame{Type: FrameRST})
-				r.teardown(nil)
+				r.reset()
 				return
 			}
 		case FrameEOF:

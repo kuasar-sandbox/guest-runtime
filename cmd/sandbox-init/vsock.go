@@ -214,6 +214,15 @@ func (c *vsockConn) SetLinger(sec int) error {
 	return unix.SetsockoptLinger(c.fd, unix.SOL_SOCKET, unix.SO_LINGER, &unix.Linger{Onoff: 1, Linger: int32(sec)})
 }
 
+// Apply close-on-exec atomically, including when a workload is forking.
+func managementSocket(domain int) (int, error) {
+	return unix.Socket(domain, unix.SOCK_STREAM|unix.SOCK_CLOEXEC, 0)
+}
+
+func acceptManagementSocket(listener int) (int, unix.Sockaddr, error) {
+	return unix.Accept4(listener, unix.SOCK_CLOEXEC)
+}
+
 // dialVsock opens an AF_VSOCK SOCK_STREAM socket and connects to (cid,
 // port). The first attempt fires immediately; on ECONNREFUSED (host
 // listener not yet ready) we exponentially back off from vsockDialStart
@@ -226,7 +235,7 @@ func dialVsock(cid, port uint32) (*vsockConn, error) {
 	delay := vsockDialStart
 	var lastErr error
 	for {
-		fd, err := unix.Socket(unix.AF_VSOCK, unix.SOCK_STREAM, 0)
+		fd, err := managementSocket(unix.AF_VSOCK)
 		if err != nil {
 			return nil, fmt.Errorf("socket: %w", err)
 		}
@@ -254,7 +263,7 @@ func dialVsock(cid, port uint32) (*vsockConn, error) {
 // phase 1 chroot (the syscall itself doesn't depend on rootfs but
 // keeping a single ordering rule simplifies reasoning).
 func bindVsockListener(port uint32) (int, error) {
-	fd, err := unix.Socket(unix.AF_VSOCK, unix.SOCK_STREAM, 0)
+	fd, err := managementSocket(unix.AF_VSOCK)
 	if err != nil {
 		return -1, fmt.Errorf("socket: %w", err)
 	}
@@ -292,7 +301,7 @@ func bindVsockListener(port uint32) (int, error) {
 // published. The listener itself is established before runtime_ready.
 func serveReverseChannelDynamic(listenFD int, sup *atomic.Pointer[supervisorState], bridge *consoleBridge) {
 	for {
-		nfd, _, err := unix.Accept(listenFD)
+		nfd, _, err := acceptManagementSocket(listenFD)
 		if err != nil {
 			if errors.Is(err, unix.EINTR) {
 				continue

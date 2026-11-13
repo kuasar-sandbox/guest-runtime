@@ -2,6 +2,7 @@ package fwd
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"net"
 	"os"
@@ -125,5 +126,51 @@ func waitTimeout(t *testing.T, wg *sync.WaitGroup, d time.Duration) {
 	case <-done:
 	case <-time.After(d):
 		t.Fatal("relays did not finish within deadline")
+	}
+}
+
+func TestRelayReset(t *testing.T) {
+	for _, busy := range []bool{false, true} {
+		framed, peer := net.Pipe()
+		plain, target := net.Pipe()
+		r := NewRelay(framed, plain)
+		if busy {
+			r.wmu.Lock()
+		}
+		done := make(chan struct{})
+		go func() { r.reset(); close(done) }()
+		_ = peer.SetReadDeadline(time.Now().Add(3 * time.Second))
+		frame, err := ReadFrame(peer)
+		if !busy && (err != nil || frame.Type != FrameRST) {
+			t.Fatalf("reset on idle writer = %+v, %v", frame, err)
+		}
+		if busy && !errors.Is(err, io.EOF) {
+			t.Fatalf("reset on busy writer = %+v, %v", frame, err)
+		}
+		select {
+		case <-done:
+		case <-time.After(3 * time.Second):
+			t.Fatal("reset did not close relay")
+		}
+		if busy {
+			r.wmu.Unlock()
+		}
+		peer.Close()
+		target.Close()
+	}
+}
+
+func TestRelayResetClosesUnreadTransport(t *testing.T) {
+	framed, peer := net.Pipe()
+	defer peer.Close()
+	plain, target := net.Pipe()
+	defer target.Close()
+	r := NewRelay(framed, plain)
+	done := make(chan struct{})
+	go func() { r.reset(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(4 * time.Second):
+		t.Fatal("relay did not finish resetting an unread transport")
 	}
 }

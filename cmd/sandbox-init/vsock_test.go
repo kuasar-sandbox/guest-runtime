@@ -267,3 +267,45 @@ func TestSocketAdaptersOnStream(t *testing.T) {
 		})
 	}
 }
+
+func TestManagementSocketsAreCloseOnExec(t *testing.T) {
+	socket := func() int {
+		t.Helper()
+		fd, err := managementSocket(unix.AF_UNIX)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { unix.Close(fd) })
+		return fd
+	}
+	check := func(fd int) {
+		t.Helper()
+		flags, err := unix.FcntlInt(uintptr(fd), unix.F_GETFD, 0)
+		if err != nil || flags&unix.FD_CLOEXEC == 0 {
+			t.Fatalf("F_GETFD = %d, %v", flags, err)
+		}
+	}
+	listener, client := socket(), socket()
+	check(listener)
+	check(client)
+	// Linux chooses an abstract address for an autobind, without a filesystem path.
+	if err := unix.Bind(listener, &unix.SockaddrUnix{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := unix.Listen(listener, 1); err != nil {
+		t.Fatal(err)
+	}
+	addr, err := unix.Getsockname(listener)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := unix.Connect(client, addr); err != nil {
+		t.Fatal(err)
+	}
+	fd, _, err := acceptManagementSocket(listener)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unix.Close(fd)
+	check(fd)
+}
