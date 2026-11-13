@@ -327,4 +327,4 @@ See the [project release documentation](https://github.com/kuasar-sandbox/kuasar
 
 ## Selected sandbox-init and helper provenance
 
-Runtime publication builds both owned Go executables from its admitted source and verifies their current clean commit, main package and target architecture. It packages `bin/sandbox-init` and verifies byte identity with `/sbin/init` in the Runtime image. Stable `runtime-vX.Y.Z` publication creates root module tag `vX.Y.Z` at the same commit; it rejects conflicts and safely resumes an interrupted publication. Preview and Kernel releases do not create root module tags.
+Runtime publication builds both owned Go executables from its admitted source and verifies their current clean commit, main package and target architecture. It packages `bin/sandbox-init` and verifies byte identity with `/sbin/init` in the Runtime image. After verifying the complete public Stable `runtime-vX.Y.Z` release, the publisher creates root module tag `vX.Y.Z` at the same commit; it rejects conflicts and safely resumes an interrupted publication. Preview and Kernel releases do not create root module tags.

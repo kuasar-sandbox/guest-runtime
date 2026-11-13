@@ -357,4 +357,4 @@ Runtime 与 VMLinux 组件 Release 从所选 source ref 和精确 commit 构建�
 
 所选 owner 源码在 `release/helper-inputs.json` 显式声明编译型 E2E helper 清单。当前清单为空。后续 helper 及其构建配方由此 owner 声明维护，聚合打包自动发现，无需平台文件名清单。
 
-Runtime 发布从获准源码构建本仓两个 Go 程序，核对当前干净 commit、主入口与目标架构；将 `bin/sandbox-init` 放入发布包，并核对其与镜像 `/sbin/init` 字节一致。Stable `runtime-vX.Y.Z` 发布在同 commit 创建根 module tag `vX.Y.Z`，拒绝冲突并支持中断重试。Preview 与 Kernel 发布不创建根 module tag。
+Runtime 发布从获准源码构建本仓两个 Go 程序，核对当前干净 commit、主入口与目标架构；将 `bin/sandbox-init` 放入发布包，并核对其与镜像 `/sbin/init` 字节一致。在核实已公开的 Stable `runtime-vX.Y.Z` Release 及其完整制品后，发布器在同一 commit 创建根 module tag `vX.Y.Z`，拒绝冲突并支持中断重试。Preview 与 Kernel 发布不创建根 module tag。

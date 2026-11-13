@@ -78,7 +78,7 @@ native-deps:
 
 sandbox-init:
 	@mkdir -p "$(BINDIR)"
-	GOOS=linux GOARCH=$(GO_ARCH) CGO_ENABLED=0 $(GO) build $(GO_BUILD_FLAGS) -o "$(BINDIR)/sandbox-init" ./cmd/sandbox-init
+	GOOS=linux GOARCH=$(GO_ARCH) CGO_ENABLED=0 $(GO) build $(GO_BUILD_FLAGS) -ldflags '-s -w' -o "$(BINDIR)/sandbox-init" ./cmd/sandbox-init
 	$(call link_bin,sandbox-init)
 
 envd:

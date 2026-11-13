@@ -269,7 +269,6 @@ def publish(repository, tag, arch, commit, bundle, source_ref):
     if target is None:
         api(f'repos/{repository}/git/refs',method='POST',data={'ref':'refs/tags/'+tag,'sha':commit})
     require(tag_target(repository,tag) == commit, 'tag creation did not preserve selected commit')
-    ensure_runtime_module_tag(repository, tag, commit)
     if release is None:
         release = api(f'repos/{repository}/releases',method='POST',data={
             'tag_name':tag,'target_commitish':commit,'name':tag,'body':notes,'draft':True,
@@ -298,6 +297,9 @@ def publish(repository, tag, arch, commit, bundle, source_ref):
     release_identity(published,tag,public=True);remote_assets(published,expected,complete=True,identities=identities)
     require(published.get('body') == notes and local_assets(bundle,expected) == expected,
             'published notes or local validated bytes changed')
+    # A Go proxy can cache root tags permanently. Expose the module only after
+    # the public component release and its complete assets have been read back.
+    ensure_runtime_module_tag(repository, tag, commit)
     update_latest(repository,published,commit,source_ref)
     print('Published',repository,tag)
 

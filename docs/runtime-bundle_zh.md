@@ -167,7 +167,7 @@ runtime 文档与 `test/e2e/`,从独立选择的 vmlinux tag 取得内核文档�
 在 `test/` 提供测试，并在 `workbench/` 提供轻量 Workbench 启动器。历史版本沿用其随包指南规定的布局。双语文档交付与二进制版本选择分别验收。
 
 `vmlinux` 不属于 runtime 版本,由本仓 `vmlinux-vX.Y.Z` 独立版本线发布。
-runtime workflow 从同一选定 guest-runtime commit 构建 sandbox-init 与 flatten-ctl。Stable `runtime-vX.Y.Z` 发布同时创建同 commit 的根 Go module tag `vX.Y.Z`；Preview 与 Kernel 发布不创建根 module tag。runtime 与 vmlinux
+runtime workflow 从同一选定 guest-runtime commit 构建 sandbox-init 与 flatten-ctl。核实 Stable `runtime-vX.Y.Z` 的公开制品后，发布器在同一 commit 创建根 Go module tag `vX.Y.Z`；Preview 与 Kernel 发布不创建根 module tag。runtime 与 vmlinux
 版本号独立演进。
 
 `envd` 已内置在 runtime 镜像中,不作为独立 `bin/envd` 发布;

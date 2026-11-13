@@ -173,6 +173,24 @@ class PublisherTests(unittest.TestCase):
         self.calls.clear();self.publish()
         self.assertFalse(any(method=='POST' for method,_,_ in self.calls))
 
+    def test_runtime_draft_upload_failure_does_not_expose_module_version(self):
+        self.repo='kuasar-sandbox/guest-runtime'; self.tag='runtime-v1.2.3'
+        self.fail_upload=True
+        with self.assertRaisesRegex(ValueError,'interrupted'): self.publish()
+        self.assertTrue(self.release['draft']); self.assertIsNone(self.module_target)
+        self.fail_upload=False
+        self.publish()
+        self.assertFalse(self.release['draft']); self.assertEqual(self.module_target,SHA)
+
+    def test_runtime_lost_publication_response_recovers_without_reuploading(self):
+        self.repo='kuasar-sandbox/guest-runtime'; self.tag='runtime-v1.2.3'
+        self.publish_failure=True
+        with self.assertRaisesRegex(ValueError,'undraft'): self.publish()
+        self.assertFalse(self.release['draft']); self.assertIsNone(self.module_target)
+        self.publish_failure=False
+        self.publish()
+        self.assertEqual(self.module_target,SHA); self.assertEqual(len(self.uploads),1)
+
     def test_runtime_module_tag_conflict_precedes_any_mutation(self):
         self.repo='kuasar-sandbox/guest-runtime';self.tag='runtime-v1.2.3';self.module_target='b'*40
         with self.assertRaisesRegex(ValueError,'module tag'):self.publish()
