@@ -323,20 +323,6 @@ func remountChildProc() error {
 }
 
 func execFinalApplication(sync *childSync, cred, workdir, appPath string, args []string, placeholder, joined bool) error {
-	if workdir != "" && workdir != "/" {
-		if err := unix.Chdir(workdir); err != nil {
-			return fmt.Errorf("chdir %s: %w", workdir, err)
-		}
-	}
-
-	resolved := appPath
-	if !placeholder && !strings.Contains(appPath, "/") {
-		path, err := exec.LookPath(appPath)
-		if err != nil {
-			return fmt.Errorf("%s not found in PATH: %w", appPath, err)
-		}
-		resolved = path
-	}
 	if err := applyCred(cred); err != nil {
 		return fmt.Errorf("drop privileges: %w", err)
 	}
@@ -353,6 +339,12 @@ func execFinalApplication(sync *childSync, cred, workdir, appPath string, args [
 		}
 	}
 
+	if workdir != "" {
+		if err := unix.Chdir(workdir); err != nil {
+			return fmt.Errorf("chdir %s: %w", workdir, err)
+		}
+	}
+
 	if placeholder {
 		// There is no final exec to close the CLOEXEC sync fd, so close it
 		// explicitly before becoming the long-lived placeholder process.
@@ -362,6 +354,17 @@ func execFinalApplication(sync *childSync, cred, workdir, appPath string, args [
 		signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
 		<-sigCh
 		os.Exit(0)
+	}
+
+	// LookPath checks directory traversal and execute permission. Run it with
+	// the workload's actual credentials, environment and working directory.
+	resolved := appPath
+	if !strings.ContainsRune(appPath, '/') {
+		path, err := exec.LookPath(appPath)
+		if err != nil {
+			return fmt.Errorf("%s not found in PATH: %w", appPath, err)
+		}
+		resolved = path
 	}
 	if err := syscall.Exec(resolved, append([]string{appPath}, args...), os.Environ()); err != nil {
 		return fmt.Errorf("exec %s: %w", resolved, err)

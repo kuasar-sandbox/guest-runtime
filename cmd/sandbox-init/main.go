@@ -7,10 +7,9 @@
 //     → recv launch spec) in a goroutine CONCURRENT with the spec-independent
 //     overlay assembly (mount /proc /sys /dev, wait vda/vdb, mount overlay →
 //     /sysroot). The handshake touches no path, so it is safe alongside
-//     the mount chain and the later chroot. After the join: set up volume
-//     (empty) mounts on the raw ext4 pre-switch, then MS_MOVE + chroot into
-//     the overlay and mount the post-switch base filesystems (devpts, cgroup
-//     v2, /run, /run/shm).
+//     the mount chain and the later chroot. After the join: mount /run and
+//     /run/shm, set up volume binds, then MS_MOVE + chroot into the overlay
+//     and mount the post-switch base filesystems (devpts and cgroup v2).
 //  2. Apply the launch spec on the post-switch rootfs: network, tmpfs mounts,
 //     file injection, one-shot init — then set up the app's stdio and send
 //     launch_ack{stdio} (its connection becomes the stdio MUX). Fork the user
@@ -65,6 +64,14 @@ const (
 )
 
 func main() {
+	// One-shot init command forked with its final credential, Dir and Env.
+	if len(os.Args) >= 3 && os.Args[1] == "init-command" {
+		path, err := initCommandPath(os.Args[2], os.Environ(), ".")
+		if err == nil {
+			err = syscall.Exec(path, os.Args[2:], os.Environ())
+		}
+		die("init command %q: %v", os.Args[2], err)
+	}
 	// Primary app helper. argv: [self, "exec-child", bootstrap|restart,
 	// isolated, cgroupControl, placeholder, cred, workdir, appPath, args...].
 	if len(os.Args) >= 9 && os.Args[1] == "exec-child" {
@@ -291,19 +298,31 @@ func phaseWorkloadRoot(spec *proto.LaunchSpec) error {
 	}
 
 	logf("phase1a: /sysroot ready (runtime payload bound)")
-	if err := applyVolumeMounts(spec.Mounts, ext4Options); err != nil {
+	runDir, err := mountRunDirs("/sysroot")
+	if err != nil {
+		return fmt.Errorf("mount /run: %w", err)
+	}
+	runMount, err := os.Stat(runDir)
+	if err != nil {
+		return err
+	}
+	shmMount, err := os.Stat(runDir + "/shm")
+	if err != nil {
+		return err
+	}
+	if err := applyVolumeMounts(spec.Mounts, ext4Options, runDir); err != nil {
 		return fmt.Errorf("apply volume mounts: %w", err)
 	}
 	if err := phase1bSwitchRoot(spec.CgroupControl); err != nil {
 		return fmt.Errorf("switch root: %w", err)
 	}
-	return nil
+	return ensureRunDirs("/", runMount, shmMount)
 }
 
 // phase1bSwitchRoot MS_MOVEs /proc /sys /dev (and any volume binds already
 // placed under /sysroot) into the overlay, switches root into it, then
-// mounts the post-switch base filesystems (devpts, cgroup v2,
-// /run, /run/shm). Runs after the join, single-threaded — the chroot is a
+// mounts the post-switch base filesystems (devpts and cgroup v2).
+// Runs after the join, single-threaded — the chroot is a
 // process-global path switch so nothing else may touch a path concurrently.
 func phase1bSwitchRoot(cgroupControl bool) error {
 	for _, src := range []struct{ from, to string }{
@@ -350,29 +369,48 @@ func phase1bSwitchRoot(cgroupControl bool) error {
 		return fmt.Errorf("cgroup setup: %w", err)
 	}
 
-	// /run + /run/shm: auto-mounted tmpfs (like /proc), so apps and the
-	// file-injection staging dir have them without an explicit mount entry.
-	if err := mountRunDirs(); err != nil {
-		return fmt.Errorf("mount /run: %w", err)
-	}
-
-	logf("phase1b: switch-root + devpts + cgroup + /run done")
+	logf("phase1b: switch-root + devpts + cgroup done")
 	return nil
 }
 
-// mountRunDirs mounts the auto-provided tmpfs /run and /run/shm.
-func mountRunDirs() error {
-	if err := os.MkdirAll("/run", 0o755); err != nil {
-		return fmt.Errorf("mkdir /run: %w", err)
+// Mount both tmpfs parents before the declared volume binds so a volume under
+// /run (including image aliases such as /var/run) survives switch-root.
+func mountRunDirs(root string) (string, error) {
+	run, err := prepareVolumeDir(root, "/run")
+	if err != nil {
+		return "", fmt.Errorf("mkdir /run: %w", err)
 	}
-	if err := unix.Mount("tmpfs", "/run", "tmpfs", unix.MS_NOSUID|unix.MS_NODEV, "mode=0755"); err != nil {
-		return fmt.Errorf("mount tmpfs /run: %w", err)
+	if err := unix.Mount("tmpfs", run, "tmpfs", unix.MS_NOSUID|unix.MS_NODEV, "mode=0755"); err != nil {
+		return "", fmt.Errorf("mount tmpfs /run: %w", err)
 	}
-	if err := os.MkdirAll("/run/shm", 0o1777); err != nil {
+	return run, mountRunShm(run)
+}
+
+func mountRunShm(run string) error {
+	shm := run + "/shm"
+	if err := os.MkdirAll(shm, 0o1777); err != nil {
 		return fmt.Errorf("mkdir /run/shm: %w", err)
 	}
-	if err := unix.Mount("tmpfs", "/run/shm", "tmpfs", unix.MS_NOSUID|unix.MS_NODEV, "mode=1777"); err != nil {
+	if err := unix.Mount("tmpfs", shm, "tmpfs", unix.MS_NOSUID|unix.MS_NODEV, "mode=1777"); err != nil {
 		return fmt.Errorf("mount tmpfs /run/shm: %w", err)
+	}
+	return nil
+}
+
+// An intervening parent bind or MS_MOVE may have hidden a prepared tmpfs
+// (for example, /run -> /var/run with a declared /var data disk). Restore
+// the original automatic mount precedence only when the visible inode changed.
+func ensureRunDirs(root string, runMount, shmMount os.FileInfo) error {
+	run, err := prepareVolumeDir(root, "/run")
+	if err != nil {
+		return err
+	}
+	if visible, err := os.Stat(run); err != nil || !os.SameFile(visible, runMount) {
+		_, err = mountRunDirs(root)
+		return err
+	}
+	if visible, err := os.Stat(run + "/shm"); err != nil || !os.SameFile(visible, shmMount) {
+		return mountRunShm(run)
 	}
 	return nil
 }

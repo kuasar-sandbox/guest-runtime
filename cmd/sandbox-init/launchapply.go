@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/cyphar/filepath-securejoin"
 	"github.com/kuasar-sandbox/guest-runtime/pkg/guestabi/proto"
 	"github.com/moby/sys/user"
 	"golang.org/x/sys/unix"
@@ -28,34 +29,53 @@ const fileInjectStage = "/run/.inject"
 //     sibling to the overlay upperdir.
 //   - single-disk mode: /sysroot/.sandbox-volumes/<i> on the single writable
 //     root disk itself (no separate upper exists).
-func applyVolumeMounts(mounts []proto.MountSpec, ext4Options string) error {
-	srcRoot := "/overlay/upper/volumes"
+func applyVolumeMounts(mounts []proto.MountSpec, ext4Options, runDir string) error {
+	srcRoot, srcDir := "/overlay/upper", "volumes"
 	if singleDiskRoot {
-		srcRoot = "/sysroot/.sandbox-volumes"
+		srcRoot, srcDir = "/sysroot", ".sandbox-volumes"
 	}
 	vi := 0
 	for _, m := range mounts {
 		switch m.Type {
 		case "empty":
-			src := fmt.Sprintf("%s/%d", srcRoot, vi)
+			src, err := prepareVolumeDir(srcRoot, filepath.Join(srcDir, strconv.Itoa(vi)))
 			vi++
-			if err := os.MkdirAll(src, 0o755); err != nil {
+			if err != nil {
 				return fmt.Errorf("mkdir volume source %s: %w", src, err)
 			}
-			tgt := "/sysroot" + m.Target
-			if err := os.MkdirAll(tgt, 0o755); err != nil {
-				return fmt.Errorf("mkdir volume target %s: %w", tgt, err)
-			}
-			if err := unix.Mount(src, tgt, "", unix.MS_BIND, ""); err != nil {
+			if err := bindVolumeDir("/sysroot", runDir, src, m.Target); err != nil {
 				return fmt.Errorf("bind volume -> %s: %w", m.Target, err)
 			}
 		case "disk":
-			if err := assembleDataDisk(m, ext4Options); err != nil {
+			if err := assembleDataDisk(m, ext4Options, runDir); err != nil {
 				return err
 			}
 		}
 	}
 	return nil
+}
+
+// Only PID 1 operates on the workload filesystem during pre-switch assembly.
+// An absolute symlink in the image is relative to that filesystem's root.
+func prepareVolumeDir(root, path string) (string, error) {
+	dir, err := securejoin.SecureJoin(root, path)
+	if err != nil {
+		return "", err
+	}
+	return dir, os.MkdirAll(dir, 0o755)
+}
+
+func bindVolumeDir(root, runDir, source, target string) error {
+	dir, err := prepareVolumeDir(root, target)
+	if err != nil {
+		return err
+	}
+	// The automatic tmpfs mounts have always masked declared volumes at
+	// their exact roots. Only descendants should gain a visible bind.
+	if dir == runDir || dir == filepath.Join(runDir, "shm") {
+		return nil
+	}
+	return unix.Mount(source, dir, "", unix.MS_BIND, "")
 }
 
 // assembleDataDisk mounts one boot.disks[] data disk and binds it onto its
@@ -67,7 +87,7 @@ func applyVolumeMounts(mounts []proto.MountSpec, ext4Options string) error {
 // base + rw ext4 upper into an overlayfs. The /sysdisks subtree is hidden after
 // switch-root but held alive by the bind (and overlayfs refs) — same as the
 // root overlay's /overlay/lower+upper and the /opt/sandbox-runtime bind.
-func assembleDataDisk(m proto.MountSpec, ext4Options string) error {
+func assembleDataDisk(m proto.MountSpec, ext4Options, runDir string) error {
 	asm := fmt.Sprintf("/sysdisks/disk-%d", m.DiskIndex)
 	needed := []string{asm}
 	if m.DiskOverlay {
@@ -108,7 +128,6 @@ func assembleDataDisk(m proto.MountSpec, ext4Options string) error {
 			return fmt.Errorf("disk %d mount overlay on %s: %w", m.DiskIndex, asm, err)
 		}
 	}
-	tgt := "/sysroot" + m.Target
 	usagePath := asm
 	if m.DiskOverlay {
 		usagePath = asm + "-upper"
@@ -116,10 +135,7 @@ func assembleDataDisk(m proto.MountSpec, ext4Options string) error {
 	if err := guestUsage.register(fmt.Sprintf("disk-%d", m.DiskIndex), usagePath); err != nil {
 		logf("usage disk registration: %v", err)
 	}
-	if err := os.MkdirAll(tgt, 0o755); err != nil {
-		return fmt.Errorf("disk %d mkdir target %s: %w", m.DiskIndex, tgt, err)
-	}
-	if err := unix.Mount(asm, tgt, "", unix.MS_BIND, ""); err != nil {
+	if err := bindVolumeDir("/sysroot", runDir, asm, m.Target); err != nil {
 		return fmt.Errorf("disk %d bind -> %s: %w", m.DiskIndex, m.Target, err)
 	}
 	return nil
@@ -229,17 +245,24 @@ func applyFiles(files []proto.FileSpec) error {
 	return nil
 }
 
-// ensureTargetFile makes sure path's parent exists and path exists as a file
-// to bind over (a bind mount needs an existing target). If path already
-// exists (file or symlink), we bind over it as-is (masking image content).
+// The kernel follows symlinks at the bind target. Preserve image symlinks
+// and prepare their referent if it disappeared when a tmpfs was mounted.
 func ensureTargetFile(path string) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		return err
 	}
-	if _, err := os.Lstat(path); err == nil {
-		return nil
+	target, err := securejoin.SecureJoin("/", path)
+	if err != nil {
+		return err
 	}
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, 0o644)
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		return err
+	}
+	f, err := os.OpenFile(target, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+	if os.IsExist(err) {
+		_, err = os.Stat(path)
+		return err
+	}
 	if err != nil {
 		return err
 	}
@@ -265,28 +288,31 @@ func parseFileMode(s string, def os.FileMode) os.FileMode {
 func runInit(specs []proto.InitSpec) error {
 	for i, s := range specs {
 		env := execEnv(s.Env)
-		path, err := initCommandPath(s.Exec, env, s.Workdir)
+		cred, err := resolveCred(s.User)
 		if err != nil {
-			return fmt.Errorf("init[%d] %q: %w", i, s.Exec, err)
+			return fmt.Errorf("init[%d] user %q: %w", i, s.User, err)
 		}
-		cmd := exec.Command(path, s.Args...)
-		cmd.Args[0] = s.Exec
-		cmd.Stdin = nil
+
+		var cmd *exec.Cmd
+		if cred != nil && !strings.ContainsRune(s.Exec, '/') {
+			// The fork applies Credential and Dir before entering this helper;
+			// only the target user can select the correct bare command.
+			cmd = exec.Command("/proc/self/exe", append([]string{"init-command", s.Exec}, s.Args...)...)
+		} else {
+			path, err := initCommandPath(s.Exec, env, s.Workdir)
+			if err != nil {
+				return fmt.Errorf("init[%d] %q: %w", i, s.Exec, err)
+			}
+			cmd = exec.Command(path, s.Args...)
+			cmd.Args[0] = s.Exec
+		}
 		cmd.Stdout = os.Stderr
 		cmd.Stderr = os.Stderr
 		cmd.Env = env
-		if s.Workdir != "" && s.Workdir != "/" {
-			cmd.Dir = s.Workdir
-		}
-		if s.User != "" {
-			c, err := resolveCred(s.User)
-			if err != nil {
-				return fmt.Errorf("init[%d] user %q: %w", i, s.User, err)
-			}
-			if c != nil {
-				cmd.SysProcAttr = &syscall.SysProcAttr{
-					Credential: &syscall.Credential{Uid: c.uid, Gid: c.gid, Groups: c.sgids},
-				}
+		cmd.Dir = s.Workdir
+		if cred != nil {
+			cmd.SysProcAttr = &syscall.SysProcAttr{
+				Credential: &syscall.Credential{Uid: cred.uid, Gid: cred.gid, Groups: cred.sgids},
 			}
 		}
 		logf("init[%d]: %s %v", i, s.Exec, s.Args)

@@ -304,6 +304,9 @@ C. Only after launch (and host publication of every block backend):
       The read-only pmem payload bind moves with the new root subtree.
 
 D. Spec-dependent work before switch-root (empty volumes need the raw ext4 source):
+   mount -t tmpfs tmpfs /sysroot/run -o nosuid,nodev
+   mount -t tmpfs tmpfs /sysroot/run/shm -o nosuid,nodev,mode=1777
+     Automatic roots precede volume binds so mounts below them remain visible.
    for each mounts[].type == empty:
      mkdir /overlay/upper/volumes/<i>
        Raw ext4, alongside upperdir and separate from the overlay write layer.
@@ -324,9 +327,6 @@ F. Basic mounts after switch-root:
      and strictly delegate advertised controllers (Application cgroup namespace and controller topology).
    mount -t devpts devpts /dev/pts -o newinstance,ptmxmode=0666
                                         # needed by tty-mode openpty
-   mount -t tmpfs tmpfs /run -o nosuid,nodev
-   mount -t tmpfs tmpfs /run/shm -o nosuid,nodev,mode=1777
-                                        # automatic mounts, like /proc
 ```
 
 All operations use syscall interfaces such as

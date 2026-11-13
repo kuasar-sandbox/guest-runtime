@@ -244,6 +244,9 @@ C. 仅在收到 launch、host 已发布全部 block backend 后:
       只读 pmem payload bind 随新 root 子树一起搬运。
 
 D. spec-dependent、switch-root 之前(empty/volume 卷需 raw ext4 source):
+   mount -t tmpfs tmpfs /sysroot/run -o nosuid,nodev
+   mount -t tmpfs tmpfs /sysroot/run/shm -o nosuid,nodev,mode=1777
+     先挂载这两个自动提供的 tmpfs，再绑定卷，确保其子目录上的卷可见。
    for each mounts[].type == empty:
      mkdir /overlay/upper/volumes/<i>            ← raw ext4(与 upperdir 同级,物理隔离于 overlay 写层)
      mkdir -p /sysroot/<target>
@@ -258,8 +261,6 @@ F. switch-root 之后的基础挂载:
    mount -t cgroup2 cgroup2 /sys/fs/cgroup;mkdir /sys/fs/cgroup/app   ← 应用 cgroup namespace/freezer 根
    launch.cgroup_control=true 时另 mkdir /sys/fs/cgroup/app/init,并严格下放 advertised controllers(应用 cgroup namespace 与 controller 拓扑)
    mount -t devpts devpts /dev/pts (newinstance,ptmxmode=0666)        ← tty 模式 openpty 需要
-   mount -t tmpfs  tmpfs  /run     (nosuid,nodev)                     ← 自动挂载(类 /proc)
-   mount -t tmpfs  tmpfs  /run/shm (nosuid,nodev,mode=1777)           ← 自动挂载
 ```
 
 全部通过 `golang.org/x/sys/unix.Mount` / `unix.Chroot` 等 syscall 完成,
