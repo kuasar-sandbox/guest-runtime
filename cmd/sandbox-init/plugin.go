@@ -41,6 +41,7 @@ func (p *pluginProc) policy() string {
 // restarts at shutdown.
 type pluginRegistry struct {
 	mu        sync.Mutex
+	launches  sync.WaitGroup // Add is synchronized with closing admission under mu
 	byPID     map[int]*pluginProc
 	all       []*pluginProc
 	quiescing bool
@@ -67,17 +68,10 @@ func (r *pluginRegistry) start(specs []proto.PluginSpec) {
 // (pending) instead — a snapshot must not capture a freshly-forked, unfrozen
 // plugin; endQuiesce issues the deferred launch on resume.
 func (r *pluginRegistry) launch(p *pluginProc) {
-	r.mu.Lock()
-	if r.closed {
-		r.mu.Unlock()
+	if !r.admitLaunch(p) {
 		return
 	}
-	if r.quiescing {
-		p.pending = true
-		r.mu.Unlock()
-		return
-	}
-	r.mu.Unlock()
+	defer r.launches.Done()
 
 	pid, err := startPluginProcess(p.spec, func(pid int) error {
 		// Register before the helper leaves its start gate. The global reaper
@@ -144,6 +138,20 @@ func (r *pluginRegistry) onExit(pid int, status syscall.WaitStatus) bool {
 	return true
 }
 
+func (r *pluginRegistry) admitLaunch(p *pluginProc) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.closed {
+		return false
+	}
+	if r.quiescing {
+		p.pending = true
+		return false
+	}
+	r.launches.Add(1)
+	return true
+}
+
 // beginQuiesce gates new plugin launches before a snapshot. Running plugins are
 // frozen with the app cgroup; this only stops the supervisor from forking new
 // ones into the frozen window.
@@ -151,6 +159,9 @@ func (r *pluginRegistry) beginQuiesce() {
 	r.mu.Lock()
 	r.quiescing = true
 	r.mu.Unlock()
+	// Existing helpers must finish their clone and setup before /app can be
+	// frozen. Their registration callbacks take mu, so join outside it.
+	r.launches.Wait()
 }
 
 // endQuiesce re-enables launches after resume and issues any relaunch that came

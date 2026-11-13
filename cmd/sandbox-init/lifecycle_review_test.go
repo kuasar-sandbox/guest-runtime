@@ -126,3 +126,57 @@ func TestFinishExecMuxHonorsShutdownDeadline(t *testing.T) {
 		t.Fatal("session remained open after shutdown deadline")
 	}
 }
+
+func TestQuiesceJoinsPluginLaunchBeforeFreezing(t *testing.T) {
+	reg := newPluginRegistry()
+	running := &pluginProc{}
+	deferred := &pluginProc{}
+	if !reg.admitLaunch(running) {
+		t.Fatal("initial plugin launch was rejected")
+	}
+	drained := make(chan struct{})
+	go func() {
+		reg.beginQuiesce()
+		close(drained)
+	}()
+	deadline := time.Now().Add(time.Second)
+	for {
+		reg.mu.Lock()
+		closed := reg.quiescing
+		reg.mu.Unlock()
+		if closed {
+			break
+		}
+		if time.Now().After(deadline) {
+			reg.launches.Done()
+			t.Fatal("quiesce did not close plugin admission")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if reg.admitLaunch(deferred) {
+		reg.launches.Done()
+		reg.launches.Done()
+		t.Fatal("plugin fork admitted while quiescing")
+	}
+	if !deferred.pending {
+		reg.launches.Done()
+		t.Fatal("deferred plugin relaunch lost")
+	}
+	select {
+	case <-drained:
+		reg.launches.Done()
+		t.Fatal("quiesce returned before admitted plugin completed")
+	default:
+	}
+	reg.launches.Done()
+	select {
+	case <-drained:
+	case <-time.After(time.Second):
+		t.Fatal("plugin launch did not drain")
+	}
+	reg.endQuiesce()
+	if !reg.admitLaunch(deferred) {
+		t.Fatal("post-thaw plugin launch was rejected")
+	}
+	reg.launches.Done()
+}
