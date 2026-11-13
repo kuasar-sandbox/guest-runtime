@@ -315,15 +315,32 @@ def assemble(tag,x86,arm,output):
     validate_bundle(tag,'all',output)
 
 
+def check_request(repository, tag, arch, commit=None):
+    unit_for(repository,tag);names(tag,arch)
+    release=find_release(repository,tag)
+    if release is None or release.get('draft') is True:
+        return
+    # A public release is normally reused. The only resumable exception is a
+    # completed Runtime Stable whose module tag is still missing. This check
+    # is read-only; publish revalidates both local and public assets.
+    module_tag=runtime_module_tag(repository,tag)
+    if commit is not None and module_tag and arch == 'all':
+        release_identity(release,tag,public=True)
+        require(re.fullmatch('[0-9a-f]{40}',commit) and tag_target(repository,tag)==commit,
+                'published Runtime tag differs from the admitted source')
+        target=tag_target(repository,module_tag)
+        require(target in (None,commit),'Go module tag already identifies a different commit')
+        if target is None: return
+    raise ValueError('component Release already exists; reuse the specified published tag')
+
+
 def main(arguments):
     repository=os.environ.get('GH_REPO') or os.environ.get('GITHUB_REPOSITORY','')
     require(re.fullmatch(r'kuasar-sandbox/(?:accelerator|connector|sandboxer|orchestrator|guest-runtime)',repository), 'invalid component repository')
     if len(arguments)==5 and arguments[0]=='assemble':
         _,tag,x86,arm,output=arguments;unit_for(repository,tag);assemble(tag,Path(x86),Path(arm),Path(output))
-    elif len(arguments)==3 and arguments[0]=='check':
-        _,tag,arch=arguments;unit_for(repository,tag);names(tag,arch)
-        release=find_release(repository,tag)
-        require(release is None or release.get('draft') is True, 'component Release already exists; reuse the specified published tag')
+    elif len(arguments) in (3,4) and arguments[0]=='check':
+        check_request(repository,*arguments[1:])
     elif len(arguments)==6 and arguments[0]=='publish':
         _,tag,arch,commit,bundle,source_ref=arguments;publish(repository,tag,arch,commit,Path(bundle),source_ref)
     else: raise ValueError('usage: publish-release.sh <assemble|check|publish> ...')

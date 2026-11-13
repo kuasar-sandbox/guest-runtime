@@ -106,7 +106,7 @@ jobs:
             "$SOURCE_REF" "$SOURCE_SHA" "$VERSION" runtime
           bash scripts/validate-preview-line.sh \
             runtime "$VERSION" "$AGGREGATE_VERSION" "$AGGREGATE_SHA"
-          bash scripts/publish-release.sh check "$VERSION" "$TARGET_ARCH"
+          bash scripts/publish-release.sh check "$VERSION" "$TARGET_ARCH" "$SOURCE_SHA"
           {
             echo "accelerator_version=$ACCELERATOR_VERSION"
             echo "version=$VERSION"

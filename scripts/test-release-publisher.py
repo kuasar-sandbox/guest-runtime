@@ -203,6 +203,20 @@ class PublisherTests(unittest.TestCase):
         self.assertEqual(self.module_target,SHA)
         self.assertEqual(len(self.uploads),1)
 
+    def test_check_only_admits_recovery_of_a_missing_module_for_the_same_public_release(self):
+        self.repo='kuasar-sandbox/guest-runtime'; self.tag='runtime-v1.2.3'
+        self.publish(); self.module_target=None; self.calls.clear()
+        subject.check_request(self.repo,self.tag,'all',SHA)
+        for arch,commit,reason in (('all','b'*40,'admitted source'),
+                                   ('all',None,'already exists'),('x86_64',SHA,'already exists')):
+            with self.subTest(arch=arch,commit=commit), self.assertRaisesRegex(ValueError,reason):
+                subject.check_request(self.repo,self.tag,arch,commit)
+        self.module_target='b'*40
+        with self.assertRaisesRegex(ValueError,'module tag'): subject.check_request(self.repo,self.tag,'all',SHA)
+        self.module_target=SHA
+        with self.assertRaisesRegex(ValueError,'already exists'): subject.check_request(self.repo,self.tag,'all',SHA)
+        self.assertTrue(all(method=='GET' for method,_,_ in self.calls))
+
     def test_preview_and_kernel_do_not_publish_root_module_tags(self):
         self.repo='kuasar-sandbox/guest-runtime';self.tag='runtime-v1.2.3-preview.20261112'
         self.publish();self.assertIsNone(self.module_target)
