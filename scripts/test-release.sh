@@ -31,7 +31,6 @@ if [[ -n "${KUASAR_PLATFORM_DIR:-${KUASAR_PLATFORM_ROOT:-}}" ]]; then
 else
   echo 'test-release: workspace integration not selected (set KUASAR_PLATFORM_DIR to run)'
 fi
-PYTHONDONTWRITEBYTECODE=1 python3 "$ROOT/scripts/test-prepare-sandbox-init.py"
 PYTHONDONTWRITEBYTECODE=1 python3 "$ROOT/scripts/test-release-go-environment.py"
 bash "$ROOT/scripts/test-release-license-traversal.sh"
 bash "$ROOT/scripts/test-release-cleanup.sh"
@@ -157,12 +156,12 @@ fi
 bash -n "$ROOT/scripts/delete-preview.sh" "$ROOT/scripts/validate-release-source.sh"
 
 WORKFLOW="$ROOT/.github/workflows/release-runtime.yml"
-grep -Fqx 'run-name: Release ${{ inputs.version }} @${{ inputs.source_sha }} [accelerator=${{ inputs.accelerator_version }},sandboxer=${{ inputs.sandboxer_version }}]' \
+grep -Fqx "run-name: Release \${{ inputs.version }} @\${{ inputs.source_sha }} [accelerator=\${{ inputs.accelerator_version }}\${{ inputs.sandboxer_version && format(',sandboxer={0}', inputs.sandboxer_version) || '' }}]" \
   "$WORKFLOW" || fail "runtime release identity does not pin source and dependencies"
 grep -Fqx 'run-name: Release ${{ inputs.version }} @${{ inputs.source_sha }}' \
   "$ROOT/.github/workflows/release-vmlinux.yml" \
   || fail "vmlinux release identity does not pin source_sha"
-for input in accelerator_version sandboxer_version; do
+for input in accelerator_version; do
   grep -Fq "      $input:" "$WORKFLOW" \
     || fail "runtime release workflow is missing required $input input"
   grep -Fq -- "--dependency ${input%_version} \"\${{ needs.preflight.outputs.$input }}\" \"\${{ needs.preflight.outputs.${input%_version}_sha }}\"" "$WORKFLOW" \
@@ -205,7 +204,7 @@ for retired in test/e2e/run_all.sh test/e2e/e2e_flatten.sh test/e2e/common.sh; d
 done
 
 fixture_root="$TMP/guest-runtime"
-mkdir -p "$TMP/src" "$TMP/sandboxer/bin/x86_64" "$TMP/accelerator" \
+mkdir -p "$TMP/src" "$TMP/accelerator" \
   "$fixture_root/scripts" "$fixture_root/bin/x86_64" \
   "$fixture_root/native-deps/bin/x86_64" \
   "$fixture_root/native-deps/build/src/e2b-infra" \
@@ -274,7 +273,6 @@ printf 'module github.com/kuasar-sandbox/guest-runtime\n\ngo 1.24\nrequire githu
 printf 'package main\nimport "github.com/kuasar-sandbox/go-erofs"\nfunc main() { erofs.Fixture() }\n' > "$fixture_root/cmd/flatten-ctl/main.go"
 (cd "$fixture_root" && GOWORK=off go mod tidy)
 printf 'package main\nfunc main() {}\n' > "$fixture_root/cmd/other-tool/main.go"
-printf '/bin/\n/build/\n' > "$TMP/sandboxer/.gitignore"
 printf '/bin/\n/build/\n' > "$TMP/accelerator/.gitignore"
 mkdir "$TMP/shared"
 printf 'module github.com/e2b-dev/infra/packages/shared\n\ngo 1.24\n' > "$TMP/shared/go.mod"
@@ -286,15 +284,14 @@ printf 'package main\nimport "github.com/e2b-dev/infra/packages/shared"\nfunc ma
 (cd "$TMP/src" && GOWORK=off GOOS=linux GOARCH=amd64 GOAMD64=v1 CGO_ENABLED=0 GOEXPERIMENT='' \
   go build -trimpath -ldflags "-s -w" -o "$TMP/tool" .)
 install -m 0755 "$TMP/tool" "$fixture_root/bin/x86_64/flatten-ctl"
-install -m 0755 "$TMP/tool" "$TMP/sandboxer/bin/x86_64/sandbox-init"
+install -m 0755 "$TMP/tool" "$fixture_root/bin/x86_64/sandbox-init"
 install -m 0755 "$TMP/tool" "$fixture_root/native-deps/bin/x86_64/envd"
 printf 'runtime bundle\n' > "$fixture_root/bin/x86_64/sandbox-runtime.bundle"
 # Native fixture headers are inspected; their programs are never executed.
 install -m 0755 "$TMP/tool" "$fixture_root/native-deps/bin/x86_64/mkfs.erofs"
 install -m 0644 "$TMP/tool" "$fixture_root/native-deps/bin/x86_64/vmlinux"
-printf 'fixture sandboxer license\n' > "$TMP/sandboxer/LICENSE"
 printf 'fixture accelerator license\n' > "$TMP/accelerator/LICENSE"
-for dependency in accelerator sandboxer; do
+for dependency in accelerator; do
   mkdir "$TMP/$dependency/LICENSES"
   printf 'fixture dependency attribution\n' > "$TMP/$dependency/NOTICE"
   printf 'fixture nested dependency notice\n' > "$TMP/$dependency/LICENSES/NOTICE.txt"
@@ -305,13 +302,10 @@ printf 'fixture Linux license\n' \
   > "$fixture_root/native-deps/build/src/linux/COPYING"
 printf 'fixture GPL-2.0 text\n' \
   > "$fixture_root/native-deps/build/src/linux/LICENSES/preferred/GPL-2.0"
-mkdir -p "$TMP/sandboxer/cmd/sandbox-init"
-printf 'module github.com/kuasar-sandbox/sandboxer\n\ngo 1.24\n' > "$TMP/sandboxer/go.mod"
-printf 'package main\nfunc main() {}\n' > "$TMP/sandboxer/cmd/sandbox-init/main.go"
-sandboxer_sha="$(init_fixture_repo "$TMP/sandboxer" LICENSE LICENSES NOTICE .gitignore go.mod cmd)"
+mkdir -p "$fixture_root/cmd/sandbox-init"
+printf 'package main\nfunc main() {}\n' > "$fixture_root/cmd/sandbox-init/main.go"
 accelerator_sha="$(init_fixture_repo "$TMP/accelerator" LICENSE LICENSES NOTICE .gitignore)"
 git -C "$TMP/accelerator" tag v0.1.3 "$accelerator_sha"
-git -C "$TMP/sandboxer" tag v0.1.3 "$sandboxer_sha"
 mkdir -p "$fixture_root/native-deps/deps/vmlinux"
 printf 'CONFIG_LOCALVERSION="-kuasar"\nCONFIG_LOCALVERSION_AUTO=y\n' \
   > "$fixture_root/native-deps/deps/vmlinux/sandbox-common.config"
@@ -358,14 +352,14 @@ chmod 0755 "$TMP/release-build-bin/dpkg-query" "$TMP/release-build-bin/rpm"
 # Build matching synthetic payloads once before exercising package/validate.
 (cd "$fixture_root" && GOWORK=off CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -buildvcs=true \
   -o bin/x86_64/flatten-ctl ./cmd/flatten-ctl)
-(cd "$TMP/sandboxer" && GOWORK=off CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -buildvcs=true \
+(cd "$fixture_root" && GOWORK=off CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -buildvcs=true \
   -o bin/x86_64/sandbox-init ./cmd/sandbox-init)
 mkdir -p "$fixture_root/native-deps/build/src/e2b-infra/packages"
 cp -a "$TMP/src" "$fixture_root/native-deps/build/src/e2b-infra/packages/envd"
 cp -a "$TMP/shared" "$fixture_root/native-deps/build/src/e2b-infra/packages/shared"
 tree="$fixture_root/build/runtime-fixture"
 mkdir -p "$tree/sbin" "$tree/opt/sandbox-runtime/bin"
-install -m 0755 "$TMP/sandboxer/bin/x86_64/sandbox-init" "$tree/sbin/init"
+install -m 0755 "$fixture_root/bin/x86_64/sandbox-init" "$tree/sbin/init"
 install -m 0755 "$fixture_root/native-deps/bin/x86_64/envd" "$tree/opt/sandbox-runtime/bin/envd"
 install -m 0755 "$fixture_root/bin/x86_64/flatten-ctl" "$tree/opt/sandbox-runtime/bin/flatten-ctl"
 mkfs.erofs --all-root -T0 -U 00000000-0000-0000-0000-000000000000 \
@@ -384,8 +378,6 @@ common_env=(
   RELEASE_TEST_TOOL="$TMP/tool"
   RELEASE_TEST_PROJECT_SHA="$project_sha"
   RELEASE_TEST_SYSTEM_INPUTS="$TMP/system-inputs"
-  RELEASE_SANDBOXER_SOURCE_SHA="$sandboxer_sha"
-  RELEASE_SANDBOXER_VERSION=v0.1.3
   RELEASE_ACCELERATOR_SOURCE_SHA="$accelerator_sha"
   RELEASE_ACCELERATOR_VERSION=v0.1.3
   ENVD_TARBALL=https://codeload.github.com/e2b-dev/runtime/tar.gz/refs/tags/2026.22#e2b-runtime-2026.22.tar.gz
@@ -421,11 +413,10 @@ grep -Fq 'Go payload must be built from the clean selected commit' "$TMP/publica
 "$fixture_root/scripts/release.sh" validate \
   vmlinux vmlinux-v2.3.4 x86_64 "$TMP/vmlinux-bundle"
 RELEASE_ACCELERATOR_SOURCE_DIR="$TMP/absent-accelerator" \
-RELEASE_SANDBOXER_SOURCE_DIR="$TMP/absent-sandboxer" \
   "$fixture_root/scripts/release.sh" validate \
   vmlinux vmlinux-v2.3.4 x86_64 "$TMP/vmlinux-bundle"
 
-RELEASE_KIND=runtime RELEASE_DEPENDENCIES=accelerator=v0.1.3,sandboxer=v0.1.3 bash "$ROOT/scripts/test-publisher.sh" \
+RELEASE_KIND=runtime RELEASE_DEPENDENCIES=accelerator=v0.1.3 bash "$ROOT/scripts/test-publisher.sh" \
   "$fixture_root/scripts/publish-release.sh" "$TMP/runtime-bundle" \
   kuasar-sandbox/guest-runtime runtime-v1.2.3-preview.20260804 \
   "$project_sha" main
@@ -442,9 +433,9 @@ RELEASE_KIND=vmlinux bash "$ROOT/scripts/test-publisher.sh" \
 # input bytes. Package must compare its embedded binaries with these inputs.
 for input in init envd; do
   if [ "$input" = init ]; then
-    source_input="$TMP/sandboxer/bin/x86_64/sandbox-init"
+    source_input="$fixture_root/bin/x86_64/sandbox-init"
     override=RELEASE_SANDBOX_INIT_BIN
-    expected='embedded sandbox-init differs from the selected release binary'
+    expected='embedded sandbox-init differs from the verified outer payload'
   else
     source_input="$fixture_root/native-deps/bin/x86_64/envd"
     override=RELEASE_ENVD_BIN
@@ -468,9 +459,8 @@ if tar -tzf "$runtime_archive" | grep -E '^./bin/mkfs[.]erofs$|^./share/sources/
 fi
 
 go_toolchain="$(go version | awk '{print $3}')"
-for path in ./bin/sandbox-runtime.bundle ./bin/flatten-ctl \
+for path in ./bin/sandbox-runtime.bundle ./bin/sandbox-init ./bin/flatten-ctl \
   ./share/licenses/runtime/project/LICENSE \
-  ./share/licenses/runtime/sandboxer/LICENSE \
   ./share/licenses/runtime/accelerator/LICENSE \
   ./share/licenses/runtime/envd/LICENSE \
   ./share/licenses/runtime/go-toolchain/"$go_toolchain"/LICENSE; do
@@ -617,7 +607,7 @@ done
 for kind in runtime vmlinux; do
   if [ "$kind" = runtime ]; then
     version=runtime-v1.2.3-preview.20260804
-    labels=(project sandboxer accelerator envd)
+    labels=(project accelerator envd)
   else
     version=vmlinux-v2.3.4
     labels=(project linux)

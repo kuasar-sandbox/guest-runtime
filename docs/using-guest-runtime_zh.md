@@ -8,7 +8,7 @@
 
 本仓不发布通用的 `guest-runtime-vX.Y.Z` Release,而是维护两条独立版本线:
 
-- **`runtime-vX.Y.Z`** - 发布 `sandbox-runtime-<arch>-vX.Y.Z.tar.gz`,包含 Runtime bundle、静态 `flatten-ctl` 及其许可和源码材料;
+- **`runtime-vX.Y.Z`** - 发布 `sandbox-runtime-<arch>-vX.Y.Z.tar.gz`,包含 Runtime bundle、静态 `sandbox-init` 与 `flatten-ctl` 及其许可和源码材料;
 - **`vmlinux-vX.Y.Z`** - 发布 `vmlinux-<arch>-vX.Y.Z.tar.gz`,在稳定路径 `bin/vmlinux` 包含 guest kernel，并在 `bin/vmlinux.sha256` 携带原始内核文件的 SHA-256。
 
 两者版本号可以独立演进。项目聚合 Release 精确选择一个 Runtime Tag 和一个 VMLinux Tag,不假定版本号相同。
@@ -23,9 +23,10 @@ GitHub 组件资产在组件 build/package 检查后从所选 source ref 和精�
 set -euo pipefail
 PREFIX=/path/to/validated-release
 test -s "$PREFIX/bin/sandbox-runtime.bundle"
+test -x "$PREFIX/bin/sandbox-init"
 test -x "$PREFIX/bin/flatten-ctl"
 test -s "$PREFIX/bin/vmlinux"
-file "$PREFIX/bin/flatten-ctl" "$PREFIX/bin/vmlinux"
+file "$PREFIX/bin/sandbox-init" "$PREFIX/bin/flatten-ctl" "$PREFIX/bin/vmlinux"
 (cd "$PREFIX/bin" && sha256sum --check vmlinux.sha256)
 ```
 

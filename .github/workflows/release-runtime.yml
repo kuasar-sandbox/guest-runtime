@@ -1,5 +1,5 @@
 name: Runtime Release
-run-name: Release ${{ inputs.version }} @${{ inputs.source_sha }} [accelerator=${{ inputs.accelerator_version }},sandboxer=${{ inputs.sandboxer_version }}]
+run-name: Release ${{ inputs.version }} @${{ inputs.source_sha }} [accelerator=${{ inputs.accelerator_version }}${{ inputs.sandboxer_version && format(',sandboxer={0}', inputs.sandboxer_version) || '' }}]
 'on':
   workflow_dispatch:
     inputs:
@@ -8,8 +8,8 @@ run-name: Release ${{ inputs.version }} @${{ inputs.source_sha }} [accelerator=$
         required: true
         type: string
       sandboxer_version:
-        description: Published stable or preview sandboxer version embedded as sandbox-init
-        required: true
+        description: Published sandboxer supplying init for historical Runtime sources only
+        required: false
         type: string
       accelerator_version:
         description: Published accelerator version used to build flatten-ctl
@@ -107,7 +107,7 @@ jobs:
           set -euo pipefail
           [[ "$VERSION" =~ ^runtime-v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-preview\.[0-9]{8}(\.[1-9][0-9]*)?)?$ ]] \
             || { echo "version must match runtime-vX.Y.Z or runtime-vX.Y.Z-preview.YYYYMMDD[.N]" >&2; exit 1; }
-          [[ "$SANDBOXER_VERSION" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-preview\.[0-9]{8}(\.[1-9][0-9]*)?)?$ ]] \
+          [[ -z "$SANDBOXER_VERSION" || "$SANDBOXER_VERSION" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-preview\.[0-9]{8}(\.[1-9][0-9]*)?)?$ ]] \
             || { echo "sandboxer_version must match vX.Y.Z or vX.Y.Z-preview.YYYYMMDD[.N]" >&2; exit 1; }
           [[ "$ACCELERATOR_VERSION" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-preview\.[0-9]{8}(\.[1-9][0-9]*)?)?$ ]] \
             || { echo "accelerator_version must match vX.Y.Z or vX.Y.Z-preview.YYYYMMDD[.N]" >&2; exit 1; }
@@ -115,7 +115,7 @@ jobs:
             "$SOURCE_REF" "$SOURCE_SHA" "$VERSION" runtime
           bash scripts/validate-preview-line.sh \
             runtime "$VERSION" "$AGGREGATE_VERSION" "$AGGREGATE_SHA"
-          bash scripts/publish-release.sh check "$VERSION" "$TARGET_ARCH"
+          bash scripts/publish-release.sh check "$VERSION" "$TARGET_ARCH" "$SOURCE_SHA"
           {
             echo "accelerator_version=$ACCELERATOR_VERSION"
             echo "version=$VERSION"
@@ -139,14 +139,16 @@ jobs:
           release=$(gh api "repos/$repository/releases/tags/$version")
           jq -e --arg tag "$version" '.tag_name == $tag and .draft == false and .prerelease == ($tag | contains("-preview."))' <<< "$release" >/dev/null
           echo "accelerator_sha=$sha" >> "$GITHUB_OUTPUT"
-          repository=kuasar-sandbox/sandboxer
-          version=$SANDBOXER_VERSION
-          gh api "repos/$repository" --jq 'select(.visibility == "public" and .private == false) | .full_name' | grep -Fx "$repository"
-          sha=$(python3 -B trusted/platform/release/tag_sources.py resolve "${repository##*/}" "$version")
-          [[ "$sha" =~ ^[0-9a-f]{40}$ ]]
-          release=$(gh api "repos/$repository/releases/tags/$version")
-          jq -e --arg tag "$version" '.tag_name == $tag and .draft == false and .prerelease == ($tag | contains("-preview."))' <<< "$release" >/dev/null
-          echo "sandboxer_sha=$sha" >> "$GITHUB_OUTPUT"
+          if [[ -n "$SANDBOXER_VERSION" ]]; then
+            repository=kuasar-sandbox/sandboxer
+            version=$SANDBOXER_VERSION
+            gh api "repos/$repository" --jq 'select(.visibility == "public" and .private == false) | .full_name' | grep -Fx "$repository"
+            sha=$(python3 -B trusted/platform/release/tag_sources.py resolve "${repository##*/}" "$version")
+            [[ "$sha" =~ ^[0-9a-f]{40}$ ]]
+            release=$(gh api "repos/$repository/releases/tags/$version")
+            jq -e --arg tag "$version" '.tag_name == $tag and .draft == false and .prerelease == ($tag | contains("-preview."))' <<< "$release" >/dev/null
+            echo "sandboxer_sha=$sha" >> "$GITHUB_OUTPUT"
+          fi
       - name: Freeze admitted source and selected dependency tags
         env:
           SOURCE_REF: ${{ steps.request.outputs.source_ref }}
@@ -159,7 +161,7 @@ jobs:
           set -euo pipefail
           dependencies=()
           dependencies+=(--dependency accelerator "$ACCELERATOR_TAG" "$ACCELERATOR_SHA")
-          dependencies+=(--dependency sandboxer "$SANDBOXER_TAG" "$SANDBOXER_SHA")
+          if [[ -n "$SANDBOXER_TAG" ]]; then dependencies+=(--dependency sandboxer "$SANDBOXER_TAG" "$SANDBOXER_SHA"); fi
           python3 -B trusted/platform/release/producer-inputs.py freeze runtime "$SOURCE_REF" "$SOURCE_SHA" producer-inputs.tar --admission producer-source.tar --version "${{ steps.request.outputs.version }}" "${dependencies[@]}"
       - name: Upload Workbench selection
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
@@ -207,10 +209,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          for dependency in \
-            "accelerator $ACCELERATOR_VERSION" \
-            "sandboxer $SANDBOXER_VERSION"
-          do
+          dependencies=("accelerator $ACCELERATOR_VERSION")
+          if [[ -n "$SANDBOXER_VERSION" ]]; then dependencies+=("sandboxer $SANDBOXER_VERSION"); fi
+          for dependency in "${dependencies[@]}"; do
             read -r repository version <<< "$dependency"
             prerelease=false
             [[ "$version" != *-preview.* ]] || prerelease=true
@@ -226,6 +227,7 @@ jobs:
               "$repository-release.json" >/dev/null
           done
       - name: Download the selected sandboxer release assets
+        if: needs.preflight.outputs.sandboxer_version != ''
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -289,7 +291,13 @@ jobs:
       - name: Restore fixed producer inputs
         env:
           SOURCE_SHA: ${{ needs.preflight.outputs.source_sha }}
-        run: python3 -B trusted/platform/release/producer-inputs.py restore workbench-selection/producer-inputs.tar runtime "$SOURCE_SHA" src --dependency accelerator "${{ needs.preflight.outputs.accelerator_version }}" "${{ needs.preflight.outputs.accelerator_sha }}" --dependency sandboxer "${{ needs.preflight.outputs.sandboxer_version }}" "${{ needs.preflight.outputs.sandboxer_sha }}"
+        run: |
+          set -euo pipefail
+          dependencies=()
+          if [[ -n "$SANDBOXER_VERSION" ]]; then
+            dependencies+=(--dependency sandboxer "$SANDBOXER_VERSION" "${{ needs.preflight.outputs.sandboxer_sha }}")
+          fi
+          python3 -B trusted/platform/release/producer-inputs.py restore workbench-selection/producer-inputs.tar runtime "$SOURCE_SHA" src --dependency accelerator "${{ needs.preflight.outputs.accelerator_version }}" "${{ needs.preflight.outputs.accelerator_sha }}" "${dependencies[@]}"
       - name: Freeze clean source cache trust before installing verified assets
         env:
           GH_TOKEN: ${{ github.token }}
@@ -303,10 +311,19 @@ jobs:
           subprocess.run([sys.executable, '-B', 'trusted/platform/ci/hosted/workbench.py', 'cache-scope',
                           '--sources', sources, '--receipt', receipt], check=True)
           PY
+      - name: Check out trusted historical Runtime packaging
+        if: needs.preflight.outputs.sandboxer_version != ''
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          # Last pre-cutover main with strict sandboxer-owned init validation.
+          ref: 998e5ed5573ab71fe9ed81ccddd562dc590eb0a3
+          path: trusted/precutover-runtime
+          persist-credentials: false
       - name: Verify and install the selected sandbox-init
+        if: needs.preflight.outputs.sandboxer_version != ''
         run: |
           set -euo pipefail
-          python3 trusted/guest-runtime/scripts/prepare-sandbox-init.py \
+          python3 trusted/precutover-runtime/scripts/prepare-sandbox-init.py \
             --release-json sandboxer-release.json --directory selected-sandboxer \
             --version "$SANDBOXER_VERSION" --arch "$TARGET_ARCH" \
             --source-sha "$(git -C src/sandboxer rev-parse HEAD)" \
@@ -318,7 +335,9 @@ jobs:
           destination=trusted/platform/.ci/component-packaging
           test ! -e "$destination"
           mkdir -p "$destination"
-          git -C trusted/guest-runtime archive --format=tar HEAD scripts | tar -xf - -C "$destination"
+          tooling=trusted/guest-runtime
+          if [[ -n "$SANDBOXER_VERSION" ]]; then tooling=trusted/precutover-runtime; fi
+          git -C "$tooling" archive --format=tar HEAD scripts | tar -xf - -C "$destination"
       - name: Build test and package runtime image
         uses: ./trusted/platform/.github/actions/workbench
         with:
@@ -328,7 +347,7 @@ jobs:
           outputs: |
             guest-runtime/bin/${{ matrix.arch }}/flatten-ctl
             guest-runtime/native-deps/bin/${{ matrix.arch }}/envd
-            sandboxer/bin/${{ matrix.arch }}/sandbox-init
+            ${{ needs.preflight.outputs.sandboxer_version && 'sandboxer' || 'guest-runtime' }}/bin/${{ matrix.arch }}/sandbox-init
             guest-runtime/release-bundle
           arch: ${{ matrix.arch }}
           cpus: '2'
@@ -341,13 +360,17 @@ jobs:
               --dependency accelerator '${{ needs.preflight.outputs.accelerator_version }}' '${{ needs.preflight.outputs.accelerator_sha }}')"
             export GOWORK
             if [ "$TARGET_ARCH" = x86_64 ]; then make -C guest-runtime test; make -C guest-runtime vet; fi
-            make -C guest-runtime flatten-ctl
+            export SANDBOXER_VERSION='${{ needs.preflight.outputs.sandboxer_version }}'
+            if [[ -n "$SANDBOXER_VERSION" ]]; then
+              make -C guest-runtime flatten-ctl
+              export RELEASE_MATERIALS_GO_NOTICE_ROOT=/src/selected-sandboxer-go
+            else
+              make -C guest-runtime sandbox-init flatten-ctl
+            fi
             make -C guest-runtime sandbox-runtime BUILD_MKFS_EROFS="$(command -v mkfs.erofs)"
             cd /src/guest-runtime
             export VERSION='${{ needs.preflight.outputs.version }}'
             export ACCELERATOR_VERSION='${{ needs.preflight.outputs.accelerator_version }}'
-            export SANDBOXER_VERSION='${{ needs.preflight.outputs.sandboxer_version }}'
-            export RELEASE_MATERIALS_GO_NOTICE_ROOT=/src/selected-sandboxer-go
             [ "$(git rev-parse HEAD)" = "${{ needs.preflight.outputs.source_sha }}" ]
             export SOURCE_DATE_EPOCH
             SOURCE_DATE_EPOCH=$(git show -s --format=%ct "${{ needs.preflight.outputs.source_sha }}")
@@ -355,10 +378,12 @@ jobs:
             RELEASE_SOURCE_ROOT="$PWD" bash /inputs/release/.ci/component-packaging/scripts/release.sh validate runtime "$VERSION" "$TARGET_ARCH" release-bundle
       - name: Check the released Runtime ABI
         run: |
+          init_owner=guest-runtime
+          if [[ -n "$SANDBOXER_VERSION" ]]; then init_owner=sandboxer; fi
           python3 trusted/guest-runtime/scripts/ci-check-runtime-abi.py \
             --static src/guest-runtime/bin/$TARGET_ARCH/flatten-ctl \
             --static src/guest-runtime/native-deps/bin/$TARGET_ARCH/envd \
-            src/sandboxer/bin/$TARGET_ARCH/sandbox-init
+            "src/$init_owner/bin/$TARGET_ARCH/sandbox-init"
       - name: Upload validated runtime bundle
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
@@ -383,6 +408,8 @@ jobs:
     needs:
       - preflight
       - build
+    env:
+      SANDBOXER_VERSION: ${{ needs.preflight.outputs.sandboxer_version }}
     runs-on: ubuntu-latest
     permissions:
       actions: read
@@ -453,12 +480,24 @@ jobs:
         with:
           name: runtime-release-${{ needs.preflight.outputs.version }}-aarch64-${{ github.run_id }}
           path: staged/aarch64
+      - name: Check out trusted historical Runtime packaging
+        if: needs.preflight.outputs.sandboxer_version != ''
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          # Last pre-cutover main with strict sandboxer-owned init validation.
+          ref: 998e5ed5573ab71fe9ed81ccddd562dc590eb0a3
+          path: trusted/precutover-runtime
+          persist-credentials: false
       - name: Restore selected source objects for material validation
         env:
           SOURCE_SHA: ${{ needs.preflight.outputs.source_sha }}
         run: |
           set -euo pipefail
-          python3 -B trusted/platform/release/producer-inputs.py restore workbench-selection/producer-inputs.tar runtime "$SOURCE_SHA" publisher-inputs --dependency accelerator "${{ needs.preflight.outputs.accelerator_version }}" "${{ needs.preflight.outputs.accelerator_sha }}" --dependency sandboxer "${{ needs.preflight.outputs.sandboxer_version }}" "${{ needs.preflight.outputs.sandboxer_sha }}"
+          dependencies=()
+          if [[ -n "$SANDBOXER_VERSION" ]]; then
+            dependencies+=(--dependency sandboxer "$SANDBOXER_VERSION" "${{ needs.preflight.outputs.sandboxer_sha }}")
+          fi
+          python3 -B trusted/platform/release/producer-inputs.py restore workbench-selection/producer-inputs.tar runtime "$SOURCE_SHA" publisher-inputs --dependency accelerator "${{ needs.preflight.outputs.accelerator_version }}" "${{ needs.preflight.outputs.accelerator_sha }}" "${dependencies[@]}"
           # Import only the already admitted run input into the trusted validator.
           git -c core.hooksPath=/dev/null fetch --no-tags ./publisher-inputs/guest-runtime HEAD
           git cat-file -e "$SOURCE_SHA^{commit}"

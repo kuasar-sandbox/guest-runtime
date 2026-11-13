@@ -63,7 +63,10 @@ def release_cli(command, tag, arch, *args):
     kind = os.environ.get('RELEASE_KIND')
     unit = tag.split('-v', 1)[0] if tag.startswith(('runtime-v','vmlinux-v')) else None
     require(kind is None or kind == unit, 'RELEASE_KIND differs from tag')
-    return ['bash', str(SCRIPT/'release.sh'), command, *([unit] if unit else []), tag, arch, *map(str,args)]
+    tooling = SCRIPT
+    if command == 'validate' and unit == 'runtime' and os.environ.get('SANDBOXER_VERSION'):
+        tooling = SCRIPT.parent / 'trusted/precutover-runtime/scripts'
+    return ['bash', str(tooling/'release.sh'), command, *([unit] if unit else []), tag, arch, *map(str,args)]
 
 
 def names(tag, arch):
@@ -218,8 +221,35 @@ def update_latest(repository, release, commit, source_ref):
     require(current.get('id') == release['id'] and current.get('tag_name') == release['tag_name'], 'Latest update did not converge')
 
 
+def runtime_module_tag(repository, tag):
+    # Go resolves this repository's root module through vX.Y.Z. Only a Stable
+    # Runtime built from the new producer exposes a root Go module tag.
+    # A sandboxer_version binding identifies the admitted historical producer.
+    match = STABLE.fullmatch(tag)
+    if (repository == 'kuasar-sandbox/guest-runtime' and match and match[1] == 'runtime'
+            and not os.environ.get('SANDBOXER_VERSION')):
+        return tag.removeprefix('runtime-')
+    return None
+
+
+def ensure_runtime_module_tag(repository, tag, commit):
+    module_tag = runtime_module_tag(repository, tag)
+    if module_tag is None:
+        return
+    target = tag_target(repository, module_tag)
+    require(target is None or target == commit, 'Go module tag already identifies a different commit')
+    if target is None:
+        api(f'repos/{repository}/git/refs', method='POST',
+            data={'ref': 'refs/tags/' + module_tag, 'sha': commit})
+    require(tag_target(repository, module_tag) == commit,
+            'Go module tag creation did not preserve selected commit')
+
+
 def publish(repository, tag, arch, commit, bundle, source_ref):
     unit = unit_for(repository,tag)
+    module_tag = runtime_module_tag(repository, tag)
+    if module_tag:
+        require(arch == 'all', 'Stable Runtime module publication requires both architectures')
     require(re.fullmatch('[0-9a-f]{40}',commit), 'commit must be a full lowercase SHA')
     require(source_ref == 'main' or re.fullmatch(r'release/v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.x',source_ref), 'invalid release source branch')
     notes = human_notes(bundle)
@@ -232,8 +262,12 @@ def publish(repository, tag, arch, commit, bundle, source_ref):
         if release['draft']: require(release.get('body') == notes, 'existing draft notes differ; reconcile them manually')
     target = tag_target(repository,tag)
     require(target is None or target == commit, 'tag already identifies a different commit')
+    if module_tag is not None:
+        require(tag_target(repository, module_tag) in (None, commit),
+                'Go module tag already identifies a different commit')
     if release is not None and not release['draft']:
         require(target == commit, 'published Release lacks its selected tag')
+        ensure_runtime_module_tag(repository, tag, commit)
         update_latest(repository,release,commit,source_ref)
         print('Verified already published',repository,tag)
         return
@@ -270,6 +304,9 @@ def publish(repository, tag, arch, commit, bundle, source_ref):
     release_identity(published,tag,public=True);remote_assets(published,expected,complete=True,identities=identities)
     require(published.get('body') == notes and local_assets(bundle,expected) == expected,
             'published notes or local validated bytes changed')
+    # A Go proxy can cache root tags permanently. Expose the module only after
+    # the public component release and its complete assets have been read back.
+    ensure_runtime_module_tag(repository, tag, commit)
     update_latest(repository,published,commit,source_ref)
     print('Published',repository,tag)
 
@@ -285,15 +322,34 @@ def assemble(tag,x86,arm,output):
     validate_bundle(tag,'all',output)
 
 
+def check_request(repository, tag, arch, commit=None):
+    unit_for(repository,tag);names(tag,arch)
+    module_tag=runtime_module_tag(repository,tag)
+    if module_tag:
+        require(arch == 'all', 'Stable Runtime module publication requires both architectures')
+    release=find_release(repository,tag)
+    if release is None or release.get('draft') is True:
+        return
+    # A public release is normally reused. The only resumable exception is a
+    # completed Runtime Stable whose module tag is still missing. This check
+    # is read-only; publish revalidates both local and public assets.
+    if commit is not None and module_tag:
+        release_identity(release,tag,public=True)
+        require(re.fullmatch('[0-9a-f]{40}',commit) and tag_target(repository,tag)==commit,
+                'published Runtime tag differs from the admitted source')
+        target=tag_target(repository,module_tag)
+        require(target in (None,commit),'Go module tag already identifies a different commit')
+        if target is None: return
+    raise ValueError('component Release already exists; reuse the specified published tag')
+
+
 def main(arguments):
     repository=os.environ.get('GH_REPO') or os.environ.get('GITHUB_REPOSITORY','')
     require(re.fullmatch(r'kuasar-sandbox/(?:accelerator|connector|sandboxer|orchestrator|guest-runtime)',repository), 'invalid component repository')
     if len(arguments)==5 and arguments[0]=='assemble':
         _,tag,x86,arm,output=arguments;unit_for(repository,tag);assemble(tag,Path(x86),Path(arm),Path(output))
-    elif len(arguments)==3 and arguments[0]=='check':
-        _,tag,arch=arguments;unit_for(repository,tag);names(tag,arch)
-        release=find_release(repository,tag)
-        require(release is None or release.get('draft') is True, 'component Release already exists; reuse the specified published tag')
+    elif len(arguments) in (3,4) and arguments[0]=='check':
+        check_request(repository,*arguments[1:])
     elif len(arguments)==6 and arguments[0]=='publish':
         _,tag,arch,commit,bundle,source_ref=arguments;publish(repository,tag,arch,commit,Path(bundle),source_ref)
     else: raise ValueError('usage: publish-release.sh <assemble|check|publish> ...')

@@ -41,7 +41,7 @@ class ReleaseWorkspaceTests(unittest.TestCase):
         self.env['PATH'] = str(Path(goroot)/'bin') + os.pathsep + os.defpath
         self.make = shutil.which('make', path=os.defpath)
         self.deps = ['accelerator'] + (['connector'] if OWNER != 'guest-runtime' else []) + (['sandboxer'] if OWNER == 'orchestrator' else [])
-        for name in set([OWNER, 'sandboxer', *self.deps]):
+        for name in set([OWNER, *self.deps]):
             p=self.root/name; p.mkdir()
             (p/'go.mod').write_text('module github.com/kuasar-sandbox/'+name+'\n\ngo 1.26.1\n')
             (p/'.gitignore').write_text('bin/\nbuild/\npackage.json\n')
@@ -56,15 +56,15 @@ class ReleaseWorkspaceTests(unittest.TestCase):
         variables = 'SHELL := /bin/bash\nBINDIR := bin/x86_64\nBUILD_DIR := build/x86_64\nTARGET_ARCH := x86_64\nSANDBOXER_DIR := ../sandboxer\nENVD := native-deps/bin/x86_64/envd\nVERSION := v0.1.99\nRUNTIME_VERSION := runtime-v0.1.99\n'
         requirement=original[original.index('go_requirement ='):].split('\nACCELERATOR_VERSION',1)[0]
         variables += 'GO := go\n'+recursive+'\n'+requirement+'\nACCELERATOR_VERSION ?= $(call go_requirement,accelerator)\n'
-        variables += ''.join(name.upper()+'_VERSION := v0.1.10\n' for name in set(self.deps+['sandboxer'])-{'accelerator'})
-        build = '\n.PHONY: release release-runtime build flatten-ctl sandbox-runtime\nbuild flatten-ctl:\n\t@mkdir -p "$(BINDIR)"\n\tgo build -o "$(BINDIR)/flatten-ctl" .\n'
+        variables += ''.join(name.upper()+'_VERSION := v0.1.10\n' for name in set(self.deps)-{'accelerator'})
+        build = '\n.PHONY: release release-runtime build flatten-ctl sandbox-init sandbox-runtime\nbuild flatten-ctl:\n\t@mkdir -p "$(BINDIR)"\n\tgo build -o "$(BINDIR)/flatten-ctl" .\n'
+        build += 'sandbox-init:\n\t@mkdir -p "$(BINDIR)"\n\tgo build -o "$(BINDIR)/sandbox-init" .\n'
         build += 'sandbox-runtime:\n\t@test "$(FLATTEN_CTL)" = "$(BINDIR)/flatten-ctl"\n\t@test "$$("$(FLATTEN_CTL)")" = selected-local\n\t@cp "$(FLATTEN_CTL)" "$(BINDIR)/sandbox-runtime.bundle"\n'
         # The release recipe is copied verbatim; only costly build/package boundaries are fixtures.
         (self.owner/'Makefile').write_text(variables+self.target+':\n'+recipe+'\n'+build)
         scripts=self.owner/'scripts'; scripts.mkdir()
         (scripts/'release.sh').write_text('python3 scripts/package.py\n')
         (scripts/'package.py').write_text('import json,os,subprocess\nfrom pathlib import Path\np=Path(os.environ["RELEASE_BIN_DIR"])/"flatten-ctl"\nassert subprocess.check_output([p],text=True)=="selected-local"\nPath("package.json").write_text(json.dumps(dict(os.environ)))\n')
-        (scripts/'prepare-sandbox-init.py').write_text('import argparse\nfrom pathlib import Path\np=argparse.ArgumentParser();p.add_argument("--output");p.add_argument("--go-toolchain-output");a,_=p.parse_known_args();f=Path(a.output);f.parent.mkdir(parents=True,exist_ok=True);f.write_text("selected-published-init");Path(a.go_toolchain_output).mkdir(exist_ok=True)\n')
         # A real file proxy serves the selected stable module. Isolate the cache
         # so an installed public release with the same name cannot hide a mistake.
         repositories = list(self.root.iterdir())
@@ -92,7 +92,7 @@ class ReleaseWorkspaceTests(unittest.TestCase):
 
     def tearDown(self):
         self.assertEqual({p:p.read_bytes() for p in self.before},self.before)
-        sources = {self.root / name for name in (OWNER, 'sandboxer', *self.deps)}
+        sources = {self.root / name for name in (OWNER, *self.deps)}
         self.assertEqual({file for repo in sources for file in (repo/'go.mod', repo/'go.sum') if file.exists()},
                          set(self.before))
 
@@ -122,7 +122,7 @@ class ReleaseWorkspaceTests(unittest.TestCase):
                 self.assertIn('dep\tgithub.com/kuasar-sandbox/accelerator\tv0.1.10\t', info)
                 if OWNER=='guest-runtime':
                     self.assertEqual((output/'flatten-ctl').read_bytes(),(output/'sandbox-runtime.bundle').read_bytes())
-                    self.assertEqual(Path(package['RELEASE_SANDBOX_INIT_BIN']).read_text(),'selected-published-init')
+                    self.assertEqual(subprocess.check_output([package['RELEASE_SANDBOX_INIT_BIN']],text=True),'selected-local')
                     self.assertEqual(package['RELEASE_ENVD_BIN'],str(self.owner/'native-deps/bin/x86_64/envd'))
 
     def test_preview_uses_exact_upstream_tag_without_fetching_its_future_core(self):

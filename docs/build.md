@@ -11,20 +11,19 @@ Unless a subsection specifies `native-deps/`, run commands from the `guest-runti
 | Mode | Accelerator | sandbox-init |
 | --- | --- | --- |
 | Standalone CLI development | Obtainable versions in `go.mod`. | Not needed to build only flatten-ctl. |
-| Coordinated source development | Selected guest-runtime + accelerator Go workspace. | Local sibling build may satisfy the normal assembly target. |
-| Runtime release reproduction | Clean checkout matching `ACCELERATOR_VERSION`; the release target generates the selected workspace. | Exact published `SANDBOXER_VERSION` binary, validated before assembly, with matching source notices. |
+| Coordinated source development | Selected guest-runtime + accelerator Go workspace. | Built from this repository with the selected workspace. |
+| Runtime release reproduction | Clean checkout matching `ACCELERATOR_VERSION`; the release target generates the selected workspace. | Rebuilt from the same selected guest-runtime commit as flatten-ctl. |
 
-A local fallback build is not evidence of byte identity with a published dependency. Do not substitute an old development binary when release dependency verification fails.
+Release targets rebuild both owned Go payloads; ordinary assembly may reuse explicitly selected development binaries.
 
 ## Source workspace
 
-The selected-source Go build uses a workspace with the sibling `accelerator` module. Standalone `go.mod` resolves a published version. The release workflow installs `sandbox-init` from the selected sandboxer release archive; local development may also build it from the sibling sandboxer checkout:
+The selected-source Go build uses a workspace with the sibling `accelerator` module. Standalone `go.mod` resolves a published version. Both release and development builds compile `sandbox-init` from this repository:
 
 ```text
 <workspace>/
 ├── guest-runtime/
-├── accelerator/
-└── sandboxer/
+└── accelerator/
 ```
 
 For coordinated development, use compatible `main` revisions from these sibling repositories. To reproduce a released composition, use the exact component tags selected by the corresponding [project aggregate release](https://github.com/kuasar-sandbox/kuasar-sandbox/releases) rather than independently choosing GitHub Latest tags. The complete six-repository workspace is documented in the [project README](https://github.com/kuasar-sandbox/kuasar-sandbox).
@@ -39,9 +38,8 @@ export GOWORK
 ```
 
 The workspace validates module paths without rewriting `go.mod`/`go.sum`. Runtime
-publication consumes `sandbox-init` from the specified sandboxer release binary;
-Sandboxer and Connector are not Runtime Go workspace members. Install that executable
-at `../sandboxer/bin/<arch>/sandbox-init` or set `SANDBOX_INIT` explicitly before assembly.
+publication builds `sandbox-init` from `cmd/sandbox-init`; Sandboxer and Connector are not
+Runtime Go workspace members. Its default output is `bin/<arch>/sandbox-init`.
 Envd and versitygw keep their independent Go module builds. The standalone Kernel
 target uses native inputs and does not join a Go workspace. `go-erofs` remains a
 versioned external dependency.
@@ -76,12 +74,12 @@ make build TARGET_ARCH=aarch64  # cross-build where documented dependencies supp
 
 `make sandbox-runtime` consumes:
 
-- `../sandboxer/bin/<arch>/sandbox-init`;
+- `bin/<arch>/sandbox-init`;
 - `native-deps/bin/<arch>/envd`;
 - `bin/<arch>/flatten-ctl`;
 - `BUILD_MKFS_EROFS` as the host image packer.
 
-Ordinary assembly reuses executable input binaries; it does not refresh existing `sandbox-init` or Envd after source or pin changes. `make build` rebuilds `flatten-ctl` first, while direct `make sandbox-runtime` reuses it if executable. Use the release-specific dependency selection described [below](#reproduce-release-dependencies-exactly) for release reproduction.
+Ordinary assembly reuses executable input binaries; it does not refresh existing `sandbox-init` or Envd after source or pin changes. `make build` rebuilds `sandbox-init` and `flatten-ctl` first, while direct `make sandbox-runtime` reuses it if executable. Use the release-specific dependency selection described [below](#reproduce-release-dependencies-exactly) for release reproduction.
 
 When `sandbox-init`, Envd or `flatten-ctl` is absent or not executable, the Makefile invokes its corresponding build target. Host `mkfs.erofs` must be installed on `PATH` or selected by `BUILD_MKFS_EROFS`; otherwise the Runtime build fails explicitly. The project no longer maintains erofs-utils patches or builds and distributes mkfs. Workbench and host environments may install distribution erofs-utils packages for build-time packing and independent validation.
 
@@ -111,7 +109,7 @@ A **host-executable `mkfs.erofs` must already be available** before `make sandbo
 The target's input and build sequence is:
 
 1. Resolve and check `BUILD_MKFS_EROFS`. Use the explicitly selected tool or the preinstalled executable on host PATH. A missing host tool fails before image assembly.
-2. If the selected `SANDBOX_INIT` (default `../sandboxer/bin/<arch>/sandbox-init`) is absent, delegate to `make -C ../sandboxer sandbox-init`.
+2. If the selected `SANDBOX_INIT` (default `bin/<arch>/sandbox-init`) is absent, build it with `make sandbox-init`.
 3. Resolve target `ENVD` (default `native-deps/bin/<arch>/envd`), building it when missing.
 4. Resolve this repository's target `FLATTEN_CTL` (default `bin/<arch>/flatten-ctl`), building it when missing.
 5. Verify the selected `flatten-ctl` build record links the external go-erofs module. A binary lacking that versioned, checksummed dependency fails explicitly; run `make flatten-ctl` or select a matching binary. Assemble the staging tree and use host `BUILD_MKFS_EROFS` to create temporary runtime EROFS.
@@ -119,7 +117,7 @@ The target's input and build sequence is:
 
 That final rename is not a rollback guarantee for the whole Make target: the Makefile removes the previous bundle before running mkfs. A later failure can leave no bundle. Build in an isolated checkout/output directory, validate the result, then deploy it under a new immutable path for future launches. Retain old artifacts still referenced by running VMs or snapshots; do not overwrite files in use.
 
-See [the native-build workflow](../native-deps/README.md) for host EROFS prerequisites and Envd builds and the [sandboxer guest ABI](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/guest-abi.md) for sandbox-init.
+See [the native-build workflow](../native-deps/README.md) for host EROFS prerequisites and Envd builds and the [Guest ABI](guest-abi.md) for sandbox-init.
 
 ### Architectures
 
@@ -195,9 +193,9 @@ and Envd binaries for material collection and image consistency checks. Keep sou
 together. Native pin changes require updating the recipe, input digests and license collection together; a path override is not permission to label different source
 bytes as the configured version.
 
-Runtime Go builds use a workspace containing exactly the selected guest-runtime and accelerator modules. `sandbox-init` comes from the selected published sandboxer binary; sandboxer is not a Runtime Go workspace member. `flatten-ctl` must identify the Linux `github.com/kuasar-sandbox/guest-runtime/cmd/flatten-ctl` main package and selected amd64 or arm64 target. The current producer checks its own clean Go VCS metadata. Normal binary build information and the versioned, checksummed external go-erofs dependency remain intact; no separate source records are packaged.
+Runtime Go builds use a workspace containing exactly the selected guest-runtime and accelerator modules. `sandbox-init` and `flatten-ctl` are both built from this module; sandboxer is not a Runtime Go workspace member. `flatten-ctl` must identify the Linux `github.com/kuasar-sandbox/guest-runtime/cmd/flatten-ctl` main package and selected amd64 or arm64 target. The current producer checks its own clean Go VCS metadata. Normal binary build information and the versioned, checksummed external go-erofs dependency remain intact; no separate source records are packaged.
 
-License collection resolves the Go compiler selection separately for guest-runtime, the selected sandbox-init binary and Envd. When these select different compiler versions,
+License collection resolves the Go compiler selection for the two guest-runtime binaries together and separately for Envd. When these select different compiler versions,
 each payload's actual version and the corresponding installed Go/bundled
 dependency notices are collected. The parent module's context does not replace
 a payload's own selection. Module materials use the effective replacements and
@@ -307,10 +305,9 @@ For **vmlinux**, the Makefile detects a kernel release containing `microsoft` to
 
 ## Reproduce release dependencies exactly
 
-`make release-runtime SANDBOXER_VERSION=<tag>` also fetches and verifies that exact sandboxer Release using the authenticated GitHub CLI. It assembles and packages the same installed binary and compiler notices under the build directory; a missing release or failed verification stops before assembly, even when an old development binary exists.
-The local sandboxer checkout must be at that exact tag for license inputs; missing or different tags fail before download.
+`make release-runtime` rebuilds `sandbox-init` and `flatten-ctl` from this selected source. The package contains `bin/sandbox-init`; the validator requires it to equal the embedded `/sbin/init` and identify `github.com/kuasar-sandbox/guest-runtime/cmd/sandbox-init`.
 
-`make release-runtime` also checks `ACCELERATOR_VERSION` against the clean sibling accelerator checkout and generates the two-module workspace before compilation. It rebuilds `flatten-ctl` and uses that same output for assembly and packaging, regardless of an inherited `GOWORK=off` or old `FLATTEN_CTL`. Set `KUASAR_PLATFORM_DIR` if the project checkout is not at `../kuasar-sandbox`. Conflicting source directories or missing tags/modules fail before the build.
+`make release-runtime` also checks `ACCELERATOR_VERSION` against the clean sibling accelerator checkout and generates the two-module workspace before compilation. It rebuilds both Go binaries and uses those same outputs for assembly and packaging, regardless of an inherited `GOWORK=off` or old `FLATTEN_CTL`/`SANDBOX_INIT`. Set `KUASAR_PLATFORM_DIR` if the project checkout is not at `../kuasar-sandbox`. Conflicting source directories or missing tags/modules fail before the build.
 
 ## Kernel source and licensing
 
@@ -330,4 +327,4 @@ See the [project release documentation](https://github.com/kuasar-sandbox/kuasar
 
 ## Selected sandbox-init and helper provenance
 
-Runtime publication embeds `sandbox-init` from the selected sandboxer Release. It fixes the selected native asset ID from the tag’s complete Release package set and checks GitHub size/digest before installing the binary. Historical body markers, checksum attachments and source sidecars are ignored. Only the selected target architecture is downloaded. Archive paths, types, ownership, permissions and ELF architecture are checked; Go notices are copied using the compiler version read from the actual binary. Rebuilding the same commit can change Go build metadata or workspace-derived defaults, so a source rebuild does not establish byte identity with the published dependency.
+Runtime publication builds both owned Go executables from its admitted source and verifies their current clean commit, main package and target architecture. It packages `bin/sandbox-init` and verifies byte identity with `/sbin/init` in the Runtime image. After verifying the complete public Stable `runtime-vX.Y.Z` release, the publisher creates root module tag `vX.Y.Z` at the same commit; it rejects conflicts and safely resumes an interrupted publication. Preview and Kernel releases do not create root module tags.

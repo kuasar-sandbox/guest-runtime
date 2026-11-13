@@ -1,14 +1,14 @@
 # guest-runtime — guest runtime image and native dependency builder.
 #
 # This repo builds guest runtime artifacts:
+#   sandbox-init              guest PID 1
 #   flatten-ctl               OCI/dir -> deterministic EROFS builder
 #   sandbox-runtime.bundle    virtio-pmem/DAX guest runtime image
 #   native-deps/bin/*         vmlinux, envd
 #
-# The sandbox-init binary is produced by the sibling sandboxer repo. This
-# Makefile consumes ../sandboxer/bin/$(TARGET_ARCH)/sandbox-init and injects the
-# guest payload needed by e2b/build flows into one runtime image. flatten-ctl is
-# a CLI in this repo; its reusable implementation packages live in accelerator.
+# sandbox-init and flatten-ctl are built from this module. Their selected
+# target binaries and envd are packed into one runtime image. The reusable
+# image-flattening implementation packages live in accelerator.
 
 SHELL := /bin/bash
 
@@ -42,8 +42,7 @@ BUILD_DIR := build/$(TARGET_ARCH)
 GO        := go
 GO_BUILD_FLAGS := -trimpath
 
-SANDBOXER_DIR ?= ../sandboxer
-SANDBOX_INIT  ?= $(SANDBOXER_DIR)/$(BINDIR)/sandbox-init
+SANDBOX_INIT  ?= $(BINDIR)/sandbox-init
 ENVD          ?= native-deps/bin/$(TARGET_ARCH)/envd
 FLATTEN_CTL   ?= $(BINDIR)/flatten-ctl
 STORE_CTL     ?= ../accelerator/$(BINDIR)/store-ctl
@@ -64,9 +63,9 @@ endef
 # ---------------------------------------------------------------------------
 all: build
 
-# Finish the requested CLI rebuild before inspecting or staging its output.
-# A direct sandbox-runtime invocation still accepts a prebuilt FLATTEN_CTL.
-build: flatten-ctl
+# Finish both requested Go rebuilds before inspecting or staging their output.
+# A direct sandbox-runtime invocation accepts prebuilt SANDBOX_INIT/FLATTEN_CTL.
+build: sandbox-init flatten-ctl
 	$(MAKE) sandbox-runtime
 
 flatten-ctl:
@@ -78,7 +77,9 @@ native-deps:
 	$(MAKE) -C native-deps build
 
 sandbox-init:
-	$(MAKE) -C $(SANDBOXER_DIR) sandbox-init
+	@mkdir -p "$(BINDIR)"
+	GOOS=linux GOARCH=$(GO_ARCH) CGO_ENABLED=0 $(GO) build $(GO_BUILD_FLAGS) -ldflags '-s -w' -o "$(BINDIR)/sandbox-init" ./cmd/sandbox-init
+	$(call link_bin,sandbox-init)
 
 envd:
 	$(MAKE) -C native-deps envd BINDIR="bin/$(TARGET_ARCH)"
@@ -151,10 +152,9 @@ KUASAR_PLATFORM_DIR ?= ../kuasar-sandbox
 go_requirement = $$(GOWORK=off $(GO) mod edit -json | \
 	jq -er --arg path "github.com/kuasar-sandbox/$(1)" '.Require[] | select(.Path == $$path) | .Version')
 ACCELERATOR_VERSION ?= $(call go_requirement,accelerator)
-SANDBOXER_VERSION ?= v0.1.15
 
-# Release assembly must consume a verified selected archive, never a leftover
-# development binary. The generic sandbox-runtime target remains a dev entry.
+# Release assembly rebuilds both Go payloads from the selected source, never
+# reusing leftover development binaries. The generic sandbox-runtime target remains a dev entry.
 # Mixed release recipes run sub-makes with the jobserver on real builds. GNU
 # Make executes recipes that directly reference $(MAKE) even under --dry-run.
 release_make = $(MAKE)
@@ -164,30 +164,18 @@ release-runtime:
 	$(release_recursive)@set -e; accelerator_tag="$(ACCELERATOR_VERSION)"; \
 	workspace="$$(python3 -B "$(KUASAR_PLATFORM_DIR)/ci/integration/go_workspace.py" \
 		--root .. --owners guest-runtime --version "$(RUNTIME_VERSION)" --dependency-tag "accelerator=$$accelerator_tag")"; \
-	head="$$(git -C "$(SANDBOXER_DIR)" rev-parse HEAD)" \
-	  && tagged="$$(git -C "$(SANDBOXER_DIR)" rev-parse --verify "refs/tags/$(SANDBOXER_VERSION)^{commit}")" \
-	  && [ "$$head" = "$$tagged" ] \
-	  || { echo "release-runtime: check out the selected sandboxer tag $(SANDBOXER_VERSION) for license inputs" >&2; exit 1; }; \
-	python3 -B scripts/prepare-sandbox-init.py --fetch \
-		--version "$(SANDBOXER_VERSION)" --arch "$(TARGET_ARCH)" \
-		--source-sha "$$(git -C "$(SANDBOXER_DIR)" rev-parse HEAD)" \
-		--output "$(abspath $(BUILD_DIR))/release-inputs/sandbox-init" \
-		--go-toolchain-output "$(abspath $(BUILD_DIR))/release-inputs/sandboxer-go"; \
-	$(release_make) flatten-ctl GOWORK="$$workspace" BINDIR="$(abspath $(BINDIR))"; \
+	$(release_make) sandbox-init flatten-ctl GOWORK="$$workspace" BINDIR="$(abspath $(BINDIR))"; \
 	$(release_make) sandbox-runtime GOWORK="$$workspace" BINDIR="$(abspath $(BINDIR))" \
 		FLATTEN_CTL="$(abspath $(BINDIR))/flatten-ctl" \
-		SANDBOX_INIT="$(abspath $(BUILD_DIR))/release-inputs/sandbox-init"; \
+		SANDBOX_INIT="$(abspath $(BINDIR))/sandbox-init"; \
 	rm -rf "$(BUILD_DIR)/release-runtime-bundle"; \
 	GOWORK="$$workspace" RELEASE_BIN_DIR="$(abspath $(BINDIR))" \
 	RELEASE_SOURCE_ROOT="$(CURDIR)" \
 	RELEASE_ACCELERATOR_SOURCE_DIR="$(abspath ../accelerator)" \
 	SOURCE_DATE_EPOCH="$$(git show -s --format=%ct HEAD)" \
 	RELEASE_ACCELERATOR_VERSION="$$accelerator_tag" \
-	RELEASE_SANDBOXER_VERSION="$(SANDBOXER_VERSION)" \
-	RELEASE_SANDBOXER_SOURCE_DIR="$$(cd "$(SANDBOXER_DIR)" && pwd)" \
 	RELEASE_ENVD_BIN="$(abspath $(ENVD))" \
-	RELEASE_SANDBOX_INIT_BIN="$(abspath $(BUILD_DIR))/release-inputs/sandbox-init" \
-	RELEASE_MATERIALS_GO_NOTICE_ROOT="$(abspath $(BUILD_DIR))/release-inputs/sandboxer-go" \
+	RELEASE_SANDBOX_INIT_BIN="$(abspath $(BINDIR))/sandbox-init" \
 		bash scripts/release.sh package runtime "$(RUNTIME_VERSION)" "$(TARGET_ARCH)" \
 		$(BUILD_DIR)/release-runtime-bundle
 
@@ -207,10 +195,10 @@ clean:
 
 help:
 	@echo "guest-runtime. Targets:"
-	@echo "  build              build flatten-ctl + sandbox-runtime.bundle"
+	@echo "  build              build sandbox-init + flatten-ctl + sandbox-runtime.bundle"
 	@echo "  flatten-ctl        OCI/dir -> deterministic EROFS builder"
-	@echo "  sandbox-runtime    pack sandboxer sandbox-init into guest erofs"
-	@echo "  sandbox-init       delegate to ../sandboxer sandbox-init"
+	@echo "  sandbox-runtime    pack guest payloads into guest erofs"
+	@echo "  sandbox-init       build the guest PID 1 binary"
 	@echo "  envd               build e2b guest agent"
 	@echo "  vmlinux            build the guest kernel"
 	@echo "  native-deps        build vmlinux / envd"

@@ -23,14 +23,14 @@ class ArchiveLayout(unittest.TestCase):
                        ("./share/licenses/" + kind + "/project/", True),
                        ("./share/licenses/" + kind + "/project/LICENSE", False)]
             entries += [("./bin/" + name, False) for name in (
-                ("sandbox-runtime.bundle", "flatten-ctl") if kind == "runtime" else ("vmlinux",))]
+                ("sandbox-runtime.bundle", "sandbox-init", "flatten-ctl") if kind == "runtime" else ("vmlinux",))]
             if extra is not None:
                 entries.append(extra)
             with tarfile.open(archive, "w:gz", format=tarfile.GNU_FORMAT) as output:
                 for name, is_directory in entries:
                     item = tarfile.TarInfo(name)
                     item.type = tarfile.DIRTYPE if is_directory else tarfile.REGTYPE
-                    item.mode = 0o755 if is_directory or name in ("./bin/flatten-ctl", "./bin/mkfs.erofs") else 0o644
+                    item.mode = 0o755 if is_directory or name in ("./bin/sandbox-init", "./bin/flatten-ctl", "./bin/mkfs.erofs") else 0o644
                     item.size = 0 if is_directory else 8
                     output.addfile(item, None if is_directory else io.BytesIO(b"fixture\n"))
             script = 'set -euo pipefail\nWORK=$1\nROOT=$4\nfail() { echo "$*" >&2; exit 1; }\n'
@@ -60,7 +60,7 @@ class ArchiveLayout(unittest.TestCase):
 
     def test_runtime_and_kernel_payloads_are_not_interchangeable(self):
         for kind, name in (("runtime", "./bin/mkfs.erofs"), ("runtime", "./bin/vmlinux"), ("runtime", "./bin/other"),
-                           ("vmlinux", "./bin/sandbox-runtime.bundle"), ("vmlinux", "./bin/flatten-ctl")):
+                           ("vmlinux", "./bin/sandbox-init"), ("vmlinux", "./bin/sandbox-runtime.bundle"), ("vmlinux", "./bin/flatten-ctl")):
             result = self.validate(kind, (name, False))
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("outside the exact", result.stderr)

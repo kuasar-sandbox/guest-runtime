@@ -23,11 +23,15 @@ class PublisherTests(unittest.TestCase):
         self.root=Path(self.temporary.name);(self.root/'assets').mkdir()
         (self.root/'assets/package.tar.gz').write_bytes(b'validated bytes')
         (self.root/'release-notes.md').write_text('Human release notes.\n')
-        self.repo='kuasar-sandbox/accelerator';self.tag='v1.2.3';self.target=None
+        self.repo='kuasar-sandbox/accelerator';self.tag='v1.2.3';self.target=None;self.module_target=None
         self.release=None;self.other=[];self.latest=None;self.calls=[];self.uploads=[];self.fail_upload=False
         self.publish_failure=False;self.latest_failure=False;self.now='2026-11-04T01:00:00Z'
-        def names(*args):return ['package.tar.gz']
-        def validation(*args,**kwargs):return subject.local_assets(self.root,names())
+        def names(tag, arch):
+            if arch == 'all':
+                return ['package-x86_64.tar.gz', 'package-aarch64.tar.gz']
+            return ['package.tar.gz']
+        def validation(tag, arch, *args, **kwargs):
+            return subject.local_assets(self.root, names(tag, arch))
         self.patchers={}
         for name,options in [('names',dict(side_effect=names)),('validate_bundle',dict(side_effect=validation)),
           ('api',dict(side_effect=self.api)),('releases',dict(side_effect=lambda repo:copy.deepcopy(self.other+([self.release] if self.release else [])))),
@@ -38,9 +42,17 @@ class PublisherTests(unittest.TestCase):
         self.calls.append((method,endpoint,copy.deepcopy(data)))
         if endpoint.endswith('/git/ref/heads/main'):return {'object':{'type':'commit','sha':self.target or SHA}}
         if '/compare/' in endpoint:return {'status':'identical'}
-        if '/git/ref/tags/' in endpoint:return {'object':{'type':'commit','sha':self.target}} if self.target else None
+        if '/git/ref/tags/' in endpoint:
+            target = self.target if endpoint.endswith('/'+self.tag) else self.module_target
+            return {'object':{'type':'commit','sha':target}} if target else None
         if endpoint.endswith('/git/refs'):
-            self.assertEqual(method,'POST');self.assertIsNone(self.target);self.target=data['sha'];return {}
+            self.assertEqual(method,'POST')
+            if data['ref'] == 'refs/tags/'+self.tag:
+                self.assertIsNone(self.target);self.target=data['sha']
+            else:
+                self.assertEqual(data['ref'],'refs/tags/'+self.tag.removeprefix('runtime-'))
+                self.assertIsNone(self.module_target);self.module_target=data['sha']
+            return {}
         if endpoint.endswith('/releases/latest'):
             return copy.deepcopy(self.latest)
         if endpoint.endswith('/releases'):
@@ -68,7 +80,14 @@ class PublisherTests(unittest.TestCase):
         return subprocess.CompletedProcess(args,0,'','')
 
     def publish(self,source='main'):
-        return subject.publish(self.repo,self.tag,'x86_64',SHA,self.root,source)
+        arch = 'x86_64'
+        if self.repo == 'kuasar-sandbox/guest-runtime' and self.tag == 'runtime-v1.2.3':
+            arch = 'all'
+            single = self.root/'assets/package.tar.gz'
+            if single.exists():
+                single.rename(self.root/'assets/package-x86_64.tar.gz')
+                (self.root/'assets/package-aarch64.tar.gz').write_bytes(b'arm64 archive')
+        return subject.publish(self.repo,self.tag,arch,SHA,self.root,source)
 
     def test_new_main_stable_verifies_upload_then_updates_latest(self):
         self.publish()
@@ -155,6 +174,98 @@ class PublisherTests(unittest.TestCase):
         self.other=[dict(id=88,tag_name='v9223372036854775808.0.0',draft=False,prerelease=False)]
         self.publish();self.assertIsNone(self.latest)
         self.assertFalse(any(data=={'make_latest':'true'} for _,_,data in self.calls))
+
+    def test_old_runtime_never_binds_a_root_module_tag(self):
+        self.repo = 'kuasar-sandbox/guest-runtime'
+        self.tag = 'runtime-v1.2.3'
+        with patch.dict(os.environ, SANDBOXER_VERSION='v1.2.3'):
+            self.publish('release/v1.2.x')
+            self.assertIsNone(self.module_target)
+            self.assertTrue(self.release and not self.release['draft'])
+            with self.assertRaisesRegex(ValueError, 'already exists'):
+                subject.check_request(self.repo, self.tag, 'all', SHA)
+            self.assertEqual(subject.release_cli('validate', self.tag, 'x86_64')[1],
+                             str(subject.SCRIPT.parent / 'trusted/precutover-runtime/scripts/release.sh'))
+
+    def test_single_arch_modern_runtime_refused_before_any_writes(self):
+        self.repo='kuasar-sandbox/guest-runtime'; self.tag='runtime-v1.2.3'
+        for arch in ('aarch64', 'x86_64'):
+            with self.subTest(arch=arch):
+                with self.assertRaisesRegex(ValueError, 'both architectures'):
+                    subject.check_request(self.repo, self.tag, arch, SHA)
+                with self.assertRaisesRegex(ValueError, 'both architectures'):
+                    subject.publish(self.repo, self.tag, arch, SHA, self.root, 'main')
+        self.assertEqual(self.calls, [])
+
+    def test_public_release_missing_arm_archive_cannot_bind_root_tag(self):
+        self.repo='kuasar-sandbox/guest-runtime'; self.tag='runtime-v1.2.3'
+        self.publish()
+        self.module_target = None
+        self.release['assets'] = [a for a in self.release['assets'] if 'aarch64' not in a['name']]
+        self.calls.clear()
+        with self.assertRaises(ValueError):
+            self.publish()
+        self.assertIsNone(self.module_target)
+        self.assertTrue(all(method == 'GET' for method, _, _ in self.calls))
+
+    def test_runtime_stable_publishes_root_module_tag_at_the_same_commit(self):
+        self.repo='kuasar-sandbox/guest-runtime';self.tag='runtime-v1.2.3'
+        self.publish()
+        self.assertEqual(self.target,SHA);self.assertEqual(self.module_target,SHA)
+        refs=[data['ref'] for method,url,data in self.calls if method=='POST' and url.endswith('/git/refs')]
+        self.assertEqual(refs,['refs/tags/runtime-v1.2.3','refs/tags/v1.2.3'])
+        self.calls.clear();self.publish()
+        self.assertFalse(any(method=='POST' for method,_,_ in self.calls))
+
+    def test_runtime_draft_upload_failure_does_not_expose_module_version(self):
+        self.repo='kuasar-sandbox/guest-runtime'; self.tag='runtime-v1.2.3'
+        self.fail_upload=True
+        with self.assertRaisesRegex(ValueError,'interrupted'): self.publish()
+        self.assertTrue(self.release['draft']); self.assertIsNone(self.module_target)
+        self.fail_upload=False
+        self.publish()
+        self.assertFalse(self.release['draft']); self.assertEqual(self.module_target,SHA)
+
+    def test_runtime_lost_publication_response_recovers_without_reuploading(self):
+        self.repo='kuasar-sandbox/guest-runtime'; self.tag='runtime-v1.2.3'
+        self.publish_failure=True
+        with self.assertRaisesRegex(ValueError,'undraft'): self.publish()
+        self.assertFalse(self.release['draft']); self.assertIsNone(self.module_target)
+        self.publish_failure=False
+        self.publish()
+        self.assertEqual(self.module_target,SHA); self.assertEqual(len(self.uploads),2)
+
+    def test_runtime_module_tag_conflict_precedes_any_mutation(self):
+        self.repo='kuasar-sandbox/guest-runtime';self.tag='runtime-v1.2.3';self.module_target='b'*40
+        with self.assertRaisesRegex(ValueError,'module tag'):self.publish()
+        self.assertFalse(any(method!='GET' for method,_,_ in self.calls))
+
+    def test_runtime_published_retry_repairs_missing_module_tag(self):
+        self.repo='kuasar-sandbox/guest-runtime';self.tag='runtime-v1.2.3'
+        self.publish();self.module_target=None;self.calls.clear()
+        self.publish()
+        self.assertEqual(self.module_target,SHA)
+        self.assertEqual(len(self.uploads),2)
+
+    def test_check_only_admits_recovery_of_a_missing_module_for_the_same_public_release(self):
+        self.repo='kuasar-sandbox/guest-runtime'; self.tag='runtime-v1.2.3'
+        self.publish(); self.module_target=None; self.calls.clear()
+        subject.check_request(self.repo,self.tag,'all',SHA)
+        for arch,commit,reason in (('all','b'*40,'admitted source'),
+                                   ('all',None,'already exists'),('x86_64',SHA,'both architectures')):
+            with self.subTest(arch=arch,commit=commit), self.assertRaisesRegex(ValueError,reason):
+                subject.check_request(self.repo,self.tag,arch,commit)
+        self.module_target='b'*40
+        with self.assertRaisesRegex(ValueError,'module tag'): subject.check_request(self.repo,self.tag,'all',SHA)
+        self.module_target=SHA
+        with self.assertRaisesRegex(ValueError,'already exists'): subject.check_request(self.repo,self.tag,'all',SHA)
+        self.assertTrue(all(method=='GET' for method,_,_ in self.calls))
+
+    def test_preview_and_kernel_do_not_publish_root_module_tags(self):
+        self.repo='kuasar-sandbox/guest-runtime';self.tag='runtime-v1.2.3-preview.20261112'
+        self.publish();self.assertIsNone(self.module_target)
+        self.release=None;self.target=None;self.tag='vmlinux-v1.2.3'
+        self.publish();self.assertIsNone(self.module_target)
 
     def test_guest_runtime_units_do_not_compare_semver_across_lines(self):
         self.repo='kuasar-sandbox/guest-runtime';self.tag='runtime-v1.2.3'
@@ -270,13 +381,18 @@ class WorkflowTests(unittest.TestCase):
             self.assertNotIn('RELEASE_DEPENDENCIES:',job)
             build=text.split('\n  build:\n',1)[1].split('\n  publish:\n',1)[0]
             self.assertNotIn('bash scripts/release.sh',build)
-            self.assertIn('ref: ${{ github.workflow_sha }}\n          path: trusted/'+root.name,build)
-            self.assertIn('git -C trusted/',build)
+            self.assertIn('ref: ${{ github.workflow_sha }}\n          path: trusted/guest-runtime',build)
+            if path.name == 'release-runtime.yml':
+                self.assertIn('tooling=trusted/guest-runtime', build)
+                self.assertIn('if [[ -n "$SANDBOXER_VERSION" ]]; then tooling=trusted/precutover-runtime; fi', build)
+                self.assertIn('git -C "$tooling" archive --format=tar HEAD scripts', build)
+            else:
+                self.assertIn('git -C trusted/guest-runtime archive --format=tar HEAD scripts', build)
             self.assertIn('archive --format=tar HEAD scripts',build)
             self.assertIn('RELEASE_SOURCE_ROOT="$PWD" bash /inputs/release/.ci/component-packaging/scripts/release.sh package',build)
             self.assertIn('RELEASE_SOURCE_ROOT="$PWD" bash /inputs/release/.ci/component-packaging/scripts/release.sh validate',build)
 
-        self.assertEqual(publications,2 if root.name=='guest-runtime' else 1)
+        self.assertEqual(publications, 2)
 
 
 class TagTests(unittest.TestCase):

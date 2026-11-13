@@ -6,6 +6,8 @@ README.md
 README_zh.md
 docs/using-guest-runtime.md
 docs/using-guest-runtime_zh.md
+docs/guest-abi.md
+docs/guest-abi_zh.md
 docs/runtime-bundle.md
 docs/runtime-bundle_zh.md
 docs/vmlinux.md
