@@ -596,7 +596,8 @@ type supervisorState struct {
 	spec       *proto.LaunchSpec // app launch spec (incl. Restart) for re-fork on restart
 	appBackoff backoff           // app restart backoff (shared scheme, supervise.go)
 	shutdown   atomic.Bool       // set on SIGTERM/SIGINT; gates app restart re-fork
-	quiescing  atomic.Bool       // set across a snapshot quiesce; gates app restart re-fork
+	quiescing  atomic.Bool       // closes restart admission across snapshot quiesce
+	restartMu  sync.Mutex        // held from restart admission through fork registration and setup
 	stopSignal syscall.Signal    // signal forwarded to app on host SIGTERM/SIGINT; 0 → SIGTERM
 	stopGrace  time.Duration     // grace before SIGKILL; 0 → gracefulShutdown default
 	execReg    *execRegistry     // exec-session child reaping + quiesce gating
@@ -617,25 +618,22 @@ func phase3Supervise(s *supervisorState, b *consoleBridge, sigCh chan os.Signal)
 		switch sig {
 		case syscall.SIGCHLD:
 			for {
-				var status syscall.WaitStatus
-				pid, err := syscall.Wait4(-1, &status, syscall.WNOHANG, nil)
+				pid, status, wasExec, err := s.execReg.reapChild()
 				if err != nil || pid <= 0 {
 					break
 				}
 				logf("reaped pid=%d exit=%d signal=%v", pid, status.ExitStatus(), status.Signal())
+				if wasExec {
+					continue
+				}
 				if int64(pid) == s.appPid.Load() {
 					if handleAppExit(status, s, b) {
 						return // rebooting (doReboot does not return; this is a backstop)
 					}
 					continue // restarting in place — keep reaping
 				}
-				// A companion plugin? Route to its supervisor (backoff restart).
-				if s.pluginReg.onExit(pid, status) {
-					continue
-				}
-				// Otherwise an exec-session child (deliver to its goroutine) or
-				// a shared-PID app orphan (no session → silently reaped).
-				s.execReg.deliver(pid, status)
+				// Route plugin exits; other shared-PID descendants have no waiter.
+				s.pluginReg.onExit(pid, status)
 			}
 		case syscall.SIGTERM, syscall.SIGINT:
 			s.shutdown.Store(true) // stop any in-flight app restart from re-forking
@@ -693,38 +691,11 @@ func handleAppExit(status syscall.WaitStatus, s *supervisorState, b *consoleBrid
 // so it never forks an app the freeze missed.
 func restartApp(s *supervisorState, b *consoleBridge, delay time.Duration) {
 	time.Sleep(delay)
-	for {
-		if s.shutdown.Load() {
-			return
-		}
-		if !s.quiescing.Load() {
-			break
-		}
-		time.Sleep(50 * time.Millisecond) // wait out the snapshot window
-	}
-	cs, err := b.rewireApp(s.spec.Stdio)
+	pid, err := s.launchRestart(b)
 	if err != nil {
 		if s.shutdown.Load() || errors.Is(err, errAppBridgeClosed) {
 			return
 		}
-		logf("restart: re-wire stdio: %v (rebooting)", err)
-		notifyAppExited(1, 0)
-		doReboot()
-		return
-	}
-	if s.shutdown.Load() {
-		closeChildStdio(cs)
-		return
-	}
-	s.appBackoff.onStart(time.Now())
-	pid, err := phase2ForkApp(s.spec, cs, false, func(pid int) error {
-		// Register the new primary before the helper leaves its initial start
-		// gate, so even a namespace/setup failure is classified by the sole
-		// SIGCHLD reaper as this app attempt.
-		s.appPid.Store(int64(pid))
-		return nil
-	})
-	if err != nil {
 		if pid > 0 {
 			logf("restart: app setup failed pid=%d: %v (reaper will apply restart policy)", pid, err)
 			return
@@ -738,6 +709,49 @@ func restartApp(s *supervisorState, b *consoleBridge, delay time.Duration) {
 	if err := notifyAppStarted(pid); err != nil {
 		logf("restart: app_started notify failed (continuing): %v", err)
 	}
+}
+
+// closeRestartAdmission waits for any restart admitted before quiesce to finish
+// its child handshake. The cgroup must remain thawed until this returns.
+func (s *supervisorState) closeRestartAdmission() {
+	s.quiescing.Store(true)
+	s.restartMu.Lock()
+	s.restartMu.Unlock()
+}
+
+func (s *supervisorState) admitRestart() bool {
+	for !s.shutdown.Load() {
+		s.restartMu.Lock()
+		if !s.quiescing.Load() {
+			return true // caller holds restartMu through child launch
+		}
+		s.restartMu.Unlock()
+		time.Sleep(50 * time.Millisecond)
+	}
+	return false
+}
+
+func (s *supervisorState) launchRestart(b *consoleBridge) (int, error) {
+	if !s.admitRestart() {
+		return 0, errAppBridgeClosed
+	}
+	defer s.restartMu.Unlock()
+	cs, err := b.rewireApp(s.spec.Stdio)
+	if err != nil {
+		return 0, fmt.Errorf("re-wire stdio: %w", err)
+	}
+	if s.shutdown.Load() {
+		closeChildStdio(cs)
+		return 0, errAppBridgeClosed
+	}
+	s.appBackoff.onStart(time.Now())
+	return phase2ForkApp(s.spec, cs, false, func(pid int) error {
+		// Register the new primary before the helper leaves its initial start
+		// gate, so even a namespace/setup failure is classified by the sole
+		// SIGCHLD reaper as this app attempt.
+		s.appPid.Store(int64(pid))
+		return nil
+	})
 }
 
 func waitOrTimeout(pid int, timeout time.Duration) {

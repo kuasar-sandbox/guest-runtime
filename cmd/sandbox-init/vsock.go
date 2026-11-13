@@ -499,7 +499,7 @@ func handleReverseConnShutdown(c *vsockConn, sup *supervisorState, bridge *conso
 		// freeze window. Running plugins stay frozen with the app cgroup; the
 		// app's own restart goroutine waits this out (restartApp). Cleared at
 		// endQuiesce (restore/attach).
-		sup.quiescing.Store(true)
+		sup.closeRestartAdmission()
 		sup.pluginReg.beginQuiesce()
 		// Reject new exec, terminate every in-flight child, and join the full
 		// fork/MUX/socket session before freezing. Capturing only after child

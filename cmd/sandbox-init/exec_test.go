@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"os/exec"
 	"testing"
 	"time"
 )
@@ -42,17 +43,16 @@ func TestExecRegistryQuiesceIncludesLiveChild(t *testing.T) {
 	if !reg.beginSession(conn) {
 		t.Fatal("session rejected before quiesce")
 	}
-	wait, allowed := reg.register(42)
-	if !allowed {
-		t.Fatal("child rejected before quiesce")
+	cmd := exec.Command("sleep", "30")
+	if _, err := reg.startChild(cmd); err != nil {
+		t.Fatal(err)
 	}
-	_ = wait
+	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
 
 	pids, _, _ := reg.beginQuiesce()
-	if len(pids) != 1 || pids[0] != 42 {
-		t.Fatalf("quiesce pids = %v, want [42]", pids)
+	if len(pids) != 1 || pids[0] != cmd.Process.Pid {
+		t.Fatalf("quiesce pids = %v, want [%d]", pids, cmd.Process.Pid)
 	}
-	reg.done(42)
 	reg.endSession(conn)
 }
 

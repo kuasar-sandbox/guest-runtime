@@ -41,19 +41,11 @@ import (
 
 // execRegistry brokers child reaping between the single process-wide
 // SIGCHLD reaper (phase3Supervise) and the per-session exec goroutines.
-// The reaper owns Wait4(-1); it routes each non-app child's WaitStatus
-// to the registered session waiter (or stashes it if the session has
-// not registered the pid yet — the Start→register window is tiny but
-// the child can exit inside it).
-//
-// In this sandbox model sandbox-init's only direct children are the
-// user app and exec children (each CLONE_NEWPID, so a direct child of
-// init), so any non-app reaped pid is an exec child.
+// Start/registration and Wait4/dispatch share mu. A PID cannot be reused
+// between reaping and dispatch, and unknown adopted children are discarded.
 type execRegistry struct {
 	mu        sync.Mutex
 	waiters   map[int]chan syscall.WaitStatus
-	pending   map[int]syscall.WaitStatus
-	live      map[int]struct{}
 	sessions  map[*vsockConn]struct{}
 	drained   chan struct{}
 	quiescing bool
@@ -62,8 +54,6 @@ type execRegistry struct {
 func newExecRegistry() *execRegistry {
 	return &execRegistry{
 		waiters:  make(map[int]chan syscall.WaitStatus),
-		pending:  make(map[int]syscall.WaitStatus),
-		live:     make(map[int]struct{}),
 		sessions: make(map[*vsockConn]struct{}),
 	}
 }
@@ -92,46 +82,33 @@ func (r *execRegistry) endSession(c *vsockConn) {
 	r.mu.Unlock()
 }
 
-// register records a freshly-started exec child and returns the channel
-// the reaper will deliver its WaitStatus on. If the child was already
-// reaped (lost the Start→register race) the status is delivered at once.
-func (r *execRegistry) register(pid int) (<-chan syscall.WaitStatus, bool) {
-	ch := make(chan syscall.WaitStatus, 1)
+// startChild registers the waiter before the reaper can observe the child's
+// exit, including early exits before the helper reaches its first sync gate.
+func (r *execRegistry) startChild(cmd *exec.Cmd) (<-chan syscall.WaitStatus, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if st, ok := r.pending[pid]; ok {
-		delete(r.pending, pid)
-		ch <- st
-		return ch, !r.quiescing
+	if r.quiescing {
+		return nil, errors.New("exec: sandbox quiescing (snapshot in progress)")
 	}
-	r.waiters[pid] = ch
-	r.live[pid] = struct{}{}
-	return ch, !r.quiescing
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+	ch := make(chan syscall.WaitStatus, 1)
+	r.waiters[cmd.Process.Pid] = ch
+	return ch, nil
 }
 
-// deliver routes a reaped non-app pid's status to its session. Returns
-// true (always, in this model — see type doc) so the reaper treats it
-// as handled and does not reboot.
-func (r *execRegistry) deliver(pid int, st syscall.WaitStatus) bool {
+func (r *execRegistry) reapChild() (int, syscall.WaitStatus, bool, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	delete(r.live, pid)
-	if ch, ok := r.waiters[pid]; ok {
+	var st syscall.WaitStatus
+	pid, err := syscall.Wait4(-1, &st, syscall.WNOHANG, nil)
+	ch, registered := r.waiters[pid]
+	if registered {
 		delete(r.waiters, pid)
 		ch <- st
-		return true
 	}
-	r.pending[pid] = st
-	return true
-}
-
-// done drops bookkeeping for a finished session (idempotent).
-func (r *execRegistry) done(pid int) {
-	r.mu.Lock()
-	delete(r.waiters, pid)
-	delete(r.live, pid)
-	delete(r.pending, pid)
-	r.mu.Unlock()
+	return pid, st, registered, err
 }
 
 // beginQuiesce marks the sandbox quiescing (new exec rejected) and
@@ -141,8 +118,8 @@ func (r *execRegistry) beginQuiesce() ([]int, []*vsockConn, <-chan struct{}) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.quiescing = true
-	pids := make([]int, 0, len(r.live))
-	for pid := range r.live {
+	pids := make([]int, 0, len(r.waiters))
+	for pid := range r.waiters {
 		pids = append(pids, pid)
 	}
 	conns := make([]*vsockConn, 0, len(r.sessions))
@@ -319,13 +296,11 @@ func runExecSession(c *vsockConn, req *proto.Message, sup *supervisorState) {
 			// The helper was registered before leaving its start gate. Wait for
 			// the sole SIGCHLD reaper to consume the failed setup attempt.
 			<-waitCh
-			reg.done(pid)
 		}
 		eb.drain()
 		fail("exec: fork: " + err.Error())
 		return
 	}
-	defer reg.done(pid)
 
 	established := spec.Stdio
 	if err := proto.WriteMessage(c, &proto.Message{Type: proto.TypeExecAck, Stdio: &established}); err != nil {
@@ -353,18 +328,31 @@ func runExecSession(c *vsockConn, req *proto.Message, sup *supervisorState) {
 
 	code := exitCodeFromStatus(st)
 	eb.drain() // flush + close child ends; guest→host streams EOF
-	if err := sess.SendExitStatus(code); err != nil {
-		logf("exec: send exit status pid=%d: %v", pid, err)
+	if err := finishExecMux(sess, code, muxCloseTimeout); err != nil {
+		logf("exec: finish MUX pid=%d: %v", pid, err)
 	}
-	done := make(chan struct{})
-	go func() { _ = sess.InitMuxClose(); close(done) }()
-	select {
-	case <-done:
-	case <-time.After(muxCloseTimeout):
-		logf("exec: MUX_CLOSE_ACK timed out (pid=%d) — forcing conn close", pid)
-	}
-	_ = sess.Close()
 	logf("exec: session done pid=%d code=%d", pid, code)
+}
+
+// finishExecMux sends the status before MUX_CLOSE and waits for its ACK.
+// Close interrupts both an in-flight write and a session waiting on its writer.
+func finishExecMux(sess *mux.Session, code int, timeout time.Duration) error {
+	closed := make(chan struct{})
+	timer := time.AfterFunc(timeout, func() {
+		_ = sess.Close()
+		close(closed)
+	})
+	defer func() {
+		if timer.Stop() {
+			_ = sess.Close()
+		} else {
+			<-closed
+		}
+	}()
+	if err := sess.SendExitStatus(code); err != nil {
+		return err
+	}
+	return sess.InitMuxClose()
 }
 
 // forkExecChild spawns the nsenter helper (re-exec "exec-join"), which
@@ -416,16 +404,14 @@ func forkExecChild(spec *proto.ExecSpec, cs childStdio, appPid int, reg *execReg
 		ExtraFiles:  []*os.File{ns, childSync}, // fd 3 cgroup ns, fd 4 sync
 		SysProcAttr: sysAttr,
 	}
-	var waitCh <-chan syscall.WaitStatus
-	pid, err := coordinateChild(&cmd, parentSync, childSync, func(pid int) error {
-		var allowed bool
-		waitCh, allowed = reg.register(pid)
-		if !allowed {
-			_ = syscall.Kill(pid, syscall.SIGKILL)
-			return errors.New("exec: sandbox quiescing (snapshot in progress)")
-		}
-		return nil
-	}, nil, nil, childSyncStarted)
+	waitCh, err := reg.startChild(&cmd)
+	if err != nil {
+		_ = parentSync.Close()
+		_ = childSync.Close()
+		closeChildStdio(cs)
+		return 0, nil, err
+	}
+	pid, err := coordinateStartedChild(cmd.Process.Pid, parentSync, childSync, nil, nil, nil, childSyncStarted)
 	closeChildStdio(cs)
 	if err != nil {
 		return pid, waitCh, err

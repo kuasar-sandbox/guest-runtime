@@ -141,14 +141,24 @@ func coordinateChild(
 	onFailure func(int),
 	want childSyncResult,
 ) (int, error) {
-	sync := &childSync{file: parent, reader: bufio.NewReader(parent)}
 	if err := cmd.Start(); err != nil {
 		_ = childEnd.Close()
-		sync.close()
+		_ = parent.Close()
 		return 0, err
 	}
+	return coordinateStartedChild(cmd.Process.Pid, parent, childEnd, onSpawn, onReady, onFailure, want)
+}
+
+// coordinateStartedChild runs the handshake after the caller has started the
+// helper and, for exec sessions, registered its PID with the sole reaper.
+func coordinateStartedChild(
+	pid int, parent, childEnd *os.File,
+	onSpawn, onReady func(int) error,
+	onFailure func(int),
+	want childSyncResult,
+) (int, error) {
+	sync := &childSync{file: parent, reader: bufio.NewReader(parent)}
 	_ = childEnd.Close()
-	pid := cmd.Process.Pid
 	if onSpawn != nil {
 		if err := onSpawn(pid); err != nil {
 			if onFailure != nil {
