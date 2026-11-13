@@ -292,6 +292,9 @@ package_release() {
   [ "$#" -eq 4 ] || fail "usage: release.sh package <runtime|vmlinux> <version> <arch> <output-dir>"
   local kind="$1" version="$2" arch archive output="$4" epoch bin_dir native_bin_dir project_sha value
   arch="$(normalize_arch "$3")"
+  if [ "$kind" = vmlinux ] && [[ "$(git -C "$ROOT" symbolic-ref -q --short HEAD || true)" =~ ^release/v[0-9]+\.[0-9]+\.x$ ]]; then
+    fail "vmlinux releases are built from guest-runtime main"
+  fi
   archive="$(archive_name "$kind" "$version" "$arch")"
   if [ -z "$output" ] || [ "$output" = / ] || [ "$output" = . ]; then
     fail "unsafe output directory: $output"

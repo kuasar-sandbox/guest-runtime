@@ -62,6 +62,22 @@ class EnvironmentTools(unittest.TestCase):
                     self.assertEqual(cli.read_bytes(), before)
                     self.assertFalse((root / "github-path").exists())
 
+    def test_maintenance_kernel_release_stops_before_build_or_packaging(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory)
+            subprocess.run(["git", "init", "-q", "-b", "release/v0.1.x", str(source)], check=True)
+            env = dict(os.environ, RELEASE_SOURCE_ROOT=str(source))
+            commands = [
+                ["make", "-f", str(ROOT / "Makefile"), "release-vmlinux"],
+                ["bash", str(ROOT / "scripts/release.sh"), "package", "vmlinux",
+                 "vmlinux-v0.1.7", "x86_64", str(source / "bundle")],
+            ]
+            for command in commands:
+                result = subprocess.run(command, cwd=source, env=env, text=True, capture_output=True)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("vmlinux releases are built from guest-runtime main", result.stderr)
+                self.assertFalse((source / "bundle").exists())
+
     def test_missing_cli_fails_without_installing(self):
         with tempfile.TemporaryDirectory() as directory:
             for command in self.cli_steps():
