@@ -4,9 +4,9 @@
 
 This is the delivery contract for `sandbox-runtime.bundle` and its Runtime release unit. It owns filesystem layout, PMEM alignment, footer identity, reserved paths and compatibility requirements. Follow [Using guest-runtime](using-guest-runtime.md) to consume a selected pair of Runtime/Kernel artifacts, or [Build](build.md) to produce and validate them.
 
-`sandbox-runtime.bundle` is the read-only Guest runtime image attached to each MicroVM. It contains the guest PID 1 (`sandbox-init`) built by `sandboxer` and the platform's guest-side helper tools. This repository packages and releases it; `sandboxer/sandbox-ctl` supplies it to the guest as a virtio-pmem device when starting a sandbox.
+`sandbox-runtime.bundle` is the read-only Guest runtime image attached to each MicroVM. It contains the guest PID 1 (`sandbox-init`) built by this repository and the platform's guest-side helper tools. This repository packages and releases it; `sandboxer/sandbox-ctl` supplies it to the guest as a virtio-pmem device when starting a sandbox.
 
-This document defines image packaging, filesystem layout, versioning and consumption. The startup rootfs assembly, vsock control plane, stdio MUX and exec/attach/quiesce ABI of `sandbox-init` are maintained in [the sandboxer guest ABI specification](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/guest-abi.md).
+This document defines image packaging, filesystem layout, versioning and consumption. The startup rootfs assembly, vsock control plane, stdio MUX and exec/attach/quiesce ABI of `sandbox-init` are maintained in [the Guest ABI specification](guest-abi.md).
 
 ## Overview
 
@@ -14,8 +14,8 @@ This document defines image packaging, filesystem layout, versioning and consump
 
 | Component | Responsibility |
 | --- | --- |
-| `sandboxer` | Build `sandbox-init`; `sandbox-ctl` starts CH and attaches the runtime image as guest virtio-pmem. |
-| `guest-runtime` | Package `sandbox-init`, `envd`, `flatten-ctl` into one EROFS image. |
+| `sandboxer` | `sandbox-ctl` starts CH and attaches the runtime image as guest virtio-pmem. |
+| `guest-runtime` | Build `sandbox-init` and `flatten-ctl`, and package them with `envd` into one EROFS image. |
 | `guest-runtime/native-deps` | Build `vmlinux` and `envd`; the optional gateway is a separate opt-in target, not runtime payload. |
 | `accelerator` | Supply the reusable `pkg/{flatten,image,remote,tar}` packages used by `flatten-ctl`, and Manifest/Cache/Store capabilities. |
 
@@ -26,7 +26,7 @@ This document defines image packaging, filesystem layout, versioning and consump
 ```text
                  build time                                      run time
 
-  sandboxer/bin/<arch>/sandbox-init ─┐
+  guest-runtime/bin/<arch>/sandbox-init ─┐
   guest-runtime/bin/<arch>/flatten-ctl├─► sandbox-runtime.bundle ──► sandbox-ctl
   native-deps/bin/<arch>/envd ────────┘             ▲                     │
                                                  │                     ▼
@@ -40,7 +40,7 @@ The image is a node-shared artifact. Sandboxes using the same version on a node 
 - **One image:** the E2B and builder runtimes share one runtime image.
 - **Read-only and versioned:** the release process produces the image; runtime execution does not modify it.
 - **Cross-instance sharing:** virtio-pmem and DAX share the host page cache.
-- **Clear ownership:** sandboxer owns the PID 1 protocol; guest-runtime owns image packaging and guest payload.
+- **Clear ownership:** guest-runtime owns PID 1, its shared ABI, image packaging and guest payload; sandboxer owns host lifecycle.
 - **Independent releases:** the runtime bundle can be published through the repository's dedicated release line and selected independently for rollback.
 
 ## Image layout
@@ -70,7 +70,7 @@ The `/sysdisks/` mountpoints are precreated by the current Makefile for data-dis
 
 | File | Source | Purpose |
 | --- | --- | --- |
-| `/sbin/init` | `../sandboxer/bin/<arch>/sandbox-init` | Guest PID 1: mounts, handshakes and application supervision. |
+| `/sbin/init` | `bin/<arch>/sandbox-init` | Guest PID 1: mounts, handshakes and application supervision. |
 | `/opt/sandbox-runtime/bin/envd` | `native-deps/bin/<arch>/envd` | E2B data-plane agent. |
 | `/opt/sandbox-runtime/bin/flatten-ctl` | `bin/<arch>/flatten-ctl` | Pull/flatten OCI images inside the build sandbox. |
 
@@ -130,7 +130,7 @@ The trusted `Runtime Release` workflow on this repository's main branch independ
 
 | Package | Contents | Release |
 | --- | --- | --- |
-| `sandbox-runtime-<arch>-vX.Y.Z.tar.gz` | Runtime image, `flatten-ctl` | `runtime-vX.Y.Z` in guest-runtime |
+| `sandbox-runtime-<arch>-vX.Y.Z.tar.gz` | Runtime image, `sandbox-init`, `flatten-ctl` | `runtime-vX.Y.Z` in guest-runtime |
 
 Here `<arch>` is `x86_64` or `aarch64` when declared and published by the selected release.
 Do not infer another architecture's assets from source-build support or overwrite two architectures
@@ -140,6 +140,7 @@ The runtime package contains:
 
 ```text
 bin/sandbox-runtime.bundle
+bin/sandbox-init
 bin/flatten-ctl
 share/licenses/runtime/...
 ```
@@ -152,13 +153,13 @@ not files in the runtime EROFS image.
 
 The project repository's `release-vX.Y.Z` aggregate release uploads the platform package, original independently versioned component packages, verified using native GitHub asset sizes and digests. The platform package takes runtime documentation and `test/e2e/` from the selected runtime tag and the kernel documentation pair (`docs/vmlinux.md` and, when present at that selected tag, `docs/vmlinux_zh.md`) from the independently selected kernel tag; component packages do not duplicate those documents. Extracting the required packages into one directory supplies product tools under `bin/` from the component packages, and documentation under `guide/`, tests under `test/` and thin Workbench launchers under `workbench/` from the current platform package. Historical releases retain the layout documented by their bundled guides. Bilingual documentation delivery is validated separately from binary release selection.
 
-`vmlinux` is not part of the runtime version; it uses this repository's independent `vmlinux-vX.Y.Z` line. The runtime workflow explicitly selects a published sandboxer tag to build the image. Runtime and vmlinux version numbers evolve independently.
+`vmlinux` is not part of the runtime version; it uses this repository's independent `vmlinux-vX.Y.Z` line. The runtime workflow builds sandbox-init and flatten-ctl from the same selected guest-runtime commit. Stable `runtime-vX.Y.Z` publication also creates root Go module tag `vX.Y.Z` at that commit; Preview and kernel publication do not create root module tags. Runtime and vmlinux version numbers evolve independently.
 
 Envd is already embedded in the image and is not published separately as `bin/envd`. `fsck.erofs` is a host diagnostic/test tool, not part of the general component packages.
 
 ## Related contracts
 
-- [sandbox-init](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/guest-abi.md): guest PID 1 ABI and host/guest protocol.
+- [sandbox-init](guest-abi.md): guest PID 1 ABI and host/guest protocol.
 - [sandbox](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/runtime.md): runtime-image consumption, startup and restore.
 - [Native-build workflow](../native-deps/README.md): host EROFS prerequisites, vmlinux and Envd builds.
 - [vmlinux](vmlinux.md): guest kernel and runtime-image relationship.

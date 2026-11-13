@@ -23,7 +23,7 @@ class PublisherTests(unittest.TestCase):
         self.root=Path(self.temporary.name);(self.root/'assets').mkdir()
         (self.root/'assets/package.tar.gz').write_bytes(b'validated bytes')
         (self.root/'release-notes.md').write_text('Human release notes.\n')
-        self.repo='kuasar-sandbox/accelerator';self.tag='v1.2.3';self.target=None
+        self.repo='kuasar-sandbox/accelerator';self.tag='v1.2.3';self.target=None;self.module_target=None
         self.release=None;self.other=[];self.latest=None;self.calls=[];self.uploads=[];self.fail_upload=False
         self.publish_failure=False;self.latest_failure=False;self.now='2026-11-04T01:00:00Z'
         def names(*args):return ['package.tar.gz']
@@ -38,9 +38,17 @@ class PublisherTests(unittest.TestCase):
         self.calls.append((method,endpoint,copy.deepcopy(data)))
         if endpoint.endswith('/git/ref/heads/main'):return {'object':{'type':'commit','sha':self.target or SHA}}
         if '/compare/' in endpoint:return {'status':'identical'}
-        if '/git/ref/tags/' in endpoint:return {'object':{'type':'commit','sha':self.target}} if self.target else None
+        if '/git/ref/tags/' in endpoint:
+            target = self.target if endpoint.endswith('/'+self.tag) else self.module_target
+            return {'object':{'type':'commit','sha':target}} if target else None
         if endpoint.endswith('/git/refs'):
-            self.assertEqual(method,'POST');self.assertIsNone(self.target);self.target=data['sha'];return {}
+            self.assertEqual(method,'POST')
+            if data['ref'] == 'refs/tags/'+self.tag:
+                self.assertIsNone(self.target);self.target=data['sha']
+            else:
+                self.assertEqual(data['ref'],'refs/tags/'+self.tag.removeprefix('runtime-'))
+                self.assertIsNone(self.module_target);self.module_target=data['sha']
+            return {}
         if endpoint.endswith('/releases/latest'):
             return copy.deepcopy(self.latest)
         if endpoint.endswith('/releases'):
@@ -155,6 +163,33 @@ class PublisherTests(unittest.TestCase):
         self.other=[dict(id=88,tag_name='v9223372036854775808.0.0',draft=False,prerelease=False)]
         self.publish();self.assertIsNone(self.latest)
         self.assertFalse(any(data=={'make_latest':'true'} for _,_,data in self.calls))
+
+    def test_runtime_stable_publishes_root_module_tag_at_the_same_commit(self):
+        self.repo='kuasar-sandbox/guest-runtime';self.tag='runtime-v1.2.3'
+        self.publish()
+        self.assertEqual(self.target,SHA);self.assertEqual(self.module_target,SHA)
+        refs=[data['ref'] for method,url,data in self.calls if method=='POST' and url.endswith('/git/refs')]
+        self.assertEqual(refs,['refs/tags/runtime-v1.2.3','refs/tags/v1.2.3'])
+        self.calls.clear();self.publish()
+        self.assertFalse(any(method=='POST' for method,_,_ in self.calls))
+
+    def test_runtime_module_tag_conflict_precedes_any_mutation(self):
+        self.repo='kuasar-sandbox/guest-runtime';self.tag='runtime-v1.2.3';self.module_target='b'*40
+        with self.assertRaisesRegex(ValueError,'module tag'):self.publish()
+        self.assertFalse(any(method!='GET' for method,_,_ in self.calls))
+
+    def test_runtime_published_retry_repairs_missing_module_tag(self):
+        self.repo='kuasar-sandbox/guest-runtime';self.tag='runtime-v1.2.3'
+        self.publish();self.module_target=None;self.calls.clear()
+        self.publish()
+        self.assertEqual(self.module_target,SHA)
+        self.assertEqual(len(self.uploads),1)
+
+    def test_preview_and_kernel_do_not_publish_root_module_tags(self):
+        self.repo='kuasar-sandbox/guest-runtime';self.tag='runtime-v1.2.3-preview.20261112'
+        self.publish();self.assertIsNone(self.module_target)
+        self.release=None;self.target=None;self.tag='vmlinux-v1.2.3'
+        self.publish();self.assertIsNone(self.module_target)
 
     def test_guest_runtime_units_do_not_compare_semver_across_lines(self):
         self.repo='kuasar-sandbox/guest-runtime';self.tag='runtime-v1.2.3'

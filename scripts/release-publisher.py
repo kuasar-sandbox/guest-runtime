@@ -218,6 +218,28 @@ def update_latest(repository, release, commit, source_ref):
     require(current.get('id') == release['id'] and current.get('tag_name') == release['tag_name'], 'Latest update did not converge')
 
 
+def runtime_module_tag(repository, tag):
+    # Go resolves this repository's root module through vX.Y.Z. Only a Stable
+    # runtime release produces that module version; kernel and Preview tags do not.
+    match = STABLE.fullmatch(tag)
+    if repository == 'kuasar-sandbox/guest-runtime' and match and match[1] == 'runtime':
+        return tag.removeprefix('runtime-')
+    return None
+
+
+def ensure_runtime_module_tag(repository, tag, commit):
+    module_tag = runtime_module_tag(repository, tag)
+    if module_tag is None:
+        return
+    target = tag_target(repository, module_tag)
+    require(target is None or target == commit, 'Go module tag already identifies a different commit')
+    if target is None:
+        api(f'repos/{repository}/git/refs', method='POST',
+            data={'ref': 'refs/tags/' + module_tag, 'sha': commit})
+    require(tag_target(repository, module_tag) == commit,
+            'Go module tag creation did not preserve selected commit')
+
+
 def publish(repository, tag, arch, commit, bundle, source_ref):
     unit = unit_for(repository,tag)
     require(re.fullmatch('[0-9a-f]{40}',commit), 'commit must be a full lowercase SHA')
@@ -232,8 +254,13 @@ def publish(repository, tag, arch, commit, bundle, source_ref):
         if release['draft']: require(release.get('body') == notes, 'existing draft notes differ; reconcile them manually')
     target = tag_target(repository,tag)
     require(target is None or target == commit, 'tag already identifies a different commit')
+    module_tag = runtime_module_tag(repository, tag)
+    if module_tag is not None:
+        require(tag_target(repository, module_tag) in (None, commit),
+                'Go module tag already identifies a different commit')
     if release is not None and not release['draft']:
         require(target == commit, 'published Release lacks its selected tag')
+        ensure_runtime_module_tag(repository, tag, commit)
         update_latest(repository,release,commit,source_ref)
         print('Verified already published',repository,tag)
         return
@@ -242,6 +269,7 @@ def publish(repository, tag, arch, commit, bundle, source_ref):
     if target is None:
         api(f'repos/{repository}/git/refs',method='POST',data={'ref':'refs/tags/'+tag,'sha':commit})
     require(tag_target(repository,tag) == commit, 'tag creation did not preserve selected commit')
+    ensure_runtime_module_tag(repository, tag, commit)
     if release is None:
         release = api(f'repos/{repository}/releases',method='POST',data={
             'tag_name':tag,'target_commitish':commit,'name':tag,'body':notes,'draft':True,

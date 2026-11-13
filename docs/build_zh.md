@@ -11,20 +11,19 @@
 | 模式 | Accelerator | sandbox-init |
 | --- | --- | --- |
 | 独立 CLI 开发 | `go.mod` 中可取得的版本。 | 仅构建 flatten-ctl 时不需要。 |
-| 协同源码开发 | 选定 guest-runtime + accelerator Go workspace。 | 普通装配目标可以使用本地相邻源码构建。 |
-| Runtime 发行复现 | 与 `ACCELERATOR_VERSION` 匹配的干净 checkout，由发行目标生成 workspace。 | 装配前验证精确 `SANDBOXER_VERSION` 发布二进制，并准备匹配源码声明。 |
+| 协同源码开发 | 选定 guest-runtime + accelerator Go workspace。 | 通过选定 workspace 从本仓构建。 |
+| Runtime 发行复现 | 与 `ACCELERATOR_VERSION` 匹配的干净 checkout，由发行目标生成 workspace。 | 与 flatten-ctl 一起从同一选定 guest-runtime commit 重新构建。 |
 
-本地 fallback 构建不能证明与发布依赖字节相同；发行依赖验证失败时，不能用旧开发二进制替代。
+发行目标重编译本仓两个 Go 程序；普通装配可以复用明确选定的开发二进制。
 
 ## 源码工作区
 
-选定源码的 Go 构建通过 workspace 使用兄弟仓 `accelerator`;独立 `go.mod` 解析已发布版本。发布流程从选定 sandboxer 发布包安装 `sandbox-init`;本地开发也可以从兄弟仓 sandboxer 构建它:
+选定源码的 Go 构建通过 workspace 使用兄弟仓 `accelerator`;独立 `go.mod` 解析已发布版本。发布与开发流程均从本仓构建 `sandbox-init`：
 
 ```text
 <workspace>/
 ├── guest-runtime/
-├── accelerator/
-└── sandboxer/
+└── accelerator/
 ```
 
 协调开发使用这些兄弟仓相互兼容的 `main` revision。复现已发布组合时,使用对应[项目聚合 Release](https://github.com/kuasar-sandbox/kuasar-sandbox/releases)精确选择的组件 Tag,不要分别选择各仓 GitHub Latest。完整六仓工作区见[项目 README](https://github.com/kuasar-sandbox/kuasar-sandbox)。
@@ -36,7 +35,7 @@ GOWORK="$(python3 ../kuasar-sandbox/ci/integration/go_workspace.py --root .. --o
 export GOWORK
 ```
 
-工作区验证 module path，不改写 `go.mod`/`go.sum`。Runtime 发布从指定 sandboxer Release 消费 `sandbox-init` 二进制；Sandboxer、Connector 不加入 Runtime Go 工作区。组装前将该程序安装到 `../sandboxer/bin/<arch>/sandbox-init`，或显式设置 `SANDBOX_INIT`。Envd、versitygw 保持独立 Go 模块构建；Kernel 使用 Native 输入，不加入 Go workspace。`go-erofs` 继续作为版本化外部依赖。
+工作区验证 module path，不改写 `go.mod`/`go.sum`。Runtime 发布从本仓 `cmd/sandbox-init` 构建 PID 1，默认输出 `bin/<arch>/sandbox-init`；Sandboxer、Connector 不加入 Runtime Go 工作区。Envd、versitygw 保持独立 Go 模块构建；Kernel 使用 Native 输入，不加入 Go workspace。`go-erofs` 继续作为版本化外部依赖。
 
 ## 构建前置
 
@@ -68,12 +67,12 @@ make build TARGET_ARCH=aarch64  # 在依赖支持的范围内交叉构建
 
 `make sandbox-runtime` 使用:
 
-- `../sandboxer/bin/<arch>/sandbox-init`;
+- `bin/<arch>/sandbox-init`;
 - `native-deps/bin/<arch>/envd`;
 - `bin/<arch>/flatten-ctl`;
 - 作为 Host image packer 的 `BUILD_MKFS_EROFS`。
 
-普通装配会复用已有可执行输入，不会在源码或 pin 变化后自动刷新已有 `sandbox-init` 或 Envd。`make build` 先重编译 `flatten-ctl`，直接执行 `make sandbox-runtime` 则会复用已有可执行文件。发行复现应使用[下文](#精确复现发行依赖)的专用依赖选择流程。
+普通装配会复用已有可执行输入，不会在源码或 pin 变化后自动刷新已有 `sandbox-init` 或 Envd。`make build` 先重编译 `sandbox-init` 和 `flatten-ctl`，直接执行 `make sandbox-runtime` 则会复用已有可执行文件。发行复现应使用[下文](#精确复现发行依赖)的专用依赖选择流程。
 
 缺少 `sandbox-init`、Envd 或 `flatten-ctl`，或其不可执行时，Makefile 调用对应构建目标。宿主 `mkfs.erofs` 必须已在 `PATH` 中，或由 `BUILD_MKFS_EROFS` 指定；缺少时 Runtime 构建明确失败。项目不再维护 erofs-utils 补丁、编译或分发 mkfs。Workbench 或宿主可安装发行版的 erofs-utils，用于构建时打包和独立校验。
 
@@ -103,8 +102,8 @@ make build TARGET_ARCH=aarch64
 目标的输入和构建顺序:
 
 1. 解析并检查 `BUILD_MKFS_EROFS`:使用显式指定的工具或宿主 PATH 中预安装的工具。缺少宿主工具在组装镜像前即失败。
-2. 若所选 `SANDBOX_INIT`(默认 `../sandboxer/bin/<arch>/sandbox-init`)不存在,
-   委托 `make -C ../sandboxer sandbox-init`。
+2. 若所选 `SANDBOX_INIT`(默认 `bin/<arch>/sandbox-init`)不存在,
+   调用本仓 `make sandbox-init`。
 3. 使用目标架构 `ENVD`(默认 `native-deps/bin/<arch>/envd`),缺失时触发构建。
 4. 使用本仓目标架构 `FLATTEN_CTL`(默认 `bin/<arch>/flatten-ctl`),缺失时触发构建。
 5. 检查所选 `flatten-ctl` 的构建记录中有外部 go-erofs 模块；缺少该带版本与校验和依赖的二进制会明确失败，须先执行 `make flatten-ctl` 或选择匹配的二进制。组装 staging，使用宿主 `BUILD_MKFS_EROFS` 生成临时 runtime EROFS。
@@ -114,7 +113,7 @@ make build TARGET_ARCH=aarch64
 最后的原子重命名不保证整个 Make 目标失败时保留旧产物：Makefile 在运行 mkfs 前已移除旧 bundle，后续失败可能导致没有 bundle。应在隔离的 checkout/输出目录构建并验证结果，再部署到新的不可变路径供后续启动使用。保留运行中 VM 或快照仍引用的旧产物，不要覆盖正在使用的文件。
 
 宿主 EROFS 工具要求和 `envd` 构建流程见[Native Build 文档](../native-deps/README_zh.md)。
-`sandbox-init` 实现与 ABI 见[sandboxer Guest ABI](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/guest-abi_zh.md)。
+`sandbox-init` 实现与 ABI 见[Guest ABI](guest-abi_zh.md)。
 
 ### 架构
 
@@ -205,9 +204,9 @@ Runtime 包输入为 `bin/<arch>/{sandbox-runtime.bundle,flatten-ctl}`；bundle
 源码版本、原生链接映射与这些产物应一并保留。原生 pin 变化需要同步更新配方、
 输入摘要与许可证收集；路径覆盖不表示可以把不同源码字节标记为配置的版本。
 
-Runtime Go 构建的 workspace 只包含本轮选定的 guest-runtime 和 accelerator 模块。`sandbox-init` 来自指定 sandboxer 发布二进制；sandboxer 不加入 Runtime Go workspace。`flatten-ctl` 必须标识 Linux `github.com/kuasar-sandbox/guest-runtime/cmd/flatten-ctl` 主入口及所选 amd64 或 arm64 目标。当次生产者检查自身干净的 Go VCS 元数据。正常二进制构建信息和具有版本、校验和的外部 go-erofs 依赖保留，不打包独立来源记录。
+Runtime Go 构建的 workspace 只包含本轮选定的 guest-runtime 和 accelerator 模块。`sandbox-init` 与 `flatten-ctl` 均从本模块构建；sandboxer 不加入 Runtime Go workspace。`flatten-ctl` 必须标识 Linux `github.com/kuasar-sandbox/guest-runtime/cmd/flatten-ctl` 主入口及所选 amd64 或 arm64 目标。当次生产者检查自身干净的 Go VCS 元数据。正常二进制构建信息和具有版本、校验和的外部 go-erofs 依赖保留，不打包独立来源记录。
 
-许可证收集分别解析 guest-runtime、所选 sandbox-init 二进制和 Envd 的 Go 编译器选择。
+许可证收集统一解析本仓两个 Go 程序的编译器，并独立解析 Envd 的编译器选择。
 若这些目录选择不同的编译器版本,则按各载荷实际版本收集对应安装的 Go 及随附
 依赖声明,不以父 module 上下文替代载荷自身的选择。Module 材料使用生效的替换
 及匹配的 module 校验和,沿用正常 Go 缓存与路由。选定内部组件使用显式 workspace；Envd 保持隔离的 shared module 本地替换；官方包不支持其他无版本的第三方替换。这些材料收集器
@@ -336,10 +335,9 @@ Kbuild 需要目标 C 工具链，例如在 x86_64 宿主安装 `gcc-aarch64-lin
 
 ## 精确复现发行依赖
 
-`make release-runtime SANDBOXER_VERSION=<tag>` 同样通过已登录的 GitHub CLI 下载并校验该精确 sandboxer Release。装配与打包使用构建目录内同一个已安装二进制及编译器许可证；即使本地存在旧开发二进制，Release 缺失或校验失败也会在装配前停止。
-本地 sandboxer 源码必须位于该精确 tag，以提供对应许可证；缺少 tag 或 HEAD 不符会在下载前失败。
+`make release-runtime` 从选定本仓源码重新构建 `sandbox-init` 与 `flatten-ctl`。包内发布 `bin/sandbox-init`，验证器要求它与镜像内 `/sbin/init` 字节相同，并具有 `github.com/kuasar-sandbox/guest-runtime/cmd/sandbox-init` 主入口身份。
 
-`make release-runtime` 同时核对 `ACCELERATOR_VERSION` 与干净的相邻 accelerator checkout，并在编译前生成两个模块的 workspace。它重新编译 `flatten-ctl`，装配和打包使用同一输出，不受继承的 `GOWORK=off` 或旧 `FLATTEN_CTL` 影响。项目 checkout 不在 `../kuasar-sandbox` 时设置 `KUASAR_PLATFORM_DIR`。源码目录冲突或缺 Tag、缺模块会在构建前停止。
+`make release-runtime` 同时核对 `ACCELERATOR_VERSION` 与干净的相邻 accelerator checkout，并在编译前生成两个模块的 workspace。它重新编译两个 Go 程序，装配和打包使用相同输出，不受继承的 `GOWORK=off` 或旧 `FLATTEN_CTL`/`SANDBOX_INIT` 影响。项目 checkout 不在 `../kuasar-sandbox` 时设置 `KUASAR_PLATFORM_DIR`。源码目录冲突或缺 Tag、缺模块会在构建前停止。
 
 ## Kernel source 与许可证
 
@@ -359,4 +357,4 @@ Runtime 与 VMLinux 组件 Release 从所选 source ref 和精确 commit 构建�
 
 所选 owner 源码在 `release/helper-inputs.json` 显式声明编译型 E2E helper 清单。当前清单为空。后续 helper 及其构建配方由此 owner 声明维护，聚合打包自动发现，无需平台文件名清单。
 
-Runtime 发布内嵌所选 sandboxer Release 中的 `sandbox-init`。安装前从所选 Tag 的完整 Release 包集合固定所选目标架构资产 ID，并校验 GitHub 原生大小与摘要。忽略历史正文 marker、校验和附件及来源旁车，只下载所选目标架构。校验归档路径、文件类型、所有权、权限与 ELF 架构，并按实际二进制中读取的编译器版本复制 Go 法律声明。重新编译同一提交可能改变 Go 构建元数据或工作区派生的默认值，因此源码重编译不能证明与已发布依赖逐字节一致。
+Runtime 发布从获准源码构建本仓两个 Go 程序，核对当前干净 commit、主入口与目标架构；将 `bin/sandbox-init` 放入发布包，并核对其与镜像 `/sbin/init` 字节一致。Stable `runtime-vX.Y.Z` 发布在同 commit 创建根 module tag `vX.Y.Z`，拒绝冲突并支持中断重试。Preview 与 Kernel 发布不创建根 module tag。

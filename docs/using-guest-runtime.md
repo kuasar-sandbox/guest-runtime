@@ -8,7 +8,7 @@ Use this workflow after obtaining and validating a matching aggregate release, o
 
 This repository does not publish a generic `guest-runtime-vX.Y.Z` release. It maintains two independent version lines:
 
-- **`runtime-vX.Y.Z`** — publishes `sandbox-runtime-<arch>-vX.Y.Z.tar.gz`, containing the runtime bundle, static `flatten-ctl`, and their license/source materials;
+- **`runtime-vX.Y.Z`** — publishes `sandbox-runtime-<arch>-vX.Y.Z.tar.gz`, containing the runtime bundle, static `sandbox-init` and `flatten-ctl`, and their license/source materials;
 - **`vmlinux-vX.Y.Z`** — publishes `vmlinux-<arch>-vX.Y.Z.tar.gz`, containing the guest kernel at the stable `bin/vmlinux` path and its raw-file SHA-256 at `bin/vmlinux.sha256`.
 
 The two version numbers may advance independently. The project aggregate release selects an exact Runtime tag and an exact VMLinux tag; it does not assume that their version numbers match.
@@ -23,9 +23,10 @@ Prerequisites: Linux, Bash, `file`, `sha256sum`, the validated extracted Runtime
 set -euo pipefail
 PREFIX=/path/to/validated-release
 test -s "$PREFIX/bin/sandbox-runtime.bundle"
+test -x "$PREFIX/bin/sandbox-init"
 test -x "$PREFIX/bin/flatten-ctl"
 test -s "$PREFIX/bin/vmlinux"
-file "$PREFIX/bin/flatten-ctl" "$PREFIX/bin/vmlinux"
+file "$PREFIX/bin/sandbox-init" "$PREFIX/bin/flatten-ctl" "$PREFIX/bin/vmlinux"
 (cd "$PREFIX/bin" && sha256sum --check vmlinux.sha256)
 ```
 

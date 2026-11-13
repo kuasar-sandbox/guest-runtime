@@ -136,11 +136,10 @@ check_go_binary() {
 }
 
 record_release_go_contexts() {
-  local build_root="$1" sandboxer_root="$2" envd_root="$3" context directory info
-  for context in runtime sandboxer envd; do
+  local build_root="$1" envd_root="$2" context directory info
+  for context in runtime envd; do
     case "$context" in
       runtime) directory="$build_root" ;;
-      sandboxer) directory="$sandboxer_root" ;;
       envd) directory="$envd_root/packages/envd" ;;
     esac
     info="$WORK/go-context-$context.json"
@@ -151,7 +150,7 @@ record_release_go_contexts() {
     fi
   done
   RELEASE_MATERIALS_GO_ENV="$WORK/go-build-toolchains.json"
-  jq -s . "$WORK/go-context-runtime.json" "$WORK/go-context-sandboxer.json" "$WORK/go-context-envd.json" \
+  jq -s . "$WORK/go-context-runtime.json" "$WORK/go-context-envd.json" \
     > "$RELEASE_MATERIALS_GO_ENV"
 }
 
@@ -178,7 +177,7 @@ validate_archive_paths() {
         exit 1
       }
       if (material) next
-      if (unit == "runtime" && path ~ /^bin\/(sandbox-runtime[.]bundle|flatten-ctl)$/) next
+      if (unit == "runtime" && path ~ /^bin\/(sandbox-runtime[.]bundle|sandbox-init|flatten-ctl)$/) next
       if (unit == "vmlinux" && (path == "bin/vmlinux" || path == "bin/vmlinux.sha256")) next
       exit 1
     }
@@ -189,7 +188,7 @@ validate_archive_paths() {
     $1 !~ /^-/ { exit 1 }
     {
       path=$6; sub(/^\.\//, "", path)
-      expected=(path ~ /^bin\/(flatten-ctl)$/ ? "-rwxr-xr-x" : "-rw-r--r--")
+      expected=(path ~ /^bin\/(sandbox-init|flatten-ctl)$/ ? "-rwxr-xr-x" : "-rw-r--r--")
       if ($1 != expected) exit 1
     }
   ' || fail "$archive contains an unsafe type, mode or ownership"
@@ -205,7 +204,7 @@ prepare_runtime_verifier() {
 }
 
 validate_runtime_payloads() {
-  local extract="$1" target_arch="$2" go_arch payloads="$WORK/runtime-payloads" sandboxer_sha binary package module info
+  local extract="$1" target_arch="$2" go_arch payloads="$WORK/runtime-payloads" binary package module info
   case "$target_arch" in x86_64) go_arch=amd64 ;; aarch64) go_arch=arm64 ;; *) fail "invalid target: $target_arch" ;; esac
   prepare_runtime_verifier
   python3 "${TOOL_ROOT:-$ROOT}/scripts/release-runtime-payloads.py" --without-mkfs \
@@ -213,12 +212,14 @@ validate_runtime_payloads() {
     || fail "Runtime embedded payload verification failed"
   cmp -s "$payloads/flatten-ctl" "$extract/bin/flatten-ctl" \
     || fail "embedded flatten-ctl differs from the verified outer payload"
+  cmp -s "$payloads/init" "$extract/bin/sandbox-init" \
+    || fail "embedded sandbox-init differs from the verified outer payload"
   for binary in init envd flatten-ctl; do
     check_target_binary "$payloads/$binary" "$target_arch" "embedded $binary"
   done
   for binary in init envd; do
     case "$binary" in
-      init) module=github.com/kuasar-sandbox/sandboxer; package="$module/cmd/sandbox-init" ;;
+      init) module=github.com/kuasar-sandbox/guest-runtime; package="$module/cmd/sandbox-init" ;;
       envd) module=github.com/e2b-dev/infra/packages/envd; package="$module" ;;
     esac
     info="$(go version -m "$payloads/$binary" 2>/dev/null)" || fail "embedded Go build info is missing"
@@ -259,12 +260,13 @@ validate_bundle() {
   release_materials_validate "$extract" "$kind"
   case "$kind" in
     runtime)
-      release_materials_require_license "$extract" runtime sandboxer
       release_materials_require_license "$extract" runtime accelerator
       release_materials_require_license "$extract" runtime envd
       release_materials_validate_go "$extract" runtime bin/flatten-ctl
       [ -f "$extract/bin/sandbox-runtime.bundle" ] \
         || fail "$archive is missing bin/sandbox-runtime.bundle"
+      [ -x "$extract/bin/sandbox-init" ] || fail "$archive is missing bin/sandbox-init"
+      release_materials_validate_go "$extract" runtime bin/sandbox-init
       [ -x "$extract/bin/flatten-ctl" ] || fail "$archive is missing bin/flatten-ctl"
       check_go_binary "$extract/bin/flatten-ctl" "$arch"
       validate_runtime_payloads "$extract" "$arch"
@@ -310,42 +312,35 @@ package_release() {
   release_materials_copy_licenses "$ROOT" project
   case "$kind" in
     runtime)
-      local sandboxer_source accelerator_source envd_source
-      local sandbox_init_bin envd_bin sandboxer_version accelerator_version
-      local sandboxer_sha accelerator_sha
-      sandboxer_source="${RELEASE_SANDBOXER_SOURCE_DIR:-$ROOT/../sandboxer}"
+      local accelerator_source envd_source
+      local sandbox_init_bin envd_bin accelerator_version
+      local accelerator_sha
       accelerator_source="${RELEASE_ACCELERATOR_SOURCE_DIR:-$ROOT/../accelerator}"
       envd_source="${RELEASE_ENVD_SOURCE_DIR:-${ENVD_SRC:-$ROOT/native-deps/build/src/e2b-infra}}"
-      sandbox_init_bin="${RELEASE_SANDBOX_INIT_BIN:-$sandboxer_source/bin/$arch/sandbox-init}"
+      sandbox_init_bin="${RELEASE_SANDBOX_INIT_BIN:-$bin_dir/sandbox-init}"
       envd_bin="${RELEASE_ENVD_BIN:-$native_bin_dir/envd}"
-      sandboxer_version="${RELEASE_SANDBOXER_VERSION:-${SANDBOXER_VERSION:-}}"
       accelerator_version="${RELEASE_ACCELERATOR_VERSION:-${ACCELERATOR_VERSION:-}}"
-      for value in "$sandboxer_version" "$accelerator_version"; do
+      for value in "$accelerator_version"; do
         [[ "$value" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-preview\.[0-9]{8}(\.[1-9][0-9]*)?)?$ ]] \
           || fail "runtime internal dependency versions must identify selected component releases"
       done
-      sandboxer_sha="$(release_materials_resolve_git_source "$sandboxer_source" \
-        "${RELEASE_SANDBOXER_SOURCE_SHA:-}" sandboxer)"
       accelerator_sha="$(release_materials_resolve_git_source "$accelerator_source" \
         "${RELEASE_ACCELERATOR_SOURCE_SHA:-}" accelerator)"
-      record_release_go_contexts "$ROOT" "$sandboxer_source" "$envd_source"
+      record_release_go_contexts "$ROOT" "$envd_source"
       copy_external_file "$bin_dir/sandbox-runtime.bundle" bin/sandbox-runtime.bundle
+      copy_executable "$sandbox_init_bin" bin/sandbox-init
+      release_materials_require_go_revision "$STAGE/bin/sandbox-init" "$project_sha"
       copy_executable "$bin_dir/flatten-ctl" bin/flatten-ctl
       check_go_binary "$STAGE/bin/flatten-ctl" "$arch"
       release_materials_require_go_revision "$STAGE/bin/flatten-ctl" "$project_sha"
       accelerator_version="$(release_materials_git_version "$accelerator_source" "$accelerator_version" "$accelerator_sha")"
-      sandboxer_version="$(release_materials_git_version "$sandboxer_source" "$sandboxer_version" "$sandboxer_sha")"
-      release_materials_copy_licenses "$sandboxer_source" sandboxer
       release_materials_copy_licenses "$accelerator_source" accelerator
       release_materials_copy_licenses "$envd_source" envd
       release_materials_copy_licenses "$envd_source" \
         go/github.com/e2b-dev/infra/packages/shared@v0.0.0
-      release_materials_record_source 'bin/sandbox-runtime.bundle,bin/flatten-ctl' guest-runtime "$version" \
+      release_materials_record_source 'bin/sandbox-runtime.bundle,bin/sandbox-init,bin/flatten-ctl' guest-runtime "$version" \
         "https://github.com/kuasar-sandbox/guest-runtime/commit/$project_sha" \
         "git:$project_sha" project
-      release_materials_record_source 'bin/sandbox-runtime.bundle:/sbin/init' sandboxer "$sandboxer_version" \
-        "https://github.com/kuasar-sandbox/sandboxer/commit/$sandboxer_sha" \
-        "git:$sandboxer_sha" sandboxer
       release_materials_record_source 'bin/sandbox-runtime.bundle,bin/flatten-ctl' accelerator "$accelerator_version" \
         "https://github.com/kuasar-sandbox/accelerator/commit/$accelerator_sha" \
         "git:$accelerator_sha" accelerator
@@ -358,7 +353,8 @@ package_release() {
         'sha256:8f074b23dcb2c9db48f8e674a8ab8082b54a16088fb29b66376178feeb7fe040' \
         go/github.com/e2b-dev/infra/packages/shared@v0.0.0
       release_materials_add_go_binary "$STAGE/bin/flatten-ctl" bin/flatten-ctl
-      release_materials_add_go_binary "$sandbox_init_bin" bin/sandbox-runtime.bundle:/sbin/init
+      release_materials_add_go_binary "$STAGE/bin/sandbox-init" bin/sandbox-init
+      release_materials_add_go_binary "$STAGE/bin/sandbox-init" bin/sandbox-runtime.bundle:/sbin/init
       release_materials_add_go_binary "$envd_bin" bin/sandbox-runtime.bundle:/opt/sandbox-runtime/bin/envd
       ;;
     vmlinux)
@@ -393,7 +389,7 @@ EOF
   SOURCE_SHA="$project_sha" validate_bundle "$kind" "$version" "$arch" "$output"
   if [ "$kind" = runtime ]; then
     cmp -s "$WORK/runtime-payloads/init" "$sandbox_init_bin" \
-      || fail "embedded sandbox-init differs from the selected release binary"
+      || fail "embedded sandbox-init differs from the selected build binary"
     cmp -s "$WORK/runtime-payloads/envd" "$envd_bin" \
       || fail "embedded envd differs from the selected build binary"
   fi

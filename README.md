@@ -12,14 +12,14 @@ selected release; source support does not imply all historical assets exist.
 
 `guest-runtime` builds the **guest kernel, runtime image, and image-building tools** used by [Kuasar Sandbox](https://github.com/kuasar-sandbox/kuasar-sandbox).
 
-The repository owns the guest environment and its build inputs, provenance, and release artifacts. Host-side MicroVM lifecycle, snapshot, restore, and `sandbox-init` source belong to [`sandboxer`](https://github.com/kuasar-sandbox/sandboxer). Shared Manifest, cache/store, OCI retrieval, and image-flattening libraries belong to [`accelerator`](https://github.com/kuasar-sandbox/accelerator).
+The repository owns the guest environment and its build inputs, provenance, and release artifacts. Guest PID 1 source and its shared ABI packages belong here. Host-side MicroVM lifecycle, snapshot and restore belong to [`sandboxer`](https://github.com/kuasar-sandbox/sandboxer). Shared Manifest, cache/store, OCI retrieval, and image-flattening libraries belong to [`accelerator`](https://github.com/kuasar-sandbox/accelerator).
 
 ## Responsibilities
 
 - build the guest VMLinux image from a documented kernel source, configuration, and patch set;
 - build native guest dependencies such as Envd and use environment-installed host EROFS tools for packaging and validation;
 - build `flatten-ctl`, the OCI/directory-to-EROFS image builder;
-- assemble `sandbox-runtime.bundle`, including `sandbox-init` from `sandboxer` and the guest payloads maintained here;
+- assemble `sandbox-runtime.bundle`, including the locally built `sandbox-init` and the guest payloads maintained here;
 - validate the produced guest/runtime filesystem structure;
 - publish and document two independently versioned release units: Runtime and VMLinux.
 
@@ -29,6 +29,8 @@ The repository is one component repository even though it publishes two release-
 
 | Path | Purpose |
 | --- | --- |
+| `cmd/sandbox-init` | Guest PID 1: runtime setup, supervision and control protocol |
+| `pkg/guestabi` | Shared control, MUX and forward protocol packages consumed by Host and Guest |
 | `cmd/flatten-ctl` | OCI or directory to deterministic EROFS image builder, using shared `accelerator` packages |
 | `native-deps/` | Guest VMLinux/Envd source inputs, patch trees and native maintenance |
 | `scripts/guest-inspect.py` | Read guest kernel memory counters from the host using a compatible nonrandomized x86_64 layout |
@@ -49,7 +51,7 @@ The [shared image-preparation implementation](https://github.com/kuasar-sandbox/
 
 ## Integration boundaries
 
-- `sandboxer` owns `sandbox-init` source and the host lifecycle; this repository packages the built guest binary into the Runtime image;
+- `guest-runtime` builds `sandbox-init` and maintains its [Guest ABI](docs/guest-abi.md); `sandboxer` owns the host lifecycle;
 - `accelerator` owns the shared EROFS/OCI flattening libraries; this repository publishes the `flatten-ctl` binary in the Runtime release unit;
 - `orchestrator` consumes the produced Runtime and VMLinux artifacts through the complete platform;
 - `kuasar-sandbox/kuasar-sandbox` selects exact release units, runs cross-component validation, and publishes aggregate releases.

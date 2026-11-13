@@ -172,31 +172,29 @@ def check(platform):
     assert runtime["Check out trusted build checks"]["with"]["ref"] == "${{ github.workflow_sha }}"
     preflight = {row['name']: row for row in workflows['release-runtime.yml']['preflight']['steps']}
     admitted = preflight['Freeze admitted source and selected dependency tags']
-    for name in ('accelerator', 'sandboxer'):
+    for name in ('accelerator',):
         assert '--dependency ' + name + ' "$' + name.upper() + '_TAG" "$' + name.upper() + '_SHA"' in admitted['run']
     assert 'producer-inputs.py restore workbench-selection/producer-inputs.tar runtime "$SOURCE_SHA" src' in runtime['Restore fixed producer inputs']['run']
     freeze = runtime["Freeze clean source cache trust before installing verified assets"]
     assert freeze["env"] == {"GH_TOKEN": "${{ github.token }}"}
     assert names.index("Restore fixed producer inputs") < names.index(freeze["name"])
-    assert names.index(freeze["name"]) < names.index("Verify and install the selected sandbox-init")
-    assert names.index("Verify and install the selected sandbox-init") < names.index("Build test and package runtime image")
+    assert names.index(freeze["name"]) < names.index("Build test and package runtime image")
     check_runtime_cache_scope(freeze["run"])
-    assert '--arch "$TARGET_ARCH"' in runtime["Verify and install the selected sandbox-init"]["run"]
-    assert "python3 trusted/guest-runtime/scripts/prepare-sandbox-init.py" in runtime["Verify and install the selected sandbox-init"]["run"]
+    assert not any("sandboxer" in step.get("run", "") for step in runtime.values())
     build = runtime["Build test and package runtime image"]
     assert build["uses"] == "./trusted/platform/.github/actions/workbench"
     assert build["with"]["cache-coverage"] == "release-runtime-build"
     assert build["with"]["outputs"].splitlines() == [
         "guest-runtime/bin/${{ matrix.arch }}/flatten-ctl",
         "guest-runtime/native-deps/bin/${{ matrix.arch }}/envd",
-        "sandboxer/bin/${{ matrix.arch }}/sandbox-init",
+        "guest-runtime/bin/${{ matrix.arch }}/sandbox-init",
         "guest-runtime/release-bundle",
     ]
     for component in ("envd",):
         assert "bash /inputs/release/ci/native-cache/native-cache.sh restore-or-build " + component in build["with"]["run"]
     assert 'BUILD_MKFS_EROFS="$(command -v mkfs.erofs)"' in build["with"]["run"]
     assert "restore-or-build erofs" not in build["with"]["run"]
-    for goal in ("test", "vet", "flatten-ctl", "sandbox-runtime"):
+    for goal in ("test", "vet", "sandbox-init flatten-ctl", "sandbox-runtime"):
         assert f"make -C guest-runtime {goal}" in build["with"]["run"]
     assert 'if [ "$TARGET_ARCH" = x86_64 ]; then make -C guest-runtime test; make -C guest-runtime vet; fi' in build["with"]["run"]
     # Build and package retain the same private HOME and dependency caches.
@@ -207,12 +205,11 @@ def check(platform):
     script = build["with"]["run"]
     assert 'scripts/release.sh package runtime "$VERSION" "$TARGET_ARCH"' in script
     assert 'scripts/release.sh validate runtime "$VERSION" "$TARGET_ARCH"' in script
-    assert 'RELEASE_MATERIALS_GO_NOTICE_ROOT=/src/selected-sandboxer-go' in script
     assert script.index("make -C guest-runtime sandbox-runtime") < script.index("scripts/release.sh package runtime")
     assert script.index("scripts/release.sh package runtime") < script.index("scripts/release.sh validate runtime")
     abi = runtime["Check the released Runtime ABI"]["run"]
     assert "trusted/guest-runtime/scripts/ci-check-runtime-abi.py" in abi and abi.count("--static ") == 2
-    assert "src/sandboxer/bin/$TARGET_ARCH/sandbox-init" in abi
+    assert "src/guest-runtime/bin/$TARGET_ARCH/sandbox-init" in abi
     assert names.index("Build test and package runtime image") < names.index("Check the released Runtime ABI")
     assert names.index("Check the released Runtime ABI") < names.index("Upload validated runtime bundle")
     publish = {s["name"]: s for s in workflows["release-runtime.yml"]["publish"]["steps"]}
@@ -308,8 +305,8 @@ def check_publish_source_objects(script, platform):
         source_env = dict(env, GIT_CONFIG_COUNT='1', GIT_CONFIG_KEY_0='url.' + str(origin) + '.insteadOf',
                           GIT_CONFIG_VALUE_0='https://github.com/kuasar-sandbox/guest-runtime.git')
         dependencies = []
-        source_env['GIT_CONFIG_COUNT'] = '3'
-        for index, owner in enumerate(('accelerator', 'sandboxer'), 1):
+        source_env['GIT_CONFIG_COUNT'] = '2'
+        for index, owner in enumerate(('accelerator',), 1):
             source_env['GIT_CONFIG_KEY_' + str(index)] = 'url.' + str(origin) + '.insteadOf'
             source_env['GIT_CONFIG_VALUE_' + str(index)] = 'https://github.com/kuasar-sandbox/' + owner + '.git'
             dependencies.extend(['--dependency', owner, 'v1.2.3', selected])

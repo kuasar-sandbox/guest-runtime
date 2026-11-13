@@ -144,7 +144,6 @@ release_materials_add_go_binary() {
     $2 == "dep" { module=$3 }
     $2 == "=>" && ($3 ~ /^\// || $3 ~ /^\.\.?\// || $4 == "(devel)" || $4 == "") {
       if (module != "github.com/kuasar-sandbox/accelerator" &&
-          module != "github.com/kuasar-sandbox/sandboxer" &&
           module != "github.com/e2b-dev/infra/packages/shared") unsupported=1
     }
     END { exit unsupported }
@@ -367,7 +366,7 @@ release_materials_finish() {
     # have their notices collected separately. Organization membership is not
     # a license-material exemption.
     case "$module" in
-      github.com/kuasar-sandbox/accelerator|github.com/kuasar-sandbox/sandboxer) continue ;;
+      github.com/kuasar-sandbox/accelerator) continue ;;
     esac
     if awk -F '\t' -v module="$module" \
       '$2 == "replacement" && $3 == module && $4 == "local-source" { found=1 }
@@ -411,7 +410,7 @@ release_materials_validate_go() (
       accelerator:bin/manifest-ctl|accelerator:bin/store-ctl|accelerator:bin/cache-ctl|\
       connector:bin/connector-ctl|sandboxer:bin/sandbox-ctl|sandboxer:bin/sandbox-init|\
       orchestrator:bin/node-ctl|orchestrator:bin/cluster-ctl|orchestrator:bin/node-stub-ctl|orchestrator:bin/e2b-key-ctl|\
-      runtime:bin/flatten-ctl)
+      runtime:bin/flatten-ctl|runtime:bin/sandbox-init|runtime:bin/sandbox-runtime.bundle:/sbin/init)
         release_materials_require_go_revision "$binary" "$SOURCE_SHA" ;;
     esac
   fi
@@ -433,7 +432,7 @@ release_materials_validate_go() (
     case "$unit:$module" in
       sandboxer:github.com/kuasar-sandbox/accelerator|sandboxer:github.com/kuasar-sandbox/connector|\
       orchestrator:github.com/kuasar-sandbox/accelerator|orchestrator:github.com/kuasar-sandbox/connector|orchestrator:github.com/kuasar-sandbox/sandboxer|\
-      runtime:github.com/kuasar-sandbox/accelerator|runtime:github.com/kuasar-sandbox/sandboxer)
+      runtime:github.com/kuasar-sandbox/accelerator)
         label="${module##*/}" ;;
     esac
     release_materials_require_license "$root" "$unit" "$label"

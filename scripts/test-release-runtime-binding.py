@@ -31,7 +31,9 @@ def run(source, original, readers):
             ("missing-init", "Runtime embedded payload verification failed"),
             ("linked-init", "Runtime embedded payload verification failed"),
             ("wrong-mode", "mode 0755"),
-            ("swapped-init", "embedded init has the wrong Go main identity or target"),
+            ("swapped-init", "embedded sandbox-init differs"),
+            ("wrong-init-main", "embedded init has the wrong Go main identity or target"),
+            ("missing-outer-init", "missing bin/sandbox-init"),
             ("non-go-envd", "embedded"),
             ("obsolete-outer-mkfs", "outside the exact runtime release layout"),
             ("obsolete-embedded-mkfs", "must not contain obsolete mkfs.erofs"),
@@ -54,6 +56,8 @@ def run(source, original, readers):
                     value = data.read(1)
                     data.seek(4096)
                     data.write(bytes([value[0] ^ 1]))
+            elif mutation == "missing-outer-init":
+                (tree / "bin/sandbox-init").unlink()
             elif mutation == "obsolete-outer-mkfs":
                 target = tree / "bin/mkfs.erofs"
                 target.write_text("#!/bin/sh\ntouch " + str(marker) + "\n")
@@ -85,8 +89,10 @@ def run(source, original, readers):
                     init.symlink_to("/opt/sandbox-runtime/bin/envd")
                 elif mutation == "wrong-mode":
                     init.chmod(0o644)
-                elif mutation == "swapped-init":
+                elif mutation in ("swapped-init", "wrong-init-main"):
                     shutil.copyfile(envd, init)
+                    if mutation == "wrong-init-main":
+                        shutil.copyfile(envd, tree / "bin/sandbox-init")
                 elif mutation == "missing-flatten":
                     flatten.unlink()
                 elif mutation == "different-flatten":
@@ -115,7 +121,7 @@ def run(source, original, readers):
             if marker.exists():
                 raise AssertionError("an embedded fixture executable was run")
             print("test-runtime-binding: rejected " + mutation, flush=True)
-        print("test-runtime-binding: 13 rechecksummed EROFS/payload mutations rejected; no payload execution")
+        print("test-runtime-binding: 15 rechecksummed EROFS/payload mutations rejected; no payload execution")
 
 
 if __name__ == "__main__":

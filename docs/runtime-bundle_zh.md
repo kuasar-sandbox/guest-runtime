@@ -5,13 +5,13 @@
 本篇是 `sandbox-runtime.bundle` 及 Runtime 发行单元的交付契约，定义文件系统布局、PMEM 对齐、footer 身份、保留路径和兼容要求。消费选定 Runtime/Kernel 产物见[使用 guest-runtime](using-guest-runtime_zh.md)，生产与验证见[构建](build_zh.md)。
 
 `sandbox-runtime.bundle` 是平台随每个 microVM 挂入的一份只读 Guest runtime
-镜像。它包含 `sandboxer` 构建出的 guest PID 1(`sandbox-init`)和平台在
+镜像。它包含 本仓构建出的 guest PID 1(`sandbox-init`)和平台在
 guest 内需要的辅助工具,由本仓打包、发布,再由 `sandboxer/sandbox-ctl` 在
 启动沙箱时作为 virtio-pmem 设备提供给 guest。
 
 本文只定义镜像打包、文件布局、版本发布和消费契约。`sandbox-init` 的启动期
 rootfs 组装、vsock 控制面、stdio MUX、exec/attach/quiesce 等 ABI 由
-[sandboxer Guest ABI 文档](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/guest-abi_zh.md)维护。
+[Guest ABI 文档](guest-abi_zh.md)维护。
 
 ## 概述
 
@@ -19,8 +19,8 @@ rootfs 组装、vsock 控制面、stdio MUX、exec/attach/quiesce 等 ABI 由
 
 | 组件 | 职责 |
 |---|---|
-| `sandboxer` | 构建 `sandbox-init`;`sandbox-ctl` 启动 CH,把 runtime 镜像作为 virtio-pmem 挂入 guest |
-| `guest-runtime` | 打包 `sandbox-init`、`envd`、`flatten-ctl` 为单一 EROFS 镜像 |
+| `sandboxer` | `sandbox-ctl` 启动 CH,把 runtime 镜像作为 virtio-pmem 挂入 guest |
+| `guest-runtime` | 构建 `sandbox-init`、`flatten-ctl`，并与 `envd` 打包为单一 EROFS 镜像 |
 | `guest-runtime/native-deps` | 构建 `vmlinux`、`envd`;可选网关单独按需构建,不是 runtime payload |
 | `accelerator` | 提供 `flatten-ctl` 复用的 `pkg/{flatten,image,remote,tar}` 和 manifest/cache/store 能力 |
 
@@ -33,7 +33,7 @@ kernel 由 `vmlinux` 包发布;VMM 由 `sandboxer` 发布。
 ```
                  build time                                      run time
 
-  sandboxer/bin/<arch>/sandbox-init ─┐
+  guest-runtime/bin/<arch>/sandbox-init ─┐
   guest-runtime/bin/<arch>/flatten-ctl├─► sandbox-runtime.bundle ──► sandbox-ctl
   native-deps/bin/<arch>/envd ────────┘             ▲                     │
                                                  │                     ▼
@@ -48,7 +48,7 @@ DAX 映射同一份 host 文件,避免每个 sandbox 独立复制 runtime 文件
 - **单一镜像**:e2b 运行时和 builder 运行时合并为同一个 runtime 镜像。
 - **只读且版本固定**:镜像由发布流程产生,运行期不修改。
 - **跨实例共享**:通过 virtio-pmem + DAX 共享 host page cache。
-- **边界清晰**:PID1 协议在 `sandboxer`,镜像打包和 guest payload 在 `guest-runtime`。
+- **边界清晰**:PID1、共享 ABI、镜像打包与 guest payload 归属 `guest-runtime`，Host 生命周期归属 `sandboxer`。
 - **可独立发布**:runtime bundle 可随 `guest-runtime` 专用版本线单独发布并选择旧版本回滚。
 
 ## 镜像布局
@@ -81,7 +81,7 @@ DAX 映射同一份 host 文件,避免每个 sandbox 独立复制 runtime 文件
 
 | 文件 | 来源 | 用途 |
 |---|---|---|
-| `/sbin/init` | `../sandboxer/bin/<arch>/sandbox-init` | guest PID 1,负责挂载、握手、应用监督 |
+| `/sbin/init` | `bin/<arch>/sandbox-init` | guest PID 1,负责挂载、握手、应用监督 |
 | `/opt/sandbox-runtime/bin/envd` | `native-deps/bin/<arch>/envd` | e2b 数据面 agent |
 | `/opt/sandbox-runtime/bin/flatten-ctl` | `bin/<arch>/flatten-ctl` | build sandbox 内拉取/展平 OCI 镜像 |
 
@@ -141,7 +141,7 @@ runtime 镜像由本仓 `main` 上受信任的 `Runtime Release` workflow 从调
 
 | 包 | 内容 | Release |
 |---|---|---|
-| `sandbox-runtime-<arch>-vX.Y.Z.tar.gz` | runtime 镜像、`flatten-ctl` | `guest-runtime` 仓 `runtime-vX.Y.Z` |
+| `sandbox-runtime-<arch>-vX.Y.Z.tar.gz` | runtime 镜像、`sandbox-init`、`flatten-ctl` | `guest-runtime` 仓 `runtime-vX.Y.Z` |
 
 这里 `<arch>` 为所选版本实际声明和发布的 `x86_64` 或 `aarch64`。
 不要仅凭源码构建支持推断另一架构资产存在，也不要将两个架构覆盖解包到同一 `bin/`。
@@ -150,6 +150,7 @@ runtime 专用包内同时放置:
 
 ```
 bin/sandbox-runtime.bundle
+bin/sandbox-init
 bin/flatten-ctl
 share/licenses/runtime/...
 ```
@@ -166,7 +167,7 @@ runtime 文档与 `test/e2e/`,从独立选择的 vmlinux tag 取得内核文档�
 在 `test/` 提供测试，并在 `workbench/` 提供轻量 Workbench 启动器。历史版本沿用其随包指南规定的布局。双语文档交付与二进制版本选择分别验收。
 
 `vmlinux` 不属于 runtime 版本,由本仓 `vmlinux-vX.Y.Z` 独立版本线发布。
-runtime workflow 显式选择已发布 sandboxer tag 构建镜像;runtime 与 vmlinux
+runtime workflow 从同一选定 guest-runtime commit 构建 sandbox-init 与 flatten-ctl。Stable `runtime-vX.Y.Z` 发布同时创建同 commit 的根 Go module tag `vX.Y.Z`；Preview 与 Kernel 发布不创建根 module tag。runtime 与 vmlinux
 版本号独立演进。
 
 `envd` 已内置在 runtime 镜像中,不作为独立 `bin/envd` 发布;
@@ -174,7 +175,7 @@ runtime workflow 显式选择已发布 sandboxer tag 构建镜像;runtime 与 vm
 
 ## 相关契约
 
-- [sandbox-init](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/guest-abi_zh.md) - guest PID 1 ABI 和 host/guest 控制协议。
+- [sandbox-init](guest-abi_zh.md) - guest PID 1 ABI 和 host/guest 控制协议。
 - [sandbox](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/runtime_zh.md) - runtime 镜像消费、启动与恢复。
 - [Native Build](../native-deps/README_zh.md) - 宿主 EROFS 工具要求及 vmlinux、envd 构建。
 - [vmlinux](vmlinux_zh.md) - guest kernel 与 runtime 镜像的配合关系。
