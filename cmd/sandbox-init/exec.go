@@ -184,7 +184,7 @@ type execBridge struct {
 
 func (b *execBridge) onSetWinsize(cols, rows uint16) {
 	if b.tty && b.ptyMaster != nil {
-		_ = setWinsize(int(b.ptyMaster.Fd()), cols, rows)
+		_ = setWinsize(b.ptyMaster, cols, rows)
 	}
 }
 

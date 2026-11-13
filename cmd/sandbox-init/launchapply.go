@@ -264,11 +264,17 @@ func parseFileMode(s string, def os.FileMode) os.FileMode {
 // A non-zero exit aborts startup (initContainers semantics).
 func runInit(specs []proto.InitSpec) error {
 	for i, s := range specs {
-		cmd := exec.Command(s.Exec, s.Args...)
+		env := execEnv(s.Env)
+		path, err := initCommandPath(s.Exec, env, s.Workdir)
+		if err != nil {
+			return fmt.Errorf("init[%d] %q: %w", i, s.Exec, err)
+		}
+		cmd := exec.Command(path, s.Args...)
+		cmd.Args[0] = s.Exec
 		cmd.Stdin = nil
 		cmd.Stdout = os.Stderr
 		cmd.Stderr = os.Stderr
-		cmd.Env = envSliceFromMap(s.Env) // s.Env merged over the default PATH
+		cmd.Env = env
 		if s.Workdir != "" && s.Workdir != "/" {
 			cmd.Dir = s.Workdir
 		}
@@ -289,6 +295,40 @@ func runInit(specs []proto.InitSpec) error {
 		}
 	}
 	return nil
+}
+
+// exec.Command looks up a bare name in PID 1's PATH. Resolve it against the
+// actual child environment and retain Go's protection against implicit
+// working-directory executables. An explicit ./name is still valid.
+func initCommandPath(name string, env []string, workdir string) (string, error) {
+	if strings.ContainsRune(name, '/') {
+		return name, nil
+	}
+	for _, entry := range env {
+		path, ok := strings.CutPrefix(entry, "PATH=")
+		if !ok {
+			continue
+		}
+		for _, dir := range filepath.SplitList(path) {
+			candidate := filepath.Join(dir, name)
+			relative := !filepath.IsAbs(candidate)
+			if relative {
+				candidate = filepath.Join(workdir, candidate)
+				// Include a slash so LookPath checks only this candidate.
+				if !filepath.IsAbs(candidate) {
+					candidate = "./" + candidate
+				}
+			}
+			if _, err := exec.LookPath(candidate); err == nil {
+				if relative {
+					return "", &exec.Error{Name: name, Err: exec.ErrDot}
+				}
+				return candidate, nil
+			}
+		}
+		break
+	}
+	return "", &exec.Error{Name: name, Err: exec.ErrNotFound}
 }
 
 // runWithTimeout runs cmd to completion, or kills it and returns an error if

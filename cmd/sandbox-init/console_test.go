@@ -512,3 +512,65 @@ func TestRewireAppStopsOnBridgeShutdown(t *testing.T) {
 	}
 	closeChildStdio(cs1)
 }
+
+func TestPipeStdinEOFSurvivesRestart(t *testing.T) {
+	spec := proto.StdioSpec{Stdin: true}
+	cs, b, err := setupAppStdio(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	guest, host := muxPair(t, streamSetFor(spec))
+	b.attach(guest)
+	b.start()
+	if err := host.Stream(mux.StreamStdin).CloseWrite(); err != nil {
+		t.Fatal(err)
+	}
+	for generation := 0; generation < 3; generation++ {
+		if generation > 0 {
+			cs, err = b.rewireApp(spec)
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		defer closeChildStdio(cs)
+		if got := awaitRead(t, readAllAsync(cs.stdin)); len(got) != 0 {
+			t.Fatalf("generation %d received %q after EOF", generation, got)
+		}
+	}
+}
+
+func TestRewirePTYWithOldSlaveOpen(t *testing.T) {
+	spec := proto.StdioSpec{TTY: true, Winsize: &proto.Winsize{Cols: 80, Rows: 24}}
+	old, b, err := setupAppStdio(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeChildStdio(old)
+	guest, host := muxPair(t, streamSetFor(spec))
+	b.attach(guest)
+	b.start()
+	b.onSetWinsize(120, 40)
+	stream := host.Stream(mux.StreamPTY)
+	if _, err := old.stdout.Write([]byte("old")); err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 3)
+	if _, err := io.ReadFull(stream, buf); err != nil || string(buf) != "old" {
+		t.Fatalf("read old generation: %q, %v", buf, err)
+	}
+	rewired := make(chan rewireResult, 1)
+	go func() {
+		cs, err := b.rewireAppWithTimeout(spec, 25*time.Millisecond)
+		rewired <- rewireResult{stdio: cs, err: err}
+	}()
+	next := awaitRewire(t, rewired)
+	if _, err := next.stdout.Write([]byte("new")); err != nil {
+		t.Fatal(err)
+	}
+	closeChildStdio(next)
+	shutdownBridge(b)
+	if got := string(awaitRead(t, readAllAsync(stream))); got != "new" {
+		t.Fatalf("new generation output = %q", got)
+	}
+	waitOutputPumps(t, b)
+}

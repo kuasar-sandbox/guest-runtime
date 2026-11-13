@@ -66,6 +66,7 @@ type consoleBridge struct {
 	appDrain    *appGenerationDrain
 	appDone     chan struct{}
 	appClosed   bool
+	stdinClosed bool // terminal host EOF persists across pipe generations
 	ptyMaster   *os.File
 	stdinW      *os.File
 	stdoutR     *os.File
@@ -212,6 +213,10 @@ func (b *consoleBridge) waitNextFd(role appRole, gen uint64) (*os.File, uint64, 
 
 // setEndsLocked installs a generation's fds and bumps appGen (caller holds appMu).
 func (b *consoleBridge) setEndsLocked(e appEnds, drain *appGenerationDrain) {
+	if b.stdinClosed && e.stdinW != nil {
+		_ = e.stdinW.Close()
+		e.stdinW = nil
+	}
 	b.ptyMaster, b.stdinW, b.stdoutR, b.stderrR = e.ptyMaster, e.stdinW, e.stdoutR, e.stderrR
 	b.appDrain = drain
 	b.appGen++
@@ -362,7 +367,7 @@ func makeAppFds(spec proto.StdioSpec) (childStdio, appEnds, error) {
 			return childStdio{}, appEnds{}, fmt.Errorf("openpty: %w", err)
 		}
 		if spec.Winsize != nil {
-			_ = setWinsize(int(master.Fd()), spec.Winsize.Cols, spec.Winsize.Rows)
+			_ = setWinsize(master, spec.Winsize.Cols, spec.Winsize.Rows)
 		}
 		return childStdio{stdin: slave, stdout: slave, stderr: slave, tty: true},
 			appEnds{ptyMaster: master}, nil
@@ -448,7 +453,7 @@ func streamSetFor(s proto.StdioSpec) mux.StreamSet {
 func (b *consoleBridge) onSetWinsize(cols, rows uint16) {
 	if b.tty {
 		if master := b.writeFd(rolePTY); master != nil {
-			_ = setWinsize(int(master.Fd()), cols, rows)
+			_ = setWinsize(master, cols, rows)
 		}
 	}
 }
@@ -694,9 +699,13 @@ func pumpHostToApp(b *consoleBridge, role appRole, holder *sessionHolder, id uin
 		switch {
 		case err == nil, errors.Is(err, io.EOF), errors.Is(err, mux.ErrStreamReset):
 			if closeOnEOF {
-				if fd := b.writeFd(role); fd != nil {
-					_ = fd.Close()
+				b.appMu.Lock()
+				b.stdinClosed = true
+				if b.stdinW != nil {
+					_ = b.stdinW.Close()
+					b.stdinW = nil
 				}
+				b.appMu.Unlock()
 			}
 			return
 		default:
@@ -806,12 +815,17 @@ func openPTY() (master, slave *os.File, err error) {
 			_ = mfd.Close()
 		}
 	}()
-	if err := unix.IoctlSetPointerInt(int(mfd.Fd()), unix.TIOCSPTLCK, 0); err != nil { // unlockpt
-		return nil, nil, fmt.Errorf("unlockpt: %w", err)
-	}
-	n, err := unix.IoctlGetInt(int(mfd.Fd()), unix.TIOCGPTN)
+	var n int
+	err = withPTYFD(mfd, func(fd int) error {
+		if err := unix.IoctlSetPointerInt(fd, unix.TIOCSPTLCK, 0); err != nil {
+			return fmt.Errorf("unlockpt: %w", err)
+		}
+		var err error
+		n, err = unix.IoctlGetInt(fd, unix.TIOCGPTN)
+		return err
+	})
 	if err != nil {
-		return nil, nil, fmt.Errorf("TIOCGPTN: %w", err)
+		return nil, nil, err
 	}
 	name := fmt.Sprintf("/dev/pts/%d", n)
 	sfd, err := os.OpenFile(name, os.O_RDWR|syscall.O_NOCTTY, 0)
@@ -821,6 +835,22 @@ func openPTY() (master, slave *os.File, err error) {
 	return mfd, sfd, nil
 }
 
-func setWinsize(fd int, cols, rows uint16) error {
-	return unix.IoctlSetWinsize(fd, unix.TIOCSWINSZ, &unix.Winsize{Col: cols, Row: rows})
+// Control holds the descriptor during the ioctl without changing the master's
+// nonblocking mode. Closing an old master can then interrupt its output pump.
+func withPTYFD(file *os.File, ioctl func(int) error) error {
+	raw, err := file.SyscallConn()
+	if err != nil {
+		return err
+	}
+	var ioctlErr error
+	if err := raw.Control(func(fd uintptr) { ioctlErr = ioctl(int(fd)) }); err != nil {
+		return err
+	}
+	return ioctlErr
+}
+
+func setWinsize(master *os.File, cols, rows uint16) error {
+	return withPTYFD(master, func(fd int) error {
+		return unix.IoctlSetWinsize(fd, unix.TIOCSWINSZ, &unix.Winsize{Col: cols, Row: rows})
+	})
 }
