@@ -156,7 +156,7 @@ fi
 bash -n "$ROOT/scripts/delete-preview.sh" "$ROOT/scripts/validate-release-source.sh"
 
 WORKFLOW="$ROOT/.github/workflows/release-runtime.yml"
-grep -Fqx 'run-name: Release ${{ inputs.version }} @${{ inputs.source_sha }} [accelerator=${{ inputs.accelerator_version }}]' \
+grep -Fqx "run-name: Release \${{ inputs.version }} @\${{ inputs.source_sha }} [accelerator=\${{ inputs.accelerator_version }}\${{ inputs.sandboxer_version && format(',sandboxer={0}', inputs.sandboxer_version) || '' }}]" \
   "$WORKFLOW" || fail "runtime release identity does not pin source and dependencies"
 grep -Fqx 'run-name: Release ${{ inputs.version }} @${{ inputs.source_sha }}' \
   "$ROOT/.github/workflows/release-vmlinux.yml" \

@@ -63,7 +63,10 @@ def release_cli(command, tag, arch, *args):
     kind = os.environ.get('RELEASE_KIND')
     unit = tag.split('-v', 1)[0] if tag.startswith(('runtime-v','vmlinux-v')) else None
     require(kind is None or kind == unit, 'RELEASE_KIND differs from tag')
-    return ['bash', str(SCRIPT/'release.sh'), command, *([unit] if unit else []), tag, arch, *map(str,args)]
+    tooling = SCRIPT
+    if command == 'validate' and unit == 'runtime' and os.environ.get('SANDBOXER_VERSION'):
+        tooling = SCRIPT.parent / 'trusted/precutover-runtime/scripts'
+    return ['bash', str(tooling/'release.sh'), command, *([unit] if unit else []), tag, arch, *map(str,args)]
 
 
 def names(tag, arch):
@@ -220,9 +223,11 @@ def update_latest(repository, release, commit, source_ref):
 
 def runtime_module_tag(repository, tag):
     # Go resolves this repository's root module through vX.Y.Z. Only a Stable
-    # runtime release produces that module version; kernel and Preview tags do not.
+    # Runtime built from the new producer exposes a root Go module tag.
+    # A sandboxer_version binding identifies the admitted historical producer.
     match = STABLE.fullmatch(tag)
-    if repository == 'kuasar-sandbox/guest-runtime' and match and match[1] == 'runtime':
+    if (repository == 'kuasar-sandbox/guest-runtime' and match and match[1] == 'runtime'
+            and not os.environ.get('SANDBOXER_VERSION')):
         return tag.removeprefix('runtime-')
     return None
 
@@ -242,6 +247,9 @@ def ensure_runtime_module_tag(repository, tag, commit):
 
 def publish(repository, tag, arch, commit, bundle, source_ref):
     unit = unit_for(repository,tag)
+    module_tag = runtime_module_tag(repository, tag)
+    if module_tag:
+        require(arch == 'all', 'Stable Runtime module publication requires both architectures')
     require(re.fullmatch('[0-9a-f]{40}',commit), 'commit must be a full lowercase SHA')
     require(source_ref == 'main' or re.fullmatch(r'release/v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.x',source_ref), 'invalid release source branch')
     notes = human_notes(bundle)
@@ -254,7 +262,6 @@ def publish(repository, tag, arch, commit, bundle, source_ref):
         if release['draft']: require(release.get('body') == notes, 'existing draft notes differ; reconcile them manually')
     target = tag_target(repository,tag)
     require(target is None or target == commit, 'tag already identifies a different commit')
-    module_tag = runtime_module_tag(repository, tag)
     if module_tag is not None:
         require(tag_target(repository, module_tag) in (None, commit),
                 'Go module tag already identifies a different commit')
@@ -317,14 +324,16 @@ def assemble(tag,x86,arm,output):
 
 def check_request(repository, tag, arch, commit=None):
     unit_for(repository,tag);names(tag,arch)
+    module_tag=runtime_module_tag(repository,tag)
+    if module_tag:
+        require(arch == 'all', 'Stable Runtime module publication requires both architectures')
     release=find_release(repository,tag)
     if release is None or release.get('draft') is True:
         return
     # A public release is normally reused. The only resumable exception is a
     # completed Runtime Stable whose module tag is still missing. This check
     # is read-only; publish revalidates both local and public assets.
-    module_tag=runtime_module_tag(repository,tag)
-    if commit is not None and module_tag and arch == 'all':
+    if commit is not None and module_tag:
         release_identity(release,tag,public=True)
         require(re.fullmatch('[0-9a-f]{40}',commit) and tag_target(repository,tag)==commit,
                 'published Runtime tag differs from the admitted source')
