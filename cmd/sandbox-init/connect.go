@@ -7,10 +7,12 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/kuasar-sandbox/guest-runtime/pkg/guestabi/fwd"
 	"github.com/kuasar-sandbox/guest-runtime/pkg/guestabi/proto"
+	"golang.org/x/sys/unix"
 )
 
 // The guest side of `sandbox-ctl run --connect` port forwarding: for each
@@ -222,10 +224,8 @@ func (a *acceptListeners) reopen() {
 // MUX close.
 func closeConnectSessions(reg *connRegistry, lns *acceptListeners) {
 	sessions := reg.beginQuiesce()
-	lns.closeAll()
-	if len(sessions) == 0 {
-		return
-	}
+	// Shutdown each parked reverse socket before waiting for listener Close:
+	// acceptForPeer pins the shared listener while polling it and that socket.
 	var wg sync.WaitGroup
 	for _, s := range sessions {
 		wg.Add(1)
@@ -234,6 +234,7 @@ func closeConnectSessions(reg *connRegistry, lns *acceptListeners) {
 			s.teardown()
 		}(s)
 	}
+	lns.closeAll()
 	wg.Wait()
 }
 
@@ -315,6 +316,57 @@ func runConnectSessionWithDial(c *vsockConn, req *proto.Message, sup *supervisor
 	logf("connect: session done → %s", spec.Address)
 }
 
+// acceptForPeer waits for this host and the shared listener together. A
+// disconnected host relinquishes its request without accepting a client or
+// disturbing other waiters on the same address. The listener is nonblocking:
+// another request can consume readiness between Poll and Accept4.
+func acceptForPeer(ln net.Listener, peer *vsockConn) (net.Conn, error) {
+	// getOrCreate only returns the system TCP and Unix listeners from net.Listen.
+	raw, err := ln.(syscall.Conn).SyscallConn()
+	if err != nil {
+		return nil, err
+	}
+	var accepted int
+	var acceptErr error
+	err = raw.Control(func(listenerFD uintptr) {
+		// rawIO retains the peer fd until poll returns. Close performs shutdown
+		// before joining its users, including when quiesce cancels this wait.
+		accepted, acceptErr = peer.rawIO(func(hostFD int, _ []byte) (int, error) {
+			fds := []unix.PollFd{
+				{Fd: int32(hostFD), Events: unix.POLLRDHUP},
+				{Fd: int32(listenerFD), Events: unix.POLLIN},
+			}
+			for {
+				_, err := unix.Poll(fds, -1)
+				if err == unix.EINTR {
+					continue
+				}
+				if err != nil {
+					return -1, err
+				}
+				// Prefer cancellation if a client arrived after the host left.
+				if fds[0].Revents != 0 {
+					return -1, net.ErrClosed
+				}
+				fd, _, err := unix.Accept4(int(listenerFD), unix.SOCK_NONBLOCK|unix.SOCK_CLOEXEC)
+				if err == unix.EAGAIN || err == unix.EINTR || err == unix.ECONNABORTED {
+					continue
+				}
+				return fd, err
+			}
+		}, nil)
+	})
+	if err != nil {
+		return nil, err
+	}
+	if acceptErr != nil {
+		return nil, acceptErr
+	}
+	file := os.NewFile(uintptr(accepted), ln.Addr().String())
+	defer file.Close()
+	return net.FileConn(file)
+}
+
 // runAcceptSession services an accept-mode (`LOCAL::TARGET`) connect: it
 // Listen+Accepts one guest-side connection on (network, address) — via a
 // lazily-created, cached listener — pairs it with this reverse-channel conn,
@@ -323,38 +375,33 @@ func runConnectSessionWithDial(c *vsockConn, req *proto.Message, sup *supervisor
 // closes the listener (unblocking Accept) and lingers the conn. It owns c.
 func runAcceptSession(c *vsockConn, network, address string, sup *supervisorState) {
 	reg := sup.connReg
-	fail := func(msg string) {
-		_ = proto.WriteMessage(c, &proto.Message{Type: proto.TypeError, Msg: msg})
-		_ = c.Close()
-	}
-
 	// Register the parked session before binding/accepting so a snapshot
 	// starting now either observes it (tears it down + closes the listener)
 	// or is observed here (add fails). relay is nil until promote below.
 	s := &connSession{c: c}
 	if !reg.add(s) {
-		fail("connect: sandbox quiescing (snapshot in progress)")
+		_ = proto.WriteMessage(c, &proto.Message{Type: proto.TypeError, Msg: "connect: sandbox quiescing (snapshot in progress)"})
+		s.teardown()
 		return
 	}
+
+	defer reg.remove(s)
 
 	ln, err := sup.acceptLn.getOrCreate(network, address)
 	if err != nil {
-		reg.remove(s)
-		fail("connect: listen " + address + ": " + err.Error())
+		if !reg.isQuiescing() {
+			_ = proto.WriteMessage(c, &proto.Message{Type: proto.TypeError, Msg: "connect: listen " + address + ": " + err.Error()})
+		}
+		s.teardown()
 		return
 	}
 
-	target, err := ln.Accept()
+	target, err := acceptForPeer(ln, c)
 	if err != nil {
-		// Listener closed by quiesce (closeConnectSessions) or a real accept
-		// error. If quiescing, the snapshot teardown owns the lingered close;
-		// otherwise report the error to the host.
-		reg.remove(s)
-		if reg.isQuiescing() {
-			s.teardown()
-		} else {
-			fail("connect: accept " + address + ": " + err.Error())
+		if !errors.Is(err, net.ErrClosed) && !reg.isQuiescing() {
+			_ = proto.WriteMessage(c, &proto.Message{Type: proto.TypeError, Msg: "connect: accept " + address + ": " + err.Error()})
 		}
+		s.teardown()
 		return
 	}
 
@@ -363,15 +410,13 @@ func runAcceptSession(c *vsockConn, network, address string, sup *supervisorStat
 		// Raced with quiesce after Accept returned: don't ack. Close the just-
 		// accepted guest conn and linger the reverse conn.
 		_ = target.Close()
-		reg.remove(s)
 		s.teardown()
 		return
 	}
-	defer reg.remove(s)
 
 	if err := proto.WriteMessage(c, &proto.Message{Type: proto.TypeConnectAck}); err != nil {
 		logf("connect(accept): write connect_ack (%s): %v", address, err)
-		relay.Shutdown(nil)
+		s.teardown()
 		return
 	}
 	_ = c.SetDeadline(time.Time{}) // hand off to the relay; no per-frame deadline

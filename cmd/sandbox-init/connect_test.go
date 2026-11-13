@@ -316,3 +316,78 @@ func TestRunAcceptSessionQuiesce(t *testing.T) {
 		t.Error("runConnectSession did not return after quiesce")
 	}
 }
+
+func TestParkedAcceptDisconnectKeepsOtherRequest(t *testing.T) {
+	for _, network := range []string{"unix", "tcp"} {
+		t.Run(network, func(t *testing.T) { testParkedAcceptDisconnect(t, network) })
+	}
+}
+
+func testParkedAcceptDisconnect(t *testing.T, network string) {
+	sup := &supervisorState{connReg: newConnRegistry(), acceptLn: newAcceptListeners()}
+	addr := filepath.Join(t.TempDir(), "parked.sock")
+	if network == "tcp" {
+		addr = "127.0.0.1:0"
+	}
+	// Bind without consuming a connection; both requests share this listener.
+	listener, err := sup.acceptLn.getOrCreate(network, addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeConnectSessions(sup.connReg, sup.acceptLn)
+	start := func() (*vsockConn, <-chan struct{}) {
+		h, g := socketpairFDs(t)
+		host := &vsockConn{fd: h}
+		t.Cleanup(func() { _ = host.Close() })
+		done := make(chan struct{})
+		go func() {
+			runAcceptSession(&vsockConn{fd: g}, network, addr, sup)
+			close(done)
+		}()
+		return host, done
+	}
+	old, canceled := start()
+	live, finished := start()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		sup.connReg.mu.Lock()
+		count := len(sup.connReg.live)
+		sup.connReg.mu.Unlock()
+		if count == 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("both requests did not register")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	_ = old.Close()
+	select {
+	case <-canceled:
+	case <-time.After(time.Second):
+		t.Fatal("parked request remained registered after host disconnect")
+	}
+	client, err := net.Dial(network, listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	_ = live.SetDeadline(time.Now().Add(2 * time.Second))
+	ack, err := proto.ReadMessage(live)
+	if err != nil || ack.Type != proto.TypeConnectAck {
+		t.Fatalf("remaining request got %v, %v", ack, err)
+	}
+	if _, err := client.Write([]byte("live")); err != nil {
+		t.Fatal(err)
+	}
+	f, err := fwd.ReadFrame(live)
+	if err != nil || f.Type != fwd.FrameData || string(f.Payload) != "live" {
+		t.Fatalf("remaining request data = %v, %v", f, err)
+	}
+	closeConnectSessions(sup.connReg, sup.acceptLn)
+	select {
+	case <-finished:
+	case <-time.After(time.Second):
+		t.Fatal("live request did not finish at quiesce")
+	}
+}
