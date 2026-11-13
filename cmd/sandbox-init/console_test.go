@@ -11,6 +11,7 @@ import (
 
 	"github.com/kuasar-sandbox/guest-runtime/pkg/guestabi/mux"
 	"github.com/kuasar-sandbox/guest-runtime/pkg/guestabi/proto"
+	"golang.org/x/sys/unix"
 )
 
 // muxPair wires a guest-side and host-side mux.Session over a net.Pipe so
@@ -573,4 +574,64 @@ func TestRewirePTYWithOldSlaveOpen(t *testing.T) {
 		t.Fatalf("new generation output = %q", got)
 	}
 	waitOutputPumps(t, b)
+}
+
+func TestRestartInterruptsOldStdinWriter(t *testing.T) {
+	spec := proto.StdioSpec{Stdin: true}
+	old, bridge, err := setupAppStdio(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeChildStdio(old)
+	defer shutdownBridge(bridge)
+	// Keep the old reader open, as when the application leaves a descendant.
+	// Wait until the first part of an oversized write is in the pipe.
+	var size int
+	if err := withStdioFD(old.stdin, func(fd int) error {
+		var err error
+		size, err = unix.FcntlInt(uintptr(fd), unix.F_GETPIPE_SZ, 0)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	writer := bridge.writeFd(roleStdin)
+	done := make(chan error, 1)
+	go func() { _, err := writer.Write(make([]byte, size+4096)); done <- err }()
+	if err := old.stdin.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.ReadFull(old.stdin, make([]byte, 1)); err != nil {
+		t.Fatal(err)
+	}
+	rewired := make(chan rewireResult, 1)
+	go func() { stdio, err := bridge.rewireApp(spec); rewired <- rewireResult{stdio: stdio, err: err} }()
+	var next childStdio
+	select {
+	case result := <-rewired:
+		if result.err != nil {
+			t.Fatal(result.err)
+		}
+		next = result.stdio
+	case <-time.After(2 * time.Second):
+		_ = old.stdin.Close() // release the writer before test teardown
+		result := <-rewired
+		closeChildStdio(result.stdio)
+		t.Fatal("restart could not interrupt the retired stdin writer")
+	}
+	defer closeChildStdio(next)
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("old writer completed on retired generation")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("retired stdin writer stayed blocked")
+	}
+	if _, err := bridge.writeFd(roleStdin).Write([]byte("new")); err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 3)
+	if _, err := io.ReadFull(next.stdin, buf); err != nil || string(buf) != "new" {
+		t.Fatalf("replacement stdin = %q, %v", buf, err)
+	}
 }

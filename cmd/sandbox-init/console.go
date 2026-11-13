@@ -433,7 +433,10 @@ func appPipe() (r, w *os.File, err error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	_, _ = unix.FcntlInt(w.Fd(), unix.F_SETPIPE_SZ, appPipeSize)
+	_ = withStdioFD(w, func(fd int) error {
+		_, err := unix.FcntlInt(uintptr(fd), unix.F_SETPIPE_SZ, appPipeSize)
+		return err
+	})
 	return r, w, nil
 }
 
@@ -816,7 +819,7 @@ func openPTY() (master, slave *os.File, err error) {
 		}
 	}()
 	var n int
-	err = withPTYFD(mfd, func(fd int) error {
+	err = withStdioFD(mfd, func(fd int) error {
 		if err := unix.IoctlSetPointerInt(fd, unix.TIOCSPTLCK, 0); err != nil {
 			return fmt.Errorf("unlockpt: %w", err)
 		}
@@ -835,22 +838,21 @@ func openPTY() (master, slave *os.File, err error) {
 	return mfd, sfd, nil
 }
 
-// Control holds the descriptor during the ioctl without changing the master's
-// nonblocking mode. Closing an old master can then interrupt its output pump.
-func withPTYFD(file *os.File, ioctl func(int) error) error {
+// Keep the descriptor pollable so closing retired stdio can interrupt its pump.
+func withStdioFD(file *os.File, control func(int) error) error {
 	raw, err := file.SyscallConn()
 	if err != nil {
 		return err
 	}
-	var ioctlErr error
-	if err := raw.Control(func(fd uintptr) { ioctlErr = ioctl(int(fd)) }); err != nil {
+	var controlErr error
+	if err := raw.Control(func(fd uintptr) { controlErr = control(int(fd)) }); err != nil {
 		return err
 	}
-	return ioctlErr
+	return controlErr
 }
 
 func setWinsize(master *os.File, cols, rows uint16) error {
-	return withPTYFD(master, func(fd int) error {
+	return withStdioFD(master, func(fd int) error {
 		return unix.IoctlSetWinsize(fd, unix.TIOCSWINSZ, &unix.Winsize{Col: cols, Row: rows})
 	})
 }
