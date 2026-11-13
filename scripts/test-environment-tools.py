@@ -72,11 +72,18 @@ class EnvironmentTools(unittest.TestCase):
                 ["bash", str(ROOT / "scripts/release.sh"), "package", "vmlinux",
                  "vmlinux-v0.1.7", "x86_64", str(source / "bundle")],
             ]
-            for command in commands:
+            def rejected(command):
                 result = subprocess.run(command, cwd=source, env=env, text=True, capture_output=True)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("vmlinux releases are built from guest-runtime main", result.stderr)
                 self.assertFalse((source / "bundle").exists())
+
+            for command in commands:
+                rejected(command)
+            subprocess.run(["git", "-c", "user.name=test", "-c", "user.email=test@example.test",
+                            "commit", "-qm", "maintenance", "--allow-empty"], cwd=source, check=True)
+            subprocess.run(["git", "checkout", "-q", "--detach"], cwd=source, check=True)
+            rejected(commands[1])
 
     def test_missing_cli_fails_without_installing(self):
         with tempfile.TemporaryDirectory() as directory:

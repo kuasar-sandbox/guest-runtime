@@ -45,7 +45,7 @@ python3 -B "$ROOT/scripts/test-static-crypto.py"
 init_fixture_repo() {
   local directory="$1"
   shift
-  git -C "$directory" init -q
+  git -C "$directory" init -q -b main
   git -C "$directory" config --local user.name "Chen Xiaohui"
   git -C "$directory" config --local user.email "graych@gmail.com"
   git -C "$directory" add -- "$@"
