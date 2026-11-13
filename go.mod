@@ -4,7 +4,7 @@ go 1.26.1
 
 require (
 	github.com/cyphar/filepath-securejoin v0.5.0
-	github.com/kuasar-sandbox/accelerator v0.1.12
+	github.com/kuasar-sandbox/accelerator v0.2.0
 	github.com/moby/sys/user v0.4.0
 	gopkg.in/yaml.v3 v3.0.1
 )
