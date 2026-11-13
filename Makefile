@@ -146,14 +146,24 @@ test-e2e-scripts:
 RUNTIME_VERSION ?= runtime-v0.1.0
 VMLINUX_VERSION ?= vmlinux-v0.1.0
 KUASAR_PLATFORM_DIR ?= ../kuasar-sandbox
-ACCELERATOR_VERSION ?= v0.1.12
+# Explicit dependency tags select Preview inputs. Otherwise use this module's
+# declared release requirement without resolving the module graph.
+go_requirement = $$(GOWORK=off $(GO) mod edit -json | \
+	jq -er --arg path "github.com/kuasar-sandbox/$(1)" '.Require[] | select(.Path == $$path) | .Version')
+ACCELERATOR_VERSION ?= $(call go_requirement,accelerator)
 SANDBOXER_VERSION ?= v0.1.15
 
 # Release assembly must consume a verified selected archive, never a leftover
 # development binary. The generic sandbox-runtime target remains a dev entry.
+# Mixed release recipes run sub-makes with the jobserver on real builds. GNU
+# Make executes recipes that directly reference $(MAKE) even under --dry-run.
+release_make = $(MAKE)
+release_recursive = $(if $(findstring n,$(filter-out -% %=%,$(firstword $(MAKEFLAGS)))),,+)
+
 release-runtime:
-	@set -e; workspace="$$(python3 -B "$(KUASAR_PLATFORM_DIR)/ci/integration/go_workspace.py" \
-		--root .. --owners guest-runtime --dependency-tag "accelerator=$(ACCELERATOR_VERSION)")"; \
+	$(release_recursive)@set -e; accelerator_tag="$(ACCELERATOR_VERSION)"; \
+	workspace="$$(python3 -B "$(KUASAR_PLATFORM_DIR)/ci/integration/go_workspace.py" \
+		--root .. --owners guest-runtime --version "$(RUNTIME_VERSION)" --dependency-tag "accelerator=$$accelerator_tag")"; \
 	head="$$(git -C "$(SANDBOXER_DIR)" rev-parse HEAD)" \
 	  && tagged="$$(git -C "$(SANDBOXER_DIR)" rev-parse --verify "refs/tags/$(SANDBOXER_VERSION)^{commit}")" \
 	  && [ "$$head" = "$$tagged" ] \
@@ -163,8 +173,8 @@ release-runtime:
 		--source-sha "$$(git -C "$(SANDBOXER_DIR)" rev-parse HEAD)" \
 		--output "$(abspath $(BUILD_DIR))/release-inputs/sandbox-init" \
 		--go-toolchain-output "$(abspath $(BUILD_DIR))/release-inputs/sandboxer-go"; \
-	$(MAKE) flatten-ctl GOWORK="$$workspace" BINDIR="$(abspath $(BINDIR))"; \
-	$(MAKE) sandbox-runtime GOWORK="$$workspace" BINDIR="$(abspath $(BINDIR))" \
+	$(release_make) flatten-ctl GOWORK="$$workspace" BINDIR="$(abspath $(BINDIR))"; \
+	$(release_make) sandbox-runtime GOWORK="$$workspace" BINDIR="$(abspath $(BINDIR))" \
 		FLATTEN_CTL="$(abspath $(BINDIR))/flatten-ctl" \
 		SANDBOX_INIT="$(abspath $(BUILD_DIR))/release-inputs/sandbox-init"; \
 	rm -rf "$(BUILD_DIR)/release-runtime-bundle"; \
@@ -172,7 +182,7 @@ release-runtime:
 	RELEASE_SOURCE_ROOT="$(CURDIR)" \
 	RELEASE_ACCELERATOR_SOURCE_DIR="$(abspath ../accelerator)" \
 	SOURCE_DATE_EPOCH="$$(git show -s --format=%ct HEAD)" \
-	RELEASE_ACCELERATOR_VERSION="$(ACCELERATOR_VERSION)" \
+	RELEASE_ACCELERATOR_VERSION="$$accelerator_tag" \
 	RELEASE_SANDBOXER_VERSION="$(SANDBOXER_VERSION)" \
 	RELEASE_SANDBOXER_SOURCE_DIR="$$(cd "$(SANDBOXER_DIR)" && pwd)" \
 	RELEASE_ENVD_BIN="$(abspath $(ENVD))" \
@@ -181,11 +191,9 @@ release-runtime:
 		bash scripts/release.sh package runtime "$(RUNTIME_VERSION)" "$(TARGET_ARCH)" \
 		$(BUILD_DIR)/release-runtime-bundle
 
-release-vmlinux: vmlinux
-	rm -rf $(BUILD_DIR)/release-vmlinux-bundle
-	SOURCE_DATE_EPOCH="$$(git show -s --format=%ct HEAD)" \
-		bash scripts/release.sh package vmlinux "$(VMLINUX_VERSION)" "$(TARGET_ARCH)" \
-		$(BUILD_DIR)/release-vmlinux-bundle
+release-vmlinux:
+	@echo "vmlinux releases are built from guest-runtime main; use make vmlinux for a development kernel" >&2
+	@exit 1
 
 test-release:
 	PYTHONDONTWRITEBYTECODE=1 python3 scripts/test-environment-tools.py
@@ -208,7 +216,7 @@ help:
 	@echo "  vet                Go static analysis"
 	@echo "  test-e2e-scripts   fixture, assertion and lifecycle regressions (no Docker required)"
 	@echo "  release-runtime    package runtime-vX.Y.Z"
-	@echo "  release-vmlinux    package vmlinux-vX.Y.Z"
+	@echo "  release-vmlinux    available on the main branch"
 	@echo "  test-release       test both independent release lines"
 	@echo "  clean"
 	@echo "  TARGET_ARCH        x86_64 (default) | aarch64"

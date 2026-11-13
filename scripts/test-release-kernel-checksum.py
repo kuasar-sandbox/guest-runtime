@@ -28,7 +28,7 @@ class KernelChecksumRelease(unittest.TestCase):
         (cls.linux / "LICENSES/preferred").mkdir(parents=True)
         (cls.linux / "COPYING").write_text("synthetic Linux license fixture\n")
         (cls.linux / "LICENSES/preferred/GPL-2.0").write_text("synthetic license fixture\n")
-        for args in (("init", "-q"), ("config", "user.name", "Release test"),
+        for args in (("init", "-q", "-b", "main"), ("config", "user.name", "Release test"),
                      ("config", "user.email", "release-test@example.invalid"),
                      ("add", "."), ("-c", "commit.gpgsign=false", "commit", "-qm", "fixture")):
             subprocess.run(["git", "-C", str(cls.source), *args], check=True,
