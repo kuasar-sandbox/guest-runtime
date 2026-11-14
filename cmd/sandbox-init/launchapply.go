@@ -34,6 +34,10 @@ func applyVolumeMounts(mounts []proto.MountSpec, ext4Options, runDir string) err
 	if singleDiskRoot {
 		srcRoot, srcDir = "/sysroot", ".sandbox-volumes"
 	}
+	if err := validateDiskMounts("/sysroot", runDir, mounts); err != nil {
+		return err
+	}
+	assembled := make(map[int]bool)
 	vi := 0
 	for _, m := range mounts {
 		switch m.Type {
@@ -47,8 +51,25 @@ func applyVolumeMounts(mounts []proto.MountSpec, ext4Options, runDir string) err
 				return fmt.Errorf("bind volume -> %s: %w", m.Target, err)
 			}
 		case "disk":
-			if err := assembleDataDisk(m, ext4Options, runDir); err != nil {
+			dir, err := prepareVolumeDir("/sysroot", m.Target)
+			if err != nil {
 				return err
+			}
+			if m.DiskSlot {
+				if err := guestSlots.install(m, dir, ext4Options); err != nil {
+					return fmt.Errorf("disk %d trigger %s: %w", m.DiskIndex, m.Target, err)
+				}
+				continue
+			}
+			asm := fmt.Sprintf("/sysdisks/disk-%d", m.DiskIndex)
+			if !assembled[m.DiskIndex] {
+				if err := assembleDataDisk(m, asm, ext4Options); err != nil {
+					return err
+				}
+				assembled[m.DiskIndex] = true
+			}
+			if err := projectDiskDirectory(asm, m.Subpath, dir); err != nil {
+				return fmt.Errorf("disk %d project %q to %s: %w", m.DiskIndex, m.Subpath, m.Target, err)
 			}
 		}
 	}
@@ -78,17 +99,8 @@ func bindVolumeDir(root, runDir, source, target string) error {
 	return unix.Mount(source, dir, "", unix.MS_BIND, "")
 }
 
-// assembleDataDisk mounts one boot.disks[] data disk and binds it onto its
-// target inside /sysroot (before switch-root, so phase1b's MS_MOVE carries it
-// into the new /). The /sysdisks/disk-<N>{,-lower,-upper} mountpoints are
-// pre-baked into the runtime erofs (config.MaxDataDisks of them); a missing one
-// is fatal (the erofs predates this disk count — rebuild it or reduce
-// boot.disks[]). single mode mounts one ext4; overlay mode layers a ro erofs
-// base + rw ext4 upper into an overlayfs. The /sysdisks subtree is hidden after
-// switch-root but held alive by the bind (and overlayfs refs) — same as the
-// root overlay's /overlay/lower+upper and the /opt/sandbox-runtime bind.
-func assembleDataDisk(m proto.MountSpec, ext4Options, runDir string) error {
-	asm := fmt.Sprintf("/sysdisks/disk-%d", m.DiskIndex)
+// assembleDataDisk mounts one disk once on its hidden pmem staging directory.
+func assembleDataDisk(m proto.MountSpec, asm, ext4Options string) error {
 	needed := []string{asm}
 	if m.DiskOverlay {
 		needed = append(needed, asm+"-lower", asm+"-upper")
@@ -134,9 +146,6 @@ func assembleDataDisk(m proto.MountSpec, ext4Options, runDir string) error {
 	}
 	if err := guestUsage.register(fmt.Sprintf("disk-%d", m.DiskIndex), usagePath); err != nil {
 		logf("usage disk registration: %v", err)
-	}
-	if err := bindVolumeDir("/sysroot", runDir, asm, m.Target); err != nil {
-		return fmt.Errorf("disk %d bind -> %s: %w", m.DiskIndex, m.Target, err)
 	}
 	return nil
 }
@@ -314,6 +323,16 @@ func runInit(specs []proto.InitSpec) error {
 			cmd.SysProcAttr = &syscall.SysProcAttr{
 				Credential: &syscall.Credential{Uid: cred.uid, Gid: cred.gid, Groups: cred.sgids},
 			}
+		}
+		if len(guestSlots.disks) > 0 {
+			// Init commands run before the primary establishes its namespace.
+			// Give them the same device restriction and a distinct process group.
+			if cmd.SysProcAttr == nil {
+				cmd.SysProcAttr = &syscall.SysProcAttr{}
+			}
+			cmd.SysProcAttr.Setpgid = true
+			cmd.SysProcAttr.UseCgroupFD = true
+			cmd.SysProcAttr.CgroupFD = int(applicationCgroups.target.Fd())
 		}
 		logf("init[%d]: %s %v", i, s.Exec, s.Args)
 		if err := runWithTimeout(cmd, s.TimeoutMs); err != nil {

@@ -458,8 +458,30 @@ Overlay data disk N:
   ext4 rw,discard -> /sysdisks/disk-N-upper
   overlayfs(lower, upper/upperdir, upper/workdir) -> /sysdisks/disk-N
 Both:
-  bind /sysdisks/disk-N -> /sysroot<target>
+  bind /sysdisks/disk-N/<subpath> -> /sysroot<target> (once per mapping)
 ```
+
+A disk ordinal may appear in several mount entries. `subpath` is relative to
+that disk's filesystem root; empty or `.` selects the entire root. Disk
+sources within the same ordinal and mount destinations across disks must be
+pairwise disjoint. The Guest resolves destination aliases and rejects collisions
+before creating mounts. Each missing source directory is created on the private
+writable disk. Existing symbolic links, non-directories and submounts fail source
+resolution. Hosts require `disk_mount_projection_v1` in the runtime-ready
+Hello for a non-root subpath or repeated ordinal.
+
+For a single-device `disk_slot`, the runtime-ready Hello advertises
+`disk_slot_v1` when the kernel exposes autofs. Each destination gets an autofs
+v5 direct trigger. It returns EAGAIN until PID 1 receives
+`disk_bind{disk_bind:{disk_index,binding_id,size_bytes}}` over the reverse
+management channel and confirms the device capacity. The `disk_bind_ack`
+echoes the same binding. Equal requests may be retried; a different binding
+identity or capacity fails. The first successful lookup assembles the disk,
+projects the requested directory, and continues the original lookup. All
+destinations of the disk reuse the same filesystem. The application cgroup
+cannot open the raw slot device, including through another device node.
+The Guest snapshot retains the binding, autofs control descriptors and mounted
+projections. The host must restore the matching block view before resuming it.
 
 The `/sysdisks` subtree becomes invisible after switch-root, but binds and
 overlayfs lower/upper references keep its mounts alive, just as for the root
