@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 	"unsafe"
 
 	"github.com/kuasar-sandbox/guest-runtime/pkg/guestabi/proto"
@@ -117,32 +118,55 @@ func (r *diskSlots) confirm(binding proto.DiskBinding) error {
 	if slot == nil {
 		return fmt.Errorf("unknown disk slot %d", binding.DiskIndex)
 	}
-	slot.mu.Lock()
-	defer slot.mu.Unlock()
-	if slot.fault != nil {
-		return slot.fault
-	}
-	if slot.binding.BindingID != "" {
-		if slot.binding != binding {
-			return errors.New("disk slot already has a different binding")
+	// The vhost config-change interrupt may still be queued in virtio-blk.
+	return slot.confirmCapacity(binding, readBlockCapacity, 100*time.Millisecond)
+}
+
+func (s *diskSlot) confirmCapacity(binding proto.DiskBinding, capacity func(string) (uint64, error), timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for {
+		if s.fault != nil {
+			return s.fault
 		}
-		return nil
+		if s.binding.BindingID != "" {
+			if s.binding != binding {
+				return errors.New("disk slot already has a different binding")
+			}
+			return nil
+		}
+		size, err := capacity(s.spec.DiskDevs[0])
+		if err != nil {
+			return err
+		}
+		if size == binding.SizeBytes {
+			s.binding = binding
+			return nil
+		}
+		if size != 0 || !time.Now().Before(deadline) {
+			return fmt.Errorf("disk %d size %d, expected %d", binding.DiskIndex, size, binding.SizeBytes)
+		}
+		// Only a zero-capacity observation can still be the pre-bind geometry.
+		// Keep servicing pre-bind autofs requests while the kernel refreshes it.
+		s.mu.Unlock()
+		time.Sleep(2 * time.Millisecond)
+		s.mu.Lock()
 	}
-	fd, err := unix.Open(slot.spec.DiskDevs[0], unix.O_RDONLY|unix.O_NONBLOCK|unix.O_CLOEXEC, 0)
+}
+
+func readBlockCapacity(device string) (uint64, error) {
+	fd, err := unix.Open(device, unix.O_RDONLY|unix.O_NONBLOCK|unix.O_CLOEXEC, 0)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	defer unix.Close(fd)
 	var size uint64
 	_, _, errno := unix.Syscall(unix.SYS_IOCTL, uintptr(fd), unix.BLKGETSIZE64, uintptr(unsafe.Pointer(&size)))
 	if errno != 0 {
-		return errno
+		return 0, errno
 	}
-	if size != binding.SizeBytes {
-		return fmt.Errorf("disk %d size %d, expected %d", binding.DiskIndex, size, binding.SizeBytes)
-	}
-	slot.binding = binding
-	return nil
+	return size, nil
 }
 
 func (s *diskSlot) project(subpath string, mountFD int) error {

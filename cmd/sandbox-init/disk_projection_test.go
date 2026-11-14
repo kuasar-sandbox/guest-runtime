@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/kuasar-sandbox/guest-runtime/pkg/guestabi/proto"
 	"golang.org/x/sys/unix"
@@ -94,5 +95,35 @@ func TestDiskBindReplay(t *testing.T) {
 	var s diskSlot
 	if err := s.project("", -1); !errors.Is(err, unix.EAGAIN) {
 		t.Fatal(err)
+	}
+}
+
+func TestSlotWaitsOnlyForZeroCapacity(t *testing.T) {
+	b := proto.DiskBinding{DiskIndex: 0, BindingID: "original", SizeBytes: 4096}
+	for _, tc := range []struct {
+		name      string
+		sizes     []uint64
+		timeout   time.Duration
+		wantBound bool
+	}{
+		{"notification pending", []uint64{0, 0, 4096}, time.Second, true},
+		{"wrong fixed capacity", []uint64{8192}, time.Second, false},
+		{"notification missing", []uint64{0}, 0, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			slot := diskSlot{spec: proto.MountSpec{DiskDevs: []string{"/dev/vdb"}}}
+			calls := 0
+			err := slot.confirmCapacity(b, func(string) (uint64, error) {
+				if calls >= len(tc.sizes) {
+					t.Fatal("unexpected extra capacity probe")
+				}
+				size := tc.sizes[calls]
+				calls++
+				return size, nil
+			}, tc.timeout)
+			if (err == nil) != tc.wantBound || (slot.binding == b) != tc.wantBound || calls != len(tc.sizes) {
+				t.Fatalf("binding=%+v calls=%d err=%v", slot.binding, calls, err)
+			}
+		})
 	}
 }
