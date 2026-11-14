@@ -1975,3 +1975,9 @@ existing resource controller.
 [Runtime: start, control, capture and restore](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/runtime.md) | [Sandbox configuration reference](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/configuration.md) | [Sandbox and Snapshot artifacts](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/artifacts.md) | [Guest memory and lazy restore](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/memory.md) | [Block storage: devices, writable state and checkpoints](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/block-storage.md) | [Resource control and usage accounting](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/resources.md) | [VMM integration and Cloud Hypervisor patches](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/vmm.md)
 
 [Component entry](https://github.com/kuasar-sandbox/sandboxer/blob/main/README.md) · [Native builds and patch materials](https://github.com/kuasar-sandbox/sandboxer/blob/main/native-deps/README.md)
+
+
+Hosts selecting strict disk topology set `disk_mount_projection_v1` in Launch.
+A disk slot, a subdirectory source, or multiple targets for one device also selects
+the strict checks. Older hosts sending ordinary single-target whole disks retain
+their original volume ordering, including an empty volume beneath a data disk.

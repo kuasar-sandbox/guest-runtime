@@ -98,6 +98,10 @@ const (
 // netlink-based applyNetwork pass. nil → no network configuration.
 // Stdio carries the app stdio mode the host wants (see StdioSpec).
 type LaunchSpec struct {
+	// DiskMountProjectionV1 opts into Guest-side checks for the complete
+	// mount topology, including nested legacy whole-disk and empty mounts.
+	DiskMountProjectionV1 bool `json:"disk_mount_projection_v1,omitempty"`
+
 	// InitialLaunchToken binds the one initial launch to its Guest facts. It is
 	// host operation identity, never portable artifact policy.
 	InitialLaunchToken string `json:"initial_launch_token,omitempty"`

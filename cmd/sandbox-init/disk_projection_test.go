@@ -37,7 +37,7 @@ func TestDiskProjectionValidation(t *testing.T) {
 		{"absolute", []proto.MountSpec{disk(0, "/a", "/data")}, false},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			err := validateDiskMounts(root, filepath.Join(root, "run"), c.mounts)
+			err := validateDiskMounts(root, filepath.Join(root, "run"), &proto.LaunchSpec{Mounts: c.mounts, DiskMountProjectionV1: true})
 			if (err == nil) != c.ok {
 				t.Fatalf("got %v, want ok=%t", err, c.ok)
 			}
@@ -125,5 +125,32 @@ func TestSlotWaitsOnlyForZeroCapacity(t *testing.T) {
 				t.Fatalf("binding=%+v calls=%d err=%v", slot.binding, calls, err)
 			}
 		})
+	}
+}
+
+func TestLegacyWholeDiskWithNestedEmptyMount(t *testing.T) {
+	root := t.TempDir()
+	spec := &proto.LaunchSpec{Mounts: []proto.MountSpec{
+		{Type: "disk", Target: "/data", DiskDevs: []string{"/dev/vdc"}},
+		{Type: "disk", Target: "/other", DiskIndex: 1, DiskDevs: []string{"/dev/vdd"}},
+		{Type: "empty", Target: "/data/cache"},
+	}}
+	validate := func() error { return validateDiskMounts(root, filepath.Join(root, "run"), spec) }
+	if err := validate(); err != nil {
+		t.Fatalf("legacy whole disk: %v", err)
+	}
+	spec.DiskMountProjectionV1 = true
+	if err := validate(); err == nil {
+		t.Fatal("strict topology accepted overlapping mount")
+	}
+	spec.DiskMountProjectionV1 = false
+	spec.Mounts[0].Subpath = "input"
+	if err := validate(); err == nil {
+		t.Fatal("projected disk accepted overlapping mount")
+	}
+	spec.Mounts[0].Subpath = ""
+	spec.Mounts[0].DiskSlot = true
+	if err := validate(); err == nil {
+		t.Fatal("slot accepted overlapping mount")
 	}
 }

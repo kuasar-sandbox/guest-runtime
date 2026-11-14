@@ -19,35 +19,50 @@ func nested(parent, child string) bool {
 
 // Non-disk mounts may overlap each other. Sorting normalized component paths
 // lets us find a conflict involving a disk without comparing every mount pair.
-func validateDiskMounts(root, runDir string, mounts []proto.MountSpec) error {
+func validateDiskMounts(root, runDir string, spec *proto.LaunchSpec) error {
+	mounts := spec.Mounts
+	strict := spec.DiskMountProjectionV1
+	seen := make(map[int]bool)
+	for _, m := range mounts {
+		if m.Type == "disk" {
+			strict = strict || m.DiskSlot || m.Subpath != "" || seen[m.DiskIndex]
+			seen[m.DiskIndex] = true
+		}
+	}
+	if len(seen) == 0 {
+		return nil
+	}
 	type target struct {
 		path string
 		disk bool
-	}
-	if !slices.ContainsFunc(mounts, func(m proto.MountSpec) bool { return m.Type == "disk" }) {
-		return nil
 	}
 	targets := make([]target, 0, len(mounts))
 	disks := make(map[int]proto.MountSpec)
 	sources := make(map[int][]string)
 	for _, m := range mounts {
-		resolved, err := securejoin.SecureJoin(root, m.Target)
-		if err != nil {
-			return err
+		if strict {
+			resolved, err := securejoin.SecureJoin(root, m.Target)
+			if err != nil {
+				return err
+			}
+			targets = append(targets, target{resolved, m.Type == "disk"})
+			if m.Type == "disk" {
+				// System mounts installed during switch-root would hide a projection.
+				if nested(resolved, runDir) || nested(resolved, filepath.Join(runDir, "shm")) {
+					return fmt.Errorf("disk %d target %q conflicts with guest mount at %s", m.DiskIndex, m.Target, resolved)
+				}
+				for _, fixed := range []string{"dev", "sys", "proc", "opt/sandbox-runtime"} {
+					if reserved := filepath.Join(root, fixed); nested(reserved, resolved) || nested(resolved, reserved) {
+						return fmt.Errorf("disk %d target %s overlaps guest mount %s", m.DiskIndex, m.Target, reserved)
+					}
+				}
+			}
 		}
-		targets = append(targets, target{resolved, m.Type == "disk"})
 		if m.Type != "disk" {
 			continue
 		}
-		// Automatic tmpfs roots and system mounts installed at switch-root
-		// would hide a projection. Ordinary children of /run remain valid.
-		if !filepath.IsAbs(m.Target) || nested(resolved, runDir) || nested(resolved, filepath.Join(runDir, "shm")) {
-			return fmt.Errorf("disk %d target %q conflicts with guest mount at %s", m.DiskIndex, m.Target, resolved)
-		}
-		for _, fixed := range []string{"dev", "sys", "proc", "opt/sandbox-runtime"} {
-			if reserved := filepath.Join(root, fixed); nested(reserved, resolved) || nested(resolved, reserved) {
-				return fmt.Errorf("disk %d target %s overlaps guest mount %s", m.DiskIndex, m.Target, reserved)
-			}
+		if !filepath.IsAbs(m.Target) {
+			return fmt.Errorf("disk %d target must be absolute: %q", m.DiskIndex, m.Target)
 		}
 		wantDevs := 1
 		if m.DiskOverlay {

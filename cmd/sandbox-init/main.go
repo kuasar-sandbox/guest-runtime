@@ -310,7 +310,7 @@ func phaseWorkloadRoot(spec *proto.LaunchSpec) error {
 	if err != nil {
 		return err
 	}
-	if err := applyVolumeMounts(spec.Mounts, ext4Options, runDir); err != nil {
+	if err := applyVolumeMounts(spec, ext4Options, runDir); err != nil {
 		return fmt.Errorf("apply volume mounts: %w", err)
 	}
 	if err := phase1bSwitchRoot(spec.CgroupControl); err != nil {

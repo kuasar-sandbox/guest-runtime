@@ -29,17 +29,17 @@ const fileInjectStage = "/run/.inject"
 //     sibling to the overlay upperdir.
 //   - single-disk mode: /sysroot/.sandbox-volumes/<i> on the single writable
 //     root disk itself (no separate upper exists).
-func applyVolumeMounts(mounts []proto.MountSpec, ext4Options, runDir string) error {
+func applyVolumeMounts(spec *proto.LaunchSpec, ext4Options, runDir string) error {
 	srcRoot, srcDir := "/overlay/upper", "volumes"
 	if singleDiskRoot {
 		srcRoot, srcDir = "/sysroot", ".sandbox-volumes"
 	}
-	if err := validateDiskMounts("/sysroot", runDir, mounts); err != nil {
+	if err := validateDiskMounts("/sysroot", runDir, spec); err != nil {
 		return err
 	}
 	assembled := make(map[int]bool)
 	vi := 0
-	for _, m := range mounts {
+	for _, m := range spec.Mounts {
 		switch m.Type {
 		case "empty":
 			src, err := prepareVolumeDir(srcRoot, filepath.Join(srcDir, strconv.Itoa(vi)))
@@ -67,6 +67,11 @@ func applyVolumeMounts(mounts []proto.MountSpec, ext4Options, runDir string) err
 					return err
 				}
 				assembled[m.DiskIndex] = true
+			}
+			// Old hosts could mount a whole disk at an automatic tmpfs root.
+			// The tmpfs stays visible there, as in the original volume policy.
+			if dir == runDir || dir == filepath.Join(runDir, "shm") {
+				continue
 			}
 			if err := projectDiskDirectory(asm, m.Subpath, dir); err != nil {
 				return fmt.Errorf("disk %d project %q to %s: %w", m.DiskIndex, m.Subpath, m.Target, err)
