@@ -154,3 +154,30 @@ func TestLegacyWholeDiskWithNestedEmptyMount(t *testing.T) {
 		t.Fatal("slot accepted overlapping mount")
 	}
 }
+
+func TestWorkspaceProjectionResolvesRuntimeDirectory(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "usr", "local"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("usr/local", filepath.Join(root, "opt")); err != nil {
+		t.Fatal(err)
+	}
+	for _, tt := range []struct {
+		target  string
+		allowed bool
+	}{
+		{"/opt/sandbox-runtime/project", false},
+		{"/usr/local/sandbox-runtime/project", false},
+		{"/usr/local", false},
+		{"/usr/local/workspace", true},
+	} {
+		t.Run(tt.target, func(t *testing.T) {
+			spec := proto.LaunchSpec{DiskMountProjectionV1: true, Mounts: []proto.MountSpec{{Type: "disk", DiskIndex: 0, DiskDevs: []string{"/dev/vdb"}, DiskSlot: true, Target: tt.target}}}
+			err := validateDiskMounts(root, filepath.Join(root, "run"), &spec)
+			if (err == nil) != tt.allowed {
+				t.Fatalf("projection %q: %v", tt.target, err)
+			}
+		})
+	}
+}

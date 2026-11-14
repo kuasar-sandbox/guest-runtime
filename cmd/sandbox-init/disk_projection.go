@@ -32,6 +32,18 @@ func validateDiskMounts(root, runDir string, spec *proto.LaunchSpec) error {
 	if len(seen) == 0 {
 		return nil
 	}
+	// Resolve the protected destinations through the same image tree as the
+	// requested projections. Images may place /opt under e.g. /usr/local.
+	var reservedTargets []string
+	if strict {
+		for _, fixed := range []string{"dev", "sys", "proc", "opt/sandbox-runtime"} {
+			resolved, err := securejoin.SecureJoin(root, fixed)
+			if err != nil {
+				return err
+			}
+			reservedTargets = append(reservedTargets, resolved)
+		}
+	}
 	type target struct {
 		path string
 		disk bool
@@ -51,8 +63,8 @@ func validateDiskMounts(root, runDir string, spec *proto.LaunchSpec) error {
 				if nested(resolved, runDir) || nested(resolved, filepath.Join(runDir, "shm")) {
 					return fmt.Errorf("disk %d target %q conflicts with guest mount at %s", m.DiskIndex, m.Target, resolved)
 				}
-				for _, fixed := range []string{"dev", "sys", "proc", "opt/sandbox-runtime"} {
-					if reserved := filepath.Join(root, fixed); nested(reserved, resolved) || nested(resolved, reserved) {
+				for _, reserved := range reservedTargets {
+					if nested(reserved, resolved) || nested(resolved, reserved) {
 						return fmt.Errorf("disk %d target %s overlaps guest mount %s", m.DiskIndex, m.Target, reserved)
 					}
 				}
