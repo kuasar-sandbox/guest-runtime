@@ -144,6 +144,12 @@ func cgroupConfigureClone(attr *syscall.SysProcAttr, firstPrimary bool) error {
 	if !firstPrimary && applicationCgroups.namespace == nil {
 		return errors.New("application cgroup namespace is not initialized")
 	}
+	// A process in the autofs daemon process group can bypass its triggers.
+	// TTY workloads start a new session via Setsid; other managed children
+	// with a slot receive their own process group.
+	if len(guestSlots.disks) > 0 && !attr.Setsid {
+		attr.Setpgid = true
+	}
 	attr.UseCgroupFD = true
 	attr.CgroupFD = int(target.Fd())
 	if firstPrimary {

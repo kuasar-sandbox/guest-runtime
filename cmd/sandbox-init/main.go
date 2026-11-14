@@ -310,11 +310,14 @@ func phaseWorkloadRoot(spec *proto.LaunchSpec) error {
 	if err != nil {
 		return err
 	}
-	if err := applyVolumeMounts(spec.Mounts, ext4Options, runDir); err != nil {
+	if err := applyVolumeMounts(spec, ext4Options, runDir); err != nil {
 		return fmt.Errorf("apply volume mounts: %w", err)
 	}
 	if err := phase1bSwitchRoot(spec.CgroupControl); err != nil {
 		return fmt.Errorf("switch root: %w", err)
+	}
+	if err := guestSlots.protectDevices(); err != nil {
+		return err
 	}
 	return ensureRunDirs("/", runMount, shmMount)
 }
@@ -426,7 +429,7 @@ func waitForLaunch() (*proto.LaunchSpec, *vsockConn, error) {
 		_ = conn.Close()
 		return nil, nil, err
 	}
-	if err := proto.WriteMessage(conn, &proto.Message{Type: proto.TypeHello, Phase: "runtime_ready", InitialLaunchStateV1: true, Ext4DiscardV1: true}); err != nil {
+	if err := proto.WriteMessage(conn, &proto.Message{Type: proto.TypeHello, Phase: "runtime_ready", InitialLaunchStateV1: true, Ext4DiscardV1: true, DiskMountProjectionV1: true, DiskSlotV1: diskSlotSupported()}); err != nil {
 		return fail(fmt.Errorf("send runtime_ready: %w", err))
 	}
 	msg, err := proto.ReadMessage(conn)
@@ -580,6 +583,7 @@ func phase2ForkApp(spec *proto.LaunchSpec, cs childStdio, firstPrimary bool, onS
 		return 0, err
 	}
 	if cs.tty {
+		sysAttr.Setpgid = false
 		sysAttr.Setsid = true
 		sysAttr.Setctty = true // Ctty defaults to 0 = Stdin = the pty slave
 	}

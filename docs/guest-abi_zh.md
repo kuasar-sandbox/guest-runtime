@@ -352,8 +352,12 @@ name 不过线。盘的设备位由它在 boot.disks[] 的下标决定,与 mount
 单盘数据盘 N:  mount ext4 -o discard /dev/vdX → /sysdisks/disk-N
 overlay 数据盘 N: erofs ro → /sysdisks/disk-N-lower;ext4 rw,discard → /sysdisks/disk-N-upper;
                  overlayfs(lower, upper/upperdir, upper/workdir) → /sysdisks/disk-N
-两者收尾:bind /sysdisks/disk-N → /sysroot<target>
+每条映射:bind /sysdisks/disk-N/<subpath> → /sysroot<target>
 ```
+
+同一设备序号可以出现在多条映射中。`subpath` 是盘根内的相对目录，空值或 `.` 表示整盘根。同盘源目录及跨盘目标目录分别要求互不重叠。Guest 在安装前解析目标别名并检查实际冲突。缺少的源目录在私有写层创建；源是符号链接、非目录或子挂载时访问失败。使用子目录或重复设备序号前，宿主检查 `runtime_ready` Hello 的 `disk_mount_projection_v1` 能力。
+
+单设备 `disk_slot` 在每个目标安装标准 autofs v5 直接触发点。内核提供 autofs 时 Hello 声明 `disk_slot_v1`。绑定前目录访问返回 EAGAIN。宿主经管理通道发送 `disk_bind`，载荷 `disk_bind` 包含 `disk_index`、`binding_id` 和 `size_bytes`。PID 1 校验设备容量、放行目录后以 `disk_bind_ack` 回显相同载荷。同源重试返回相同确认，绑定身份或容量不同时报错。放行后的首次访问完成整盘挂载、对应子目录的 bind 并继续原查找。其他映射复用同一文件系统。应用 cgroup 无法打开该盘的原始块设备及别名。内存快照保留绑定状态、autofs 控制句柄和已挂载的投影，恢复时先接回同一保存点的块视图。
 
 `/sysdisks` 子树 switch-root 后不可见,但被 bind(及 overlayfs 对 lower/upper 的引用)持活——与
 root overlay 的 `/overlay/lower+upper` 隐藏后仍活、`/opt/sandbox-runtime` bind 同一机制。**恢复**时

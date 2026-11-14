@@ -351,6 +351,17 @@ func handleReverseConnShutdown(c *vsockConn, sup *supervisorState, bridge *conso
 		return false
 	}
 	switch req.Type {
+	case proto.TypeDiskBind:
+		if sup == nil || req.DiskBind == nil {
+			_ = proto.WriteMessage(c, &proto.Message{Type: proto.TypeError, Msg: "workload or binding missing"})
+			return false
+		}
+		if err := guestSlots.confirm(*req.DiskBind); err != nil {
+			_ = proto.WriteMessage(c, &proto.Message{Type: proto.TypeError, Msg: err.Error()})
+		} else {
+			_ = proto.WriteMessage(c, &proto.Message{Type: proto.TypeDiskBindAck, DiskBind: req.DiskBind})
+		}
+		return false
 	case proto.TypeShutdown:
 		if err := proto.WriteMessage(c, &proto.Message{Type: proto.TypeAck}); err == nil {
 			initialLaunch.exited(0)

@@ -263,7 +263,7 @@ do_build() {
 
     # Check the resolved config rather than trusting the fragments: Kconfig
     # silently drops requested symbols when their dependency closure changes.
-    local required=(CONFIG_ZONE_DEVICE=y CONFIG_FS_DAX=y CONFIG_VIRTIO_PMEM=y CONFIG_BLK_DEV_PMEM=y)
+    local required=(CONFIG_ZONE_DEVICE=y CONFIG_FS_DAX=y CONFIG_VIRTIO_PMEM=y CONFIG_BLK_DEV_PMEM=y CONFIG_AUTOFS_FS=y CONFIG_CGROUP_BPF=y)
     if [ "$KERNEL_ARCH" = x86_64 ]; then
         # Cloud Hypervisor emits Processor Local x2APIC (MADT type 9) entries.
         # Dropping X86_X2APIC leaves only the fallback boot CPU.
