@@ -193,6 +193,14 @@ type MountSpec struct {
 	DiskDevs         []string `json:"disk_devs,omitempty"`
 }
 
+// DiskBinding is retained for source compatibility with older clients.
+// Deprecated: binding completes on the host.
+type DiskBinding struct {
+	DiskIndex int    `json:"disk_index"`
+	BindingID string `json:"binding_id"`
+	SizeBytes uint64 `json:"size_bytes"`
+}
+
 // FileSpec is one file injected into the guest rootfs at Path. Content is
 // inline (text). Mode is an octal string ("0644"; empty → 0644). Owner is
 // "uid:gid" or "name:group" (empty → 0:0). ReadOnly makes the bind
@@ -366,6 +374,9 @@ type Message struct {
 	DiskMountProjectionV1 bool `json:"disk_mount_projection_v1,omitempty"`
 	DiskSlotV1            bool `json:"disk_slot_v1,omitempty"`
 
+	// Deprecated: the guest does not handle binding messages.
+	DiskBind *DiskBinding `json:"disk_bind,omitempty"`
+
 	Type          string         `json:"type"`
 	UsageRequest  *UsageRequest  `json:"usage_request,omitempty"`
 	UsageResponse *UsageResponse `json:"usage_response,omitempty"`
@@ -470,6 +481,10 @@ const (
 // directions, the request/response pairs, and which connections upgrade
 // to the MUX after their *_ack.
 const (
+	// Deprecated: binding completes on the host.
+	TypeDiskBind = "disk_bind"
+	// Deprecated: binding completes on the host.
+	TypeDiskBindAck  = "disk_bind_ack"
 	TypeHello        = "hello"
 	TypeLaunch       = "launch"
 	TypeLaunchAck    = "launch_ack"
