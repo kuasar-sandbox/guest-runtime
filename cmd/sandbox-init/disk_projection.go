@@ -17,42 +17,43 @@ func nested(parent, child string) bool {
 	return parent == child || strings.HasPrefix(child, strings.TrimSuffix(parent, "/")+"/")
 }
 
-// Non-disk mounts may overlap each other. Sorting normalized component paths
-// lets us find a conflict involving a disk without comparing every mount pair.
+// Only a projection of a declared slot can conflict with another mount. DiskSlot
+// also identifies unbound slots sent by hosts predating DiskSlotDeclared.
 func validateDiskMounts(root, runDir string, spec *proto.LaunchSpec) error {
 	mounts := spec.Mounts
-	strict := spec.DiskMountProjectionV1
-	seen := make(map[int]bool)
-	for _, m := range mounts {
-		if m.Type == "disk" {
-			strict = strict || m.DiskSlot || m.Subpath != "" || seen[m.DiskIndex]
-			seen[m.DiskIndex] = true
+	slot := func(m proto.MountSpec) bool { return m.Type == "disk" && (m.DiskSlotDeclared || m.DiskSlot) }
+	checkTargets := slices.ContainsFunc(mounts, slot)
+	var fixedTargets []string
+	if checkTargets {
+		for _, path := range []string{"dev", "sys", "proc", "opt/sandbox-runtime"} {
+			resolved, err := securejoin.SecureJoin(root, path)
+			if err != nil {
+				return err
+			}
+			fixedTargets = append(fixedTargets, resolved)
 		}
-	}
-	if len(seen) == 0 {
-		return nil
 	}
 	type target struct {
 		path string
-		disk bool
+		slot bool
 	}
 	targets := make([]target, 0, len(mounts))
 	disks := make(map[int]proto.MountSpec)
 	sources := make(map[int][]string)
 	for _, m := range mounts {
-		if strict {
+		if checkTargets {
 			resolved, err := securejoin.SecureJoin(root, m.Target)
 			if err != nil {
 				return err
 			}
-			targets = append(targets, target{resolved, m.Type == "disk"})
-			if m.Type == "disk" {
+			targets = append(targets, target{resolved, slot(m)})
+			if slot(m) {
 				// System mounts installed during switch-root would hide a projection.
 				if nested(resolved, runDir) || nested(resolved, filepath.Join(runDir, "shm")) {
 					return fmt.Errorf("disk %d target %q conflicts with guest mount at %s", m.DiskIndex, m.Target, resolved)
 				}
-				for _, fixed := range []string{"dev", "sys", "proc", "opt/sandbox-runtime"} {
-					if reserved := filepath.Join(root, fixed); nested(reserved, resolved) || nested(resolved, reserved) {
+				for _, reserved := range fixedTargets {
+					if nested(reserved, resolved) || nested(resolved, reserved) {
 						return fmt.Errorf("disk %d target %s overlaps guest mount %s", m.DiskIndex, m.Target, reserved)
 					}
 				}
@@ -71,14 +72,16 @@ func validateDiskMounts(root, runDir string, spec *proto.LaunchSpec) error {
 		if m.DiskIndex < 0 || m.DiskIndex >= 8 || len(m.DiskDevs) != wantDevs || (m.DiskSlot && m.DiskOverlay) {
 			return fmt.Errorf("invalid disk %d device topology", m.DiskIndex)
 		}
-		if old, ok := disks[m.DiskIndex]; ok && (old.DiskSlot != m.DiskSlot || old.DiskOverlay != m.DiskOverlay || !slices.Equal(old.DiskDevs, m.DiskDevs)) {
+		if old, ok := disks[m.DiskIndex]; ok && (slot(old) != slot(m) || old.DiskSlot != m.DiskSlot || old.DiskOverlay != m.DiskOverlay || !slices.Equal(old.DiskDevs, m.DiskDevs)) {
 			return fmt.Errorf("inconsistent device topology for disk %d", m.DiskIndex)
 		}
 		disks[m.DiskIndex] = m
 		if filepath.IsAbs(m.Subpath) || slices.Contains(strings.Split(m.Subpath, "/"), "..") {
 			return fmt.Errorf("disk %d invalid subpath %q", m.DiskIndex, m.Subpath)
 		}
-		sources[m.DiskIndex] = append(sources[m.DiskIndex], filepath.Clean("/"+m.Subpath))
+		if slot(m) {
+			sources[m.DiskIndex] = append(sources[m.DiskIndex], filepath.Clean("/"+m.Subpath))
+		}
 	}
 	// The trailing slash makes each subtree contiguous even for names such
 	// as "a", "a-b", "a/n". Keep active ancestors to allow tmpfs-on-tmpfs.
@@ -91,7 +94,7 @@ func validateDiskMounts(root, runDir string, spec *proto.LaunchSpec) error {
 		for len(ancestors) > 0 && !strings.HasPrefix(t.path, ancestors[len(ancestors)-1].path) {
 			ancestors = ancestors[:len(ancestors)-1]
 		}
-		if len(ancestors) > 0 && (t.disk || ancestors[len(ancestors)-1].disk) {
+		if len(ancestors) > 0 && (t.slot || ancestors[len(ancestors)-1].slot) {
 			return fmt.Errorf("mount %s overlaps %s", t.path, ancestors[len(ancestors)-1].path)
 		}
 		ancestors = append(ancestors, t)

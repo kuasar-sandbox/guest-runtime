@@ -1,8 +1,12 @@
 # Guest kernel patches
 
-Linux 6.1.169 uses one architecture-neutral virtio balloon patch. Inflation batches
-order-0 page allocation and list enqueue within the upstream 256-PFN request.
+The virtio balloon patch for Linux 6.1.169 batches order-0 page allocation and
+list enqueue within the upstream 256-PFN inflation request.
 See [the guest kernel specification](../../../docs/vmlinux.md#balloon-behavior-under-memory-pressure).
+
+The virtio block patch rereads capacity when opening a disk that still reports
+zero sectors. This lets a filesystem mount see newly inserted media even when
+the transport does not deliver a capacity-change interrupt.
 
 This directory remains an input to the generic `linux-patches-apply` and
 `linux-patches-format` stages. Future architecture-neutral patches belong here

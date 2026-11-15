@@ -98,8 +98,8 @@ const (
 // netlink-based applyNetwork pass. nil → no network configuration.
 // Stdio carries the app stdio mode the host wants (see StdioSpec).
 type LaunchSpec struct {
-	// DiskMountProjectionV1 opts into Guest-side checks for the complete
-	// mount topology, including nested legacy whole-disk and empty mounts.
+	// DiskMountProjectionV1 opts older guests into mount conflict checks.
+	// Current guests identify guarded mounts using their slot declarations.
 	DiskMountProjectionV1 bool `json:"disk_mount_projection_v1,omitempty"`
 
 	// InitialLaunchToken binds the one initial launch to its Guest facts. It is
@@ -185,11 +185,12 @@ type MountSpec struct {
 	Source  string `json:"source,omitempty"`
 	Options string `json:"options,omitempty"`
 
-	Subpath     string   `json:"subpath,omitempty"`   // directory relative to the assembled disk root
-	DiskSlot    bool     `json:"disk_slot,omitempty"` // direct autofs trigger, awaiting disk_bind
-	DiskIndex   int      `json:"disk_index,omitempty"`
-	DiskOverlay bool     `json:"disk_overlay,omitempty"`
-	DiskDevs    []string `json:"disk_devs,omitempty"`
+	Subpath          string   `json:"subpath,omitempty"`            // directory relative to the assembled disk root
+	DiskSlot         bool     `json:"disk_slot,omitempty"`          // direct autofs trigger, awaiting disk_bind
+	DiskSlotDeclared bool     `json:"disk_slot_declared,omitempty"` // declared slot, including an already bound disk on cold launch
+	DiskIndex        int      `json:"disk_index,omitempty"`
+	DiskOverlay      bool     `json:"disk_overlay,omitempty"`
+	DiskDevs         []string `json:"disk_devs,omitempty"`
 }
 
 // DiskBinding identifies a single publication in this Guest lifetime. A repeated

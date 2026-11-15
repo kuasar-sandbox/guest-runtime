@@ -355,7 +355,7 @@ overlay 数据盘 N: erofs ro → /sysdisks/disk-N-lower;ext4 rw,discard → /sy
 每条映射:bind /sysdisks/disk-N/<subpath> → /sysroot<target>
 ```
 
-同一设备序号可以出现在多条映射中。`subpath` 是盘根内的相对目录，空值或 `.` 表示整盘根。同盘源目录及跨盘目标目录分别要求互不重叠。Guest 在安装前解析目标别名并检查实际冲突。缺少的源目录在私有写层创建；源是符号链接、非目录或子挂载时访问失败。使用子目录或重复设备序号前，宿主检查 `runtime_ready` Hello 的 `disk_mount_projection_v1` 能力。
+同一设备序号可以出现在多条映射中。`subpath` 是盘根内的相对目录，空串表示整盘根，旧制品也可能编码为 `.`。同一 slot 投影的源目录必须互不重叠。Guest 在安装前解析目标别名，逐对检查 slot 目标和其他有效挂载。宿主通过 `disk_slot_declared` 标记 slot 投影，包括在冷 Sandbox 制品中已绑定的 slot。`disk_slot` 仅对未绑定盘位请求 autofs，也用于识别旧宿主传来的空盘位。缺少的源目录在私有写层创建；源是符号链接、非目录或子挂载时访问失败。使用子目录或重复设备序号前，宿主检查 `runtime_ready` Hello 的 `disk_mount_projection_v1` 能力。
 
 单设备 `disk_slot` 在每个目标安装标准 autofs v5 直接触发点。内核提供 autofs 时 Hello 声明 `disk_slot_v1`。绑定前目录访问返回 EAGAIN。宿主经管理通道发送 `disk_bind`，载荷 `disk_bind` 包含 `disk_index`、`binding_id` 和 `size_bytes`。PID 1 校验设备容量、放行目录后以 `disk_bind_ack` 回显相同载荷。同源重试返回相同确认，绑定身份或容量不同时报错。放行后的首次访问完成整盘挂载、对应子目录的 bind 并继续原查找。其他映射复用同一文件系统。应用 cgroup 无法打开该盘的原始块设备及别名。内存快照保留绑定状态、autofs 控制句柄和已挂载的投影，恢复时先接回同一保存点的块视图。
 
