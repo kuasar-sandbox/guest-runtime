@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
-	"time"
 	"unsafe"
 
 	"github.com/kuasar-sandbox/guest-runtime/pkg/guestabi/proto"
@@ -43,13 +42,11 @@ type diskSlots struct {
 var guestSlots = diskSlots{disks: make(map[int]*diskSlot)}
 
 type diskSlot struct {
-	mu        sync.Mutex // serializes each trigger's decision AND kernel reply with bind ACKs
+	mu        sync.Mutex // serializes filesystem assembly and projections for this disk
 	spec      proto.MountSpec
 	options   string
 	stagingFD int // parent is pinned; re-open the leaf after mounting over it
-	binding   proto.DiskBinding
 	mounted   bool
-	fault     error
 }
 
 func (r *diskSlots) install(spec proto.MountSpec, dir, options string) error {
@@ -108,71 +105,7 @@ func (s *diskSlot) installTrigger(dir, subpath string) error {
 	return nil
 }
 
-func (r *diskSlots) confirm(binding proto.DiskBinding) error {
-	if binding.BindingID == "" || binding.SizeBytes == 0 {
-		return errors.New("invalid disk binding identity or size")
-	}
-	r.RLock()
-	slot := r.disks[binding.DiskIndex]
-	r.RUnlock()
-	if slot == nil {
-		return fmt.Errorf("unknown disk slot %d", binding.DiskIndex)
-	}
-	// The vhost config-change interrupt may still be queued in virtio-blk.
-	return slot.confirmCapacity(binding, readBlockCapacity, 100*time.Millisecond)
-}
-
-func (s *diskSlot) confirmCapacity(binding proto.DiskBinding, capacity func(string) (uint64, error), timeout time.Duration) error {
-	deadline := time.Now().Add(timeout)
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for {
-		if s.fault != nil {
-			return s.fault
-		}
-		if s.binding.BindingID != "" {
-			if s.binding != binding {
-				return errors.New("disk slot already has a different binding")
-			}
-			return nil
-		}
-		size, err := capacity(s.spec.DiskDevs[0])
-		if err != nil {
-			return err
-		}
-		if size == binding.SizeBytes {
-			s.binding = binding
-			return nil
-		}
-		if size != 0 || !time.Now().Before(deadline) {
-			return fmt.Errorf("disk %d size %d, expected %d", binding.DiskIndex, size, binding.SizeBytes)
-		}
-		// Only a zero-capacity observation can still be the pre-bind geometry.
-		// Keep servicing pre-bind autofs requests while the kernel refreshes it.
-		s.mu.Unlock()
-		time.Sleep(2 * time.Millisecond)
-		s.mu.Lock()
-	}
-}
-
-func readBlockCapacity(device string) (uint64, error) {
-	fd, err := unix.Open(device, unix.O_RDONLY|unix.O_NONBLOCK|unix.O_CLOEXEC, 0)
-	if err != nil {
-		return 0, err
-	}
-	defer unix.Close(fd)
-	var size uint64
-	_, _, errno := unix.Syscall(unix.SYS_IOCTL, uintptr(fd), unix.BLKGETSIZE64, uintptr(unsafe.Pointer(&size)))
-	if errno != 0 {
-		return 0, errno
-	}
-	return size, nil
-}
-
 func (s *diskSlot) project(subpath string, mountFD int) error {
-	if s.binding.BindingID == "" {
-		return unix.EAGAIN
-	}
 	staging := filepath.Join(fdPath(s.stagingFD), fmt.Sprintf("disk-%d", s.spec.DiskIndex))
 	if !s.mounted {
 		if err := assembleDataDisk(s.spec, staging, s.options); err != nil {
@@ -192,9 +125,7 @@ func (s *diskSlot) serveTrigger(reader *os.File, ctl, mountFD int, subpath strin
 		// The kernel emits one atomic (<= PIPE_BUF) packet per request.
 		n, err := reader.Read(packet[:])
 		if err != nil || n != len(packet) || binary.NativeEndian.Uint32(packet[:4]) != 5 || binary.NativeEndian.Uint32(packet[4:8]) != autofsMissingDirect {
-			s.mu.Lock()
-			s.fault = fmt.Errorf("disk %d lost autofs trigger (size %d, read %v)", s.spec.DiskIndex, n, err)
-			s.mu.Unlock()
+			logf("disk %d lost autofs trigger (size %d, read %v)", s.spec.DiskIndex, n, err)
 			break
 		}
 		s.mu.Lock()
@@ -211,11 +142,9 @@ func (s *diskSlot) serveTrigger(reader *os.File, ctl, mountFD int, subpath strin
 			reply.Status = -int32(errno)
 		}
 		_, _, errno := unix.Syscall(unix.SYS_IOCTL, uintptr(ctl), op, uintptr(unsafe.Pointer(&reply)))
-		if errno != 0 {
-			s.fault = fmt.Errorf("autofs reply disk %d: %w", s.spec.DiskIndex, errno)
-		}
 		s.mu.Unlock()
 		if errno != 0 {
+			logf("autofs reply disk %d: %v", s.spec.DiskIndex, errno)
 			break
 		}
 	}

@@ -1,0 +1,48 @@
+From 702c6bcdb2d29ed0bc9d53729214c107bbdc2f77 Mon Sep 17 00:00:00 2001
+From: Codex <codex@openai.com>
+Date: Sun, 15 Nov 2026 04:55:42 -0500
+Subject: [PATCH] virtio_blk: recheck empty media capacity when opening a disk
+
+---
+ drivers/block/virtio_blk.c | 23 +++++++++++++++++++++++
+ 1 file changed, 23 insertions(+)
+
+diff --git a/drivers/block/virtio_blk.c b/drivers/block/virtio_blk.c
+index 0ba56ca..030edfa 100644
+--- a/drivers/block/virtio_blk.c
++++ b/drivers/block/virtio_blk.c
+@@ -518,8 +518,31 @@ static void virtblk_free_disk(struct gendisk *disk)
+ 	kfree(vblk);
+ }
+ 
++/* Empty media can acquire a backend without a config-change interrupt. */
++static int virtblk_open(struct block_device *bdev, fmode_t mode)
++{
++	struct gendisk *disk = bdev->bd_disk;
++	struct virtio_blk *vblk = disk->private_data;
++	u64 capacity;
++
++	if (get_capacity(disk))
++		return 0;
++
++	mutex_lock(&vblk->vdev_mutex);
++	if (!vblk->vdev) {
++		mutex_unlock(&vblk->vdev_mutex);
++		return -ENXIO;
++	}
++	virtio_cread(vblk->vdev, struct virtio_blk_config, capacity, &capacity);
++	if (capacity)
++		set_capacity_and_notify(disk, capacity);
++	mutex_unlock(&vblk->vdev_mutex);
++	return 0;
++}
++
+ static const struct block_device_operations virtblk_fops = {
+ 	.owner  	= THIS_MODULE,
++	.open		= virtblk_open,
+ 	.getgeo		= virtblk_getgeo,
+ 	.free_disk	= virtblk_free_disk,
+ };
+-- 
+2.52.0
+

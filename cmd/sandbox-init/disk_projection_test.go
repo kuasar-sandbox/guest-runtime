@@ -5,7 +5,6 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-	"time"
 
 	"github.com/kuasar-sandbox/guest-runtime/pkg/guestabi/proto"
 	"golang.org/x/sys/unix"
@@ -17,7 +16,7 @@ func TestDiskProjectionValidation(t *testing.T) {
 		t.Fatal(err)
 	}
 	disk := func(i int, sub, target string) proto.MountSpec {
-		return proto.MountSpec{Type: "disk", Subpath: sub, Target: target, DiskIndex: i, DiskDevs: []string{"/dev/vdb"}}
+		return proto.MountSpec{Type: "disk", DiskSlotDeclared: true, Subpath: sub, Target: target, DiskIndex: i, DiskDevs: []string{"/dev/vdb"}}
 	}
 	for _, c := range []struct {
 		name   string
@@ -77,57 +76,6 @@ func TestOpenDiskDirectoryPinsSource(t *testing.T) {
 		t.Fatalf("parent accepted: %v", err)
 	}
 }
-func TestDiskBindReplay(t *testing.T) {
-	b := proto.DiskBinding{DiskIndex: 0, BindingID: "original", SizeBytes: 4096}
-	r := diskSlots{disks: map[int]*diskSlot{0: {binding: b}}}
-	if err := r.confirm(b); err != nil {
-		t.Fatal(err)
-	}
-	b.SizeBytes = 8192
-	if err := r.confirm(b); err == nil {
-		t.Fatal("changed size accepted")
-	}
-	b.SizeBytes = 4096
-	b.BindingID = "replacement"
-	if err := r.confirm(b); err == nil {
-		t.Fatal("replacement accepted")
-	}
-	var s diskSlot
-	if err := s.project("", -1); !errors.Is(err, unix.EAGAIN) {
-		t.Fatal(err)
-	}
-}
-
-func TestSlotWaitsOnlyForZeroCapacity(t *testing.T) {
-	b := proto.DiskBinding{DiskIndex: 0, BindingID: "original", SizeBytes: 4096}
-	for _, tc := range []struct {
-		name      string
-		sizes     []uint64
-		timeout   time.Duration
-		wantBound bool
-	}{
-		{"notification pending", []uint64{0, 0, 4096}, time.Second, true},
-		{"wrong fixed capacity", []uint64{8192}, time.Second, false},
-		{"notification missing", []uint64{0}, 0, false},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			slot := diskSlot{spec: proto.MountSpec{DiskDevs: []string{"/dev/vdb"}}}
-			calls := 0
-			err := slot.confirmCapacity(b, func(string) (uint64, error) {
-				if calls >= len(tc.sizes) {
-					t.Fatal("unexpected extra capacity probe")
-				}
-				size := tc.sizes[calls]
-				calls++
-				return size, nil
-			}, tc.timeout)
-			if (err == nil) != tc.wantBound || (slot.binding == b) != tc.wantBound || calls != len(tc.sizes) {
-				t.Fatalf("binding=%+v calls=%d err=%v", slot.binding, calls, err)
-			}
-		})
-	}
-}
-
 func TestLegacyWholeDiskWithNestedEmptyMount(t *testing.T) {
 	root := t.TempDir()
 	spec := &proto.LaunchSpec{Mounts: []proto.MountSpec{
@@ -140,17 +88,50 @@ func TestLegacyWholeDiskWithNestedEmptyMount(t *testing.T) {
 		t.Fatalf("legacy whole disk: %v", err)
 	}
 	spec.DiskMountProjectionV1 = true
-	if err := validate(); err == nil {
-		t.Fatal("strict topology accepted overlapping mount")
+	if err := validate(); err != nil {
+		t.Fatalf("ordinary mounts with old strict flag: %v", err)
 	}
 	spec.DiskMountProjectionV1 = false
 	spec.Mounts[0].Subpath = "input"
-	if err := validate(); err == nil {
-		t.Fatal("projected disk accepted overlapping mount")
+	if err := validate(); err != nil {
+		t.Fatalf("ordinary disk projection: %v", err)
 	}
 	spec.Mounts[0].Subpath = ""
 	spec.Mounts[0].DiskSlot = true
 	if err := validate(); err == nil {
 		t.Fatal("slot accepted overlapping mount")
+	}
+}
+
+func TestSlotPairsAfterImageResolution(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Symlink("/real", filepath.Join(root, "alias")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("/usr/local", filepath.Join(root, "opt")); err != nil {
+		t.Fatal(err)
+	}
+	spec := proto.LaunchSpec{Mounts: []proto.MountSpec{
+		{Type: "disk", Target: "/data", Subpath: "src", DiskDevs: []string{"/dev/vdb"}},
+		{Type: "disk", Target: "/out", Subpath: "src/cache", DiskDevs: []string{"/dev/vdb"}},
+		{Type: "tmpfs", Target: "/data/cache"},
+		{Type: "disk", Target: "/real/work", DiskSlotDeclared: true, DiskIndex: 1, DiskDevs: []string{"/dev/vdc"}},
+	}}
+	check := func() error { return validateDiskMounts(root, filepath.Join(root, "run"), &spec) }
+	if err := check(); err != nil {
+		t.Fatalf("unrelated ordinary mounts: %v", err)
+	}
+	spec.Mounts[2].Target = "/alias/work/cache"
+	if err := check(); err == nil {
+		t.Fatal("resolved slot conflict accepted")
+	}
+	spec.Mounts[2].Target = "/data/cache"
+	spec.Mounts[3].Target = "/usr/local/sandbox-runtime"
+	if err := check(); err == nil {
+		t.Fatal("resolved runtime mount accepted")
+	}
+	spec.Mounts[3].Target = "/usr/local/work"
+	if err := check(); err != nil {
+		t.Fatalf("runtime sibling: %v", err)
 	}
 }

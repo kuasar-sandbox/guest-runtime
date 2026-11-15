@@ -462,26 +462,25 @@ Both:
 ```
 
 A disk ordinal may appear in several mount entries. `subpath` is relative to
-that disk's filesystem root; empty or `.` selects the entire root. Disk
-sources within the same ordinal and mount destinations across disks must be
-pairwise disjoint. The Guest resolves destination aliases and rejects collisions
-before creating mounts. Each missing source directory is created on the private
+that disk's filesystem root. An empty value selects the entire root. Previously
+saved artifacts may spell the root as `.`. A declared slot's source directories
+must be disjoint. The Guest resolves destination aliases and checks each slot
+target against all other effective mounts before mounting. Each missing source directory is created on the private
 writable disk. Existing symbolic links, non-directories and submounts fail source
 resolution. Hosts require `disk_mount_projection_v1` in the runtime-ready
 Hello for a non-root subpath or repeated ordinal.
 
 For a single-device `disk_slot`, the runtime-ready Hello advertises
 `disk_slot_v1` when the kernel exposes autofs. Each destination gets an autofs
-v5 direct trigger. It returns EAGAIN until PID 1 receives
-`disk_bind{disk_bind:{disk_index,binding_id,size_bytes}}` over the reverse
-management channel and confirms the device capacity. The `disk_bind_ack`
-echoes the same binding. Equal requests may be retried; a different binding
-identity or capacity fails. The first successful lookup assembles the disk,
-projects the requested directory, and continues the original lookup. All
-destinations of the disk reuse the same filesystem. The application cgroup
-cannot open the raw slot device, including through another device node.
-The Guest snapshot retains the binding, autofs control descriptors and mounted
-projections. The host must restore the matching block view before resuming it.
+v5 direct trigger. An access opens the block device and attempts to mount its
+filesystem. Opening a disk whose capacity is still zero refreshes it from the
+virtio device. An empty slot fails the access and leaves the trigger installed.
+Once media is present, the first successful access mounts the disk, projects the
+requested directory, and continues the lookup. All targets on the same disk
+share the mounted filesystem. The application cgroup cannot open the raw slot
+device, including through another device node. A memory snapshot retains the
+autofs descriptors and mounted projections. The host restores the captured disk
+view before resuming the Guest.
 
 The `/sysdisks` subtree becomes invisible after switch-root, but binds and
 overlayfs lower/upper references keep its mounts alive, just as for the root
@@ -1977,7 +1976,7 @@ existing resource controller.
 [Component entry](https://github.com/kuasar-sandbox/sandboxer/blob/main/README.md) · [Native builds and patch materials](https://github.com/kuasar-sandbox/sandboxer/blob/main/native-deps/README.md)
 
 
-Hosts selecting strict disk topology set `disk_mount_projection_v1` in Launch.
-A disk slot, a subdirectory source, or multiple targets for one device also selects
-the strict checks. Older hosts sending ordinary single-target whole disks retain
-their original volume ordering, including an empty volume beneath a data disk.
+Hosts mark projections of a declared slot with `disk_slot_declared`, including
+a slot already bound in a cold Sandbox artifact. `disk_slot` independently
+requests autofs for an unbound slot and also identifies slots sent by older
+hosts. Ordinary projections retain their original mount ordering.
