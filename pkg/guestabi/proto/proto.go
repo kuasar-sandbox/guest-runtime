@@ -186,19 +186,11 @@ type MountSpec struct {
 	Options string `json:"options,omitempty"`
 
 	Subpath          string   `json:"subpath,omitempty"`            // directory relative to the assembled disk root
-	DiskSlot         bool     `json:"disk_slot,omitempty"`          // direct autofs trigger, awaiting disk_bind
+	DiskSlot         bool     `json:"disk_slot,omitempty"`          // install a direct autofs trigger for this slot
 	DiskSlotDeclared bool     `json:"disk_slot_declared,omitempty"` // declared slot, including an already bound disk on cold launch
 	DiskIndex        int      `json:"disk_index,omitempty"`
 	DiskOverlay      bool     `json:"disk_overlay,omitempty"`
 	DiskDevs         []string `json:"disk_devs,omitempty"`
-}
-
-// DiskBinding identifies a single publication in this Guest lifetime. A repeated
-// confirmation of the same identity and capacity is idempotent.
-type DiskBinding struct {
-	DiskIndex int    `json:"disk_index"`
-	BindingID string `json:"binding_id"`
-	SizeBytes uint64 `json:"size_bytes"`
 }
 
 // FileSpec is one file injected into the guest rootfs at Path. Content is
@@ -370,10 +362,9 @@ type Message struct {
 	InitialLaunchStateV1 bool                `json:"initial_launch_state_v1,omitempty"`
 	InitialLaunchState   *InitialLaunchState `json:"initial_launch_state,omitempty"`
 	// Ext4DiscardV1 advertises LaunchSpec.Ext4Discard support in hello.
-	Ext4DiscardV1         bool         `json:"ext4_discard_v1,omitempty"`
-	DiskMountProjectionV1 bool         `json:"disk_mount_projection_v1,omitempty"`
-	DiskSlotV1            bool         `json:"disk_slot_v1,omitempty"`
-	DiskBind              *DiskBinding `json:"disk_bind,omitempty"`
+	Ext4DiscardV1         bool `json:"ext4_discard_v1,omitempty"`
+	DiskMountProjectionV1 bool `json:"disk_mount_projection_v1,omitempty"`
+	DiskSlotV1            bool `json:"disk_slot_v1,omitempty"`
 
 	Type          string         `json:"type"`
 	UsageRequest  *UsageRequest  `json:"usage_request,omitempty"`
@@ -479,8 +470,6 @@ const (
 // directions, the request/response pairs, and which connections upgrade
 // to the MUX after their *_ack.
 const (
-	TypeDiskBind     = "disk_bind"
-	TypeDiskBindAck  = "disk_bind_ack"
 	TypeHello        = "hello"
 	TypeLaunch       = "launch"
 	TypeLaunchAck    = "launch_ack"

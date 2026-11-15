@@ -472,16 +472,15 @@ Hello for a non-root subpath or repeated ordinal.
 
 For a single-device `disk_slot`, the runtime-ready Hello advertises
 `disk_slot_v1` when the kernel exposes autofs. Each destination gets an autofs
-v5 direct trigger. It returns EAGAIN until PID 1 receives
-`disk_bind{disk_bind:{disk_index,binding_id,size_bytes}}` over the reverse
-management channel and confirms the device capacity. The `disk_bind_ack`
-echoes the same binding. Equal requests may be retried; a different binding
-identity or capacity fails. The first successful lookup assembles the disk,
-projects the requested directory, and continues the original lookup. All
-destinations of the disk reuse the same filesystem. The application cgroup
-cannot open the raw slot device, including through another device node.
-The Guest snapshot retains the binding, autofs control descriptors and mounted
-projections. The host must restore the matching block view before resuming it.
+v5 direct trigger. An access opens the block device and attempts to mount its
+filesystem. Opening a disk whose capacity is still zero refreshes it from the
+virtio device. An empty slot fails the access and leaves the trigger installed.
+Once media is present, the first successful access mounts the disk, projects the
+requested directory, and continues the lookup. All targets on the same disk
+share the mounted filesystem. The application cgroup cannot open the raw slot
+device, including through another device node. A memory snapshot retains the
+autofs descriptors and mounted projections. The host restores the captured disk
+view before resuming the Guest.
 
 The `/sysdisks` subtree becomes invisible after switch-root, but binds and
 overlayfs lower/upper references keep its mounts alive, just as for the root
