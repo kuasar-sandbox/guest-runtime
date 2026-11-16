@@ -352,6 +352,19 @@ Guest 页选择与 Host 原生页大小是不同约束。当前 external-RAM CH 
 
 ## 关键决策
 
+<a id="disk-slot-kernel"></a>
+### 预留盘位对 Guest 内核的要求
+
+初始为空的盘位需要 Guest 提供 autofs（平台内核启用 `CONFIG_AUTOFS_FS=y`），才能在首次访问时挂载。
+Guest 缺少 autofs 时，Host 会拒绝声明了盘位的启动请求。
+固定容量盘位从启动起就有确定的容量，绑定等大磁盘后即可挂载。动态盘位（`slot: {}`）初始容量为零。
+Guest 收到并处理容量变更通知后，即可按新容量挂载。
+
+当 VMM 不发送容量变更通知时，平台内核的
+[virtio-blk 补丁](https://github.com/kuasar-sandbox/guest-runtime/blob/51a5aff9c875e0a7fc0a9efec8147cf729a6b84e/native-deps/deps/linux-patches/0002-virtio_blk-recheck-empty-media-capacity-on-open.patch)
+让 Guest 在首次访问时读取新容量。若旧版或自带内核缺少这一能力，Host 绑定仍可成功，
+但 Guest 看到的容量保持为零，后续访问挂载目录仍会失败。
+
 ### 为什么默认关 USERFAULTFD
 
 `userfaultfd` 是平台 host 端的能力：Cloud Hypervisor 为自身地址空间中的 Guest RAM
