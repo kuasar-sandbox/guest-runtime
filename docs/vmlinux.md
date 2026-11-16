@@ -343,6 +343,22 @@ See the [VMM activation contract](https://github.com/kuasar-sandbox/sandboxer/bl
 
 ## Key decisions
 
+<a id="disk-slot-kernel"></a>
+### Kernel support for reserved disk slots
+
+Mounting an initially empty slot on first access requires Guest autofs
+(`CONFIG_AUTOFS_FS=y` in the platform kernel). Without autofs, the Host rejects
+a launch that declares a slot. A fixed-size slot already exposes
+its capacity at boot and can mount a matching disk after binding. A dynamic slot
+(`slot: {}`) starts at zero. If the Guest receives and processes a capacity-change
+notification, it can mount the disk using the updated capacity.
+
+When the VMM delivers no such notification, the platform kernel's
+[virtio-blk patch](https://github.com/kuasar-sandbox/guest-runtime/blob/51a5aff9c875e0a7fc0a9efec8147cf729a6b84e/native-deps/deps/linux-patches/0002-virtio_blk-recheck-empty-media-capacity-on-open.patch)
+lets the Guest read the new capacity on first access. With an older or custom
+kernel lacking this behavior, Host binding can succeed while access to the
+mount directory keeps failing because the Guest still sees a zero-size disk.
+
 ### Why USERFAULTFD is disabled by default
 
 `userfaultfd` is a platform **host-side** facility: Cloud Hypervisor creates and registers it for its own mappings of the memfd backing guest RAM, then passes the descriptor through `SCM_RIGHTS` to sandbox-ctl for fault handling. Current platform workloads do not need to call `userfaultfd()` **inside the guest**, so the minimal preset does not expose that API.

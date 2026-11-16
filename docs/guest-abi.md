@@ -473,8 +473,10 @@ Hello for a non-root subpath or repeated ordinal.
 For a single-device `disk_slot`, the runtime-ready Hello advertises
 `disk_slot_v1` when the kernel exposes autofs. Each destination gets an autofs
 v5 direct trigger. An access opens the block device and attempts to mount its
-filesystem. Opening a disk whose capacity is still zero refreshes it from the
-virtio device. An empty slot fails the access and leaves the trigger installed.
+filesystem. For dynamic slots on a VMM
+without capacity-change notifications, mounting also requires the
+[Guest kernel to refresh the disk capacity on access](vmlinux.md#disk-slot-kernel).
+An empty slot fails the access and leaves the trigger installed.
 Once media is present, the first successful access mounts the disk, projects the
 requested directory, and continues the lookup. All targets on the same disk
 share the mounted filesystem. The application cgroup cannot open the raw slot
