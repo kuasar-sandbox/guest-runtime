@@ -60,8 +60,8 @@ func main() {
 			os.Args[4], os.Args[5], os.Args[6], os.Args[7:])
 		return
 	}
-	// Plugin helper: direct final-cgroup placement followed by cgroup namespace
-	// join + scoped cgroupfs in a private mount namespace.
+	// Plugin helper: direct final-cgroup placement in the inner init's inherited
+	// environment, followed by the configured identity and final exec.
 	if len(os.Args) >= 5 && os.Args[1] == "plugin-child" {
 		runPluginExecChild(os.Args[2], os.Args[3], os.Args[4], os.Args[5:])
 		return
@@ -523,10 +523,9 @@ func phase2ForkApp(spec *proto.LaunchSpec, cs childStdio, onSpawn func(int) erro
 		}
 		credStr = c.encode()
 	}
-	// PID namespace: isolated (default) gives the app its own (CLONE_NEWPID,
-	// app = PID 1 there); shared (spec.SharePID) keeps the app in sandbox-init's
-	// PID ns so PID 1's reaper collects the app's orphaned descendants. Mount ns
-	// is always private (file-injection rslave propagation + private /proc).
+	// Shared primaries inherit the inner init's PID and mount namespaces.
+	// A private primary becomes PID 1 in a new PID namespace and needs a new
+	// mount namespace for its matching /proc without changing the inner view.
 	isolated := !spec.SharePID
 	isoArg := "0"
 	if isolated {
@@ -541,9 +540,9 @@ func phase2ForkApp(spec *proto.LaunchSpec, cs childStdio, onSpawn func(int) erro
 	args := append([]string{self, "exec-child", isoArg, placeholderArg,
 		credStr, spec.Workdir, appPath}, spec.Args...)
 
-	cloneflags := uintptr(syscall.CLONE_NEWNS)
+	var cloneflags uintptr
 	if isolated {
-		cloneflags |= syscall.CLONE_NEWPID
+		cloneflags = syscall.CLONE_NEWPID | syscall.CLONE_NEWNS
 	}
 	sysAttr := &syscall.SysProcAttr{Cloneflags: cloneflags}
 	if err := cgroupConfigureClone(sysAttr, false); err != nil {
@@ -569,16 +568,9 @@ func phase2ForkApp(spec *proto.LaunchSpec, cs childStdio, onSpawn func(int) erro
 		Stdin:       cs.stdin,
 		Stdout:      cs.stdout,
 		Stderr:      cs.stderr,
+		ExtraFiles:  []*os.File{childSync}, // fd 3 sync
 		SysProcAttr: sysAttr,
 	}
-	ns, err := cgroupNamespaceFile()
-	if err != nil {
-		_ = parentSync.Close()
-		_ = childSync.Close()
-		closeChildStdio(cs)
-		return 0, 0, err
-	}
-	cmd.ExtraFiles = []*os.File{ns, childSync}
 	outerPID := 0
 	onReady := func(pid int) error {
 		var err error

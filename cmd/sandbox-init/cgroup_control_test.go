@@ -85,25 +85,17 @@ func TestCgroupConfigureCloneUsesRootThenFinalTarget(t *testing.T) {
 		_ = root.Close()
 		t.Fatal(err)
 	}
-	nsFD, err := unix.Open("/proc/self/ns/cgroup", unix.O_RDONLY|unix.O_CLOEXEC, 0)
-	if err != nil {
-		_ = root.Close()
-		_ = target.Close()
-		t.Fatal(err)
-	}
-	ns := os.NewFile(uintptr(nsFD), "test-cgroup-namespace")
-
 	applicationCgroups.Lock()
 	oldControl := applicationCgroups.control
 	oldProcessGroups := applicationCgroups.processGroups
 	oldRoot := applicationCgroups.root
 	oldTarget := applicationCgroups.target
-	oldNamespace := applicationCgroups.namespace
+	oldInner := applicationCgroups.inner
 	applicationCgroups.control = true
 	applicationCgroups.processGroups = false
 	applicationCgroups.root = root
 	applicationCgroups.target = target
-	applicationCgroups.namespace = nil
+	applicationCgroups.inner = false
 	applicationCgroups.Unlock()
 	t.Cleanup(func() {
 		applicationCgroups.Lock()
@@ -111,11 +103,10 @@ func TestCgroupConfigureCloneUsesRootThenFinalTarget(t *testing.T) {
 		applicationCgroups.processGroups = oldProcessGroups
 		applicationCgroups.root = oldRoot
 		applicationCgroups.target = oldTarget
-		applicationCgroups.namespace = oldNamespace
+		applicationCgroups.inner = oldInner
 		applicationCgroups.Unlock()
 		_ = root.Close()
 		_ = target.Close()
-		_ = ns.Close()
 	})
 
 	first := &syscall.SysProcAttr{Unshareflags: unix.CLONE_FS}
@@ -133,10 +124,10 @@ func TestCgroupConfigureCloneUsesRootThenFinalTarget(t *testing.T) {
 	}
 
 	if err := cgroupConfigureClone(&syscall.SysProcAttr{}, false); err == nil {
-		t.Fatal("later clone without pinned namespace succeeded")
+		t.Fatal("user clone outside the inner environment succeeded")
 	}
 	applicationCgroups.Lock()
-	applicationCgroups.namespace = ns
+	applicationCgroups.inner = true
 	applicationCgroups.Unlock()
 	later := &syscall.SysProcAttr{}
 	if err := cgroupConfigureClone(later, false); err != nil {
@@ -278,17 +269,8 @@ func TestProcNamespaceRequiresFreshMatchingView(t *testing.T) {
 	}
 }
 
-func TestCgroupNamespaceMountAndMoveFailureInjection(t *testing.T) {
+func TestCgroupMountAndMoveFailureInjection(t *testing.T) {
 	injected := errors.New("injected")
-	if err := cgroupJoinNamespaceWith(9, func(fd, nstype int) error {
-		if fd != 9 || nstype != unix.CLONE_NEWCGROUP {
-			t.Fatalf("setns args = (%d,%#x)", fd, nstype)
-		}
-		return injected
-	}); !errors.Is(err, injected) {
-		t.Fatalf("setns injection = %v", err)
-	}
-
 	mountCalled := false
 	err := cgroupMountScopedWith(func(path string, flags int) error {
 		return injected
@@ -319,7 +301,7 @@ func TestCgroupNamespaceMountAndMoveFailureInjection(t *testing.T) {
 
 func TestChildHandshakeFailureIsReportedBeforeExit(t *testing.T) {
 	if os.Getenv("SANDBOX_INIT_HANDSHAKE_HELPER") == "fail" {
-		sync, err := childSyncFromFD(childBootstrapSyncFD)
+		sync, err := childSyncFromFD(childSyncFD)
 		if err != nil {
 			os.Exit(90)
 		}
@@ -356,7 +338,7 @@ func TestChildHandshakeFailureIsReportedBeforeExit(t *testing.T) {
 
 func TestChildHandshakeParentFailureAbortsFinalExecGate(t *testing.T) {
 	if os.Getenv("SANDBOX_INIT_HANDSHAKE_HELPER") == "ready" {
-		sync, err := childSyncFromFD(childBootstrapSyncFD)
+		sync, err := childSyncFromFD(childSyncFD)
 		if err != nil {
 			os.Exit(90)
 		}

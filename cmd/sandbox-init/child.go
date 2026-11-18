@@ -17,11 +17,10 @@ import (
 )
 
 const (
-	childExtraFDBase       = 3
-	childCgroupNamespaceFD = childExtraFDBase
-	childMountNamespaceFD  = childExtraFDBase
-	childBootstrapSyncFD   = childExtraFDBase
-	childJoinedSyncFD      = childExtraFDBase + 1
+	childExtraFDBase      = 3
+	childMountNamespaceFD = childExtraFDBase
+	childSyncFD           = childExtraFDBase
+	childJoinedSyncFD     = childExtraFDBase + 1
 
 	childMsgStart = "start"
 	childMsgReady = "ready"
@@ -218,12 +217,11 @@ func coordinateStartedChild(
 	return fail(fmt.Errorf("child exec response %q", message))
 }
 
-// runPrimaryExecChild is the primary/restart re-entry. User launches join the
-// inner init's pinned namespace through fd 3. They replace cgroupfs only
-// after making their private mount namespace rslave, so the scoped mount can
-// never propagate back into the inner init.
+// runPrimaryExecChild is the primary/restart re-entry. The inner init's cgroup
+// namespace and scoped cgroupfs are inherited. Only a private PID namespace
+// needs a separate, rslave mount namespace and a matching procfs instance.
 func runPrimaryExecChild(isolated, placeholder bool, cred, workdir, appPath string, args []string) {
-	sync, err := childSyncFromFD(childJoinedSyncFD)
+	sync, err := childSyncFromFD(childSyncFD)
 	if err != nil {
 		die("exec-child: sync: %v", err)
 	}
@@ -232,20 +230,10 @@ func runPrimaryExecChild(isolated, placeholder bool, cred, workdir, appPath stri
 	}
 
 	runtime.LockOSThread()
-	if err := makeChildMountsRSlave(); err != nil {
-		sync.fail(err)
-	}
-	unix.CloseOnExec(childCgroupNamespaceFD)
-	if err := cgroupJoinNamespace(childCgroupNamespaceFD); err != nil {
-		sync.fail(err)
-	}
-	if err := unix.Close(childCgroupNamespaceFD); err != nil {
-		sync.fail(fmt.Errorf("close cgroup namespace fd: %w", err))
-	}
-	if err := cgroupMountScoped(); err != nil {
-		sync.fail(err)
-	}
 	if isolated {
+		if err := makeChildMountsRSlave(); err != nil {
+			sync.fail(err)
+		}
 		if err := remountChildProc(); err != nil {
 			sync.fail(err)
 		}
@@ -259,10 +247,10 @@ func runPrimaryExecChild(isolated, placeholder bool, cred, workdir, appPath stri
 }
 
 // runPluginExecChild is the lightweight plugin re-exec. It is born directly
-// in the final cgroup, joins the pinned cgroup namespace, installs a scoped
-// cgroupfs in its private mount namespace, and only then execs the plugin.
+// in the final cgroup and inherits the inner init's namespaces and mounts.
+// No namespace or mount setup is repeated before applying the plugin's identity.
 func runPluginExecChild(cred, workdir, appPath string, args []string) {
-	sync, err := childSyncFromFD(childJoinedSyncFD)
+	sync, err := childSyncFromFD(childSyncFD)
 	if err != nil {
 		die("plugin-child: sync: %v", err)
 	}
@@ -270,19 +258,6 @@ func runPluginExecChild(cred, workdir, appPath string, args []string) {
 		sync.fail(fmt.Errorf("wait for setup release: %w", err))
 	}
 	runtime.LockOSThread()
-	if err := makeChildMountsRSlave(); err != nil {
-		sync.fail(err)
-	}
-	unix.CloseOnExec(childCgroupNamespaceFD)
-	if err := cgroupJoinNamespace(childCgroupNamespaceFD); err != nil {
-		sync.fail(err)
-	}
-	if err := unix.Close(childCgroupNamespaceFD); err != nil {
-		sync.fail(fmt.Errorf("close cgroup namespace fd: %w", err))
-	}
-	if err := cgroupMountScoped(); err != nil {
-		sync.fail(err)
-	}
 	if err := sync.readyAndWait(); err != nil {
 		sync.fail(err)
 	}
@@ -377,7 +352,7 @@ func execFinalApplication(sync *childSync, cred, workdir, appPath string, args [
 }
 
 // runJoinedExecChild is the final native-exec command helper. Its parent has
-// already joined the pinned cgroup namespace and selected the primary PID
+// inherited the inner init's cgroup namespace and selected the primary PID
 // namespace for this child. The child joins the primary mount namespace via
 // fd 3, confirms setup over fd 4, and then execs the requested command. This
 // ordering keeps /proc/self/exe usable for the helper fork even when the

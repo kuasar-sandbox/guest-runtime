@@ -9,10 +9,15 @@ import (
 	"github.com/kuasar-sandbox/guest-runtime/pkg/guestabi/proto"
 )
 
-// Exercise the production re-entry point when runInit starts /proc/self/exe.
+// Exercise production re-entry points when a launch helper starts /proc/self/exe.
 func TestMain(m *testing.M) {
-	if len(os.Args) >= 3 && os.Args[1] == "init-command" {
-		main()
+	if len(os.Args) >= 2 {
+		switch os.Args[1] {
+		case "init-command", "exec-child", "plugin-child", "exec-join", "exec-child-joined":
+			main()
+		case "test-execution-context-outer", "test-execution-context-inner", "test-execution-context-probe":
+			os.Exit(runExecutionContextHelper())
+		}
 	}
 	os.Exit(m.Run())
 }
