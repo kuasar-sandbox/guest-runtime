@@ -15,7 +15,7 @@ func TestBaseRuntimeManagement(t *testing.T) {
 			go func() {
 				defer close(done)
 				defer guest.Close()
-				handleReverseConnShutdown(guest, nil, nil, func() { stopped <- struct{}{} })
+				handleReverseConnShutdown(guest, nil, func() { stopped <- struct{}{} })
 			}()
 			if err := proto.WriteMessage(host, &proto.Message{Type: kind, ID: 17, TSendNs: 42}); err != nil {
 				t.Fatal(err)

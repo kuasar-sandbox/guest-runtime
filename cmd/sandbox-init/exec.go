@@ -290,7 +290,7 @@ func runExecSession(c *vsockConn, req *proto.Message, sup *supervisorState) {
 		stderrR:   cb.stderrR,
 	}
 
-	pid, waitCh, err := forkExecChild(spec, cs, int(sup.appPid.Load()), reg)
+	pid, waitCh, err := sup.forkExec(spec, cs)
 	if err != nil {
 		if pid > 0 {
 			// The helper was registered before leaving its start gate. Wait for
@@ -353,6 +353,20 @@ func finishExecMux(sess *mux.Session, code int, timeout time.Duration) error {
 		return err
 	}
 	return sess.InitMuxClose()
+}
+
+// Keep the primary unreaped until the helper has pinned and joined its current
+// namespaces. A restart gap is an error; it must never select PID 1 or a reused
+// numeric PID belonging to an unrelated plugin.
+func (s *supervisorState) forkExec(spec *proto.ExecSpec, cs childStdio) (int, <-chan syscall.WaitStatus, error) {
+	s.primaryMu.RLock()
+	defer s.primaryMu.RUnlock()
+	pid := int(s.appPid.Load())
+	if pid <= 0 || s.shutdown.Load() {
+		closeChildStdio(cs)
+		return 0, nil, errors.New("exec: primary is not running")
+	}
+	return forkExecChild(spec, cs, pid, s.execReg)
 }
 
 // forkExecChild spawns the nsenter helper (re-exec "exec-join"), which
@@ -456,7 +470,7 @@ func runExecJoin(appPidStr, ttyStr, userSpec, cwd, argv0 string, args []string) 
 	if err != nil {
 		sync.fail(fmt.Errorf("bad app pid %q: %w", appPidStr, err))
 	}
-	// Open both handles while the guest-global /proc can resolve appPid.
+	// Open both handles through the inner init's /proc, which resolves appPid.
 	mntFD, err := unix.Open(fmt.Sprintf("/proc/%d/ns/mnt", appPid), unix.O_RDONLY|unix.O_CLOEXEC, 0)
 	if err != nil {
 		sync.fail(fmt.Errorf("open app mnt ns: %w", err))

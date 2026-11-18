@@ -47,6 +47,7 @@ func usageReattachFixture(t *testing.T) (*usageService, *supervisorState, *conso
 	})
 	b := newTestBridge()
 	b.holder = newSessionHolder()
+	sup.bridge = b
 	t.Cleanup(func() {
 		if session := b.holder.peek(); session != nil {
 			_ = session.Close()
@@ -80,7 +81,7 @@ func usageManagementConn(t *testing.T, sup *supervisorState, bridge *consoleBrid
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		if !handleReverseConn(guest, sup, bridge) {
+		if !handleReverseConn(guest, sup) {
 			_ = guest.Close() // same final owner as serveReverseChannel
 		}
 	}()
@@ -198,7 +199,7 @@ func TestUsageReattachAdmitsBeforeAckAndKeepsSourceSlots(t *testing.T) {
 				wantErr := errors.New("thaw failed")
 				go func() {
 					defer close(finished)
-					handed, finishErr = finishReattach(guest, sup, bridge, 19, newHost, func() error {
+					handed, finishErr = finishReattach(guest, sup, 19, newHost, func() error {
 						close(thawStarted)
 						<-releaseThaw
 						if failThaw {
@@ -290,7 +291,7 @@ func TestUsageReattachAckFailurePreservesPriorAdmission(t *testing.T) {
 			_ = host.shutdown()
 			_ = host.Close()
 			thawed := false
-			handed, err := finishReattach(guest, sup, bridge, 19, !live, func() error {
+			handed, err := finishReattach(guest, sup, 19, !live, func() error {
 				thawed = true
 				return nil
 			})
@@ -348,7 +349,7 @@ func testUsageOlderAttachFailureAfterRetry(t *testing.T, failRetry bool) {
 	wantErr := errors.New("older thaw failed late")
 	go func() {
 		defer close(finished)
-		_, firstErr = finishReattach(firstGuest, sup, bridge, 1, false, func() error {
+		_, firstErr = finishReattach(firstGuest, sup, 1, false, func() error {
 			close(started)
 			<-release
 			return wantErr
@@ -366,7 +367,7 @@ func testUsageOlderAttachFailureAfterRetry(t *testing.T, failRetry bool) {
 	closeUsageTestMUX(t, bridge, firstHost)
 	bridge.closeLiveMUX()
 	secondGuest, secondHost := usageSocketPair(t)
-	handed, err := finishReattach(secondGuest, sup, bridge, 2, false, func() error {
+	handed, err := finishReattach(secondGuest, sup, 2, false, func() error {
 		if failRetry {
 			return wantErr
 		}

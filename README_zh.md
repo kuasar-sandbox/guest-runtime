@@ -26,13 +26,19 @@
 
 | 路径 | 用途 |
 | --- | --- |
-| `cmd/sandbox-init` | Guest PID 1：运行环境准备、进程监督与控制协议 |
+| `cmd/sandbox-init` | 同一二进制承担外层 Guest 管理与内层 PID 1 进程执行 |
 | `pkg/guestabi` | Host 与 Guest 共用的控制、MUX 和转发协议包 |
 | `cmd/flatten-ctl` | 使用共享 `accelerator` package 将 OCI 或目录构建为 deterministic EROFS image |
 | `native-deps/` | Guest VMLinux/Envd 源码输入、补丁树和 Native 维护 |
 | `scripts/guest-inspect.py` | 在兼容的 nonrandomized x86_64 布局中从 Host 读取 guest kernel memory counter |
 
 Runtime image 将初始 guest tool 放在 `/opt/sandbox-runtime/bin/`。VMLinux 与 Cloud Hypervisor binary 不嵌入 Runtime bundle:VMLinux 作为独立发行单元发布,Cloud Hypervisor 由 `sandboxer` 构建和发布。
+
+`sandbox-init` 将 Guest 管理与用户进程执行分开：外层负责存储、Host 控制与捕获准备，
+内层 PID 1 负责初始化命令、主进程、plugin 和 exec 会话。用户进程共用以真实
+`/sandbox` 为根的 cgroup namespace，`launch.pid_namespace` 继续提供 private 和
+shared 两种 PID 视图。[Guest ABI](docs/guest-abi_zh.md#guest-processes)说明职责、
+cgroup 下放以及捕获和恢复中的排空、冻结、解冻顺序。
 
 ## 按流程或交付契约阅读
 

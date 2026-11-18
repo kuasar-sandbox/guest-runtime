@@ -95,10 +95,12 @@ func TestCgroupConfigureCloneUsesRootThenFinalTarget(t *testing.T) {
 
 	applicationCgroups.Lock()
 	oldControl := applicationCgroups.control
+	oldProcessGroups := applicationCgroups.processGroups
 	oldRoot := applicationCgroups.root
 	oldTarget := applicationCgroups.target
 	oldNamespace := applicationCgroups.namespace
 	applicationCgroups.control = true
+	applicationCgroups.processGroups = false
 	applicationCgroups.root = root
 	applicationCgroups.target = target
 	applicationCgroups.namespace = nil
@@ -106,6 +108,7 @@ func TestCgroupConfigureCloneUsesRootThenFinalTarget(t *testing.T) {
 	t.Cleanup(func() {
 		applicationCgroups.Lock()
 		applicationCgroups.control = oldControl
+		applicationCgroups.processGroups = oldProcessGroups
 		applicationCgroups.root = oldRoot
 		applicationCgroups.target = oldTarget
 		applicationCgroups.namespace = oldNamespace
@@ -125,6 +128,9 @@ func TestCgroupConfigureCloneUsesRootThenFinalTarget(t *testing.T) {
 	if first.Unshareflags != unix.CLONE_FS|unix.CLONE_NEWCGROUP {
 		t.Fatalf("first clone unshare flags = %#x, want CLONE_FS|CLONE_NEWCGROUP", first.Unshareflags)
 	}
+	if !first.Setpgid {
+		t.Fatal("inner bootstrap shares the outer autofs process group")
+	}
 
 	if err := cgroupConfigureClone(&syscall.SysProcAttr{}, false); err == nil {
 		t.Fatal("later clone without pinned namespace succeeded")
@@ -141,6 +147,134 @@ func TestCgroupConfigureCloneUsesRootThenFinalTarget(t *testing.T) {
 	}
 	if later.Unshareflags != 0 {
 		t.Fatalf("later clone unexpectedly unshares cgroup namespace: %#x", later.Unshareflags)
+	}
+	if later.Setpgid {
+		t.Fatal("non-slot workload unexpectedly changed its process-group policy")
+	}
+
+	applicationCgroups.Lock()
+	applicationCgroups.processGroups = true
+	applicationCgroups.Unlock()
+	grouped := &syscall.SysProcAttr{}
+	if err := cgroupConfigureClone(grouped, false); err != nil {
+		t.Fatal(err)
+	}
+	if !grouped.Setpgid || !managedProcessGroupsEnabled() {
+		t.Fatal("inner lost the inherited slot child process-group policy")
+	}
+	tty := &syscall.SysProcAttr{Setsid: true}
+	if err := cgroupConfigureClone(tty, false); err != nil {
+		t.Fatal(err)
+	}
+	if tty.Setpgid || !tty.Setsid {
+		t.Fatal("cgroup placement changed the TTY session policy")
+	}
+}
+
+func TestGuestCgroupMountRequiresNSDelegate(t *testing.T) {
+	const delegated = "50 40 0:20 / /sys/fs/cgroup rw,nosuid,nodev,noexec,relatime - cgroup2 cgroup2 rw,nsdelegate\n"
+	for _, existing := range []bool{false, true} {
+		calls := 0
+		err := cgroupMountDelegatedWith(func(source, target, typ string, flags uintptr, data string) error {
+			calls++
+			if source != "cgroup2" || target != cgroupMountPoint || typ != "cgroup2" || data != "nsdelegate" {
+				t.Fatalf("unexpected mount request: %s %s %s %#x %s", source, target, typ, flags, data)
+			}
+			if calls == 1 {
+				if flags != 0 {
+					t.Fatalf("initial mount flags = %#x", flags)
+				}
+				if existing {
+					return unix.EBUSY
+				}
+			} else if flags != unix.MS_REMOUNT {
+				t.Fatalf("existing mount flags = %#x, want remount", flags)
+			}
+			return nil
+		}, func(path string) ([]byte, error) {
+			if path != "/proc/self/mountinfo" {
+				t.Fatalf("verification read %q", path)
+			}
+			return []byte(delegated), nil
+		})
+		wantCalls := 1
+		if existing {
+			wantCalls = 2
+		}
+		if err != nil || calls != wantCalls {
+			t.Fatalf("existing=%t calls=%d err=%v", existing, calls, err)
+		}
+	}
+
+	for _, info := range []string{
+		strings.Replace(delegated, ",nsdelegate", "", 1),
+		strings.Replace(delegated, "/sys/fs/cgroup", "/elsewhere", 1),
+		strings.Replace(delegated, " - cgroup2 ", " - tmpfs ", 1),
+	} {
+		err := cgroupMountDelegatedWith(func(string, string, string, uintptr, string) error { return nil },
+			func(string) ([]byte, error) { return []byte(info), nil })
+		if err == nil || !strings.Contains(err.Error(), "did not enable nsdelegate") {
+			t.Fatalf("missing effective delegation accepted: %q err=%v", info, err)
+		}
+	}
+}
+
+func TestGuestCgroupMountDoesNotHideDelegationFailure(t *testing.T) {
+	injected := errors.New("injected mount failure")
+	for _, remount := range []bool{false, true} {
+		calls := 0
+		err := cgroupMountDelegatedWith(func(string, string, string, uintptr, string) error {
+			calls++
+			if remount && calls == 1 {
+				return unix.EBUSY
+			}
+			return injected
+		}, func(string) ([]byte, error) {
+			t.Fatal("verification continued after failed mount")
+			return nil, nil
+		})
+		if !errors.Is(err, injected) {
+			t.Fatalf("remount=%t error=%v, want mount failure", remount, err)
+		}
+	}
+}
+
+func TestProcNamespaceRequiresFreshMatchingView(t *testing.T) {
+	calls := 0
+	unmount := func(path string, flags int) error {
+		if path != "/proc" || flags != unix.MNT_DETACH {
+			t.Fatalf("unexpected proc detach: %s %#x", path, flags)
+		}
+		calls++
+		return nil
+	}
+	mount := func(source, target, typ string, flags uintptr, data string) error {
+		if calls != 1 || source != "proc" || target != "/proc" || typ != "proc" || flags != 0 {
+			t.Fatalf("fresh proc mount after %d calls: %s %s %s %#x", calls, source, target, typ, flags)
+		}
+		calls++
+		return nil
+	}
+	if err := remountChildProcWith(unmount, mount, func(string) (string, error) { return "1", nil }, 1); err != nil {
+		t.Fatal(err)
+	}
+	calls = 0
+	err := remountChildProcWith(unmount, mount, func(string) (string, error) { return "321", nil }, 1)
+	if err == nil || !strings.Contains(err.Error(), "PID namespace mismatch") {
+		t.Fatalf("ancestor proc view accepted: %v", err)
+	}
+	calls = 0
+	err = remountChildProcWith(unmount, func(_, _, _ string, flags uintptr, _ string) error {
+		if flags&unix.MS_REMOUNT != 0 {
+			t.Fatal("failed fresh mount retried with ineffective proc remount")
+		}
+		return unix.EPERM
+	}, func(string) (string, error) {
+		t.Fatal("checked proc after mounting it failed")
+		return "1", nil
+	}, 1)
+	if !errors.Is(err, unix.EPERM) {
+		t.Fatalf("fresh proc mount failure = %v", err)
 	}
 }
 

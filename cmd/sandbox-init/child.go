@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"runtime"
+	"strconv"
 	"strings"
 	"syscall"
 
@@ -33,7 +34,7 @@ const (
 // childSync is a private SOCK_STREAM protocol between sandbox-init and a
 // short-lived re-exec helper. The helper blocks before namespace setup until
 // its pid has been registered with the sole SIGCHLD reaper, then blocks again
-// before final exec while the parent pins/verifies the initial namespace.
+// before final exec while the parent completes its ready callback.
 // CLOEXEC turns EOF after "go" into confirmation that final execve succeeded.
 type childSync struct {
 	file   *os.File
@@ -130,7 +131,7 @@ const (
 // coordinateChild releases one started re-exec helper through its two gates.
 // onSpawn runs before the child can perform setup; callers use it to register
 // the pid with the process-wide reaper. onReady runs while the helper is
-// blocked immediately before final exec (first-primary namespace pinning).
+// blocked immediately before final exec (for example, to pin its identity).
 // onFailure runs before acknowledging a child-reported error.
 func coordinateChild(
 	cmd *exec.Cmd,
@@ -217,21 +218,12 @@ func coordinateStartedChild(
 	return fail(fmt.Errorf("child exec response %q", message))
 }
 
-// runPrimaryExecChild is the first-primary/restart re-entry. bootstrap is
-// already in a freshly unshared cgroup namespace rooted at real /app;
-// restarts join the pinned namespace through fd 3. Both replace cgroupfs only
+// runPrimaryExecChild is the primary/restart re-entry. User launches join the
+// inner init's pinned namespace through fd 3. They replace cgroupfs only
 // after making their private mount namespace rslave, so the scoped mount can
-// never propagate back into sandbox-init.
-func runPrimaryExecChild(mode string, isolated, control, placeholder bool, cred, workdir, appPath string, args []string) {
-	bootstrap := mode == "bootstrap"
-	if !bootstrap && mode != "restart" {
-		die("exec-child: invalid mode %q", mode)
-	}
-	syncFD := childJoinedSyncFD
-	if bootstrap {
-		syncFD = childBootstrapSyncFD
-	}
-	sync, err := childSyncFromFD(syncFD)
+// never propagate back into the inner init.
+func runPrimaryExecChild(isolated, placeholder bool, cred, workdir, appPath string, args []string) {
+	sync, err := childSyncFromFD(childJoinedSyncFD)
 	if err != nil {
 		die("exec-child: sync: %v", err)
 	}
@@ -243,22 +235,15 @@ func runPrimaryExecChild(mode string, isolated, control, placeholder bool, cred,
 	if err := makeChildMountsRSlave(); err != nil {
 		sync.fail(err)
 	}
-	if !bootstrap {
-		unix.CloseOnExec(childCgroupNamespaceFD)
-		if err := cgroupJoinNamespace(childCgroupNamespaceFD); err != nil {
-			sync.fail(err)
-		}
-		if err := unix.Close(childCgroupNamespaceFD); err != nil {
-			sync.fail(fmt.Errorf("close cgroup namespace fd: %w", err))
-		}
+	unix.CloseOnExec(childCgroupNamespaceFD)
+	if err := cgroupJoinNamespace(childCgroupNamespaceFD); err != nil {
+		sync.fail(err)
+	}
+	if err := unix.Close(childCgroupNamespaceFD); err != nil {
+		sync.fail(fmt.Errorf("close cgroup namespace fd: %w", err))
 	}
 	if err := cgroupMountScoped(); err != nil {
 		sync.fail(err)
-	}
-	if bootstrap && control {
-		if err := cgroupMoveBootstrapToInit(); err != nil {
-			sync.fail(err)
-		}
 	}
 	if isolated {
 		if err := remountChildProc(); err != nil {
@@ -314,10 +299,29 @@ func makeChildMountsRSlave() error {
 }
 
 func remountChildProc() error {
-	if err := unix.Mount("proc", "/proc", "proc", 0, ""); err != nil {
-		if remountErr := unix.Mount("none", "/proc", "", unix.MS_REMOUNT, ""); remountErr != nil {
-			return fmt.Errorf("remount /proc: %v / %w", err, remountErr)
-		}
+	return remountChildProcWith(unix.Unmount, unix.Mount, os.Readlink, os.Getpid())
+}
+
+// A remount of an ancestor's procfs retains the ancestor PID view. Install a
+// fresh instance after rslave instead, and verify its view before user code.
+func remountChildProcWith(
+	unmount func(string, int) error,
+	mount func(string, string, string, uintptr, string) error,
+	readlink func(string) (string, error),
+	pid int,
+) error {
+	if err := unmount("/proc", unix.MNT_DETACH); err != nil {
+		return fmt.Errorf("detach inherited /proc: %w", err)
+	}
+	if err := mount("proc", "/proc", "proc", 0, ""); err != nil {
+		return fmt.Errorf("mount fresh /proc: %w", err)
+	}
+	self, err := readlink("/proc/self")
+	if err != nil {
+		return fmt.Errorf("verify /proc PID namespace: %w", err)
+	}
+	if self != strconv.Itoa(pid) {
+		return fmt.Errorf("/proc PID namespace mismatch: self=%q pid=%d", self, pid)
 	}
 	return nil
 }

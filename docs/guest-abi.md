@@ -21,7 +21,7 @@ The binary is built from `cmd/sandbox-init` and installed as `/sbin/init` in the
 
 | Goal | Implementation |
 |---|---|
-| Fast startup | One static Go binary as PID 1; no systemd / dracut / busybox startup chain |
+| Fast startup | One static Go binary supplies outer Guest PID 1 and inner PID 1; no systemd / dracut / busybox startup chain |
 | Verifiable startup state | A fixed sandbox-init version; explicit launch, quiesce, restore and attach handshakes and state barriers |
 | Sharing across sandboxes | virtio-pmem + DAX lets sandboxes share file-backed read-only pages through the host page cache |
 | One VM, one primary app | Default private PID mode uses clone(NEWPID\|NEWNS), making the app PID 1 in its namespace; shared PID mode is also available |
@@ -37,18 +37,22 @@ flowchart TB
     ctl["sandbox-ctl"] -->|spawn| ch["Cloud Hypervisor"]
     bundle["Runtime Bundle"] -->|"virtio-pmem / DAX"| ch
     ch -->|boot| kernel["Guest kernel"]
-    kernel -->|"exec /sbin/init"| init["sandbox-init"]
-    init -->|"root, launch, supervision"| app["Primary app"]
-    ctl <-->|"vsock management + MUX"| init
-    app <-->|stdio| init
+    kernel -->|"exec /sbin/init"| init["Outer sandbox-init"]
+    init -->|"private control and socket handoff"| inner["Inner sandbox-init"]
+    inner -->|"launch and supervision"| app["Primary app"]
+    ctl <-->|"vsock management"| init
+    ctl <-->|"MUX and forwarding"| inner
+    app <-->|stdio| inner
     kernel -->|hvc0| ch
     ch -->|console| logs["Host stderr or file"]
 ```
 
 The Runtime Bundle is a shared read-only host backing file. The Guest kernel
-mounts it and executes `/sbin/init`. Init assembles/switches the workload root,
-applies LaunchSpec and wires stdio, then supervises the primary process. The
-primary is PID 1 in its namespace in private mode.
+mounts it and executes `/sbin/init`. The outer instance assembles and switches
+the workload root, applies its mounts/files/network, and starts an inner
+instance of the same executable. The inner instance runs initialization and
+supervises user processes. The primary is PID 1 in its own namespace in private
+mode; the inner instance is the visible PID 1 in shared mode.
 
 The host endpoint is `RunRoot/PathID/vsock.sock`. `RunRoot` defaults to
 `/run/sandbox`; `PathID` defaults to `SandboxID` but can be selected independently
@@ -56,7 +60,35 @@ The host endpoint is `RunRoot/PathID/vsock.sock`. `RunRoot` defaults to
 started/exited notifications use the control paths defined below; the launch
 connection upgrades to MUX for application stdio. Kernel hvc0 output uses the
 separate CH console path. When an app exits without restart, init notifies the
-host and powers off; CH exits and its host owner observes that exit.
+host through the outer instance, which powers off; CH exits and its host owner
+observes that exit.
+
+<a id="guest-processes"></a>
+
+### Guest management and process execution
+
+Both instances come from the Runtime's `sandbox-init` binary. The outer starts
+the inner once, before any user `init` command. Their responsibilities are:
+
+| Instance | Process and cgroup scope | Responsibilities |
+| --- | --- | --- |
+| Outer `sandbox-init` | Guest PID 1, outside `/sandbox` | Host listener and lifecycle facts; root and disk assembly, autofs and storage operations; network/clock updates; raw usage and `mem_report`; recursive freeze/thaw and Guest poweroff |
+| Inner `sandbox-init` | PID 1 of a child PID namespace, inside `/sandbox` | Serial `init`; primary and plugin supervision; orphan reaping; exec and forwarding sessions; application stdio and MUX |
+
+The outer accepts the existing Host protocol and passes execution connections
+to the inner through a private Unix socket. Descriptor transfer preserves the
+connection and unread bytes; the outer releases its copy without shutting down
+the inner's socket. This private protocol is an implementation detail shared by
+the two instances, not another Host API. If a sent request times out before its
+result is known, or the private channel breaks, the Guest fails rather than
+replaying an operation that may already have started. The inner is not restarted
+independently.
+
+The outer remains runnable while `/sandbox`, including the inner, is frozen.
+All inner-owned session cleanup therefore completes before freeze; restore
+thaws the tree before waiting for inner readiness. Storage and autofs stay in
+the outer so they can service filesystem operations from the inner and its
+children. The user PID namespace does not expose the outer instance.
 
 <a id="non-goals"></a>
 
@@ -125,7 +157,7 @@ This is an annotated JSON example; comments are explanatory, not literal JSON:
   "ext4_discard": "auto",                // auto (or omitted): discard; manual: nodiscard
   "placeholder": false,                  // true: no external exec; host rejects explicit launch.exec,
                                         // ignores image command and forces restart=always
-  "share_pid": false,                    // true: sandbox-init's PID namespace (pid_namespace=shared)
+  "share_pid": false,                    // true: inner sandbox-init's PID namespace (pid_namespace=shared)
   "user": "0:0",                         // uid:gid or name:group, guest /etc/passwd; empty -> root
   "stop_signal": 15,                     // signal number, resolved host-side; 0 -> SIGTERM
   "stop_grace_sec": 10,                  // guest PID 1's grace period; 0 -> default 10 s
@@ -174,19 +206,18 @@ host's launch_ack wait ([Failure semantics](#failures)).
 
 ### The application environment
 
-- **PID 1:** in default pid_namespace=private, the app is PID 1 of its own
-  CLONE_NEWPID namespace. In shared mode it is not PID 1; sandbox-init reaps
-  its orphan descendants and remains visible as PID 1. Plugins always remain
-  in sandbox-init's PID namespace, though they share rootfs/cgroup/network;
-  a private-PID app cannot see them.
-- **Cgroup namespace:** real /sys/fs/cgroup/app is always namespace/freezer root.
-  With cgroup_control=false, primary/restarts/plugins/native exec live in
-  real /app and see 0::/. With true, real /app has no direct processes and
-  verified subtree delegation; those processes live in /app/init and see
-  0::/init. This /init is a long-lived cgroup, not top-level init commands.
-  Cgroup namespacing is a view/management scope, not an extra security boundary.
-- **Mount namespace:** private, initially based on init's root view (overlay
-  or single ext4), with its own proc mount in private PID mode.
+- **PID 1:** in default `pid_namespace=private`, the primary is PID 1 of its
+  own namespace. In shared mode, the inner `sandbox-init` is PID 1 and reaps
+  orphans. Init commands and plugins use the inner PID namespace; native exec
+  joins the primary's namespaces. The outer management instance is not visible.
+- **Cgroup namespace:** real `/sys/fs/cgroup/sandbox` is the namespace/freezer
+  root. With `cgroup_control=false`, the inner and all directly managed processes
+  live there and see `0::/`. With `true`, this root is empty and its controllers
+  are delegated; those processes live in `/sandbox/init` and see `0::/init`.
+  The same rule covers init, primary, plugins and exec. See the
+  [complete topology and delegation rules](#application-cgroups).
+- **Mount namespace:** private, initially based on the inner's user root view
+  (overlay or single ext4), with a new proc mount in private PID mode.
 - **Network:** with a configured network source, eth0 is virtio-net with a host
   TAP backend and cold-start IP configuration from init. Without a network
   source, no virtio-net is attached; loopback and vsock control still work.
@@ -246,12 +277,14 @@ them until thaw ([Phase 3: supervisor](#supervision)).
   completion of the app's stop grace. See
   [lifecycle shutdown](https://github.com/kuasar-sandbox/sandboxer/blob/main/pkg/sandbox/lifecycle.go) and
   [run signal handling](https://github.com/kuasar-sandbox/sandboxer/blob/main/pkg/sandbox/run_signal.go).
-- **If guest PID 1 itself receives SIGTERM/SIGINT**, it sets shutdown,
-  forwards launch.stop_signal (default SIGTERM, resolved from image/YAML
-  policy) to the primary PID, waits the wire `stop_grace_sec` (default 10 s,
-  derived from host YAML `launch.stop_grace_period`),
-  kills on timeout and powers off. These settings govern that guest path;
-  they are not a guaranteed host VMM teardown handshake.
+- **If outer Guest PID 1 receives SIGTERM/SIGINT**, it requests shutdown of
+  the inner, thawing the tree if needed. Before inner readiness it terminates
+  startup. With a running primary, the inner suppresses restarts, forwards
+  `launch.stop_signal` (default SIGTERM) and waits `stop_grace_sec` (default
+  10 s, from Host `launch.stop_grace_period`), killing the primary on timeout.
+  The same primary-stop path applies when the inner itself receives these
+  signals. The outer owns final poweroff. These settings govern the Guest
+  path; they are not a guaranteed Host VMM teardown handshake.
 - In tty mode the host terminal is raw. Keyboard Ctrl-C (0x03) travels as a byte
   over the PTY stream, and the guest terminal line discipline turns it into
   SIGINT for the application. Host sandbox termination or terminal escape uses
@@ -273,8 +306,9 @@ starts loopback and the reverse control dispatcher, then announces
 `hello{phase:"runtime_ready"}`. The dispatcher answers ping and shutdown while
 waiting; workload-only exec/connect/quiesce/attach/restore are rejected. A listening
 socket alone is not this readiness barrier. `shutdown` replies `ack` before
-termination. After workload publication, the dispatcher uses the supervisor and
-its stdio bridge for the existing live operations.
+termination. Once the inner publishes the primary, the outer dispatcher routes
+execution connections to its supervisor and stdio bridge while retaining
+Guest management operations.
 
 The launch request drives all workload root assembly. Waiting for it has no
 launch execution deadline; the host starts that deadline after publishing launch.
@@ -321,10 +355,11 @@ E. switch-root:
    and D's volume binds all become part of the new /.
 
 F. Basic mounts after switch-root:
-   mount -t cgroup2 cgroup2 /sys/fs/cgroup
-   mkdir /sys/fs/cgroup/app             # app cgroup namespace and freezer root
-   With launch.cgroup_control=true, also create /sys/fs/cgroup/app/init
-     and strictly delegate advertised controllers (Application cgroup namespace and controller topology).
+   mount -t cgroup2 -o nsdelegate cgroup2 /sys/fs/cgroup; verify nsdelegate
+   mkdir /sys/fs/cgroup/sandbox         # user cgroup namespace and freezer root
+   With launch.cgroup_control=true, also create /sys/fs/cgroup/sandbox/init
+     and strictly enable the Guest-root controllers. The inner bootstrap
+     completes /sandbox delegation before any user command (User cgroup namespace and controller topology).
    mount -t devpts devpts /dev/pts -o newinstance,ptmxmode=0666
                                         # needed by tty-mode openpty
 ```
@@ -579,232 +614,171 @@ alone does not prove these properties.
 
 <a id="apply-and-launch"></a>
 
-### Phase 2: apply the spec, wire stdio and start the app
+### Phase 2: prepare the environment and launch through the inner init
 
-Phase 1's JOIN supplies LaunchSpec and the vsock connection that exchanged
-hello/launch. Phase 2 applies the spec and writes launch_ack on **that same
-connection**. It then remains open as the application's stdio MUX ([MUX sub-protocol](#mux-wire)).
+The outer applies network configuration, declared tmpfs mounts and injected
+files after switch-root. Empty volumes were installed before switch-root.
+Files are staged on tmpfs, bound at their targets with the requested ownership,
+mode and optional read-only setting, then detached from staging. Cold-start
+network, mount and file failures are fatal; restore's best-effort clock/network
+updates are a separate contract.
 
-`launch_ack` follows **all spec application, including init commands**.
-It means the environment and initialization are prepared and the app is about
-to be forked; it is the host's settled trigger, **not proof of successful app
-exec or application health**. Filesystem-dependent spec steps execute serially
-after switch-root.
+The outer then creates the inner with new PID and mount namespaces, atomically
+inside real `/sandbox` through `clone3(CLONE_INTO_CGROUP)`. Before re-exec, the
+fork child creates a cgroup namespace rooted at that group. The inner mounts
+its own `/proc` and scoped cgroup2 view, completes the delegation setup below,
+and reports readiness. This bootstrap belongs to the environment, independently
+of the selected primary executable or placeholder.
 
-```
-1. If spec.network is present, applyNetwork(spec.network); otherwise skip.
-   Cold start is additive configuration of an optional new interface:
-     - Sethostname(network.hostname)
-     - raw netlink RTM_NEWLINK(interface UP [+IFLA_MTU])
-     - RTM_NEWADDR(IP/CIDR), optional RTM_NEWROUTE(nexthop)
-   Cold-start failure is fatal. Restore with network uses best-effort
-   flush-and-replace instead (Management operations).
-2. applyFsMounts(spec.mounts where type==tmpfs)
-   Empty volumes were installed before switch-root.
-3. applyFiles(spec.files)
-   Stage on tmpfs (/run/.inject), write content + chmod/chown, bind at target,
-   optionally remount read-only, then MNT_DETACH staging. Content is memory-only,
-   not written to vdb. Failure is fatal.
-4. runInit(spec.init)
-   Run one-shot commands sequentially, output to console.
-   Per-command env/workdir/user and timeout are supported; timeout sends SIGKILL.
-   Any nonzero exit or timeout is fatal (early initContainers-style setup).
-5. Prepare app stdio from spec.stdio (Application stdio and console wiring):
-   tty: openpty(), retain master/slave; initial winsize comes from the spec.
-   pipe: pipe/socketpair per declared channel; undeclared stdin uses /dev/null.
-6. write launch_ack{stdio: actual enabled channels}
-   This connection is retained for MUX traffic.
-7. read ack: host confirms the transition to MUX.
-   Attach the MUX session and start app-fd <-> MUX bridge goroutines before
-   forking the primary helper.
-8. Start the first primary helper through exec.Cmd:
-   SysProcAttr.Cloneflags = CLONE_NEWNS [| CLONE_NEWPID in default private mode]
-     private: the app is PID 1 in its own PID namespace.
-     shared: the app stays in sandbox-init's PID namespace; PID 1 reaps orphans.
-   SysProcAttr.UseCgroupFD=true
-   CgroupFD = O_CLOEXEC directory fd for /sys/fs/cgroup/app
-     clone3(CLONE_INTO_CGROUP) creates the helper directly in real /app.
-   SysProcAttr.Unshareflags includes CLONE_NEWCGROUP:
-     Go's fork child unshares after clone3 and before re-exec; real /app becomes
-     the cgroup namespace root. No anchor process is required.
-   tty: Setctty + setsid; slave -> fd 0/1/2; close the child's master copy.
-   pipe: child pipe/socketpair ends -> fd 0/1/2.
-   argv: [/proc/self/exe, "exec-child", "bootstrap", isolated, cgroupControl,
-          placeholder, cred, workdir, exec, args...]
-   cred: "uid:gid:sg1,sg2", resolved from spec.user against guest /etc/passwd,
-         or "-" for no credential drop.
-   placeholder: identical helper setup, but finally waits for signals instead
-                of executing an external program.
-   env: spec.Env; only an entirely empty map receives the default PATH.
-        A nonempty map without PATH does not receive one.
-9. The helper waits at the internal SOCK_STREAM start gate until the parent
-   releases setup. Restart paths register the PID before releasing this gate;
-   the first primary is recorded after helper completion, before the reaper runs.
-   In its private mount namespace the helper marks / recursively
-   slave to prevent reverse propagation, unmounts inherited guest-global
-   cgroup2 and remounts cgroup2 at /sys/fs/cgroup. The new cgroup namespace
-   scopes real /app as /.
-   Only with cgroup_control=true, the bootstrap helper writes 0 once to
-   virtual /init/cgroup.procs, moving itself to real /app/init. This is the
-   sole cgroup.procs placement write in sandbox-init's implementation.
-   In private PID mode mount proc at /proc; shared mode retains the existing
-   proc mount. Then wait at the ready gate.
-10. At that ready gate, the parent:
-    - pins /proc/<pid>/ns/cgroup with O_CLOEXEC for sandbox-init's lifetime;
-    - with cgroup_control=true, verifies real /app/cgroup.procs is empty,
-      enables each advertised controller from /app/cgroup.controllers in
-      cgroup.subtree_control and reads back every item. Any failure aborts
-      the helper before the final app runs;
-    - sends go. The helper then chdirs to workdir, applies
-      setgroups -> setgid -> setuid if cred != "-", and syscall.Exec's argv.
-      Credential drop follows mount /proc and precedes execve.
-    For placeholder: identical namespace/credential setup, then
-      signal.Notify(SIGTERM,SIGINT) -> receive signal -> exit(0).
-      Do not use select{}: Go detects a deadlock with no live goroutines.
-    The placeholder is still supervised, in the app cgroup and snapshot
-    freezer. The host forces restart=always, so killing it from exec restarts
-    it in place. Guest PID 1's shutdown path sets shutdown before stopping it.
-    Host VMM teardown is a separate path (Signal handling).
-11. After the setup/ready/go exchange, parent PID 1 accepts an empty EOF on
-    the internal socket as helper completion; an explicit helper error fails
-    startup. Normal exec closes that fd through CLOEXEC; placeholder closes
-    it explicitly without exec.
-    - register the primary PID and start launch.plugin[] supervision;
-    - publish the supervisor and initial_launch_state=started;
-    - short-conn dial host:5000, send app_started{pid}, wait for ack, close;
-    - start mem_report and enter phase 3.
-```
+The inner receives LaunchSpec and the original hello/launch connection. It
+performs these operations in order:
 
-The helper error channel reports setup/exec errors, but an empty EOF can also
-result from an abrupt helper death. `app_started` and the initial started state
-therefore describe the implemented publication boundary, not independent proof
-of execve success or application health. The placeholder intentionally has no
-external exec. See [`child.go`](../cmd/sandbox-init/child.go) and
-[`main.go`](../cmd/sandbox-init/main.go).
+1. Run `init` commands sequentially in the inner PID/cgroup environment, with
+   their configured environment, working directory and user. Output goes to
+   the console. Nonzero exit or timeout fails launch. Timeout kills the current
+   command; it does not introduce process-group or descendant termination.
+   During this serial phase one waiter collects both the current command's
+   status and adopted orphan exits, before the ordinary supervisor takes over.
+   Primary, plugin and exec creation cannot overlap this initialization phase.
+2. Prepare primary stdio: a PTY with the requested size, or the declared pipes
+   with `/dev/null` for absent stdin. Send `launch_ack` on the same connection
+   that carried Launch, and wait for the Host's `ack` before starting its MUX.
+3. Create the primary in the final cgroup target, using the same path for its
+   initial start and later restarts. Its mount namespace is private; private
+   PID mode also creates a PID namespace and remounts `/proc`, while shared
+   mode retains the inner PID namespace. The helper finishes namespace/mount
+   setup before dropping credentials and executing the selected program.
+4. Hold the primary at its pre-exec gate while the outer reads its pidfd to
+   obtain the PID visible in the Guest's initial PID namespace. Register the
+   primary with the inner supervisor before releasing the helper. The Host
+   continues to receive this outer-visible primary PID, not the inner init's
+   PID or the primary's namespace-local PID.
+5. After helper completion, start the configured plugins, publish the inner
+   supervisor and send the primary-start fact to the outer. The outer owns
+   `initial_launch_state`, sends `app_started`, and starts memory reporting.
+   The inner enters normal supervision and accepts execution sessions.
 
-Primary and one-shot `init` commands use the empty-map-only PATH default above.
-Plugins and native exec use a different environment builder: they start with a
-default PATH and overlay supplied entries, including an explicitly empty PATH.
-Do not rely on a primary's nonempty environment automatically gaining PATH.
+`launch_ack` therefore still follows **all initialization**, before primary
+creation. It confirms the environment/stdio barrier, not successful primary
+exec or application health. The helper reports explicit setup/exec errors, but
+an empty EOF can also result from abrupt helper death; `app_started` retains
+its existing publication semantics. See [`executor.go`](../cmd/sandbox-init/executor.go)
+and [`child.go`](../cmd/sandbox-init/child.go).
 
-The bridge's app-side fds are replaceable by generation. An in-place restart
-drains the old output generation before installing new fds, with the bounded
-fallback in [Phase 3](#supervision); the MUX session and streams survive.
+A placeholder follows the same setup and primary lifecycle, then waits for
+SIGTERM/SIGINT instead of executing an external program. The Host still forces
+`restart=always`; killing the placeholder from exec restarts it in place.
+It is not the inner init, and replacing it does not repeat environment
+bootstrap or `init` commands.
+
+Primary and one-shot `init` commands receive a default PATH only when their
+entire environment map is empty. Plugins and native exec start with a default
+PATH and overlay supplied entries, including an explicitly empty PATH.
+The bridge's primary-side fds are replaced by generation on restart; the MUX
+session survives, with the bounded output drain described in [Phase 3](#supervision).
 
 <a id="application-cgroups"></a>
 
-#### Application cgroup namespace and controller topology
+#### User cgroup namespace and controller topology
 
-Real `/sys/fs/cgroup/app` is always both the **application cgroup namespace
-root** and the **recursive snapshot freezer root**. Capture freezes/thaws
-that path, including descendants; it does not call the application's or
-envd's `/freeze`. sandbox-init and top-level one-shot `init: []` commands
-stay in the guest-global cgroup root, outside `/app`.
+Real `/sys/fs/cgroup/sandbox` is both the **user cgroup namespace root** and the
+**recursive capture freezer root**. The outer remains at the Guest-global root;
+the inner, `init` commands, primary, plugins, exec helpers/commands and their
+descendants all belong below `/sandbox`. Capture operates on this whole tree.
 
-`launch.cgroup_control` defaults to `false`. The real hierarchy and scoped
-application view are:
+`launch.cgroup_control` defaults to `false` and selects placement/delegation
+within that same environment:
 
-```text
-cgroup_control=false
+| Real Guest path | Path in the user cgroup mount | `false` | `true` |
+| --- | --- | --- | --- |
+| `/sys/fs/cgroup` | Outside the scoped mount | Outer `sandbox-init` | Outer `sandbox-init` |
+| `/sys/fs/cgroup/sandbox` | `/sys/fs/cgroup` | Inner and all directly managed processes; `/proc/self/cgroup` is `0::/` | No direct processes; advertised controllers enabled and verified for children |
+| `/sys/fs/cgroup/sandbox/init` | `/sys/fs/cgroup/init` | Not created by the runtime | Inner and all directly managed processes; `/proc/self/cgroup` is `0::/init` |
+| `/sys/fs/cgroup/sandbox/<user-group>` | `/sys/fs/cgroup/<user-group>` | No controller-delegation guarantee | User-created groups may be siblings of `/init` or have their own descendants; they remain in the same freezer tree |
 
-Real guest-global                         primary/plugin/native exec view
-/sys/fs/cgroup/                           /sys/fs/cgroup/ (real /app)
-+-- cgroup.procs: sandbox-init, init[]     +-- cgroup.procs: primary/plugin/exec
-+-- app/                                  +-- /proc/self/cgroup: 0::/
-    +-- cgroup.procs: primary, restarts, plugins, native exec, descendants
-         ^ namespace root + snapshot freezer root
+`/init` means the default group for processes managed by the inner init. It
+contains the inner itself and includes one-shot `init` commands while they run;
+it is not a separate group for those commands. All process types use the same
+`cgroup_control` setting. User managers may organize their own descendants
+without changing the platform's recursive freezer root.
 
-cgroup_control=true
+The outer mounts cgroup2 with `nsdelegate` in the Guest's initial namespace and
+verifies the option. The inner's scoped mount hides ancestor groups. Linux
+then treats its cgroup namespace as a delegation boundary: writes to namespace
+root files are limited to the kernel's delegatable interfaces, and migration
+cannot cross the namespace's reachable subtree. Resource-controller settings
+at that root remain controlled by the outer. See the kernel's
+[cgroup v2 delegation contract](https://docs.kernel.org/admin-guide/cgroup-v2.html#delegation).
+This provides a cgroup management boundary, not a general security boundary
+against a privileged Guest.
 
-Real guest-global                         primary/plugin/native exec view
-/sys/fs/cgroup/                           /sys/fs/cgroup/ (real /app)
-+-- cgroup.procs: sandbox-init, init[]     +-- cgroup.procs: empty
-+-- app/                                  +-- cgroup.subtree_control: all advertised
-    +-- cgroup.procs: empty               +-- init/
-    +-- cgroup.subtree_control: all       |   +-- cgroup.procs: primary/plugin/exec
-    +-- init/                             +-- /proc/self/cgroup: 0::/init
-        +-- cgroup.procs: primary, restarts, plugins, native exec, descendants
-         ^ /app is the namespace/freezer root;
-           /init contains sandbox-init-managed long-lived processes
-```
+With `cgroup_control=true`, the outer strictly enables and verifies the
+Guest-global root's advertised controllers. The inner first moves itself from
+`/sandbox` to `/sandbox/init` through its scoped `/init/cgroup.procs`; no user
+code has run yet. The outer verifies `/sandbox` is empty, enables and reads
+back its advertised controllers, then releases the inner. This is the only
+bootstrap migration. With `false`, the inner remains in `/sandbox`; root
+controller propagation is best-effort and a delegated child layout is not
+promised. `nsdelegate`, scoped mounts and recursive freeze apply in both modes.
 
-True mode strictly enables and verifies the guest-global root's advertised
-controllers before creating app subgroups. After bootstrap migration it does
-the same at real `/app`; any missing controller fails startup. False mode
-does not promise app-side delegation and retains only the guest-global root's
-historical best-effort delegation.
+After bootstrap, the inner opens its own scoped target and namespace
+descriptors. Every managed launch uses `clone3(CLONE_INTO_CGROUP)` to be born
+in the final target. The initial primary has no special placement path, and
+there is no post-Start migration of user processes. Required namespace or
+cgroup setup failures abort launch; no fallback runs a process outside the
+freezer tree. Internal descriptors are CLOEXEC and passed to helpers only
+through explicit slots; user programs do not inherit them.
 
-The cgroup `/init` is **not** top-level `init: []` in sandbox.yaml.
-The former contains long-lived app processes; the latter still runs once,
-sequentially under sandbox-init before primary startup.
-`cgroup_control=true` leaves an empty namespace root and delegated
-controllers for an app-side manager. For example, envd's default
-`/user`, `/ptys` and `/socats` become real `/app/{user,ptys,socats}`,
-siblings of `/init`. There is no extra `/exec`; native exec shares the
-primary's group.
+**PID views:** `launch.pid_namespace=private` keeps the primary as PID 1 of
+its own namespace; native exec joins that primary's namespaces. With `shared`,
+the visible PID 1 is the inner init and it adopts orphaned descendants. Init
+commands and plugins run in the inner PID namespace in both modes. A private
+primary cannot see them; a shared primary can. Shared `/proc/1/root` and
+`/proc/1/cgroup` now describe the inner's root and scoped cgroup placement,
+rather than the outer management process.
 
-Only the first primary uses the special bootstrap path. Primary restarts,
-plugin starts/restarts and native exec's `exec-join` use the pinned cgroup
-namespace fd and `clone3(CLONE_INTO_CGROUP)` to be **born in the final target**,
-`/app` or `/app/init`. There is no Start → write-cgroup.procs migration window.
-Setup, namespace, mount or handshake failures fail that launch. Passed namespace
-and socket fds immediately regain CLOEXEC and are closed after use; the final
-app does not inherit them. The app's ordinary `/sys/fs/cgroup` is the scoped
-view above, without guest-global `/sys/fs/cgroup/app`. Inspection through
-`/proc/1/root` in shared PID mode is the non-security-boundary exception below.
+**Plugins:** after primary startup, the inner launches configured plugins as
+its own children, sharing the user rootfs, network and final cgroup target.
+Each has independent `never`, `on-failure` or `always` supervision (default
+`always`), using the common backoff. Output remains on the console and
+env/workdir/user remain configurable. Plugin exit does not decide the sandbox
+lifecycle; the primary's exit and `launch.restart` retain that role.
 
-A cgroup namespace scopes the **cgroupfs view and management root**; it is not
-an additional security boundary. In shared PID mode the app shares sandbox-init's
-PID namespace and can see sandbox-init as PID 1. Its `/proc/1/cgroup` can even
-show `/..` relative to the app's cgroup namespace. That does not contradict
-the app itself seeing `/` or `/init`.
+**Credentials and mount propagation:** primary/plugin helpers complete scoped
+mount setup before dropping credentials. Init commands inherit the already
+prepared inner namespaces and can apply `SysProcAttr.Credential` directly.
+Image `/etc/passwd` remains authoritative for named users. The outer's shared
+mount tree propagates into the inner's shared/slave tree, then into user
+children's slave mount trees, so managed disk mounts remain visible while
+user mount changes do not propagate back to the outer. All share the Guest
+network namespace. Restore does not replay files, mounts or init commands.
 
-**Companions, `launch.plugin[]`:** after app bootstrap, sandbox-init starts
-plugins sequentially as its own children, directly reaped by PID 1. They use
-the same guest rootfs, network and app cgroup, and freeze with the app.
-Output goes to the console; env/workdir/user are configurable. Each has its
-own restart policy, never / on-failure / always (default always), with the
-shared backoff scheme below. **Plugin exit never controls the sandbox
-lifecycle**; only the primary's exit and `launch.restart` decide between
-reboot and in-place restart. They are peers: even with a private-PID primary,
-plugins remain in sandbox-init's PID namespace, sharing rootfs/network/cgroup
-but not the primary's PID namespace. Each plugin is created in the final
-cgroup target, then a lightweight re-exec helper joins the pinned cgroup
-namespace in a private mount namespace and mounts scoped cgroup2.
-Placement/setup/exec failures are plugin startup failures; there is no
-fallback that runs a plugin outside snapshot freezing.
+#### Compatibility and memory restore
 
-**Credential-drop timing:** do not apply the resolved app uid/gid as
-`SysProcAttr.Credential` on the outer clone. A non-root child would fail the
-new PID namespace's proc mount with EPERM. Instead, the child applies
-setgroups → setgid → setuid after mounting proc and before execve.
-`init[].user` can use Credential directly because init commands retain
-PID 1's existing namespaces and do not remount proc. Named users such as
-`nobody` are resolved guest-side, where the image rootfs's `/etc/passwd`
-is authoritative.
+Host messages, primary/placeholder behavior, exit notifications, restart
+policy and cold-only initialization retain their existing contract. Observable
+changes are the Guest-global path `/app` becoming `/sandbox`, init commands
+joining the user execution environment, and shared PID mode exposing the inner
+instead of outer PID 1. Scripts that inspected global paths or outer management
+processes must account for that change; ordinary scoped membership remains
+`/` or `/init` according to `cgroup_control`.
 
-**Mount propagation for restore injection:** `CLONE_NEWNS` gives the app
-a private copy of the mount tree at fork. Later bind mounts made by PID 1
-would not normally enter that namespace. Before forking, PID 1 marks
-`/` `MS_REC|MS_SHARED`; before mounting proc, the child marks its copy
-`MS_REC|MS_SLAVE`. PID 1 mount events then propagate one way into the app,
-while app mounts such as proc do not propagate back. Cold-start injection
-precedes fork and is inherited without this mechanism; restore injection
-would need it; current restore does not replay LaunchSpec files/mounts/init. Network replacement does not: the app uses CLONE_NEWNS, not
-CLONE_NEWNET, so it shares PID 1's network namespace and sees netlink changes.
-
-**applyNetwork is not a listener prerequisite.** An absent LaunchSpec network
-is skipped; loopback still exists. External app networking and the vsock control
-plane are independent.
-
-**Cold-start failures are fatal:** network, mount, file or init setup failure
-must not silently launch an app with the wrong environment. The scheduler
-needs a failed startup it can reschedule. Restore's best-effort clock/network
-handling is a distinct contract ([Management operations](#management-operations)).
+Cold start constructs this model from the selected Runtime. A memory Snapshot
+S preserves both instances, their namespace/cgroup topology and private
+channel. Restore requires the Runtime backing artifact recorded by its E/C0
+identity and resumes that captured implementation; replacing the Host or a
+Runtime file cannot upgrade init inside an existing S. Adopt a new Runtime
+through cold start and create replacement artifacts through the normal E/S
+workflow. This refactor does not change the E/S format or replay Launch during
+memory restore.
 
 <a id="supervision"></a>
 
 ### Phase 3: supervisor
+
+This loop runs in the inner PID 1. It performs an initial reap sweep when taking
+over from serial init, so orphan exits at that phase boundary are collected.
+The outer separately waits for the inner and owns Host notification/poweroff.
 
 ```
 loop:
@@ -821,7 +795,7 @@ loop:
         // handled
       else:
         execReg.deliver(pid, status)                // exec child, or silently reaped orphan
-    sigterm/sigint:                                 // signals received by guest PID 1
+    sigterm/sigint:                                 // signals received by inner PID 1
       shutting_down = true                         // prevent pending restart forks
       send spec.stop_signal to app_pid             // default SIGTERM
       wait spec.stop_grace_sec (default 10 s); SIGKILL on timeout
@@ -846,9 +820,10 @@ app_exit_then_reboot(status):
   after stream EOFs, send MUX_CLOSE and wait for MUX_CLOSE_ACK on the same connection
   drain, ACK and transport close share one 2 s budget; force shutdown on expiry
   close remaining app ends after the drain
-  short-conn dial host:5000 -> app_exited{code, term_signal} -> wait ack(timeout) -> close
-  reboot(LINUX_REBOOT_CMD_POWER_OFF)
-  # Reboot even without ack; POWER_OFF lets CH exit cleanly with status 0.
+  send terminal status over the private channel to the outer
+  outer: host:5000 -> app_exited{code, term_signal} -> bounded ack wait -> close
+  outer: reboot(LINUX_REBOOT_CMD_POWER_OFF)
+  # Power off even without Host ack; POWER_OFF lets CH exit cleanly with status 0.
 ```
 
 **Backoff** is shared by apps and plugins in `supervise.go`: start at 10 ms,
@@ -878,12 +853,14 @@ has ended, CH should exit cleanly. RESTART would invoke CH's in-place VM reboot
 and reconnect vhost-user-blk backends, which accept only one connection for this
 single-VM lifecycle; failed reconnection makes CH exit unsuccessfully.
 
-**The reverse listener runs in a separate goroutine** alongside the supervisor,
-handling ping, restore, quiesce and attach, plus exec/connect sessions ([Management operations](#management-operations)).
-It remains across cold start, capture/restore and MUX replacement until init
-powers off.
+**The reverse listener runs in the outer**, independently of the inner
+supervisor. It handles ping, restore, quiesce and attach, and hands exec/connect
+connections to the inner ([Management operations](#management-operations)).
+It remains across cold start, capture/restore and MUX replacement until Guest
+poweroff. Unexpected inner exit or private-channel loss fails the Guest without
+inventing a successful primary exit or replaying initialization.
 
-**The mem_report goroutine** also runs alongside supervision. It samples
+**The mem_report goroutine** also runs in the outer. It samples
 `/proc/meminfo` immediately after the launch barrier, then every 5 s by default.
 Each observation carries an epoch and strictly increasing seq. Before
 restore_ack, restore creates a new report epoch and clears the old pending
@@ -911,121 +888,94 @@ usage observations over a separate connection ([Raw usage observations](#usage-o
 
 ### Quiesce handling
 
-Quiesce is the last guest cleanup opportunity before host `/vm.pause`.
-It has two goals:
+Quiesce prepares a consistent Guest memory/filesystem capture point before
+Host `/vm.pause`. It also removes execution and forwarding sessions whose
+Host peer will not exist after restore. The inner is part of the frozen tree,
+so all cleanup that requires its goroutines must finish **before** freeze.
 
-1. Freeze the app and synchronize filesystems so memory and disk artifacts
-   correspond to one consistent capture point.
-2. Tear down MUX and port-forward sessions before capture. A handshake or live
-   connection whose peer is absent after restore must not be retained as a
-   usable session ([MUX graceful-close handshake](#mux-close) / [Connect port-forward sessions (`sandbox-ctl run --connect`)](#forward-sessions)). Registry drains, bounded close handling and
-   CH's restore transport reset cooperate to establish this boundary; an
-   individual SO_LINGER return is not proof that all kernel socket state vanished.
+The operation has the following ordering:
 
-Accepted management connections are handled concurrently. Exec/connect/report
-registries and quiesce gates order their lifecycles. The host proceeds to
-`/vm.pause` only after receiving quiesced, observing that control connection's
-EOF, and completing its own admitted-handler drains.
+1. **Host closes admission.** It gates new exec/forward requests and pauses
+   its ping ticker. Usage admission is paused before the Host memory barrier.
+   Admitted pings must reach the Guest EOF transport barrier; a drained failed
+   probe still follows its health/fatal policy, and does not replace the
+   required `quiesced` response. This drain has its own bounded quiesce budget,
+   even when ordinary ping waiting is unbounded.
+2. **Outer pauses raw usage and requests inner drain.** Usage generation
+   advances, and its old connection is closed/joined; blocked source reads
+   retain their original slots without holding locks while waiting on a Host.
+   Outer execution admission closes before the private quiesce request.
+3. **Inner completes execution cleanup.** It closes primary-restart and plugin
+   launch admission and joins admitted launches; rejects new execution
+   sessions; kills in-flight exec helpers and joins their full fork/MUX/socket
+   cleanup. It closes forwarding targets and reverse connections, and clears
+   cached accept listeners to wake parked `Accept` calls. All admitted session
+   handlers, including setup before registration and final socket cleanup,
+   must finish. It then closes the primary MUX through the bounded
+   `MUX_CLOSE`/`MUX_CLOSE_ACK` handshake, with hard-close fallback, and leaves
+   output pumps parked for a later attach. Only then does it reply to the outer.
+4. **Outer drains reports and freezes the whole user environment.** After
+   inner drain succeeds, `mem_report` is paused and any in-flight exchange is
+   joined. The outer writes `/sys/fs/cgroup/sandbox/cgroup.freeze=1` and waits
+   for `cgroup.events` to report `frozen 1`. This includes the inner PID 1,
+   managed processes and user-created descendants. No step after this point
+   waits for an inner handler or an application-specific freeze endpoint.
+5. **Outer prepares filesystems.** It calls `sync(2)` after confirmed freeze,
+   preventing new user dirty pages after sync. Unless `skip_drop_caches` is
+   true, it writes `3` to `/proc/sys/vm/drop_caches`. This is Guest filesystem
+   preparation; it does not define Host physical-disk durability.
+6. **Outer confirms and closes.** It sends
+   `quiesced{drop_caches_result}`, then closes that management connection with
+   bounded linger. The Host requires this response, control EOF and its own
+   admitted exec/forward-handler drains before `/vm.pause` and capture.
 
-```
-0. Host atomically closes exec/forward admission and pauses the ping ticker.
-   Usage admission is already paused before the Host memory barrier;
-   Guest invalidates the usage generation and closes/joins its connection.
-   Blocked source reads keep their original slots, not locks waiting on Host.
-   Drain admitted ping through the guest EOF transport barrier. Response EOF
-   without pong drains a failed probe; its health metrics/fatal policy still apply.
-   CONNECT EOF and other transport/protocol failures do not establish this drain.
-   Quiesce still requires its own positive acknowledgment before /vm.pause.
-   This drain has an independent 8 s quiesce budget, even if ordinary ping
-   timeout is disabled. Expiry cancels and joins the exchange and fails capture;
-   it does not preempt a normally completing transport before guest confirmation.
-   Guest rejects new exec, SIGKILLs in-flight exec helpers, closes their lingered
-   vsock sessions and joins complete session goroutines (Exec sessions (sandbox-ctl exec)).
-   This drain is bounded: failure means no freezer entry and no quiesced.
-0a. Guest drains the in-flight mem_report exchange and pauses reporting.
-    The bounded exchange completes before S can retain a reporter lock or
-    guest->host observation connection.
-0b. Freeze the app:
-    write /sys/fs/cgroup/app/cgroup.freeze = 1
-    poll cgroup.events for frozen 1, within a bounded wait.
-    Freezing before sync prevents new app dirty pages after sync.
-    The recursive freezer covers /init, envd user/ptys/socats subtrees and
-    children forked within the subtree; do not call envd /freeze.
-1. [prep] sync(2)                         // flush dirty ext4 data
-2. [prep] if quiesce.skip_drop_caches == false:
-     open("/proc/sys/vm/drop_caches", O_WRONLY) -> write("3\n")
-                                         // clean page cache plus dentry/inode cache
-3. Park app-output forwarding as the MUX is closed.
-   The app is frozen and residual output is bounded.
-4. Tear down all connect forwards (Connect port-forward sessions (sandbox-ctl run --connect)):
-   gate new connect; close each target and reverse-vsock connection.
-   SO_LINGER is bounded (3 s, connectLingerSec) and best-effort; sessions close concurrently
-   within the quiesce budget.
-   Accept mode also closes and clears cached guest listeners, waking parked
-   Accept calls; listeners are recreated lazily after resume.
-   Host Forwarder only gates new admission before sending quiesce.
-   After quiesced plus guest EOF, close remaining host halves and join all
-   admitted exec/dial/accept/relay handlers before /vm.pause.
-5. On the primary MUX: MUX_CLOSE -> MUX_CLOSE_ACK -> close(MUX).
-   ACK wait is bounded at 5 s; timeout/error forces close.
-   Host responds and immediately closes; guest uses bounded SO_LINGER to help
-   drain vsock teardown. A dead connection is hard-dropped.
-6. WriteMessage(quiesced) on the quiesce control connection.
-7. Close that control connection; host must observe EOF.
-```
+This ordering leaves the outer listener, storage/autofs and control state
+outside the frozen subtree. The private outer/inner channel stays in memory
+with both endpoints and no unresolved quiesce request. It is not a Host vsock
+session that must be discarded. MUX/forward registries, bounded close handling
+and CH's restore transport reset jointly establish the external-session
+boundary; a single SO_LINGER return does not prove that all kernel socket
+state has disappeared.
 
-**Why prep has this order:**
+**Cache policy:** sync precedes optional drop because only clean cache is
+discarded. Dropping page/dentry/inode cache can reduce captured resident memory
+at the cost of cold reads after restore. The default skips the write; use
+`--drop-caches=true` to request it. Freeze and sync still occur when cache
+dropping is skipped. `quiesced.drop_caches_result` reports `skipped`,
+`succeeded` or `failed`. Its absence means an older Guest with an unknown
+result; if skipping was requested, the Host warns and continues because an
+older Guest may have dropped caches under its original protocol. The result
+does not guarantee retention against memory pressure or balloon reclaim.
 
-- **Sync first:** drop_caches discards clean cache; syncing first moves dirty
-  data to disk so disk and memory capture refer to consistent contents.
-- **drop_caches=3, when requested:** clean cache reflects the instance's access
-  history and prefetch timing rather than dirty process state that restore
-  requires. Dropping it can reduce resident cache in capture, at the cost of
-  cold reads from the relevant backing filesystem/device after restore,
-  including root and data disks. Measure that tradeoff for the workload.
-  The default skips the write. Use `--drop-caches=true` explicitly to request
-  it; freeze and sync still occur when cache dropping is skipped.
+**Errors and guarantees:** execution/report drain or freeze-confirmation
+failure prevents `quiesced`. An already-sent private request whose result
+cannot be established closes that channel and terminates the Guest, avoiding
+late session operations after a later lifecycle transition. Cache-drop
+open/write failure is logged and reported as `failed`, without failing capture;
+`sync(2)` has no returned error value in this path. Primary MUX close has a
+bounded ACK wait and hard-close fallback, and forwarding closes concurrently
+within the quiesce budget. These are not unbounded socket-removal guarantees;
+CH handles residual connected-socket state on restore
+([MUX graceful-close handshake](#mux-close)).
 
-`quiesced.drop_caches_result` reports skipped / succeeded / failed.
-An absent value means an older guest without result reporting, interpreted as
-unknown. If skip was requested but the result is unknown, the host warns and
-continues: an older guest may have dropped caches under its historical protocol.
-The result describes this action, not a guarantee against reclaim by memory
-pressure or ballooning.
+Without `quiesced`, or if the Host's EOF/handler barriers fail, capture fails.
+The Host attempts same-VM resume/reattach recovery and continues only if it
+succeeds; otherwise it terminates the failed recovery. See
+[Failure semantics](#failures) and the
+[sandbox lifecycle](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/runtime.md).
 
 **Extensions, not implemented:**
 
 | Action | Proposal |
-|---|---|
-| App-level quiesce hook | A proposed sandbox.yaml `quiesce.signal`, empty by default, would signal the app and wait a fixed window, proposed default 100 ms. It needs explicit opt-in: an unhandled SIGUSR1 can terminate the app. There is no completion ACK or application-consistency guarantee. |
-| Reset `/tmp` tmpfs | Add a phase-1 tmpfs mount at /tmp, then MNT_DETACH and remount at quiesce. |
-| Close outbound connections | These are app-owned fds; sandbox-init has no general active-close authority over them. An application hook would be needed. |
+| --- | --- |
+| App-level quiesce hook | A proposed opt-in `quiesce.signal`, empty by default, would signal the app and wait a fixed window, proposed default 100 ms. Without completion ACK this does not establish application consistency; an unhandled signal can terminate the app. |
+| Reset `/tmp` tmpfs | Add a phase-1 tmpfs mount at `/tmp`, then MNT_DETACH and remount at quiesce. |
+| Close application-owned outbound connections | Requires an application protocol; managed forwarding teardown does not close arbitrary application fds. |
 
-**Excluded actions:**
-
-- Do not close the vsock listener: restore/attach needs it.
-- Do not terminate or signal the primary app. Quiesce freezes it recursively
-  through cgroup v2; it is not SIGTERM and does not rely on stdout backpressure
-  to stop execution.
-- Do not reset the RNG/entropy pool here. Restore-time reseeding is not
-  implemented ([Management operations](#management-operations)).
-- Do not clean runtime logs such as /var/log; they are app-owned.
-
-**Errors and guarantees:** drop_caches open/write failures are logged and
-reported as failed, without failing capture. `sync(2)` has no returned error
-value in this path; do not describe an unimplemented sync-error check.
-Cache dropping is best-effort and affects capture size and later reads.
-
-Freeze confirmation and the host's response/EOF/handler barriers are required.
-If cgroup.events does not reach frozen 1 in time, the guest sends no quiesced.
-Exec/report drain failure likewise prevents it. Primary MUX close has a bounded
-ACK wait and hard-close fallback; SO_LINGER setup/close does not provide a
-separately verified, unbounded socket-removal guarantee. CH's transport reset
-handles residual connected-socket state ([MUX graceful-close handshake](#mux-close)).
-If quiesced is absent or cannot be written, capture fails. The host attempts
-same-VM recovery and reattach; it continues running only if that recovery
-succeeds, otherwise the host terminates the failed recovery. See [Failure semantics](#failures) and
-[sandbox lifecycle](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/runtime.md).
+Quiesce does not close the outer vsock listener, terminate or signal the primary,
+reset the RNG, or clean application logs. Recursive cgroup freezing, rather
+than SIGTERM or stdout backpressure, stops user execution. Restore-time RNG
+reseeding remains unimplemented.
 
 <a id="stdio"></a>
 
@@ -1080,24 +1030,23 @@ setns(CLONE_NEWPID) affects only subsequently forked children, and mount-namespa
 setns is thread-local. Performing those operations directly in long-lived,
 multithreaded sandbox-init would be unsafe.
 
-Instead, sandbox-init creates `exec-join` with
-clone3(CLONE_INTO_CGROUP) against the pinned final target, registers its PID,
-then releases its private handshake. The outer helper joins the pinned cgroup
-namespace and selects the app PID namespace for its future child.
-An inner re-exec child joins the app mount namespace, reuses its existing proc
-and scoped cgroup2 mounts, resolves the image user, then finally execs.
-Private PID mode requires both helpers: if the outer helper entered the app
-mount namespace first, its proc mount would not expose the outer PID and
-/proc/self/exe could not launch the inner child.
+The inner `sandbox-init` creates `exec-join` with
+`clone3(CLONE_INTO_CGROUP)` against the pinned final target, registers its PID,
+then releases its private handshake. This helper joins the pinned cgroup
+namespace and selects the primary PID namespace for its future child.
+That child re-execs as `exec-child-joined`, joins the primary mount namespace,
+reuses its proc/scoped cgroup2 mounts, and resolves the image user before exec.
+Private PID mode requires both helpers: joining the primary mount namespace
+first would hide `exec-join` from that `/proc`, preventing it from starting
+its child through `/proc/self/exe`.
 
-After mount join, the inner helper waits at a ready gate. The outer helper
-then joins that same mount namespace and releases the inner final exec only
-after success; it subsequently waits/reaps and forwards the exit code.
-Any join failure prevents the user command from running, without changing
-sandbox-init's own namespaces.
+After mount join, `exec-child-joined` waits at a ready gate. `exec-join` then
+joins the same mount namespace, releases final exec after success, and
+waits/reaps to forward the exit code. A join failure prevents the command from
+running without changing either long-lived `sandbox-init` instance's namespaces.
 
-Both exec-join and the command inherit the final app cgroup from birth,
-`/app` or `/app/init`, seen as `0::/` or `0::/init`.
+Both `exec-join` and the command inherit the final cgroup target from birth,
+`/sandbox` or `/sandbox/init`, seen as `0::/` or `0::/init`.
 There is no separate exec cgroup or later cgroup.procs placement.
 
 **Exit and reaping:** after command exit, the guest sends EOF on all session
@@ -1108,7 +1057,7 @@ the sandbox. Primary exit follows its own restart policy ([Phase 3: supervisor](
 The sole reaper routes non-primary child exits to their exec session rather
 than treating them as primary exit.
 
-**Capture interaction:** before setup the inner helper sets a parent-death
+**Capture interaction:** before setup `exec-child-joined` sets a parent-death
 signal. If dropping credentials can clear it, it resets the signal afterward
 and uses a nonblocking EOF check on its private handshake socket to ensure the
 original exec-join still lives before final exec. Killing that helper therefore
@@ -1207,7 +1156,8 @@ it is not a guarantee against transport errors. A forward has only one logical
 stream, so no stream IDs or application-level windows are needed; kernel vsock
 buffer backpressure supplies flow control.
 
-**Capture interaction:** forwards are torn down with the app MUX ([Quiesce handling](#quiesce) step 4),
+**Capture interaction:** forwards and the primary MUX are torn down by the inner
+before freeze ([Quiesce handling](#quiesce)),
 because a captured live forward has no peer after restore.
 The guest gates new connects and closes target/vsock pairs using bounded
 SO_LINGER for the latter. Accept mode also closes cached listeners, waking
@@ -1303,11 +1253,11 @@ The last column describes whether the connection closes or upgrades.
 | Cold start | guest→host | `hello` → `launch{spec}` → `launch_ack{stdio}` → `ack` | MUX | Guest announces readiness; host supplies LaunchSpec; guest applies it and prepares stdio before launch_ack. |
 | App start notification | guest→host | `app_started{pid}` → `ack` | Close | The primary passed the helper handshake and reached the startup publication boundary; this is not independent proof of execve success or application health. |
 | App exit notification | guest→host | `app_exited{code,term_signal}` → `ack` | Close | Terminal primary exit; guest waits for ACK up to its budget before powering off. Host uses this for its exit status. |
-| Shutdown request | host→guest | `shutdown` → `ack` | Close | Only a successful ACK write triggers termination: before workload publication, POWER_OFF; with a supervisor, SIGTERM to guest PID 1. ACK does not confirm completed shutdown. |
+| Shutdown request | host→guest | `shutdown` → `ack` | Close | Only a successful ACK write triggers termination. The outer stops startup if the inner is not ready; otherwise it thaws as needed and asks the inner to apply the primary stop-signal/grace policy. The outer powers off. ACK does not confirm completed shutdown. |
 | Health probe | host→guest | `ping{id,t_send_ns}` → `pong{id,t_send_ns}` | Close | Host measures RTT, timeouts and failures ([Ping health probes](#health)). |
 | Memory report | guest→host | `mem_report{mem_report:{epoch,seq,mem_*}}` → `mem_report_ack` | Close | Guest observation; host validates epoch/seq and combines it with CH vm.info in the sandbox-local controller. |
 | Usage observation | host→guest | `usage_request{usage_request}` → `usage_response{usage_response}` | Reuse | New raw memory/filesystem reads only; Host alone accumulates ([Raw usage observations](#usage-observations)). |
-| Before capture | host→guest | `quiesce{skip_drop_caches}` → `quiesced{drop_caches_result}` | Close | Freeze app, run prep and tear down sessions ([Quiesce handling](#quiesce)); host then requires control EOF and its handler barriers before pause. |
+| Before capture | host→guest | `quiesce{skip_drop_caches}` → `quiesced{drop_caches_result}` | Close | Inner session/restart drain, then outer report drain, recursive `/sandbox` freeze and filesystem prep ([Quiesce handling](#quiesce)); Host requires control EOF and its own handler barriers before pause. |
 | After restore | host→guest | `restore{epoch,wallclock_ns,network?}` → `restore_ack{epoch,stdio,app_state}` | MUX | After vCPUs resume, guest advances the report epoch, thaws and reopens execution gates before ACK, then reconnects MUX and resumes reports. Host enables memory policy only after ACK/MUX setup. Clock/network updates are best-effort ([Timelines](#timelines)); launch/files/init/plugins are cold-only and not replayed. RNG reseeding is not implemented. |
 | MUX replacement | host→guest | `attach{epoch}` → `attach_ack{epoch,stdio,app_state}` | MUX | Close/drop old MUX and attach the new connection. If the guest is still frozen, thaw it before reopening gates and sending ACK, including same-process resume and failed-capture recovery; otherwise skip thaw. Attach and VM resume are distinct operations. |
 | Execute command | host→guest | `exec{spec}` → `exec_ack{stdio}` | Independent MUX | Start a sibling command and wire its stdio; on completion send EXIT_STATUS then close ([Exec sessions (`sandbox-ctl exec`)](#exec-sessions) / [MUX graceful-close handshake](#mux-close)). Sessions can run concurrently. |
@@ -1333,11 +1283,15 @@ launch/forward/report gates closed. ACK write failure leaves the completed
 thaw and execution admission in place but does not resume a paused report
 stream. The host still fails the handshake and owns retry or terminal cleanup.
 
-Thaw writes the freezer control file from PID 1; it does not wait for the app
-or its stdio. A thawed app may block on output while console pumps remain
-parked, but cannot block the independent ACK. MUX starts only after ACK so its
-frames cannot corrupt the handshake; resource reports resume afterward. The
-existing exec-session drain and termination contract is unchanged.
+The outer first thaws `/sandbox`, then asks the now-runnable inner to close any
+old MUX and reopen its exec/forward/plugin/restart gates. Only after the inner
+confirms readiness does the outer write the Host ACK and hand that connection
+to the inner for MUX traffic. Waiting for inner readiness before thaw would
+wait on a frozen process and cannot make progress. A thawed primary may block
+on output while its pumps are parked; this does not delay the readiness ACK.
+MUX frames follow ACK, and resource reports resume after the handoff. A failed
+inner readiness exchange sends no Host ACK; uncertain private requests fail
+the Guest rather than admitting a later operation on the same channel.
 
 This stronger ACK barrier requires the updated guest init in the boot Runtime.
 A host-only update does not replace PID 1 in an existing memory Snapshot.
@@ -1586,7 +1540,8 @@ the separate bounded pre-request CONNECT retry still exists ([Failure semantics]
 
 **Four triggers use the same close handshake:**
 
-1. Quiesce closes the primary MUX near the end of guest cleanup ([Quiesce handling](#quiesce) step 5).
+1. Quiesce closes the primary MUX during inner execution cleanup, before the
+   outer freezes `/sandbox` ([Quiesce handling](#quiesce)).
 2. Exec completion sends EOF on all output/PTY streams, then EXIT_STATUS,
    then MUX_CLOSE. The host learns the exit code from EXIT_STATUS but continues
    to process MUX_CLOSE, sends ACK and closes locally before returning and
@@ -1653,99 +1608,104 @@ transport-reset contract remains [MUX graceful-close handshake](#mux-close).
 
 ### Timelines
 
-In these diagrams, ordinary arrows are management exchanges and double arrows
-are MUX traffic. “This conn → MUX” marks the retained connection's upgrade.
-Host→guest dialing always means the CH base UDS plus CONNECT/OK exchange,
-not a host dial to guest CID 2; CID 2 denotes the host from inside the guest.
+Host→Guest connections still use the CH base UDS and `CONNECT 5000`/`OK`
+exchange. CID 2 denotes the Host from inside the Guest. The diagrams separate
+the two `sandbox-init` instances without adding any Host endpoint or message.
 
-**Cold start:**
+**Cold start:** the Host listens on `<base>_5000` before starting CH. The outer
+mounts base facilities, brings up loopback and starts its dispatcher before
+announcing readiness. It waits without mounting workload disks. The Host may
+ping during that interval; the launch timeout starts when it sends Launch.
 
-```
-sandbox-ctl                                               sandbox-init (guest)
-listen <base>_5000
-spawn CH -----------------------------------------------> kernel boot
-                                                          base mounts; lo UP; control dispatcher
-                      <--- hello{runtime_ready} ------------------ dial CID=2:5000 [conn A]
-start ping; wait for Launch                               wait (no workload root mounted)
-commit all backends; launch{spec,stdio} -----------------> assemble workload root; switch-root
-launch timeout starts                                    apply network/mounts/files/init; stdio
-                      <--- launch_ack{stdio} ------------- prepared, before final app exec
-ack ----------------------------------------------------> conn A -> MUX
-initial SET_WINSIZE =====================================> tty mode; fork/exec primary app
-                                                          app fds = PTY slave or pipes; bridge up
-                      <--- app_started{pid} [conn B] ------
-ack; close conn B
-ping -> pong; guest EOF [conn C..k]                        MUX stdio + WINDOW_UPDATE
-                      <--- app_exited{code,term_signal} --- terminal exit; bounded output drain
-ack ----------------------------------------------------> POWER_OFF -> CH exits 0
-```
-
-**MUX replacement, ATTACH:**
-
-```
-sandbox-ctl                                               sandbox-init
-capture resume/recovery invokes reattach                   old MUX may be absent or broken
-dial <base> UDS, CONNECT 5000, drain OK
-attach{epoch} ------------------------------------------> gracefully close/drop old MUX
-                                                          query frozen state; thaw only if frozen
-                                                          reopen exec/forward/plugin/app-restart
-                      <--- attach_ack{epoch,stdio,app_state}
-initial SET_WINSIZE =====================================> this conn -> MUX; resume output pumps
-                                                          resume report gate
-normal MUX flow                                           normal MUX flow
-If frozen-state query or thaw fails, no ACK is sent;
-guest logs the failure and leaves those gates closed.
+```mermaid
+sequenceDiagram
+    participant H as Host
+    participant O as Outer sandbox-init
+    participant I as Inner sandbox-init
+    O->>H: hello runtime_ready
+    H->>O: launch after all backends are published
+    O->>O: Root, network, mounts and files
+    O->>I: Bootstrap and hand off Launch connection
+    I->>I: Serial init and stdio setup
+    I->>H: launch_ack
+    H->>I: ack
+    Note over H,I: Same connection becomes primary MUX
+    I->>I: Create primary and resolve outer-visible PID
+    I->>O: Primary started
+    O->>H: app_started
+    H->>O: ack
+    Note over O,I: Outer reports memory; inner supervises processes
 ```
 
-**Quiesce → snapshot:**
+TTY size and stdio use MUX after its handshake. Terminal primary exit drains
+output in the inner; the outer sends `app_exited`, waits within its notification
+budget, and powers off even if the Host ACK does not arrive. The VM then exits.
 
-```
-sandbox-ctl                                               sandbox-init
-pause/drain ping; gate new exec/forward
-dial <base> UDS, CONNECT 5000, drain OK
-quiesce{skip_drop_caches} -------------------------------> drain exec and mem_report first
-                                                          freeze app; await frozen 1
-                                                          sync; drop_caches=3 only if requested
-                                                          tear down forwards / accept listeners
-                      <=== MUX_CLOSE ==================== close primary MUX
-MUX_CLOSE_ACK =========================================> ACK wait bounded, then lingered close
-host immediately closes its MUX half
-                      <--- quiesced{drop_caches_result} --- reply on control conn; close it
-wait control EOF; join admitted host exec/forward halves
-all required barriers complete -> /vm.pause, /vm.snapshot
+**Quiesce and capture:** all cleanup requiring inner execution precedes the
+outer's recursive freeze.
 
-Snapshot: listener remains, primary app frozen, no active MUX;
-          CH local_port_last persisted;
-          TRANSPORT_RESET prepublished in used ring, reset-pending state persisted.
-Bounded guest close fallback and CH transport reset cover distinct responsibilities.
-```
-
-**Restore:**
-
-```
-sandbox-ctl                                               sandbox-init
-CH restore activation re-signals snapshotted TRANSPORT_RESET (no new descriptor consumed)
-/vm.resume OK; backend RX remains gated ----------------> reset connected sockets, retain listener
-dial <base> UDS, CONNECT 5000
-  REQUEST waits behind RX gate
-                      <--- event-queue kick -------------- reset processed; CH releases RX gate
-restore{epoch,wallclock_ns,network?} --------------------> best-effort clock_settime if >0
-                                                          optional best-effort network replacement
-                                                          advance paused mem_report to new epoch
-                                                          thaw app; reopen execution gates
-                      <--- restore_ack{epoch,stdio,app_state}
-initial SET_WINSIZE =====================================> this conn -> MUX; resume output pumps
-SafeTarget normalization; open observation epoch           new report epoch/seq resumes after barrier
-(re)start ping ticker                                      listener unchanged across capture
-Clock/network failures are logged and do not prevent ACK;
-ACK follows successful thaw and gate reopening, but does not prove application health.
+```mermaid
+sequenceDiagram
+    participant H as Host
+    participant O as Outer sandbox-init
+    participant I as Inner sandbox-init
+    H->>H: Gate exec and forwards; drain ping and usage
+    H->>O: quiesce
+    O->>O: Pause raw usage
+    O->>I: Drain execution
+    I->>I: Join launches, exec and forwarding sessions
+    I->>H: MUX_CLOSE
+    H->>I: MUX_CLOSE_ACK and close
+    I->>O: Execution drained
+    O->>O: Drain mem_report; freeze sandbox; await frozen 1
+    O->>O: Sync; optionally drop caches
+    O->>H: quiesced then control EOF
+    H->>H: Join admitted handlers; pause and snapshot
 ```
 
-**The listener remains across capture.** Closing it during quiesce would leave
-no receiver for restore/attach. Transport reset visits connected sockets without
-closing bind/listen sockets. CH also resumes local port allocation from saved
-local_port_last + 1. Resetting the transport epoch and keeping port allocation
-continuous are separate responsibilities.
+S retains the outer listener and both private-channel endpoints; the inner and
+its process tree are frozen, with no active Host MUX. CH persists
+`local_port_last`, the prepublished `TRANSPORT_RESET` event in the used ring,
+and reset-pending state. Bounded Guest close fallback and CH transport reset
+have distinct responsibilities.
+
+**Restore or same-VM attach:** a true restore first re-signals the snapshotted
+`TRANSPORT_RESET` without consuming a new descriptor. Connected sockets reset
+while the listener remains. CH gates backend RX until Guest event-queue
+processing acknowledges the reset; a new REQUEST waits behind that gate.
+
+Before thaw, restore applies best-effort wall clock and optional network
+replacement, and advances the paused memory-report epoch. Attach preserves the
+live epoch and thaws only if the tree remains frozen, including capture recovery
+and same-VM resume. Both use this readiness ordering:
+
+```mermaid
+sequenceDiagram
+    participant H as Host
+    participant O as Outer sandbox-init
+    participant I as Inner sandbox-init
+    H->>O: restore or attach
+    O->>O: Prepare observation state; thaw sandbox if needed
+    O->>I: Resume execution
+    I->>I: Close old MUX and reopen execution gates
+    I->>O: Ready
+    O->>H: restore_ack or attach_ack
+    O->>I: Hand off acknowledged connection
+    Note over H,I: MUX resumes, including TTY size and output pumps
+    O->>H: Resume memory reports
+    H->>H: Enable memory policy and restart ping
+```
+
+Frozen-state query, thaw or inner-readiness failure prevents ACK. Clock/network
+failures are logged and remain best-effort. ACK follows execution readiness,
+not application health, and never waits for the primary to consume stdio.
+Host SafeTarget normalization and the observation epoch still follow ACK/MUX
+establishment. Launch, files and init are not replayed.
+
+The outer listener remains across capture; closing it would leave no receiver
+for restore/attach. Transport reset does not close bind/listen sockets. CH
+continues local port allocation from saved `local_port_last + 1`; resetting
+transport state and preserving allocation continuity are separate obligations.
 
 <a id="health"></a>
 
@@ -1814,6 +1774,11 @@ This is best-effort classification, not a typed network-error taxonomy.
   helper through the parent-death mechanism ([Exec sessions (`sandbox-ctl exec`)](#exec-sessions)).
 - Restore clock/network failures log and continue. Restore/attach thaw failure
   leaves gates closed and sends no ACK ([Management operations](#management-operations)).
+- Unexpected inner exit, private-channel loss or an unknown result after a
+  private request was sent terminates the Guest. These operations are not
+  replayed, and an inner crash does not create a successful primary-exit fact.
+  An explicit operation error may instead reject that operation while keeping
+  the private channel usable.
 
 **Host, sandbox-ctl:**
 
@@ -1850,7 +1815,7 @@ Other budgets are protocol constants or guest-side waits:
 | app_started | Guest sets 200 ms socket I/O timeouts after dial; dial has a separate 5 s retry budget. Host read uses timeouts.app_notify. | This is not a single 200 ms total dial+exchange deadline; raw AF_VSOCK uses per-I/O socket timeouts. |
 | app_exited | Same as app_started | Missing ACK does not prevent POWER_OFF. |
 | ping | timeouts.ping, default no forced bound; production profile 200 ms; capture drain at most 8 s | Ordinary failure updates ping stats; capture expiry cancels/joins and fails capture. Fatal threshold requires a bounded probe. |
-| quiesce | 8 s | Exec/report drain, freeze, sync, optional cache drop, forwarding teardown and MUX close must fit the capture protocol. |
+| quiesce | 8 s | Inner launch/exec/forward/MUX drain, outer report drain, recursive freeze, sync and optional cache drop must fit the capture protocol, in that order. |
 | restore | timeouts.restore, default no forced response bound | Connection setup waits for guest acceptance; pre-request EOF/reset retries can continue through the total budget or context cancellation, with each CONNECT/OK attempt bounded at 2 s or the shorter remaining budget. No replay after request write. Demand paging can lengthen restoration; connection then becomes MUX. |
 | attach | 5 s | Covers the replacement handshake; connection then becomes MUX. |
 | exec | 10 s | Guest forks/execs and resolves PATH before ACK. Handshake only; clear deadline for MUX command execution. |

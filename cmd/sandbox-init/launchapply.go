@@ -11,7 +11,6 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
-	"time"
 
 	"github.com/cyphar/filepath-securejoin"
 	"github.com/kuasar-sandbox/guest-runtime/pkg/guestabi/proto"
@@ -294,50 +293,21 @@ func parseFileMode(s string, def os.FileMode) os.FileMode {
 	return os.FileMode(n)
 }
 
-// runInit runs each one-shot init command in order, to completion. They run
-// in PID 1's existing namespaces (post switch-root) with output to the guest
-// console. A per-command run-as user (init[].user) is applied via the child
-// credential (safe here — no /proc remount is involved, unlike the app fork).
-// A non-zero exit aborts startup (initContainers semantics).
+// runInit runs one-shot commands in the prepared inner environment, before
+// the primary, plugins, or ordinary exec sessions can start. This phase owns
+// child reaping until it returns; the normal supervisor must not run alongside
+// it. A non-zero exit aborts startup.
 func runInit(specs []proto.InitSpec) error {
 	for i, s := range specs {
-		env := execEnv(s.Env)
-		cred, err := resolveCred(s.User)
+		cmd, err := prepareInitCommand(s)
 		if err != nil {
-			return fmt.Errorf("init[%d] user %q: %w", i, s.User, err)
+			return fmt.Errorf("init[%d] %q: %w", i, s.Exec, err)
 		}
-
-		var cmd *exec.Cmd
-		if cred != nil && !strings.ContainsRune(s.Exec, '/') {
-			// The fork applies Credential and Dir before entering this helper;
-			// only the target user can select the correct bare command.
-			cmd = exec.Command("/proc/self/exe", append([]string{"init-command", s.Exec}, s.Args...)...)
-		} else {
-			path, err := initCommandPath(s.Exec, env, s.Workdir)
-			if err != nil {
-				return fmt.Errorf("init[%d] %q: %w", i, s.Exec, err)
-			}
-			cmd = exec.Command(path, s.Args...)
-			cmd.Args[0] = s.Exec
+		if cmd.SysProcAttr == nil {
+			cmd.SysProcAttr = &syscall.SysProcAttr{}
 		}
-		cmd.Stdout = os.Stderr
-		cmd.Stderr = os.Stderr
-		cmd.Env = env
-		cmd.Dir = s.Workdir
-		if cred != nil {
-			cmd.SysProcAttr = &syscall.SysProcAttr{
-				Credential: &syscall.Credential{Uid: cred.uid, Gid: cred.gid, Groups: cred.sgids},
-			}
-		}
-		if len(guestSlots.disks) > 0 {
-			// Init commands run before the primary establishes its namespace.
-			// Give them the same device restriction and a distinct process group.
-			if cmd.SysProcAttr == nil {
-				cmd.SysProcAttr = &syscall.SysProcAttr{}
-			}
-			cmd.SysProcAttr.Setpgid = true
-			cmd.SysProcAttr.UseCgroupFD = true
-			cmd.SysProcAttr.CgroupFD = int(applicationCgroups.target.Fd())
+		if err := cgroupConfigureClone(cmd.SysProcAttr, false); err != nil {
+			return fmt.Errorf("init[%d] %q: %w", i, s.Exec, err)
 		}
 		logf("init[%d]: %s %v", i, s.Exec, s.Args)
 		if err := runWithTimeout(cmd, s.TimeoutMs); err != nil {
@@ -345,6 +315,40 @@ func runInit(specs []proto.InitSpec) error {
 		}
 	}
 	return nil
+}
+
+// prepareInitCommand preserves the configured environment, working directory
+// and identity. The command uses file-backed stdio, so waiting after observing
+// its exit cannot block on os/exec copy goroutines inherited by descendants.
+func prepareInitCommand(s proto.InitSpec) (*exec.Cmd, error) {
+	env := execEnv(s.Env)
+	cred, err := resolveCred(s.User)
+	if err != nil {
+		return nil, fmt.Errorf("user %q: %w", s.User, err)
+	}
+	var cmd *exec.Cmd
+	if cred != nil && !strings.ContainsRune(s.Exec, '/') {
+		// The fork applies Credential and Dir before entering this helper;
+		// only the target user can select the correct bare command.
+		cmd = exec.Command("/proc/self/exe", append([]string{"init-command", s.Exec}, s.Args...)...)
+	} else {
+		path, err := initCommandPath(s.Exec, env, s.Workdir)
+		if err != nil {
+			return nil, err
+		}
+		cmd = exec.Command(path, s.Args...)
+		cmd.Args[0] = s.Exec
+	}
+	cmd.Stdout = os.Stderr
+	cmd.Stderr = os.Stderr
+	cmd.Env = env
+	cmd.Dir = s.Workdir
+	if cred != nil {
+		cmd.SysProcAttr = &syscall.SysProcAttr{
+			Credential: &syscall.Credential{Uid: cred.uid, Gid: cred.gid, Groups: cred.sgids},
+		}
+	}
+	return cmd, nil
 }
 
 // exec.Command looks up a bare name in PID 1's PATH. Resolve it against the
@@ -379,29 +383,6 @@ func initCommandPath(name string, env []string, workdir string) (string, error) 
 		break
 	}
 	return "", &exec.Error{Name: name, Err: exec.ErrNotFound}
-}
-
-// runWithTimeout runs cmd to completion, or kills it and returns an error if
-// it exceeds timeoutMs (0 → no timeout). Used for one-shot init commands.
-func runWithTimeout(cmd *exec.Cmd, timeoutMs int64) error {
-	if timeoutMs <= 0 {
-		return cmd.Run()
-	}
-	if err := cmd.Start(); err != nil {
-		return err
-	}
-	done := make(chan error, 1)
-	go func() { done <- cmd.Wait() }()
-	t := time.NewTimer(time.Duration(timeoutMs) * time.Millisecond)
-	defer t.Stop()
-	select {
-	case err := <-done:
-		return err
-	case <-t.C:
-		_ = cmd.Process.Kill()
-		<-done // reap
-		return fmt.Errorf("timed out after %dms", timeoutMs)
-	}
 }
 
 // --- run-as-user resolution (guest-side /etc/passwd + /etc/group) ---------
