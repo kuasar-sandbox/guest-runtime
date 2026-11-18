@@ -144,14 +144,22 @@ func (c *vsockConn) Write(b []byte) (int, error) {
 	return writeSocket(b, c.io)
 }
 
-func (c *vsockConn) Close() error {
+func (c *vsockConn) Close() error { return c.closeDescriptor(true) }
+
+// release is used only when SCM_RIGHTS transfers an idle connection. Closing
+// this copy must not shutdown the socket shared with its new owner.
+func (c *vsockConn) release() error { return c.closeDescriptor(false) }
+
+func (c *vsockConn) closeDescriptor(shutdown bool) error {
 	c.closeOnce.Do(func() {
 		c.fdMu.Lock()
 		c.closed = true
 		if c.closedCh != nil {
 			close(c.closedCh)
 		}
-		_ = unix.Shutdown(c.fd, unix.SHUT_RDWR)
+		if shutdown {
+			_ = unix.Shutdown(c.fd, unix.SHUT_RDWR)
+		}
 		c.fdMu.Unlock()
 		c.ioWG.Wait()
 		c.closeErr = syscall.Close(c.fd)
@@ -299,7 +307,7 @@ func bindVsockListener(port uint32) (int, error) {
 // serveReverseChannelDynamic is the base-runtime dispatcher. It answers ping
 // before Launch while rejecting workload-only operations until a supervisor is
 // published. The listener itself is established before runtime_ready.
-func serveReverseChannelDynamic(listenFD int, sup *atomic.Pointer[supervisorState], bridge *consoleBridge) {
+func serveReverseChannelDynamic(listenFD int, executor *atomic.Pointer[executorClient]) {
 	for {
 		nfd, _, err := acceptManagementSocket(listenFD)
 		if err != nil {
@@ -312,12 +320,19 @@ func serveReverseChannelDynamic(listenFD int, sup *atomic.Pointer[supervisorStat
 		}
 		go func(fd int) {
 			c := &vsockConn{fd: fd}
-			current := sup.Load()
-			localBridge := bridge
-			if current != nil {
-				localBridge = current.bridge
+			current := executor.Load()
+			var execution executionControl
+			if current != nil && current.ready.Load() {
+				execution = current
 			}
-			if handed := handleReverseConn(c, current, localBridge); !handed {
+			shutdown := func() {
+				if current == nil {
+					doReboot()
+				} else {
+					current.shutdown()
+				}
+			}
+			if handed := handleReverseConnShutdown(c, execution, shutdown); !handed {
 				_ = c.Close()
 			}
 		}(nfd)
@@ -328,16 +343,20 @@ func serveReverseChannelDynamic(listenFD int, sup *atomic.Pointer[supervisorStat
 // iff the connection was handed to a mux.Session (restore / attach) and
 // must therefore NOT be closed by the caller; false for management
 // short-conns (ping / quiesce / unknown), which the caller closes.
-func handleReverseConn(c *vsockConn, sup *supervisorState, bridge *consoleBridge) bool {
-	return handleReverseConnShutdown(c, sup, bridge, func() {
-		if sup == nil {
-			doReboot()
+// Lifecycle changes are serialized in the outer init; ping and usage never
+// acquire this lock or make an RPC to the potentially frozen inner init.
+var managementLifecycle sync.Mutex
+
+func handleReverseConn(c *vsockConn, execution executionControl) bool {
+	return handleReverseConnShutdown(c, execution, func() {
+		if client, ok := execution.(*executorClient); ok {
+			client.shutdown()
 		} else {
-			_ = unix.Kill(unix.Getpid(), unix.SIGTERM)
+			doReboot()
 		}
 	})
 }
-func handleReverseConnShutdown(c *vsockConn, sup *supervisorState, bridge *consoleBridge, shutdown func()) (handedToMUX bool) {
+func handleReverseConnShutdown(c *vsockConn, execution executionControl, shutdown func()) (handedToMUX bool) {
 	// Per-conn handshake deadline: tight enough that a stuck host can't
 	// pin a goroutine forever, generous enough for quiesce (drop_caches +
 	// the MUX-close round-trip can take a few seconds). Cleared before a
@@ -349,6 +368,15 @@ func handleReverseConnShutdown(c *vsockConn, sup *supervisorState, bridge *conso
 	if err != nil {
 		logf("reverse-channel: read: %v", err)
 		return false
+	}
+	switch req.Type {
+	case proto.TypeShutdown, proto.TypeQuiesce, proto.TypeRestore, proto.TypeAttach:
+		managementLifecycle.Lock()
+		defer managementLifecycle.Unlock()
+		if client, ok := execution.(*executorClient); ok && client.stopping.Load() && req.Type != proto.TypeShutdown {
+			_ = proto.WriteMessage(c, &proto.Message{Type: proto.TypeError, Msg: "sandbox is shutting down"})
+			return false
+		}
 	}
 	switch req.Type {
 	case proto.TypeShutdown:
@@ -373,30 +401,19 @@ func handleReverseConnShutdown(c *vsockConn, sup *supervisorState, bridge *conso
 		}
 		return false
 
-	case proto.TypeExec:
-		if sup == nil {
+	case proto.TypeExec, proto.TypeConnect:
+		if execution == nil {
 			_ = proto.WriteMessage(c, &proto.Message{Type: proto.TypeError, Msg: "workload not launched"})
 			return false
 		}
-		// Ad-hoc command inside the running sandbox. runExecSession owns
-		// c for the whole session (it closes it); never closed by the
-		// caller — hence handedToMUX=true.
-		runExecSession(c, req, sup)
-		return true
-
-	case proto.TypeConnect:
-		if sup == nil {
-			_ = proto.WriteMessage(c, &proto.Message{Type: proto.TypeError, Msg: "workload not launched"})
-			return false
+		handed, err := execution.runSession(c, req)
+		if err != nil {
+			logf("reverse-channel: execution handoff: %v", err)
 		}
-		// Port-forward: splice this reverse-channel conn to a guest-side
-		// dial target. runConnectSession owns c for the whole session (the
-		// relay closes it); never closed by the caller — handedToMUX=true.
-		runConnectSession(c, req, sup)
-		return true
+		return handed
 
 	case proto.TypeRestore:
-		if sup == nil || bridge == nil {
+		if execution == nil {
 			_ = proto.WriteMessage(c, &proto.Message{Type: proto.TypeError, Msg: "workload not launched"})
 			return false
 		}
@@ -408,7 +425,6 @@ func handleReverseConnShutdown(c *vsockConn, sup *supervisorState, bridge *conso
 			return false
 		}
 		logf("reverse-channel: restore epoch=%d — re-establishing stdio MUX", req.Epoch)
-		bridge.closeLiveMUX() // drop any stale session first (normally already gone via quiesce)
 		// CH reloaded the snapshot's CLOCK_REALTIME verbatim, so the
 		// guest wall clock is stale by the whole dormant interval. Jump
 		// it to the host's now before the post-reattach thaw, so the
@@ -447,7 +463,7 @@ func handleReverseConnShutdown(c *vsockConn, sup *supervisorState, bridge *conso
 			return false
 		}
 		logf("reverse-channel: restore mem_report epoch=%d", reportEpoch)
-		handed, err := finishReattach(c, sup, bridge, req.Epoch, true, cgroupThaw)
+		handed, err := finishReattach(c, execution, req.Epoch, true, cgroupThaw)
 		if err != nil {
 			logf("reverse-channel: %v", err)
 			return handed
@@ -459,12 +475,11 @@ func handleReverseConnShutdown(c *vsockConn, sup *supervisorState, bridge *conso
 		return true
 
 	case proto.TypeAttach:
-		if sup == nil || bridge == nil {
+		if execution == nil {
 			_ = proto.WriteMessage(c, &proto.Message{Type: proto.TypeError, Msg: "workload not launched"})
 			return false
 		}
 		logf("reverse-channel: attach epoch=%d — re-establishing stdio MUX", req.Epoch)
-		bridge.closeLiveMUX() // gracefully close the old session, then switch
 		// attach itself is only MUX-transport reconnect — NOT
 		// "post-snapshot resume" (it also serves plain live-VM MUX
 		// breaks where nothing was ever quiesced). Thaw belongs to the
@@ -484,7 +499,7 @@ func handleReverseConnShutdown(c *vsockConn, sup *supervisorState, bridge *conso
 		// Quiesce drains and pauses guest→host memory observations before the
 		// VM freeze. Attach resumes the same live epoch; a true restore instead
 		// advances the epoch in the TypeRestore branch above.
-		handed, err := finishReattach(c, sup, bridge, req.Epoch, false, thaw)
+		handed, err := finishReattach(c, execution, req.Epoch, false, thaw)
 		if err != nil {
 			logf("reverse-channel: %v", err)
 			return handed
@@ -492,7 +507,7 @@ func handleReverseConnShutdown(c *vsockConn, sup *supervisorState, bridge *conso
 		return true
 
 	case proto.TypeQuiesce:
-		if sup == nil || bridge == nil {
+		if execution == nil {
 			_ = proto.WriteMessage(c, &proto.Message{Type: proto.TypeError, Msg: "workload not launched"})
 			return false
 		}
@@ -503,19 +518,11 @@ func handleReverseConnShutdown(c *vsockConn, sup *supervisorState, bridge *conso
 			logf("usage quiesce barrier: %v", usageErr)
 			return false
 		}
-		logf("reverse-channel: quiesce — freeze + prep + MUX/forward close")
-		// Gate restarts: the snapshot must not fork a new app/plugin into the
-		// freeze window. Running plugins stay frozen with the app cgroup; the
-		// app's own restart goroutine waits this out (restartApp). Cleared at
-		// endQuiesce (restore/attach).
-		sup.closeRestartAdmission()
-		sup.pluginReg.beginQuiesce()
-		// Reject new exec, terminate every in-flight child, and join the full
-		// fork/MUX/socket session before freezing. Capturing only after child
-		// SIGKILL but before its Go cleanup completed could restore with the
-		// process-wide fork path permanently wedged.
-		if err := quiesceExecAndMemoryReports(sup.execReg, guestMemReports); err != nil {
-			logf("reverse-channel: quiesce exec drain failed, NOT sending quiesced: %v", err)
+		logf("reverse-channel: quiesce — drain execution, freeze and prepare storage")
+		// All inner-owned sessions and launch admission must settle before its
+		// PID 1 is frozen. Nothing after this RPC waits for an inner goroutine.
+		if err := quiesceExecutionAndMemoryReports(execution.quiesce, guestMemReports); err != nil {
+			logf("reverse-channel: quiesce execution drain failed: %v", err)
 			return false
 		}
 		// Freeze the app tree BEFORE sync: no new dirty pages after
@@ -529,13 +536,6 @@ func handleReverseConnShutdown(c *vsockConn, sup *supervisorState, bridge *conso
 			return false
 		}
 		dropCachesResult := runQuiesce(req.SkipDropCaches)
-		// Tear down port-forward relays the same way as the stdio MUX: a
-		// live forward left open would be captured as a half-open vsock
-		// remnant. Each vsock conn closes with SO_LINGER so the teardown is
-		// confirmed before `quiesced` (deterministic steady state, docs/guest-abi.md#quiesce). Also
-		// closes the cached accept-mode listeners (unblocking parked accepts).
-		closeConnectSessions(sup.connReg, sup.acceptLn)
-		bridge.closeLiveMUX() // stop forwarding app output, then the MUX_CLOSE handshake
 		// This management connection is the final host→guest vsock flow before
 		// /vm.pause. Arm the same bounded linger as MUX/forward connections;
 		// the host waits for EOF after quiesced, so Close completes a transport
@@ -560,7 +560,7 @@ func handleReverseConnShutdown(c *vsockConn, sup *supervisorState, bridge *conso
 
 // finishReattach is the thaw/ACK/MUX boundary. The narrow thaw seam also lets
 // socket tests hold this boundary without freezing the test process's cgroup.
-func finishReattach(c *vsockConn, sup *supervisorState, bridge *consoleBridge, epoch uint32, newHost bool, thaw func() error) (_ bool, err error) {
+func finishReattach(c *vsockConn, execution executionControl, epoch uint32, newHost bool, thaw func() error) (_ bool, err error) {
 	ack, operation := proto.TypeAttachAck, "attach"
 	if newHost {
 		ack, operation = proto.TypeRestoreAck, "restore"
@@ -585,16 +585,25 @@ func finishReattach(c *vsockConn, sup *supervisorState, bridge *consoleBridge, e
 	// Thaw only writes the freezer control file; it does not wait for the
 	// app or its output. Console pumps can stay parked until the ACK has
 	// been written and this connection can safely carry MUX frames.
-	if err := resumeAfterThaw(sup, thaw); err != nil {
-		return false, fmt.Errorf("%s thaw: %w", operation, err)
+	if thaw != nil {
+		if err := thaw(); err != nil {
+			return false, fmt.Errorf("%s thaw: %w", operation, err)
+		}
 	}
-	spec := bridge.protoSpec()
+	// Only after thaw can the inner acknowledge its local readiness. This
+	// includes opening exec gates before the Host can act on the ACK.
+	if err := execution.prepareReattach(); err != nil {
+		return false, fmt.Errorf("%s readiness: %w", operation, err)
+	}
+	spec := execution.stdioSpec()
 	resp := &proto.Message{Type: ack, Epoch: epoch, Stdio: &spec, AppState: proto.AppStateRunning}
 	if err := proto.WriteMessage(c, resp); err != nil {
 		return false, fmt.Errorf("write %s_ack: %w", operation, err)
 	}
-	_ = c.SetDeadline(time.Time{})
-	bridge.reattach(c)
+	handed, err := execution.attachSession(c)
+	if err != nil {
+		return handed, fmt.Errorf("%s MUX handoff: %w", operation, err)
+	}
 	// Resource observations must still start after ACK/MUX establishment,
 	// even though execution is already eligible before the host sees ACK.
 	guestMemReports.resumeEpoch()
@@ -622,12 +631,11 @@ func resumeAfterThaw(sup *supervisorState, thaw func() error) error {
 	return nil
 }
 
-// quiesceExecAndMemoryReports establishes the guest-side process/management
-// channel barrier before the app freezer. The reporter is paused only after
-// exec teardown succeeds, so a failed exec drain leaves ordinary guest
-// observations running while the host abandons and recovers the capture.
-func quiesceExecAndMemoryReports(execReg *execRegistry, reports *memReportStream) error {
-	if err := quiesceExecSessions(execReg); err != nil {
+// quiesceExecutionAndMemoryReports drains inner-owned execution sessions before
+// outer-owned observations. A failed execution barrier leaves observations
+// running while the Host abandons and recovers the capture.
+func quiesceExecutionAndMemoryReports(drain func() error, reports *memReportStream) error {
+	if err := drain(); err != nil {
 		return err
 	}
 	// Drain the periodic guest→host memory report before freezing. Its
@@ -643,6 +651,10 @@ func quiesceExecAndMemoryReports(execReg *execRegistry, reports *memReportStream
 // the guest. The same token-bound initial fact remains available in Pong
 // when this notification or its ACK is lost.
 func notifyAppStarted(pid int) error {
+	if innerEvents != nil {
+		_, err := innerEvents.request(executorMessage{Op: "started", PID: pid}, -1)
+		return err
+	}
 	conn, err := dialVsock(proto.VsockHostCID, proto.LaunchPort)
 	if err != nil {
 		return fmt.Errorf("dial: %w", err)
@@ -724,6 +736,12 @@ func exchangeMemReport(conn interface {
 // signal (code is then 128+sig per the shell convention). Best-effort —
 // the guest reboots regardless of outcome (docs/guest-abi.md#supervision).
 func notifyAppExited(code, sig int) {
+	if innerEvents != nil {
+		if _, err := innerEvents.request(executorMessage{Op: "exited", Code: code, Signal: sig}, -1); err != nil {
+			logf("primary exit notification: %v", err)
+		}
+		return
+	}
 	initialLaunch.exited(code)
 	conn, err := dialVsock(proto.VsockHostCID, proto.LaunchPort)
 	if err != nil {

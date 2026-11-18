@@ -75,7 +75,7 @@ func TestPongCarriesInitialFactWithoutSupervisor(t *testing.T) {
 		}
 		guest, host := usageSocketPair(t)
 		done := make(chan struct{})
-		go func() { defer close(done); defer guest.Close(); handleReverseConnShutdown(guest, nil, nil, func() {}) }()
+		go func() { defer close(done); defer guest.Close(); handleReverseConnShutdown(guest, nil, func() {}) }()
 		if err := proto.WriteMessage(host, &proto.Message{Type: proto.TypePing, ID: 31}); err != nil {
 			t.Fatal(err)
 		}

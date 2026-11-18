@@ -1,20 +1,17 @@
-// cgroup v2 wiring for sandbox-init: application namespace/delegation and the
-// snapshot freezer.
+// cgroup v2 wiring for the user execution environment and snapshot freezer.
 //
-// The real /sys/fs/cgroup/app cgroup is always the application cgroup
-// namespace root and the recursive snapshot freeze root. launch.cgroup_control
+// The real /sys/fs/cgroup/sandbox cgroup is both the user cgroup namespace
+// root and the recursive snapshot freeze root. launch.cgroup_control
 // selects the process layout below it:
 //
-//	false: application processes live directly in real /app and see 0::/
-//	true:  real /app stays empty; sandbox-init-managed application processes
-//	       live in real /app/init and see 0::/init
+//	false: inner sandbox-init and its children live in /sandbox and see 0::/
+//	true:  /sandbox stays empty; inner sandbox-init and its default children
+//	       live in /sandbox/init and see 0::/init
 //
-// sandbox-init stays in the guest-global cgroup root. The first primary child
-// is atomically cloned into /app, creates the application cgroup namespace,
-// mounts its scoped cgroupfs, and (true only) performs the design's sole
-// cgroup.procs write to move itself into /init. sandbox-init pins that
-// namespace and the cgroup directory FDs for every later primary restart,
-// plugin, and native exec clone.
+// The outer sandbox-init remains outside this tree. It atomically clones the
+// inner init into /sandbox, where the fork child creates the cgroup namespace.
+// The inner installs its scoped view and (true only) moves itself to /init
+// before any user code runs. Later user processes are born in the final target.
 package main
 
 import (
@@ -30,15 +27,15 @@ import (
 )
 
 const (
-	cgroupMountPoint = "/sys/fs/cgroup"
-	appCgroupDir     = cgroupMountPoint + "/app"
-	appInitCgroupDir = appCgroupDir + "/init"
-	cgroupFreezeFile = appCgroupDir + "/cgroup.freeze"
-	cgroupEventsFile = appCgroupDir + "/cgroup.events"
-	appCgroupProcs   = appCgroupDir + "/cgroup.procs"
+	cgroupMountPoint     = "/sys/fs/cgroup"
+	sandboxCgroupDir     = cgroupMountPoint + "/sandbox"
+	sandboxInitCgroupDir = sandboxCgroupDir + "/init"
+	cgroupFreezeFile     = sandboxCgroupDir + "/cgroup.freeze"
+	cgroupEventsFile     = sandboxCgroupDir + "/cgroup.events"
+	sandboxCgroupProcs   = sandboxCgroupDir + "/cgroup.procs"
 
-	// This path is evaluated only inside the first primary's scoped cgroup
-	// mount. It resolves to real /app/init/cgroup.procs and is the only
+	// This path is evaluated only inside the inner init's scoped cgroup
+	// mount. It resolves to real /sandbox/init/cgroup.procs and is the only
 	// cgroup.procs file this implementation writes.
 	scopedInitCgroupProcs = cgroupMountPoint + "/init/cgroup.procs"
 
@@ -54,14 +51,15 @@ const (
 // passed to re-exec helpers only through an explicit ExtraFiles slot.
 var applicationCgroups struct {
 	sync.RWMutex
-	control   bool
-	root      *os.File // real /app (first-primary CLONE_INTO_CGROUP target)
-	target    *os.File // real /app or /app/init (all later clone target)
-	namespace *os.File // first primary's pinned cgroup namespace
+	control       bool
+	processGroups bool     // preserve slot workloads' independent process groups
+	root          *os.File // /sandbox (outer) or its scoped / (inner)
+	target        *os.File // root or init leaf, used for direct clone placement
+	namespace     *os.File // the inner init's cgroup namespace
 }
 
 // cgroupMount mounts the guest-global cgroup v2 hierarchy, propagates root
-// controllers, creates /app and optional /app/init, and pins both the root and
+// controllers, creates /sandbox and optional /sandbox/init, and pins root and
 // final-target directory FDs. Called once from phase 1 after switch-root.
 //
 // cgroup_control=true is a delegation contract: every controller advertised at
@@ -69,10 +67,8 @@ var applicationCgroups struct {
 // the historical best-effort root propagation because no application subtree
 // is promised in that mode.
 func cgroupMount(control bool) error {
-	if err := unix.Mount("cgroup2", cgroupMountPoint, "cgroup2", 0, ""); err != nil {
-		if !errors.Is(err, unix.EBUSY) {
-			return fmt.Errorf("mount cgroup2 on %s: %w", cgroupMountPoint, err)
-		}
+	if err := cgroupMountDelegated(); err != nil {
+		return err
 	}
 	if err := cgroupEnableAdvertisedControllers(cgroupMountPoint); err != nil {
 		if control {
@@ -80,22 +76,22 @@ func cgroupMount(control bool) error {
 		}
 		logf("cgroup: guest-root controller delegation unavailable (continuing without application delegation): %v", err)
 	}
-	if err := os.Mkdir(appCgroupDir, 0o755); err != nil && !errors.Is(err, os.ErrExist) {
-		return fmt.Errorf("mkdir %s: %w", appCgroupDir, err)
+	if err := os.Mkdir(sandboxCgroupDir, 0o755); err != nil && !errors.Is(err, os.ErrExist) {
+		return fmt.Errorf("mkdir %s: %w", sandboxCgroupDir, err)
 	}
 	if control {
-		if err := os.Mkdir(appInitCgroupDir, 0o755); err != nil && !errors.Is(err, os.ErrExist) {
-			return fmt.Errorf("mkdir %s: %w", appInitCgroupDir, err)
+		if err := os.Mkdir(sandboxInitCgroupDir, 0o755); err != nil && !errors.Is(err, os.ErrExist) {
+			return fmt.Errorf("mkdir %s: %w", sandboxInitCgroupDir, err)
 		}
 	}
 
-	root, err := openCgroupDir(appCgroupDir)
+	root, err := openCgroupDir(sandboxCgroupDir)
 	if err != nil {
 		return fmt.Errorf("open application cgroup root: %w", err)
 	}
-	targetPath := appCgroupDir
+	targetPath := sandboxCgroupDir
 	if control {
-		targetPath = appInitCgroupDir
+		targetPath = sandboxInitCgroupDir
 	}
 	target, err := openCgroupDir(targetPath)
 	if err != nil {
@@ -116,6 +112,48 @@ func cgroupMount(control bool) error {
 	return nil
 }
 
+// nsdelegate is a Guest-wide cgroup option. Only the outer init enables it;
+// setting the option from an inner namespace would be silently ignored by the
+// kernel. Verify the mounted superblock instead of accepting that fallback.
+func cgroupMountDelegated() error {
+	return cgroupMountDelegatedWith(unix.Mount, os.ReadFile)
+}
+
+func cgroupMountDelegatedWith(
+	mount func(string, string, string, uintptr, string) error,
+	read func(string) ([]byte, error),
+) error {
+	if err := mount("cgroup2", cgroupMountPoint, "cgroup2", 0, "nsdelegate"); err != nil {
+		if !errors.Is(err, unix.EBUSY) {
+			return fmt.Errorf("mount delegated cgroup2 on %s: %w", cgroupMountPoint, err)
+		}
+		if err := mount("cgroup2", cgroupMountPoint, "cgroup2", unix.MS_REMOUNT, "nsdelegate"); err != nil {
+			return fmt.Errorf("enable cgroup nsdelegate: %w", err)
+		}
+	}
+	info, err := read("/proc/self/mountinfo")
+	if err != nil {
+		return fmt.Errorf("verify cgroup nsdelegate: %w", err)
+	}
+	for _, line := range strings.Split(string(info), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 10 || fields[4] != cgroupMountPoint {
+			continue
+		}
+		for i := 6; i+3 < len(fields); i++ {
+			if fields[i] != "-" || fields[i+1] != "cgroup2" {
+				continue
+			}
+			for _, option := range strings.Split(fields[i+3], ",") {
+				if option == "nsdelegate" {
+					return nil
+				}
+			}
+		}
+	}
+	return errors.New("guest cgroup2 mount did not enable nsdelegate")
+}
+
 func openCgroupDir(path string) (*os.File, error) {
 	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
 	if err != nil {
@@ -124,41 +162,48 @@ func openCgroupDir(path string) (*os.File, error) {
 	return os.NewFile(uintptr(fd), path), nil
 }
 
-// cgroupConfigureClone adds CLONE_INTO_CGROUP to one os/exec launch. The first
-// primary always starts in real /app and unshares a fresh cgroup namespace in
-// the child side of ForkExec. Every later launch starts directly in the final
-// target and joins the already-pinned namespace in its re-exec helper.
-func cgroupConfigureClone(attr *syscall.SysProcAttr, firstPrimary bool) error {
+// cgroupConfigureClone adds atomic cgroup placement to an os/exec launch.
+// bootstrap is used only by the outer init to create the inner init at the
+// environment root and unshare its cgroup namespace in the fork child. All
+// user launches originate in the inner init and use the pinned final target.
+func cgroupConfigureClone(attr *syscall.SysProcAttr, bootstrap bool) error {
 	if attr == nil {
 		return errors.New("nil SysProcAttr")
 	}
 	applicationCgroups.RLock()
 	defer applicationCgroups.RUnlock()
 	target := applicationCgroups.target
-	if firstPrimary {
+	if bootstrap {
 		target = applicationCgroups.root
 	}
 	if target == nil {
 		return errors.New("application cgroup target is not initialized")
 	}
-	if !firstPrimary && applicationCgroups.namespace == nil {
+	if !bootstrap && applicationCgroups.namespace == nil {
 		return errors.New("application cgroup namespace is not initialized")
 	}
 	// A process in the autofs daemon process group can bypass its triggers.
-	// TTY workloads start a new session via Setsid; other managed children
-	// with a slot receive their own process group.
-	if len(guestSlots.disks) > 0 && !attr.Setsid {
+	// The inner is always in a separate group. Its non-TTY children retain
+	// the old per-process grouping when slots are present; a re-exec cannot
+	// rediscover this from the outer's process-local guestSlots registry.
+	if (bootstrap || applicationCgroups.processGroups) && !attr.Setsid {
 		attr.Setpgid = true
 	}
 	attr.UseCgroupFD = true
 	attr.CgroupFD = int(target.Fd())
-	if firstPrimary {
+	if bootstrap {
 		// Go performs this unshare in the single-threaded fork child, after
 		// clone3(CLONE_INTO_CGROUP) and before re-execing sandbox-init. That
-		// ordering makes real /app the namespace root without a helper anchor.
+		// ordering makes real /sandbox the namespace root.
 		attr.Unshareflags |= unix.CLONE_NEWCGROUP
 	}
 	return nil
+}
+
+func managedProcessGroupsEnabled() bool {
+	applicationCgroups.RLock()
+	defer applicationCgroups.RUnlock()
+	return applicationCgroups.processGroups
 }
 
 // cgroupNamespaceFile returns sandbox-init's pinned application cgroup
@@ -179,10 +224,9 @@ func cgroupControlEnabled() bool {
 	return applicationCgroups.control
 }
 
-// cgroupFinalizeBootstrap pins the first primary's cgroup namespace while it
-// is blocked in the internal handshake. In delegation mode it then proves
-// real /app has no direct processes and strictly enables every controller that
-// /app advertises before allowing the child to exec the final application.
+// cgroupFinalizeBootstrap pins the inner init's namespace while it is blocked
+// in the internal handshake. In delegation mode it proves /sandbox has no
+// direct processes and enables every advertised controller before user code.
 func cgroupFinalizeBootstrap(pid int) error {
 	path := fmt.Sprintf("/proc/%d/ns/cgroup", pid)
 	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_CLOEXEC, 0)
@@ -196,14 +240,14 @@ func cgroupFinalizeBootstrap(pid int) error {
 	}
 
 	if cgroupControlEnabled() {
-		procs, err := os.ReadFile(appCgroupProcs)
+		procs, err := os.ReadFile(sandboxCgroupProcs)
 		if err != nil {
 			return fail(fmt.Errorf("verify application root processes: %w", err))
 		}
 		if strings.TrimSpace(string(procs)) != "" {
-			return fail(fmt.Errorf("verify application root processes: %s is not empty", appCgroupProcs))
+			return fail(fmt.Errorf("verify application root processes: %s is not empty", sandboxCgroupProcs))
 		}
-		if err := cgroupEnableAdvertisedControllers(appCgroupDir); err != nil {
+		if err := cgroupEnableAdvertisedControllers(sandboxCgroupDir); err != nil {
 			return fail(fmt.Errorf("enable application-root controllers: %w", err))
 		}
 	}
@@ -268,7 +312,7 @@ func missingControllers(want, got []string) []string {
 	return missing
 }
 
-// cgroupJoinNamespace joins the first primary's pinned cgroup namespace. It is
+// cgroupJoinNamespace joins the inner init's pinned cgroup namespace. It is
 // called only by short-lived, OS-thread-locked re-exec helpers.
 func cgroupJoinNamespace(fd int) error {
 	return cgroupJoinNamespaceWith(fd, unix.Setns)
@@ -286,7 +330,7 @@ func cgroupJoinNamespaceWith(fd int, setns func(int, int) error) error {
 
 // cgroupMountScoped replaces the inherited guest-global cgroup2 mount in a
 // child's private, rslave mount namespace. Because the calling task is already
-// in the application cgroup namespace, the new mount exposes real /app as /.
+// in the user cgroup namespace, the new mount exposes real /sandbox as /.
 func cgroupMountScoped() error {
 	return cgroupMountScopedWith(unix.Unmount, unix.Mount)
 }
@@ -305,7 +349,7 @@ func cgroupMountScopedWith(
 }
 
 // cgroupMoveBootstrapToInit performs the one explicitly permitted
-// cgroup.procs write: the first primary moves itself from virtual / to /init
+// cgroup.procs write: the inner init moves itself from virtual / to /init
 // after its scoped cgroupfs is mounted. All later starts use
 // CLONE_INTO_CGROUP on the final target and never migrate after birth.
 func cgroupMoveBootstrapToInit() error {
@@ -319,7 +363,7 @@ func cgroupMoveBootstrapToInitWith(write func(string, []byte, os.FileMode) error
 	return nil
 }
 
-// cgroupFreeze freezes the complete real /app subtree and blocks until the
+// cgroupFreeze freezes the complete real /sandbox subtree and blocks until the
 // kernel confirms cgroup.events:frozen 1, or freezeConfirmTimeout elapses.
 func cgroupFreeze() error {
 	if err := os.WriteFile(cgroupFreezeFile, []byte("1"), 0); err != nil {
@@ -341,7 +385,7 @@ func cgroupFreeze() error {
 	}
 }
 
-// cgroupThaw unfreezes the complete real /app subtree. Writing 0 is
+// cgroupThaw unfreezes the complete real /sandbox subtree. Writing 0 is
 // idempotent, so restore and attach can call it unconditionally.
 func cgroupThaw() error {
 	if err := os.WriteFile(cgroupFreezeFile, []byte("0"), 0); err != nil {
@@ -350,7 +394,7 @@ func cgroupThaw() error {
 	return nil
 }
 
-// cgroupFrozen reports whether real /app currently reads frozen 1.
+// cgroupFrozen reports whether real /sandbox currently reads frozen 1.
 func cgroupFrozen() (bool, error) {
 	b, err := os.ReadFile(cgroupEventsFile)
 	if err != nil {

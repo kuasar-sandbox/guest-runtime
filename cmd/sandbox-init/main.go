@@ -1,27 +1,9 @@
 // sandbox-init is the guest PID 1 binary inside the sandbox VM.
 //
-// It runs three phases (docs/guest-abi.md#initialization):
-//  1. Bring up loopback + bind AF_VSOCK :5000 (socket-only, before hello;
-//     the host→guest reverse channel must exist before the host's ping
-//     ticker fires). Then run the launch handshake (dial CID 2:5000 → hello
-//     → recv launch spec) in a goroutine CONCURRENT with the spec-independent
-//     overlay assembly (mount /proc /sys /dev, wait vda/vdb, mount overlay →
-//     /sysroot). The handshake touches no path, so it is safe alongside
-//     the mount chain and the later chroot. After the join: mount /run and
-//     /run/shm, set up volume binds, then MS_MOVE + chroot into the overlay
-//     and mount the post-switch base filesystems (devpts and cgroup v2).
-//  2. Apply the launch spec on the post-switch rootfs: network, tmpfs mounts,
-//     file injection, one-shot init — then set up the app's stdio and send
-//     launch_ack{stdio} (its connection becomes the stdio MUX). Fork the user
-//     app with CLONE_NEWPID|CLONE_NEWNS, dropping to launch.user just before
-//     execve, and send app_started{pid}.
-//  3. Supervise: in parallel, the vsock listener goroutine dispatches
-//     host-initiated ping / restore / attach / quiesce; the signal loop
-//     reaps children. On user-app exit we drain the stdio MUX, send
-//     app_exited{code,term_signal}, then reboot.
-//
-// All work is done via syscalls; no busybox or external tools are
-// included in sandbox-runtime.bundle.
+// The outer PID 1 owns boot, storage, Host management and VM shutdown. It
+// launches a second instance as PID 1 of the user execution environment; that
+// inner init owns one-shot init, the primary, plugins, exec and console sessions.
+// The two communicate through a private descriptor-passing Unix connection.
 package main
 
 import (
@@ -72,11 +54,10 @@ func main() {
 		}
 		die("init command %q: %v", os.Args[2], err)
 	}
-	// Primary app helper. argv: [self, "exec-child", bootstrap|restart,
-	// isolated, cgroupControl, placeholder, cred, workdir, appPath, args...].
-	if len(os.Args) >= 9 && os.Args[1] == "exec-child" {
-		runPrimaryExecChild(os.Args[2], os.Args[3] == "1", os.Args[4] == "1",
-			os.Args[5] == "1", os.Args[6], os.Args[7], os.Args[8], os.Args[9:])
+	// Primary helper: [self, exec-child, isolated, placeholder, cred, cwd, exec, args...].
+	if len(os.Args) >= 7 && os.Args[1] == "exec-child" {
+		runPrimaryExecChild(os.Args[2] == "1", os.Args[3] == "1",
+			os.Args[4], os.Args[5], os.Args[6], os.Args[7:])
 		return
 	}
 	// Plugin helper: direct final-cgroup placement followed by cgroup namespace
@@ -96,6 +77,10 @@ func main() {
 	// argv: [self, "exec-join", appPid, tty(0|1), user|-, cwd, argv0, args...]
 	if len(os.Args) >= 7 && os.Args[1] == "exec-join" {
 		runExecJoin(os.Args[2], os.Args[3], os.Args[4], os.Args[5], os.Args[6], os.Args[7:])
+		return
+	}
+	if len(os.Args) == 4 && os.Args[1] == "inner" {
+		runInner(os.Args[2] == "1", os.Args[3] == "1")
 		return
 	}
 	logf("sandbox-init starting (pid=%d)", os.Getpid())
@@ -126,8 +111,23 @@ func main() {
 	// Start the reverse management channel before runtime_ready. A base runtime
 	// must answer ping while it waits for Launch; exec/connect/quiesce remain
 	// unavailable until a workload supervisor is installed.
-	var supervisor atomic.Pointer[supervisorState]
-	go serveReverseChannelDynamic(revFD, &supervisor, nil)
+	var executor atomic.Pointer[executorClient]
+	go serveReverseChannelDynamic(revFD, &executor)
+	stopCh := make(chan os.Signal, 4)
+	signal.Notify(stopCh, syscall.SIGTERM, syscall.SIGINT)
+	go func() {
+		for sig := range stopCh {
+			logf("outer received %v", sig)
+			managementLifecycle.Lock()
+			initialLaunch.exited(0)
+			if current := executor.Load(); current != nil {
+				current.shutdown()
+			} else {
+				doReboot()
+			}
+			managementLifecycle.Unlock()
+		}
+	}()
 
 	// runtime_ready is the hello itself. The host may defer its launch reply for
 	// an arbitrary assignment interval; that interval is not launch execution.
@@ -141,48 +141,44 @@ func main() {
 	if err := phaseWorkloadRoot(spec); err != nil {
 		die("workload root: %v", err)
 	}
-	cs, bridge, err := phase2Apply(spec, conn)
+	if err := applyEnvironment(spec); err != nil {
+		die("apply environment: %v", err)
+	}
+	client, child, err := startExecutor(spec)
 	if err != nil {
-		die("phase 2 apply: %v", err)
+		die("start inner init: %v", err)
 	}
-	logf("phase2: network + stdio done")
-
-	sigCh := make(chan os.Signal, 16)
-	signal.Notify(sigCh, syscall.SIGCHLD)
-
-	appPid, err := phase2ForkApp(spec, cs, true, nil)
-	if err != nil {
-		die("phase 2 fork: %v", err)
+	executor.Store(client)
+	if err := client.launch(conn); err != nil {
+		initialLaunch.failed(err)
+		logf("inner launch failed: %v", err)
+		_ = child.Process.Kill()
+		_ = child.Wait()
+		doReboot()
 	}
-	logf("phase2: app forked pid=%d", appPid)
-
-	sup := &supervisorState{
-		bridge:     bridge,
-		spec:       spec,
-		stopSignal: syscall.Signal(spec.StopSignal),
-		stopGrace:  time.Duration(spec.StopGraceSec) * time.Second,
-		execReg:    newExecRegistry(),
-		connReg:    newConnRegistry(),
-		acceptLn:   newAcceptListeners(),
-		pluginReg:  newPluginRegistry(),
+	exit := make(chan error, 1)
+	go func() { exit <- child.Wait() }()
+	select {
+	case err := <-exit:
+		if !client.terminal.Load() {
+			logf("inner init exited without primary exit notification: %v", err)
+		}
+	case <-client.ended:
+		_ = child.Process.Kill()
+		<-exit
+	case <-client.link.done:
+		logf("inner management connection closed")
+		_ = child.Process.Kill()
+		<-exit
 	}
-	sup.appPid.Store(int64(appPid))
-	sup.appBackoff.onStart(time.Now())
-	sup.pluginReg.start(spec.Plugins)
-	supervisor.Store(sup)
-	initialLaunch.started(appPid)
-	if err := notifyAppStarted(appPid); err != nil {
-		logf("warn: app_started notify failed (continuing): %v", err)
-	}
-	go runMemReporter(memReportInterval)
-	phase3Supervise(sup, bridge, sigCh)
-	// phase3Supervise does not return.
+	// An unexpected inner exit is a Guest failure, not an invented successful
+	// primary exit. Preserve the last published initial-launch fact.
+	doReboot()
 }
 
 // singleDiskRoot records the disk mode resolved from /proc/cmdline in phase1a
 // (single-disk vs two-disk overlay). Read later by applyVolumeMounts to place
-// `empty` volume sources correctly. The guest is a single process, so a package
-// var is adequate.
+// `empty` volume sources correctly. Only the outer init assembles storage.
 var singleDiskRoot bool
 
 // singleDiskFromCmdline reports whether the kernel cmdline selects single-disk
@@ -445,35 +441,31 @@ func waitForLaunch() (*proto.LaunchSpec, *vsockConn, error) {
 	return msg.Launch, conn, nil
 }
 
-// phase2Apply applies the launch spec on the (post-switch-root) rootfs, then
-// finishes the handshake on conn and turns it into the stdio MUX:
-//
-//	guest applies network / mounts / files / init; sets up app stdio
-//	guest → host: launch_ack{stdio = what we established}  ← settled signal
-//	host  → guest: ack
-//	... connection now speaks the framed MUX sub-protocol ...
-//
-// launch_ack is sent only after the whole spec is applied (incl. init), so
-// the host treats it as "environment ready, about to fork". Returns the
-// child's 0/1/2 fds and the consoleBridge (attached + pumping; its pump
-// goroutines park until the app is forked).
+// applyEnvironment runs in the outer mount namespace so its managed mounts
+// remain available to storage/autofs and propagate into the user environment.
+func applyEnvironment(spec *proto.LaunchSpec) error {
+	if spec.Network != nil {
+		if err := applyNetwork(spec.Network); err != nil {
+			return fmt.Errorf("apply network: %w", err)
+		}
+	}
+	if err := applyFsMounts(spec.Mounts); err != nil {
+		return fmt.Errorf("apply fs mounts: %w", err)
+	}
+	if err := applyFiles(spec.Files); err != nil {
+		return fmt.Errorf("apply files: %w", err)
+	}
+	return nil
+}
+
+// phase2Apply runs only inside the inner init. launch_ack remains after init
+// and stdio setup; the Host ACK still precedes primary creation and MUX use.
 func phase2Apply(spec *proto.LaunchSpec, conn *vsockConn) (childStdio, *consoleBridge, error) {
 	fail := func(err error) (childStdio, *consoleBridge, error) {
 		_ = conn.Close()
 		return childStdio{}, nil, err
 	}
 
-	if spec.Network != nil {
-		if err := applyNetwork(spec.Network); err != nil {
-			return fail(fmt.Errorf("apply network: %w", err))
-		}
-	}
-	if err := applyFsMounts(spec.Mounts); err != nil {
-		return fail(fmt.Errorf("apply fs mounts: %w", err))
-	}
-	if err := applyFiles(spec.Files); err != nil {
-		return fail(fmt.Errorf("apply files: %w", err))
-	}
 	if err := runInit(spec.Init); err != nil {
 		return fail(fmt.Errorf("run init: %w", err))
 	}
@@ -512,27 +504,11 @@ func phase2Apply(spec *proto.LaunchSpec, conn *vsockConn) (childStdio, *consoleB
 	return cs, bridge, nil
 }
 
-// phase2ForkApp re-execs sandbox-init as the primary helper in a private mount
-// namespace (and optional private PID namespace). firstPrimary is the sole
-// bootstrap: clone3 places it in real /app and child-side unshare creates the
-// application cgroup namespace. Restarts clone directly into the final target
-// and receive the pinned namespace FD. In both cases the helper handshake
-// confirms namespace/mount setup and final exec before this function returns.
-func phase2ForkApp(spec *proto.LaunchSpec, cs childStdio, firstPrimary bool, onSpawn func(int) error) (int, error) {
+// phase2ForkApp launches every primary generation by the same path. The
+// inner init has already established the environment namespace and delegation.
+// It holds the helper at its pre-exec gate while resolving the outer-visible PID.
+func phase2ForkApp(spec *proto.LaunchSpec, cs childStdio, onSpawn func(int) error) (int, int, error) {
 	self := "/proc/self/exe"
-
-	// Make the mount tree rshared BEFORE forking the app, so restore-time
-	// file injection (binds created later in PID 1's namespace) propagates
-	// into the app's private CLONE_NEWNS namespace. The app child marks its
-	// own copy rslave (runPrimaryExecChild) so it receives PID 1's mount events but
-	// never leaks its own (e.g. /proc) back. Cold-start mounts/files are
-	// already in place and become shared peers in the copy. Without this,
-	// a restore-time bind stays invisible to the already-running app
-	// (docs/guest-abi.md#management-operations).
-	if err := unix.Mount("", "/", "", unix.MS_REC|unix.MS_SHARED, ""); err != nil {
-		closeChildStdio(cs)
-		return 0, fmt.Errorf("make-rshared /: %w", err)
-	}
 
 	// Resolve the run-as identity here (PID 1, post-chroot, /etc/passwd
 	// readable) and pass it to the exec-child to drop just before execve —
@@ -543,7 +519,7 @@ func phase2ForkApp(spec *proto.LaunchSpec, cs childStdio, firstPrimary bool, onS
 		c, err := resolveCred(spec.User)
 		if err != nil {
 			closeChildStdio(cs)
-			return 0, fmt.Errorf("resolve user %q: %w", spec.User, err)
+			return 0, 0, fmt.Errorf("resolve user %q: %w", spec.User, err)
 		}
 		credStr = c.encode()
 	}
@@ -556,21 +532,13 @@ func phase2ForkApp(spec *proto.LaunchSpec, cs childStdio, firstPrimary bool, onS
 	if isolated {
 		isoArg = "1"
 	}
-	mode := "restart"
-	if firstPrimary {
-		mode = "bootstrap"
-	}
-	controlArg := "0"
-	if spec.CgroupControl {
-		controlArg = "1"
-	}
 	placeholderArg := "0"
 	appPath := spec.Exec
 	if spec.Placeholder {
 		placeholderArg = "1"
 		appPath = "-"
 	}
-	args := append([]string{self, "exec-child", mode, isoArg, controlArg, placeholderArg,
+	args := append([]string{self, "exec-child", isoArg, placeholderArg,
 		credStr, spec.Workdir, appPath}, spec.Args...)
 
 	cloneflags := uintptr(syscall.CLONE_NEWNS)
@@ -578,9 +546,9 @@ func phase2ForkApp(spec *proto.LaunchSpec, cs childStdio, firstPrimary bool, onS
 		cloneflags |= syscall.CLONE_NEWPID
 	}
 	sysAttr := &syscall.SysProcAttr{Cloneflags: cloneflags}
-	if err := cgroupConfigureClone(sysAttr, firstPrimary); err != nil {
+	if err := cgroupConfigureClone(sysAttr, false); err != nil {
 		closeChildStdio(cs)
-		return 0, err
+		return 0, 0, err
 	}
 	if cs.tty {
 		sysAttr.Setpgid = false
@@ -591,7 +559,7 @@ func phase2ForkApp(spec *proto.LaunchSpec, cs childStdio, firstPrimary bool, onS
 	parentSync, childSync, err := newChildSyncPair()
 	if err != nil {
 		closeChildStdio(cs)
-		return 0, fmt.Errorf("child handshake socketpair: %w", err)
+		return 0, 0, fmt.Errorf("child handshake socketpair: %w", err)
 	}
 	cmd := exec.Cmd{
 		Path:        self,
@@ -603,49 +571,45 @@ func phase2ForkApp(spec *proto.LaunchSpec, cs childStdio, firstPrimary bool, onS
 		Stderr:      cs.stderr,
 		SysProcAttr: sysAttr,
 	}
-	if firstPrimary {
-		cmd.ExtraFiles = []*os.File{childSync} // fd 3
-	} else {
-		ns, err := cgroupNamespaceFile()
-		if err != nil {
-			_ = parentSync.Close()
-			_ = childSync.Close()
-			closeChildStdio(cs)
-			return 0, err
-		}
-		cmd.ExtraFiles = []*os.File{ns, childSync} // fd 3 namespace, fd 4 sync
+	ns, err := cgroupNamespaceFile()
+	if err != nil {
+		_ = parentSync.Close()
+		_ = childSync.Close()
+		closeChildStdio(cs)
+		return 0, 0, err
 	}
-	var onReady func(int) error
-	if firstPrimary {
-		onReady = cgroupFinalizeBootstrap
+	cmd.ExtraFiles = []*os.File{ns, childSync}
+	outerPID := 0
+	onReady := func(pid int) error {
+		var err error
+		outerPID, err = primaryOuterPID(pid)
+		return err
 	}
 	pid, err := coordinateChild(&cmd, parentSync, childSync, onSpawn, onReady, nil, childSyncExecEOF)
 	closeChildStdio(cs)
-	if err != nil && firstPrimary && pid > 0 {
-		// No process-wide reaper exists yet. Ensure a failed bootstrap helper
-		// cannot linger and consume its child PID/namespace resources.
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
-	}
-	return pid, err
+	return pid, outerPID, err
 }
 
 // supervisorState is shared between the signal loop and the reverse
 // channel goroutine.
 type supervisorState struct {
-	bridge     *consoleBridge    // immutable when published to the base control dispatcher
-	appPid     atomic.Int64      // current app pid; updated on in-place restart
-	spec       *proto.LaunchSpec // app launch spec (incl. Restart) for re-fork on restart
-	appBackoff backoff           // app restart backoff (shared scheme, supervise.go)
-	shutdown   atomic.Bool       // set on SIGTERM/SIGINT; gates app restart re-fork
-	quiescing  atomic.Bool       // closes restart admission across snapshot quiesce
-	restartMu  sync.Mutex        // held from restart admission through fork registration and setup
-	stopSignal syscall.Signal    // signal forwarded to app on host SIGTERM/SIGINT; 0 → SIGTERM
-	stopGrace  time.Duration     // grace before SIGKILL; 0 → gracefulShutdown default
-	execReg    *execRegistry     // exec-session child reaping + quiesce gating
-	connReg    *connRegistry     // port-forward session tracking + quiesce teardown
-	acceptLn   *acceptListeners  // accept-mode (`LOCAL::TARGET`) guest listener cache
-	pluginReg  *pluginRegistry   // companion-process (launch.plugin[]) supervision
+	sessionMu      sync.Mutex // orders received-FD registration against quiesce
+	sessions       sync.WaitGroup
+	sessionsPaused bool
+	bridge         *consoleBridge    // immutable once inner launch completes
+	primaryMu      sync.RWMutex      // pins the current generation through namespace selection
+	appPid         atomic.Int64      // current app pid; updated on in-place restart
+	spec           *proto.LaunchSpec // app launch spec (incl. Restart) for re-fork on restart
+	appBackoff     backoff           // app restart backoff (shared scheme, supervise.go)
+	shutdown       atomic.Bool       // set on SIGTERM/SIGINT; gates app restart re-fork
+	quiescing      atomic.Bool       // closes restart admission across snapshot quiesce
+	restartMu      sync.Mutex        // held from restart admission through fork registration and setup
+	stopSignal     syscall.Signal    // signal forwarded to app on host SIGTERM/SIGINT; 0 → SIGTERM
+	stopGrace      time.Duration     // grace before SIGKILL; 0 → gracefulShutdown default
+	execReg        *execRegistry     // exec-session child reaping + quiesce gating
+	connReg        *connRegistry     // port-forward session tracking + quiesce teardown
+	acceptLn       *acceptListeners  // accept-mode (`LOCAL::TARGET`) guest listener cache
+	pluginReg      *pluginRegistry   // companion-process (launch.plugin[]) supervision
 }
 
 // phase3Supervise reaps children. The user app's exit applies launch.restart
@@ -654,13 +618,25 @@ type supervisorState struct {
 // apps' descendants) are reaped silently.
 func phase3Supervise(s *supervisorState, b *consoleBridge, sigCh chan os.Signal) {
 	signal.Notify(sigCh, syscall.SIGCHLD, syscall.SIGTERM, syscall.SIGINT)
+	// An adopted init descendant may exit between the phase-local init waiter
+	// and this signal subscription. Sweep once even if SIGCHLD was coalesced.
+	select {
+	case sigCh <- syscall.SIGCHLD:
+	default:
+	}
 
 	for {
 		sig := <-sigCh
 		switch sig {
 		case syscall.SIGCHLD:
 			for {
+				s.primaryMu.Lock()
 				pid, status, wasExec, err := s.execReg.reapChild()
+				wasPrimary := pid > 0 && int64(pid) == s.appPid.Load()
+				if wasPrimary {
+					s.appPid.Store(0)
+				}
+				s.primaryMu.Unlock()
 				if err != nil || pid <= 0 {
 					break
 				}
@@ -668,7 +644,7 @@ func phase3Supervise(s *supervisorState, b *consoleBridge, sigCh chan os.Signal)
 				if wasExec {
 					continue
 				}
-				if int64(pid) == s.appPid.Load() {
+				if wasPrimary {
 					if handleAppExit(status, s, b) {
 						return // rebooting (doReboot does not return; this is a backstop)
 					}
@@ -679,7 +655,6 @@ func phase3Supervise(s *supervisorState, b *consoleBridge, sigCh chan os.Signal)
 			}
 		case syscall.SIGTERM, syscall.SIGINT:
 			s.shutdown.Store(true) // stop any in-flight app restart from re-forking
-			initialLaunch.exited(0)
 			stopSig := s.stopSignal
 			if stopSig == 0 {
 				stopSig = syscall.SIGTERM
@@ -688,10 +663,15 @@ func phase3Supervise(s *supervisorState, b *consoleBridge, sigCh chan os.Signal)
 			if grace <= 0 {
 				grace = gracefulShutdown
 			}
+			s.primaryMu.Lock()
 			appPid := int(s.appPid.Load())
 			logf("received %v, sending %v to app pid=%d (grace %s)", sig, stopSig, appPid, grace)
-			_ = syscall.Kill(appPid, stopSig)
-			waitOrTimeout(appPid, grace)
+			if appPid > 0 {
+				_ = syscall.Kill(appPid, stopSig)
+				waitOrTimeout(appPid, grace)
+			}
+			s.appPid.Store(0)
+			s.primaryMu.Unlock()
 			b.appExited()
 			notifyAppExited(0, 0)
 			doReboot()
@@ -718,7 +698,6 @@ func handleAppExit(status syscall.WaitStatus, s *supervisorState, b *consoleBrid
 		go restartApp(s, b, delay)
 		return false
 	}
-	initialLaunch.exited(code)
 	logf("app exited code=%d signal=%d (restart=%s) — draining MUX, notifying host, rebooting", code, sig, s.spec.Restart)
 	b.appExited() // close app fds, flush guest→host streams (bounded)
 	notifyAppExited(code, sig)
@@ -733,7 +712,7 @@ func handleAppExit(status syscall.WaitStatus, s *supervisorState, b *consoleBrid
 // so it never forks an app the freeze missed.
 func restartApp(s *supervisorState, b *consoleBridge, delay time.Duration) {
 	time.Sleep(delay)
-	pid, err := s.launchRestart(b)
+	pid, _, err := s.launchRestart(b)
 	if err != nil {
 		if s.shutdown.Load() || errors.Is(err, errAppBridgeClosed) {
 			return
@@ -748,9 +727,6 @@ func restartApp(s *supervisorState, b *consoleBridge, delay time.Duration) {
 		return
 	}
 	logf("app restarted pid=%d", pid)
-	if err := notifyAppStarted(pid); err != nil {
-		logf("restart: app_started notify failed (continuing): %v", err)
-	}
 }
 
 // closeRestartAdmission waits for any restart admitted before quiesce to finish
@@ -773,27 +749,37 @@ func (s *supervisorState) admitRestart() bool {
 	return false
 }
 
-func (s *supervisorState) launchRestart(b *consoleBridge) (int, error) {
+func (s *supervisorState) launchRestart(b *consoleBridge) (int, int, error) {
 	if !s.admitRestart() {
-		return 0, errAppBridgeClosed
+		return 0, 0, errAppBridgeClosed
 	}
 	defer s.restartMu.Unlock()
+	s.primaryMu.Lock()
+	defer s.primaryMu.Unlock()
 	cs, err := b.rewireApp(s.spec.Stdio)
 	if err != nil {
-		return 0, fmt.Errorf("re-wire stdio: %w", err)
+		return 0, 0, fmt.Errorf("re-wire stdio: %w", err)
 	}
 	if s.shutdown.Load() {
 		closeChildStdio(cs)
-		return 0, errAppBridgeClosed
+		return 0, 0, errAppBridgeClosed
 	}
 	s.appBackoff.onStart(time.Now())
-	return phase2ForkApp(s.spec, cs, false, func(pid int) error {
+	pid, outerPID, err := phase2ForkApp(s.spec, cs, func(pid int) error {
 		// Register the new primary before the helper leaves its initial start
 		// gate, so even a namespace/setup failure is classified by the sole
 		// SIGCHLD reaper as this app attempt.
 		s.appPid.Store(int64(pid))
 		return nil
 	})
+	if err == nil {
+		// Keep restart admission held through publication: quiesce must not
+		// freeze an inner event while it still owns a Host notification.
+		if notifyErr := notifyAppStarted(outerPID); notifyErr != nil {
+			logf("restart: app_started notify failed (continuing): %v", notifyErr)
+		}
+	}
+	return pid, outerPID, err
 }
 
 func waitOrTimeout(pid int, timeout time.Duration) {
@@ -811,7 +797,11 @@ func waitOrTimeout(pid int, timeout time.Duration) {
 }
 
 func doReboot() {
-	initialLaunch.exited(0)
+	if innerEvents != nil {
+		// Exiting PID 1 terminates only the user namespace. The outer observes
+		// it and performs the one VM-level poweroff.
+		os.Exit(0)
+	}
 	guestUsage.close()
 	// POWER_OFF (not RESTART): the sandbox model is one-shot — when
 	// the user app exits, the sandbox is done and CH should exit too.

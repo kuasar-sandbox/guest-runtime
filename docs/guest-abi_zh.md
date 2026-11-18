@@ -17,7 +17,7 @@ guest-runtime 构建 PID 1，将其打入 Runtime Bundle，并提供共享 Go �
 
 | 目标 | 实现方式 |
 |---|---|
-| 启动快 | 单一静态 Go 二进制 PID=1,无 systemd / dracut / busybox 链路 |
+| 启动快 | 同一静态 Go 二进制提供外层 Guest PID 1 和内层 PID 1，无 systemd / dracut / busybox 链路 |
 | 启动状态可验证 | sandbox-init 版本固定;launch、quiesce、restore 和 attach 使用显式握手与状态屏障 |
 | 跨 sandbox 共享 | virtio-pmem + DAX 通过 host page cache 共享同一文件的只读页，不共享 guest 私有可写 RAM |
 | 一 VM = 一 primary app | 默认 private PID 模式用 clone(NEWPID\|NEWNS) 让 app 看到自己 PID=1；也支持 shared PID 模式 |
@@ -33,21 +33,46 @@ flowchart TB
     ctl["sandbox-ctl"] -->|spawn| ch["Cloud Hypervisor"]
     bundle["Runtime Bundle"] -->|"virtio-pmem / DAX"| ch
     ch -->|boot| kernel["Guest kernel"]
-    kernel -->|"exec /sbin/init"| init["sandbox-init"]
-    init -->|"root, launch, supervision"| app["Primary app"]
-    ctl <-->|"vsock management + MUX"| init
-    app <-->|stdio| init
+    kernel -->|"exec /sbin/init"| init["Outer sandbox-init"]
+    init -->|"private control and socket handoff"| inner["Inner sandbox-init"]
+    inner -->|"launch and supervision"| app["Primary app"]
+    ctl <-->|"vsock management"| init
+    ctl <-->|"MUX and forwarding"| inner
+    app <-->|stdio| inner
     kernel -->|hvc0| ch
     ch -->|console| logs["Host stderr or file"]
 ```
 
-Runtime Bundle 是共享只读 Host backing file。Guest 内核挂载它并执行 `/sbin/init`；Init 组装并切换
-工作负载 root、应用 LaunchSpec、接好 stdio，然后监督主进程。Private 模式中主进程是自身 namespace 的 PID 1。
+Runtime Bundle 是共享只读 Host backing file。Guest 内核挂载它并执行 `/sbin/init`。
+外层实例组装并切换工作负载 root，应用 mounts/files/network，然后启动同一二进制的
+内层实例。内层执行初始化并监督用户进程。Private 模式中主进程是自身 namespace 的
+PID 1；shared 模式中用户看到的 PID 1 是内层实例。
 
 Host endpoint 为 `RunRoot/PathID/vsock.sock`。`RunRoot` 默认 `/run/sandbox`；
 `PathID` 默认 `SandboxID`，也可独立指定（[Host 路径](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/runtime_zh.md#run)）。Launch、ping、应用 started/exited 通知使用下文
 控制路径；launch 连接升级为承载应用 stdio 的 MUX。内核 hvc0 输出走独立 CH console 路径。
-应用无 restart 地退出时，Init 通知 Host 并 power off；CH 随后退出，Host owner 观测该退出结果。
+应用无 restart 地退出时，内层经外层通知 Host，由外层 power off；CH 随后退出，Host owner 观测该退出结果。
+
+<a id="guest-processes"></a>
+
+### Guest 管理与进程执行
+
+两个实例都来自 Runtime 的 `sandbox-init` 二进制。外层在任何用户 `init` 命令之前
+创建一次内层，职责如下：
+
+| 实例 | 进程与 cgroup 范围 | 职责 |
+| --- | --- | --- |
+| 外层 `sandbox-init` | Guest PID 1，位于 `/sandbox` 之外 | Host listener 与生命周期事实；root 和磁盘组装、autofs 及存储操作；网络/时钟更新；原始 usage 和 `mem_report`；递归 freeze/thaw 与 Guest poweroff |
+| 内层 `sandbox-init` | 子 PID namespace 的 PID 1，位于 `/sandbox` 内 | 顺序 `init`；primary 与 plugin 监督；孤儿回收；exec 和转发会话；应用 stdio 与 MUX |
+
+外层接收既有 Host 协议，通过私有 Unix socket 将执行连接交给内层。描述符交接保留
+原连接及未读字节，外层只释放自身副本，不 shutdown 内层持有的 socket。私有协议是
+两个实例共同使用的实现细节，不是另一套 Host API。已发请求的结果无法确认或私有
+通路断开时，Guest 失败退出，不重放可能已经启动的操作；内层也不独立重启。
+
+`/sandbox` 连同内层被冻结时，外层仍可运行，因此内层拥有的会话必须在 freeze 前完成
+清理，恢复时则先解冻整棵树，再等待内层就绪。存储和 autofs 留在外层，为内层及其
+子进程的文件系统操作提供服务。用户 PID namespace 不暴露外层实例。
 
 <a id="non-goals"></a>
 
@@ -106,7 +131,7 @@ sandbox.yaml `launch:` 节(yaml override 优先,Env merge),host sandbox-ctl 合�
   "cgroup_control": false,                // 默认 false:进程见 /;true:空根下放 controller,进程见 /init
   "ext4_discard": "auto",                // auto（或省略）：discard；manual：nodiscard
   "placeholder": false,                  // true → 不 exec 外部程序,占位锚点等待停机;exec 互斥;host 强制 restart=always
-  "share_pid": false,                    // true → 应用进 sandbox-init 的 PID ns(pid_namespace=shared)
+  "share_pid": false,                    // true → 应用进内层 sandbox-init 的 PID ns(pid_namespace=shared)
   "user":    "0:0",                      // uid:gid 或 name:group(guest 侧 /etc/passwd 解析);空 → root
   "stop_signal":   15,                   // 停机信号编号(host 已从名字解析);0 → SIGTERM
   "stop_grace_sec": 10,                  // guest PID 1 停机宽限秒数；0 → 默认 10s，不保证 host teardown 走此路径
@@ -139,18 +164,16 @@ FileSpec 还支持 read_only，省略时 bind 可写。Tmpfs 注入避免直接�
 
 ### 用户应用看到的环境
 
-- **PID 1**:`pid_namespace=private`(默认)时用户应用是自身 PID ns 的 PID 1
-  (CLONE_NEWPID);`shared` 时应用在 sandbox-init 的 PID ns(非 PID 1),由 sandbox-init
-  做 reaper 收割其孤儿后代,并仍能看到 sandbox-init PID 1。伴生 plugin 与应用同 rootfs/cgroup/网络,但始终在
-  sandbox-init 的 PID ns(private 应用看不到它们)。
-- **cgroup namespace**:真实 `/sys/fs/cgroup/app` 始终是 namespace/freezer 根。
-  `cgroup_control=false` 时 primary/restart/plugin/native exec 在真实 `/app`,scoped
-  cgroup2 与 `/proc/self/cgroup` 显示 `0::/`;`true` 时真实 `/app` 无直属进程且
-  subtree controllers 已校验启用,上述进程在真实 `/app/init`,显示 `0::/init`。
-  这里的 `/init` 是 cgroup 长期进程组,不是顶层 `init: []`;cgroup namespace 是视图与
-  管理根,不是额外安全边界。
-- **mount namespace**:私有挂载 ns,起始视图与 sandbox-init 相同(overlayfs 合并的
-  /，或 single ext4 根，以及 isolated 时自挂的 /proc)
+- **PID 1**：默认 `pid_namespace=private` 时 primary 是自身 namespace 的 PID 1；
+  shared 中内层 `sandbox-init` 是 PID 1 并回收孤儿。Init 命令与 plugin 使用内层
+  PID namespace，native exec 加入 primary 的 namespace，外层管理实例不可见。
+- **cgroup namespace**：真实 `/sys/fs/cgroup/sandbox` 是 namespace/freezer 根。
+  `cgroup_control=false` 时内层及所有直接管理的进程位于该组，显示 `0::/`；
+  `true` 时此根无直属进程且 controllers 已下放，进程位于 `/sandbox/init`，显示
+  `0::/init`。Init、primary、plugin、exec 共用该规则，详见
+  [完整拓扑与下放规则](#application-cgroups)。
+- **mount namespace**：私有挂载 namespace，起始视图来自内层用户 root（overlay
+  或 single ext4），private PID 模式重新挂载自己的 `/proc`。
 - **网络**:配置网络源时为 eth0(virtio-net,host TAP 后端),IP 由 sandbox-init 配好;
   无网络源时不挂 virtio-net,仅保留 `lo`,vsock 控制面仍可用
 - **/dev**:`devtmpfs`(/dev/null、/dev/random、/dev/urandom 等);`/dev/pts`(devpts)
@@ -193,10 +216,12 @@ FileSpec 还支持 read_only，省略时 bind 可写。Tmpfs 注入避免直接�
   CH 已运行时，lifecycle 做 memory.high 准备后尝试 CH API 的 vmm.shutdown，有需要时退回向 CH 发 SIGTERM，
   请求后 5 s 未退升级 SIGKILL，第二次信号立即升级。这不保证向 guest PID 1 送达 SIGTERM 或完成 app stop grace。
   见 [lifecycle shutdown](https://github.com/kuasar-sandbox/sandboxer/blob/main/pkg/sandbox/lifecycle.go) 与 [run signal handling](https://github.com/kuasar-sandbox/sandboxer/blob/main/pkg/sandbox/run_signal.go)。
-- **Guest PID 1 自身收到 SIGTERM/SIGINT 时**，置 shutdown，向 primary PID 转发 launch.stop_signal
-  （默认 SIGTERM，来自已解析的 image/YAML 策略），等待 wire `stop_grace_sec`
-  （默认 10 s，来自 host YAML `launch.stop_grace_period`），
-  超时 kill，随后 poweroff。这些配置约束 guest 路径，不是 host VMM teardown 的已实现握手保证。
+- **外层 Guest PID 1 收到 SIGTERM/SIGINT 时**，先在必要时解冻，再请求内层停机；
+  内层尚未就绪时终止启动。已有 primary 时，内层禁止 restart，转发
+  `launch.stop_signal`（默认 SIGTERM），等待 `stop_grace_sec`（默认 10 s，来自
+  Host `launch.stop_grace_period`），超时终止 primary。内层自身收到这两个信号时
+  也使用同一 primary 停止路径，最终由外层 poweroff。这些配置约束 Guest 路径，
+  不保证 Host VMM teardown 使用该握手。
 - tty 模式 host 终端 raw 时，Ctrl-C（0x03）按字节经 MUX PTY 送入 guest，
   由 guest line discipline 转成应用 SIGINT。Host 停 sandbox 或 terminal escape 是另一路径
   （[sandbox 生命周期](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/runtime_zh.md)）。
@@ -215,8 +240,8 @@ FileSpec 还支持 read_only，省略时 bind 可写。Tmpfs 注入避免直接�
 基础初始化不依赖工作负载，只挂载 proc/sysfs/devtmpfs，启动 loopback 和反向控制
 分发器，然后发送 `hello{phase:"runtime_ready"}`。等待期间分发器响应 ping 和 shutdown，
 拒绝仅适用于工作负载的 exec/connect/quiesce/attach/restore。单纯 socket listen 不代表
-该就绪屏障。`shutdown` 在终止前回复 `ack`。发布工作负载后，分发器使用 supervisor
-及其 stdio bridge 处理既有 live operation。
+该就绪屏障。`shutdown` 在终止前回复 `ack`。内层发布 primary 后，外层分发器将执行
+连接交给其 supervisor 和 stdio bridge，自身继续处理 Guest 管理操作。
 
 Launch 请求驱动全部工作负载 root 组装。等待请求不计入 launch 执行期限；host 在
 发布 launch 后开始该超时。握手先于进程级 chroot 完成。Go 线程共享 CLONE_FS；
@@ -258,8 +283,10 @@ E. switch-root:
                                                     C5 的 /opt 与 D 的 volume binds 一并进入新 /
 
 F. switch-root 之后的基础挂载:
-   mount -t cgroup2 cgroup2 /sys/fs/cgroup;mkdir /sys/fs/cgroup/app   ← 应用 cgroup namespace/freezer 根
-   launch.cgroup_control=true 时另 mkdir /sys/fs/cgroup/app/init,并严格下放 advertised controllers(应用 cgroup namespace 与 controller 拓扑)
+   mount -t cgroup2 -o nsdelegate cgroup2 /sys/fs/cgroup;验证 nsdelegate
+   mkdir /sys/fs/cgroup/sandbox          ← 用户 cgroup namespace/freezer 根
+   launch.cgroup_control=true 时另 mkdir /sys/fs/cgroup/sandbox/init,严格启用 Guest 根 controllers;
+   内层 bootstrap 在用户命令之前完成 /sandbox 下放(用户 cgroup namespace 与 controller 拓扑)
    mount -t devpts devpts /dev/pts (newinstance,ptmxmode=0666)        ← tty 模式 openpty 需要
 ```
 
@@ -431,194 +458,129 @@ Close 等待该回写，但不等待全部 GC。首次发布后，活动导出�
 
 <a id="apply-and-launch"></a>
 
-### 阶段 2:spec 应用 + stdio 接线 + 应用拉起
+### 阶段 2：准备环境并通过内层 init 启动进程
 
-阶段 1 的 JOIN 已拿到 LaunchSpec 与那条 vsock 连接(hello/launch 已收发)。阶段 2
-在**同一条连接**上把 spec 应用完、发 launch_ack;此后该连接**不关闭**——升级成 MUX,
-承载应用的 stdin/stdout/stderr(或一个伪终端)直到沙箱结束(协议见 [MUX 子协议](#mux-wire))。
+外层在 switch-root 后应用网络、声明的 tmpfs 挂载及注入文件。Empty volume 已在
+switch-root 前安装。文件先暂存于 tmpfs，按请求的 owner、mode 和可选 read-only
+属性 bind 到目标，再卸载 staging。冷启动网络、挂载、文件失败均终止启动；恢复时
+尽力更新时钟和网络是另一项契约。
 
-`launch_ack` 在 spec **全部应用完(含 init)之后**才发出,故它对 host 是"环境与
-初始化全部就绪、即将 fork"的 settled 信号，**不证明 final exec 已成功或应用健康**。spec 应用各步触碰文件系统,均在
-switch-root 之后单线程执行。
+外层通过 `clone3(CLONE_INTO_CGROUP)` 将内层直接创建在真实 `/sandbox`，同时建立
+新的 PID 和 mount namespace。Fork 子进程在 re-exec 前创建以该组为根的 cgroup
+namespace。内层挂载自己的 `/proc` 和 scoped cgroup2，完成下文的下放设置，再报告
+就绪。该 bootstrap 属于执行环境，不依赖 primary 选择哪个程序或是否为 placeholder。
 
-```
-1. spec.network 非空时 applyNetwork(spec.network);为空时跳过
-                                           ← 冷启动:可选全新网卡,additive
-     - Sethostname(network.hostname)
-     - raw netlink RTM_NEWLINK(interface UP[+IFLA_MTU]) / RTM_NEWADDR(IP/CIDR) /
-       可选 RTM_NEWROUTE(nexthop)
-     失败 fast-fail —— 一次性沙箱模型下"网络配置失败"必须立刻 die
-     (restore 出来时若带 network,改走 flush-and-replace 重配,见 管理操作集 restore)
-2. applyFsMounts(spec.mounts: type==tmpfs)  ← 内存盘挂载(empty 卷已在阶段 1 switch-root 前完成)
-3. applyFiles(spec.files)                 ← 暂存 tmpfs(/run/.inject)→ 写内容 + chmod/chown →
-                                            bind 到 target →(read_only 时 remount-ro)→ MNT_DETACH 暂存;
-                                            内容仅在内存、不落 vdb;失败 fast-fail
-4. runInit(spec.init)                      ← 顺序执行一次性命令;输出走 console;init[].{env,
-                                            workdir,user} 可设;init[].timeout 超时则 SIGKILL;
-                                            任一条非零退出/超时 = die(initContainers 语义,早期执行)
-5. 按 spec.stdio 准备应用 stdio fd(应用 stdio / console 接线):
-     - tty 模式:openpty();记 master/slave fd;初始 winsize 来自 spec
-     - pipe 模式:为每个声明通道建 pipe / socketpair;未声明 stdin → fd 0 接 /dev/null
-6. write  launch_ack{stdio: 实际启用的 channel 集合}  ← 此后连接进入 MUX 帧收发态,不再关闭
-7. read   ack                            ← host 确认进入 MUX 态
-   在 fork primary helper 前挂接 MUX session，启动 app fd ↔ MUX 桥接 goroutine。
+内层收到 LaunchSpec 和原 hello/launch 连接后，依次执行：
 
-8. 通过 exec.Cmd 拉起首次 primary helper:
-     SysProcAttr.Cloneflags = CLONE_NEWNS [ | CLONE_NEWPID 当 pid_namespace=private(默认) ]
-       private:app 是自身 PID ns 的 PID 1。shared(launch.pid_namespace=shared):app 留在
-       sandbox-init 的 PID ns,由 PID1 reaper 收割 app 的孤儿后代(复用 init reaper)。
-     SysProcAttr.UseCgroupFD=true,CgroupFD=/sys/fs/cgroup/app 的 O_CLOEXEC 目录 fd
-       → clone3(CLONE_INTO_CGROUP)保证 helper 从出生起就在真实 /app;
-     SysProcAttr.Unshareflags 含 CLONE_NEWCGROUP
-       → Go 的 fork child 在 clone3 返回后、re-exec 前执行 unshare(CLONE_NEWCGROUP),
-          故新 cgroup namespace 以真实 /app 为根,不需要 anchor 进程。
-     tty 模式: Setctty + setsid + slave 作为 fd 0/1/2;关闭 master 副本于子进程
-     pipe 模式: 各 pipe/socketpair 的 child 端作为 fd 0/1/2
-     argv: [/proc/self/exe, "exec-child", "bootstrap", isolated, cgroupControl,
-            placeholder, cred, workdir, exec, args...]
-       cred = "uid:gid:sg1,sg2"(由 spec.user 在 guest 侧 /etc/passwd 解析)或 "-"(不降权)
-       placeholder 时同一 helper 末步等待信号,不 exec 外部程序
-     env:  spec.Env；仅整个 map 为空时加入默认 PATH。
-           非空 map 若不含 PATH，不会自动补上。
+1. 在内层 PID/cgroup 环境中顺序执行 `init`，采用各命令配置的环境、工作目录和用户，
+   输出仍到 console。非零退出或超时使 launch 失败。超时只终止当前命令，不扩展为
+   杀进程组或后代。串行阶段只有一个 waiter，同时收集当前命令状态和已收养孤儿的退出，
+   随后交给正常 supervisor。Primary、plugin 和 exec 创建不能与该初始化阶段重叠。
+2. 根据声明准备 primary stdio：指定尺寸的 PTY，或对应管道；未启用 stdin 时使用
+   `/dev/null`。在承载 Launch 的同一连接发送 `launch_ack`，收到 Host 的 `ack`
+   后才启动 MUX。
+3. 直接在最终 cgroup target 创建 primary，首次启动与后续 restart 走同一路径。
+   Mount namespace 私有；private PID 模式额外创建 PID namespace 并重挂 `/proc`，
+   shared 模式保留内层 PID namespace。Helper 先完成 namespace/mount 设置，再降权
+   并执行所选程序。
+4. Primary 停在 pre-exec gate 时，由外层读取其 pidfd，取得 Guest 初始 PID namespace
+   中可见的 PID。内层 supervisor 在放行 helper 前登记该进程。Host 仍收到这个外层
+   可见的 primary PID，不收到内层 init 的 PID 或 primary 的 namespace-local PID。
+5. Helper 完成后，启动配置的 plugin、发布内层 supervisor，并将 primary 启动事实
+   交给外层。外层维护 `initial_launch_state`、发送 `app_started` 并启动内存报告；
+   内层进入正常监督，开始接受执行会话。
 
-9. helper 先等待内部 SOCK_STREAM start gate，由父进程放行 setup。
-   restart 路径先登记 PID 再放行；首次 primary 在 helper 完成后、reaper 开始前登记。
-   helper 在已有 private mount ns 内先把 / 标为 rslave(禁止反向传播),再卸载继承的
-   guest-global cgroup2 mount并重新 mount cgroup2 /sys/fs/cgroup。新 mount 受刚创建的
-   cgroup namespace 限定,真实 /app 在 helper 视图中成为 /。仅 cgroup_control=true 时,
-   bootstrap helper 向虚拟 /init/cgroup.procs 写一次 0,自迁移到真实 /app/init;这是
-   sandbox-init 实现中唯一一次 cgroup.procs 写入。
-   随后 isolated 时 mount -t proc proc /proc(新 PID ns 必需;shared 沿用
-     sandbox-init 的 /proc),再在 ready gate 阻塞。
+因此 `launch_ack` 仍在**全部初始化完成之后、primary 创建之前**发送。它确认环境和
+stdio 屏障，不证明 primary exec 成功或应用健康。Helper 会报告明确的 setup/exec
+错误，但突然死亡也可能产生无错误文本的 EOF；`app_started` 保留既有发布语义。
+参见 [`executor.go`](../cmd/sandbox-init/executor.go) 与 [`child.go`](../cmd/sandbox-init/child.go)。
 
-10. 父进程在 helper 的 ready gate 上:
-     - 固定打开 /proc/<pid>/ns/cgroup(O_CLOEXEC),由 sandbox-init 长期持有;
-     - cgroup_control=true 时确认真实 /app/cgroup.procs 为空,把真实 /app/
-       cgroup.controllers 中每个 advertised controller 写入 cgroup.subtree_control,
-       再回读逐项校验;任何一步失败都 abort helper,绝不启动最终应用;
-     - 发 go。helper 才执行 chdir(workdir) → 若 cred≠"-":setgroups → setgid → setuid
-     (降权放在挂载 /proc 之后、execve 之前)→ syscall.Exec(exec, args...)
-     placeholder 时:同样的 ns/cred 准备,但末步不 execve,改
-       signal.Notify(SIGTERM,SIGINT) → <-sig → exit(0)(不可用 select{}:无活 goroutine
-       会触发 Go 死锁检测 panic)。占位仍是被监督的 app:进 app cgroup、随快照冻结、
-       stop 时收信号退出。host 侧强制 restart=always ⇒ 从 exec 会话 kill 占位会原地
-       重拉(非 reboot);guest PID 1 收到停机信号时先置 shutdown 再停止占位；host VMM teardown 是独立路径（信号处理）。
+Placeholder 使用相同设置和 primary 生命周期，末步等待 SIGTERM/SIGINT，不执行
+外部程序。Host 仍强制 `restart=always`，从 exec 杀死 placeholder 会原地重启。
+Placeholder 与内层 init 是不同进程；替换 placeholder 不重做环境 bootstrap 或 `init`。
 
-11. setup/ready/go 交换之后，父进程 PID 1 将内部 socket 无错误文本的 EOF
-    视为 helper 完成；显式 helper 错误使启动失败。普通 exec 通过 CLOEXEC 关闭 fd，
-    placeholder 不执行 exec，而是主动关闭它。
-     - 登记 primary PID，启动 launch.plugin[] supervision；
-     - 发布 supervisor 和 initial_launch_state=started；
-     - 短连接 dial host:5000，发 app_started{pid} → 等 ack → close；
-     - 启动 mem_report，进入阶段 3。
-```
-
-Helper 错误通道会报告 setup/exec 错误，但 helper 突然死亡也可能产生无错误文本的 EOF。
-因此 `app_started` 和初始 started 状态描述的是实现的启动发布边界，不是 execve 成功或
-应用健康的独立证明。Placeholder 本来就不执行外部程序。参见
-[`child.go`](../cmd/sandbox-init/child.go) 和 [`main.go`](../cmd/sandbox-init/main.go)。
-
-Primary 与一次性 `init` 命令采用上述“仅整个 map 为空时补 PATH”的规则。
-Plugin 和 native exec 使用另一套环境构造器：先设置默认 PATH，再用传入条目覆盖，
-显式空 PATH 也会覆盖。不要假定 primary 的非空环境会自动获得 PATH。
-
-桥接器的 app 侧 fd 按代替换；原地重启先排空旧代输出，再安装新 fd，并保留
-[阶段 3](#supervision) 的有界兜底。MUX session 和 stream 跨原地重启保持不变。
+Primary 和一次性 `init` 命令仅在整个环境 map 为空时补默认 PATH。Plugin 和 native
+exec 先设置默认 PATH，再用传入条目覆盖，包括显式空 PATH。Restart 按代替换 bridge
+的 primary 侧 fd，保留 MUX session，并采用[阶段 3](#supervision)的有界输出排空。
 
 <a id="application-cgroups"></a>
 
-#### 应用 cgroup namespace 与 controller 拓扑
+#### 用户 cgroup namespace 与 controller 拓扑
 
-真实 `/sys/fs/cgroup/app` 在两种模式下始终同时是**应用 cgroup namespace 根**和
-snapshot 的**递归 freezer 根**;snapshot 始终只 freeze/thaw 这个路径,不调用应用或
-`envd` 的 `/freeze`。`sandbox-init` 自身与顶层 `init: []` 一次性准备命令留在 guest-global
-cgroup 根,不属于 `/app`。
+真实 `/sys/fs/cgroup/sandbox` 同时是**用户 cgroup namespace 根**和捕获时的
+**递归 freezer 根**。外层留在 Guest 全局根；内层、`init` 命令、primary、plugin、
+exec helper/命令及其后代均位于 `/sandbox` 之下，捕获操作覆盖整棵树。
 
-`launch.cgroup_control` 默认 `false`。真实布局与应用内 scoped cgroup2 视图如下:
+`launch.cgroup_control` 默认 `false`，选择同一个执行环境内部的进程放置及下放方式：
 
-```text
-cgroup_control=false
+| Guest 真实路径 | 用户 cgroup 挂载内路径 | `false` | `true` |
+| --- | --- | --- | --- |
+| `/sys/fs/cgroup` | scoped 挂载之外 | 外层 `sandbox-init` | 外层 `sandbox-init` |
+| `/sys/fs/cgroup/sandbox` | `/sys/fs/cgroup` | 内层及所有直接管理的进程；`/proc/self/cgroup` 为 `0::/` | 无直属进程；为子组启用并校验 advertised controllers |
+| `/sys/fs/cgroup/sandbox/init` | `/sys/fs/cgroup/init` | Runtime 不创建 | 内层及所有直接管理的进程；`/proc/self/cgroup` 为 `0::/init` |
+| `/sys/fs/cgroup/sandbox/<user-group>` | `/sys/fs/cgroup/<user-group>` | 不承诺 controller 下放 | 用户可创建与 `/init` 同级的组及其后代，始终属于同一 freezer 树 |
 
-真实 guest-global                         primary/plugin/native exec 所见
-/sys/fs/cgroup/                           /sys/fs/cgroup/        (真实 /app 的 scoped mount)
-├── cgroup.procs: sandbox-init, init[]     ├── cgroup.procs: primary/plugin/exec
-└── app/                                  └── /proc/self/cgroup: 0::/
-    └── cgroup.procs: primary、restart、plugin、native exec 及其后代
-         ↑ namespace root + snapshot freeze root
+`/init` 表示内层 init 直接管理进程的默认组，包含内层自身，也包含运行期间的一次性
+`init` 命令；它不是专门给这些命令设置的组。所有进程类型共用同一 `cgroup_control`
+设置，用户 manager 可组织自己的后代，不改变平台的递归 freezer 根。
 
-cgroup_control=true
+外层在 Guest 初始 namespace 中以 `nsdelegate` 挂载 cgroup2，并验证选项生效。
+内层 scoped 挂载隐藏祖先组。Linux 据此将 cgroup namespace 作为下放边界：根目录
+仅允许写内核指定的可下放接口，进程迁移不能跨越 namespace 可达子树，根上的资源
+controller 设置仍由外层控制。参见内核的
+[cgroup v2 下放契约](https://docs.kernel.org/admin-guide/cgroup-v2.html#delegation)。
+这是 cgroup 管理边界，不是针对 privileged Guest 的通用安全边界。
 
-真实 guest-global                         primary/plugin/native exec 所见
-/sys/fs/cgroup/                           /sys/fs/cgroup/        (真实 /app 的 scoped mount)
-├── cgroup.procs: sandbox-init, init[]     ├── cgroup.procs: 空
-└── app/                                  ├── cgroup.subtree_control: 全部 advertised controllers
-    ├── cgroup.procs: 空                   ├── init/
-    ├── cgroup.subtree_control: 全部       │   └── cgroup.procs: primary/plugin/exec
-    └── init/                             └── /proc/self/cgroup: 0::/init
-        └── cgroup.procs: primary、restart、plugin、native exec 及其后代
-         ↑ /app 是 namespace/freezer 根;/init 是 sandbox-init 直接管理的长期进程组
-```
+`cgroup_control=true` 时，外层严格启用并回读 Guest 全局根 advertised controllers。
+内层先通过 scoped `/init/cgroup.procs` 将自身从 `/sandbox` 移到 `/sandbox/init`，
+此时尚无用户代码运行。外层确认 `/sandbox` 无直属进程，启用并回读其 advertised
+controllers，再放行内层。这是唯一的 bootstrap 迁移。`false` 时内层留在
+`/sandbox`，全局根 controller 下放保留 best-effort，不承诺可下放的子层级；
+两种模式都使用 `nsdelegate`、scoped 挂载和递归 freezer。
 
-`true` 模式在创建应用子组前先严格启用并回读 guest-global 根 advertised controllers,
-bootstrap 自迁移后再对真实 `/app` 做同样校验;任一 controller 缺失即启动失败。
-`false` 模式不承诺应用侧 delegation,只保留 guest-global 根的历史 best-effort 下放。
+Bootstrap 后，内层自行打开 scoped target 与 namespace 描述符，每次管理的进程
+启动都通过 `clone3(CLONE_INTO_CGROUP)` 直接出生在最终 target。首次 primary 没有
+特殊放置路径，用户进程也没有 Start 后再迁移的窗口。必要的 namespace/cgroup 设置
+失败即终止启动，不降级为在 freezer 树之外运行。内部描述符设置 CLOEXEC，只通过
+显式 slot 交给 helper，用户程序不继承。
 
-图中的 cgroup `/init` **不是** sandbox.yaml 顶层 `init: []`:前者是长期应用进程组,
-后者仍由 sandbox-init 在 primary 启动前顺序执行一次。`cgroup_control=true` 给应用侧
-manager 留出空的 namespace 根及 controller delegation;例如 envd 默认创建的
-`/user`、`/ptys`、`/socats` 对应真实 `/app/{user,ptys,socats}`,与 `/init` 同级。
-不创建额外 `/exec`,native exec 仍与 primary 同组。
+**PID 视图：** `launch.pid_namespace=private` 保持 primary 为自身 namespace 的
+PID 1，native exec 加入该 primary 的 namespace；`shared` 中可见的 PID 1 是内层
+init，由它收养孤儿。Init 命令与 plugin 在两种模式下都运行于内层 PID namespace。
+Private primary 看不到它们，shared primary 可以看到。Shared 的 `/proc/1/root`
+和 `/proc/1/cgroup` 描述内层 root 与 scoped cgroup 放置，不再描述外层管理进程。
 
-首次 primary 的 bootstrap 是唯一特殊路径;之后 primary restart、plugin start/restart、
-native exec 的 `exec-join` 都用 pinned cgroup namespace fd,并通过
-`clone3(CLONE_INTO_CGROUP)`**直接出生在最终 target**(`/app` 或 `/app/init`)。没有
-`Start → 写 cgroup.procs` 的迁移窗口,setup/namespace/mount/握手失败均使该次启动失败。
-所有传递给 helper 的 namespace/socket fd 都立即恢复 CLOEXEC 并在使用后关闭,最终应用
-不会继承它们。应用正常访问的 `/sys/fs/cgroup` 只有上述 scoped 视图,其中不存在
-guest-global 路径 `/sys/fs/cgroup/app`;shared PID 下通过 `/proc/1/root` 检查 PID 1 的
-mount namespace 属于下述非安全边界例外。
+**Plugin：** primary 启动后，内层将配置的 plugin 作为自身子进程拉起，共享用户
+rootfs、网络和最终 cgroup target。每个 plugin 独立选择 `never`、`on-failure` 或
+`always`（默认 `always`），使用共同退避规则，输出仍到 console，env/workdir/user
+仍可配置。Plugin 退出不决定沙箱生命周期，该职责仍属于 primary 及 `launch.restart`。
 
-cgroup namespace 只限定 cgroupfs 的**视图与管理根**,不是额外安全边界。特别是
-`pid_namespace=shared` 时应用仍与 sandbox-init 共用 PID namespace,所以能看到
-sandbox-init 为 PID 1;其 `/proc/1/cgroup` 相对应用 namespace 甚至可能显示 `/..`。
-这与应用自身看到 cgroup 路径 `/` 或 `/init` 并不矛盾。
+**身份与挂载传播：** primary/plugin helper 先完成 scoped 挂载设置再降权。Init 命令
+继承准备好的内层 namespace，可直接使用 `SysProcAttr.Credential`；命名用户继续以
+镜像 `/etc/passwd` 为准。外层 shared 挂载树向内层 shared/slave 树传播，再进入用户
+子进程的 slave 挂载树，使管理的磁盘挂载可见，同时避免用户挂载反向传播至外层。
+所有进程共享 Guest 网络 namespace。Restore 不重放 files、mounts 或 init 命令。
 
-**伴生进程(launch.plugin[])**。app 完成 bootstrap 后,sandbox-init 顺序拉起每个 plugin
-作为**自身的子进程**(故 reaper 直接收割),跑在同一 guest rootfs + app cgroup(随快照一起
-冻结)+ 网络;stdout/stderr 走 console;支持 env/workdir/user。每个 plugin 按自身
-`restart`(never|on-failure|always,默认 always)+ 共享退避(下文)独立监督。**plugin
-退出绝不影响沙箱生命周期**——只有 app(launch.exec)的退出按 launch.restart 决定 reboot
-或原地重启。plugin 与 app 是"对等体":app 隔离(private)时 plugin 仍在 sandbox-init 的
-PID ns(共享 rootfs/网络/cgroup,但不在 app 的 PID ns 内)。每次 plugin 启动先以
-`CLONE_INTO_CGROUP` 进入最终 target,再由轻量 re-exec helper 在 private mount ns 中加入
-pinned cgroup namespace并挂 scoped cgroup2;placement/setup/exec 失败按 plugin 启动失败
-处理,不存在“继续运行但未冻结”的降级。
+#### 兼容性与内存恢复
 
-**降权时机**:`spec.user` 解析后的 uid/gid 不在外层 clone 用 `SysProcAttr.Credential`
-——否则子进程会以非 root 身份执行 `mount /proc`(新 PID ns 必需)而 EPERM 失败。
-故降权放到子进程内、`mount /proc` 之后、`execve` 之前(`setgroups→setgid→setuid`)。
-`init[].user` 不受此限(init 在 PID1 既有 ns、无 proc 重挂),直接用 `Credential`。
-命名用户("nobody")在 guest 侧解析(`/etc/passwd` 权威地在镜像 rootfs 内)。
+Host 消息、primary/placeholder 行为、退出通知、restart 策略以及仅冷启动执行初始化
+的契约保持不变。可观察变化包括 Guest 全局路径由 `/app` 改为 `/sandbox`、init 命令
+进入用户执行环境，以及 shared PID 模式暴露内层而非外层 PID 1。依赖全局路径或外层
+管理进程视图的脚本需要调整；普通 scoped membership 仍按 `cgroup_control` 显示
+`/` 或 `/init`。
 
-**挂载传播(为 restore 注入铺路)**:app 用 `CLONE_NEWNS` fork,拿到的是 fork 那一刻
-的挂载树**私有副本**;restore 时(app 已在运行)PID1 里新建的 bind 默认不会进入这个
-私有 ns。为让 restore 注入能到达运行中的 app:fork **之前** PID1 把 `/` 标为
-`MS_REC|MS_SHARED`(rshared),app 子进程在 `mount /proc` **之前**把自己的副本标为
-`MS_REC|MS_SLAVE`(rslave)——PID1 的挂载事件单向传播给 app,app 自己的挂载(如
-`/proc`)不外泄回 PID1。冷启动注入不依赖此机制(那时 bind 早于 fork、随副本带入);
-**后续注入会需要它，但当前 restore 不重放 LaunchSpec files/mounts/init**。网络 restore 重配无此问题:app 只 `CLONE_NEWNS`、不
-`CLONE_NEWNET`,与 PID1 共享网络 ns,netlink 改动天然可见。
-
-**applyNetwork 不是 listener 的前置依赖**——LaunchSpec 不带 network 时直接跳过,
-guest 仍有 `lo`;applyNetwork 只对应用层外部网络服务有意义,vsock 控制面与网络
-配置正交.
-
-**cold-start fast-fail**：冷启动的网络 / 挂载 / 文件 / init 任一失败都让应用悄悄跑
-是反模式——上层调度器期望"沙箱起不来 = 重新调度",而不是"起来了但环境不对"。
+冷启动从选定 Runtime 构造此模型。内存 Snapshot S 保存两个实例、其 namespace/cgroup
+拓扑和私有通路；恢复必须使用 E/C0 identity 对应的 Runtime backing artifact，继续
+执行捕获时的实现。替换 Host 或 Runtime 文件不能升级已有 S 内的 init。采用新 Runtime
+应经过冷启动，再按正常 E/S 流程生成替代制品。本次重构不改变 E/S 格式，也不在内存
+恢复时重放 Launch。
 
 <a id="supervision"></a>
 
 ### 阶段 3:supervisor
+
+此循环运行于内层 PID 1。接手串行 init 后先主动回收一次，覆盖阶段切换窗口中退出
+的孤儿。外层单独等待内层，负责 Host 通知和最终 poweroff。
 
 ```
 loop:
@@ -635,7 +597,7 @@ loop:
         // handled
       else:                                          // exec 子进程 → 投递其会话;
         execReg.deliver(pid, status)                 //   或 shared-PID app 的孤儿 → 静默收割
-    sigterm/sigint:
+    sigterm/sigint:                                  // 内层 PID 1 收到信号
       shutting_down = true                           // 阻止在飞的 restart 再 fork
       send spec.stop_signal to app_pid               // 默认 SIGTERM;覆盖镜像 StopSignal
       wait up to spec.stop_grace_sec (默认 10s);超时 SIGKILL
@@ -657,8 +619,9 @@ app_exit_then_reboot(status):
   stream EOF 后，在同一连接发送 MUX_CLOSE 并等待 MUX_CLOSE_ACK
   排空、ACK 和 transport close 共用一个 2 s 预算；到期强制停机
   排空后关闭剩余 app fd
-  short-conn dial host:5000 → write app_exited{code, term_signal} → wait ack(timeout) → close
-  reboot(LINUX_REBOOT_CMD_POWER_OFF)   # ack 拿不到也照常 reboot;POWER_OFF → CH 干净退 0
+  经私有通路将终态交给外层
+  外层:host:5000 → app_exited{code, term_signal} → 有界等 ack → close
+  外层:reboot(LINUX_REBOOT_CMD_POWER_OFF)   # Host ack 未到也 poweroff;CH 干净退 0
 ```
 
 **退避**(app 与 plugin 共用,supervise.go):退出即重拉,延迟 10ms 起、每次 ×2、封顶 60s;
@@ -679,12 +642,12 @@ cleanup 再排空已接收缓冲。这不保证输出 sink 的 fsync，transport
 CH 应随之干净退出。`RESTART` 会触发 CH 的"原地重启"流程,试图重连 vhost-user-blk
 后端——而后端只接受一次连接(sandbox = 单 VM 生命周期),重连失败 CH 非零退出。
 
-**反向 listener 在独立 goroutine 中持续运行**,与 supervisor signal loop 并行;
-处理 host 下发的 `ping` / `restore` / `quiesce` / `attach` 短连接([管理操作集](#management-operations)、[管理消息 wire format 与字段](#management-wire))。
-listener 整个沙箱生命周期(冷启动 + snapshot/restore + MUX 重连 + 退出)持续存在,
-唯一退出点是进程 reboot。
+**反向 listener 运行于外层**，独立于内层 supervisor。它处理 `ping`、`restore`、
+`quiesce` 和 `attach`，将 exec/connect 连接交给内层（[管理操作集](#management-operations)）。
+Listener 跨冷启动、snapshot/restore 和 MUX 重连保持存在，直到 Guest poweroff。
+内层意外退出或私有通路断开会使 Guest 失败，不虚构 primary 成功退出，也不重放初始化。
 
-**mem_report 上报 goroutine**:与 supervisor 并行的第二个常驻 goroutine。
+**mem_report 上报 goroutine**也运行于外层。
 Launch barrier 后立即采样一次,随后默认每 5 s 读取 `/proc/meminfo`。每份报告
 携带 observation `epoch` 和严格递增 `seq`;restore 在写 `restore_ack` 前建立
 新 epoch并清除旧 pending 报告。Quiesce 在 freeze 前持有同一 stream lock 等待
@@ -708,92 +671,70 @@ ACK 队列; Host 通过独立连接请求新的原始 usage 观测 ([原始 Usag
 
 ### quiesce 处理
 
-quiesce 是 host /vm.pause 之前的最后一次 guest 清理机会，目标是：
+Quiesce 在 Host `/vm.pause` 前建立一致的 Guest 内存/文件系统捕获点，并拆除恢复后
+没有 Host 对端的执行与转发会话。内层也在冻结树中，因此所有依赖其 goroutine 的
+清理都必须在 **freeze 之前**完成。
 
-1. 冻结应用并同步文件系统，让 memory 与 disk 工件对应同一个一致 capture point。
-2. 在捕获前拆除 MUX 与端口转发会话，不把恢复后没有对端的握手中途或活跃连接当作可继续使用的会话。
-   registry drain、有界 close 与 CH restore transport reset 共同建立边界；单次 SO_LINGER 返回不证明所有内核 socket 状态均已移除（[MUX 优雅关闭握手](#mux-close) / [connect 端口转发会话(`sandbox-ctl run --connect`)](#forward-sessions)）。
+顺序如下：
 
-Listener 并发处理每个已 accept 的管理连接，exec/connect/mem_report registry 与 quiesce gate
-负责生命周期排序。Host 只有收到 quiesced、看到该控制连接 EOF 并完成自己的 admitted-handler drain 后，才进入 /vm.pause。
+1. **Host 关闭准入。** Gate 新 exec/forward 请求并暂停 ping ticker。Usage 准入在
+   Host memory barrier 前暂停。已准入的 ping 必须走到 Guest EOF 传输屏障；已排空
+   的失败探测仍执行健康/致命策略，不能代替明确的 `quiesced`。即使普通 ping 等待
+   无界，此排空仍有独立、有界的 quiesce 预算。
+2. **外层暂停原始 usage 并请求内层排空。** 推进 usage 代次，关闭并 join 旧连接；
+   阻塞的 source read 保留原槽位，不持锁等待 Host。外层先关闭执行准入，再发送私有
+   quiesce 请求。
+3. **内层完成执行清理。** 关闭 primary restart 与 plugin 启动准入，join 已准入的
+   启动；拒绝新执行会话；杀死在途 exec helper，join 完整 fork/MUX/socket 清理。
+   关闭转发目标和反向连接，清空缓存 accept listener，唤醒挂起的 `Accept`。
+   所有已准入 session handler 都必须完成，包括登记前的 setup 与最后的 socket 清理。
+   然后经有界 `MUX_CLOSE`/`MUX_CLOSE_ACK` 关闭 primary MUX，失败时硬关闭，输出
+   pump 等待后续 attach。完成这些工作之后才回复外层。
+4. **外层排空报告并冻结整个用户环境。** 内层确认排空后，暂停 `mem_report` 并 join
+   在途交换。外层写 `/sys/fs/cgroup/sandbox/cgroup.freeze=1`，等待 `cgroup.events`
+   出现 `frozen 1`。范围包括内层 PID 1、管理的进程和用户创建的后代。此后不再等待
+   内层 handler，也不调用应用专有 freeze 接口。
+5. **外层准备文件系统。** 确认 freeze 后调用 `sync(2)`，防止 sync 后用户进程再次
+   产生脏页；除非 `skip_drop_caches=true`，随后向 `/proc/sys/vm/drop_caches` 写 `3`。
+   这是 Guest 文件系统准备，不定义 Host 物理磁盘持久性。
+6. **外层确认并关连接。** 发送 `quiesced{drop_caches_result}`，然后以有界 linger
+   关闭该管理连接。Host 同时要求明确响应、控制连接 EOF 和自身已准入 exec/forward
+   handler 排空完成，才能 `/vm.pause` 并捕获。
 
-**quiesce 流程**：
+外层 listener、存储/autofs 和控制状态因此留在冻结树之外。私有 outer/inner 通路
+保留在内存中，两个端点仍存在，也没有未完成的 quiesce 请求；它不是必须丢弃的
+Host vsock 会话。MUX/forward registry、有界 close 和 CH restore transport reset
+共同建立外部会话边界；一次 SO_LINGER 返回不证明全部内核 socket 状态都已消失。
 
-```
-0. host 原子关闭 exec/forward admission，暂停 ping ticker；
-   Usage admission is paused before the Host memory barrier; Guest invalidates
-   its generation and closes/joins the connection. Blocked reads retain their
-   original slots without locks waiting on the old Host.
-   等已入场 ping 完成 guest EOF transport barrier。未收到 pong 的响应 EOF
-   也能排空失败探测；健康检查计数和致命失败策略仍然适用。
-   CONNECT EOF 以及其他传输或协议失败不能证明排空完成。
-   /vm.pause 前仍必须单独取得明确的 quiesce 确认。
-   排空独立受 8 s quiesce budget 约束，即使普通 ping timeout 不强制也一样。
-   到期 cancel + join 并令捕获失败；不在 guest 确认前抢先拆能正常完成的 transport。
-   guest 拒绝新 exec、SIGKILL 在飞 exec helper、关闭 lingered vsock，
-   join 完整 session goroutine（exec 会话(sandbox-ctl exec)）。排空有界，失败不进 freezer、不发 quiesced。
-0a. guest 等待在途 mem_report exchange 完成并暂停 reporter。
-    有界交换完成后，S 不会保留等待旧 host 的 reporter mutex 或观测连接。
-0b. freeze 应用：
-    write /sys/fs/cgroup/app/cgroup.freeze = 1
-    有界轮询 cgroup.events 至 frozen 1。
-    先 freeze 再 sync，防止 sync 后 app 再写脏页；递归覆盖 /init、
-    envd 的 user/ptys/socats 子树和子树内新 fork 的进程，不调用 envd /freeze。
-1. [prep] sync(2)                              // 刷新 ext4 dirty data
-2. [prep] 若 quiesce.skip_drop_caches == false：
-     open("/proc/sys/vm/drop_caches", O_WRONLY) -> write("3\n")
-                                                // clean page cache + dentry/inode cache
-3. 随 MUX 关闭暂停 app 输出转发；应用已冻结，残留输出有界。
-4. 拆除 connect 转发（connect 端口转发会话(sandbox-ctl run --connect)）：
-   gate 新 connect；逐条关闭 target + reverse vsock。
-   SO_LINGER 有界（3 s，connectLingerSec）且 best-effort；多会话并发关闭，受 quiesce budget 限制。
-   accept 模式另关闭并清空缓存 guest listener，唤醒 park 的 Accept；
-   resume 后懒重建。
-   host 发 quiesce 前只 gate 新 forward；收到 quiesced + guest EOF 后，
-   关闭剩余 host half，join 所有已入场 exec/dial/accept/relay handler，再 /vm.pause。
-5. primary MUX：MUX_CLOSE -> MUX_CLOSE_ACK -> close(MUX)。
-   ACK 最多等 5 s，错误/超时强制 close。Host 回 ACK 后立即关；
-   guest 用有界 SO_LINGER 协助 vsock teardown，已断连接硬丢。
-6. 在 quiesce 控制连接 WriteMessage(quiesced)。
-7. 关闭控制连接，host 必须观察 EOF。
-```
+**缓存策略：** 先 sync，再按需 drop，因为只有干净缓存可以丢弃。丢弃 page/dentry/inode
+cache 可减少捕获的驻留内存，代价是恢复后的冷读。默认跳过写入，显式
+`--drop-caches=true` 才请求 drop；跳过时仍执行 freeze 和 sync。
+`quiesced.drop_caches_result` 返回 `skipped`、`succeeded` 或 `failed`。缺失代表旧
+Guest 的结果未知；若 Host 请求 skip，会告警并继续，因为旧 Guest 可能仍按原协议
+drop。该结果不保证缓存不会被内存压力或 balloon 回收。
 
-**为什么 prep 按此顺序**：
+**错误与保证：** 执行/报告排空失败或 freeze 未确认时不发 `quiesced`。已发出的私有
+请求若无法确定结果，会关闭通路并终止 Guest，避免迟到会话操作穿过后续生命周期边界。
+Drop-caches open/write 失败只记录日志并返回 `failed`，不使捕获失败；本路径的
+`sync(2)` 没有返回错误值。Primary MUX 有界等待 ACK，失败硬关，forward 在 quiesce
+预算内并行关闭。这些措施不提供无限等待的 socket-removal 保证，CH 在恢复时处理
+残余连接状态（[MUX 优雅关闭握手](#mux-close)）。
 
-- **先 sync**：drop_caches 只丢 clean cache，先落盘使 disk 与 memory capture 的内容一致。
-- **请求时 drop_caches=3**：clean cache 取决于访问历史和 prefetch 时序，不是恢复进程状态必须的 dirty 数据。
-  清理可减少 capture resident cache，但 restore 后需要从 backing filesystem/device 冷读，包括 root 与数据盘。
-  应按 workload 测量大小与恢复读取成本的取舍。默认跳过写入；显式 --drop-caches=true 才请求。
-  不论是否 drop，freeze 与 sync 都执行。
+缺少 `quiesced` 或 Host EOF/handler 屏障失败时，捕获失败。Host 尝试同 VM 的
+resume/reattach recovery，成功后才继续运行，否则终止失败恢复。见[失败语义](#failures)
+及 [sandbox 生命周期](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/runtime_zh.md)。
 
-quiesced.drop_caches_result 回报 skipped / succeeded / failed；缺失代表旧 guest 无结果回报，按 unknown 处理。
-显式 skip 却得到 unknown 时 host 告警并继续，因为旧 guest 可能按历史协议已经 drop。
-这个结果只描述此次动作，不保证内存压力或 balloon 不会回收缓存。
+**尚未实现的扩展：**
 
-**扩展项（未实现）**：
+| 动作 | 提议 |
+| --- | --- |
+| 应用 quiesce hook | 拟议 `quiesce.signal` 默认空，显式配置后通知应用并等待固定窗口，拟议默认 100 ms；没有完成 ACK 不构成应用一致性屏障，未处理信号也可能终止应用。 |
+| 重置 `/tmp` tmpfs | 在阶段 1 增加 `/tmp` tmpfs 挂载，quiesce 时 MNT_DETACH 后重挂。 |
+| 关闭应用自己的出站连接 | 需要应用协议；管理的 forwarding teardown 不关闭应用的任意 fd。 |
 
-| 动作 | 提案 |
-|---|---|
-| 应用层 quiesce hook | 拟议 sandbox.yaml quiesce.signal，默认空，向 app 发信号并等待固定窗口（拟议默认 100 ms）。必须显式声明：未注册 handler 的 SIGUSR1 可能终止应用。没有完成 ACK，不构成应用一致性屏障。 |
-| /tmp tmpfs 重置 | phase1 挂载 /tmp tmpfs，quiesce 时 MNT_DETACH 后重挂。 |
-| outbound 连接关闭 | fd 属于应用，sandbox-init 无通用主动关闭权；需要应用 hook。 |
-
-**不做项**：
-
-- 不关闭 vsock listener，restore/attach 仍需要它。
-- 不终止或信号通知 primary app；通过 cgroup v2 递归冻结，不是 SIGTERM，也不依赖输出反压停住应用。
-- 此处不重置 RNG/熵池；restore reseed 也尚未实现（[管理操作集](#management-operations)）。
-- 不清理 /var/log 等应用拥有的日志。
-
-**错误与保证**：drop_caches open/write 失败会记录并回报 failed，不阻塞 capture。
-本路径 sync(2) 没有返回错误值，不能声称实现了 sync-error 检查；drop 的 best-effort 结果影响捕获大小与之后的读取。
-
-freeze 确认和 host 响应/EOF/handler 屏障必须成功。cgroup.events 未及时到 frozen 1、
-exec/report drain 失败时都不发 quiesced。Primary MUX 关闭有有界 ACK 等待与硬关兜底；
-SO_LINGER 设置/close 不提供另行验证、无限等待的 socket-removal 保证。
-CH transport reset 处理残留 connected-socket state（[MUX 优雅关闭握手](#mux-close)）。
-若 quiesced 未到或无法写出，捕获失败。Host 尝试同 VM recovery 和 reattach；只有恢复成功才继续运行，
-恢复失败则终结该 VM，不能把 snapshot 失败等同于 VM 一定继续运行。见 [失败语义](#failures) 与 [sandbox 生命周期](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/runtime_zh.md)。
+Quiesce 不关闭外层 vsock listener，不终止或发信号给 primary，不重置 RNG，也不清理
+应用日志。停止用户执行依靠递归 cgroup freezer，不依靠 SIGTERM 或 stdout 反压。
+恢复时 RNG 重播种仍未实现。
 
 <a id="stdio"></a>
 
@@ -839,17 +780,17 @@ stdio MUX([MUX 子协议](#mux-wire))。每条反向 `exec` 连接由各自的 g
 这样 `ps` / `/proc/<pid>` / 按 pid 发信号都能看见并作用于应用进程树与其文件系统
 视图(语义同 `docker exec`)。但 `setns(CLONE_NEWPID)` 只对调用进程**之后 fork
 的子进程**生效、`setns(CLONE_NEWNS)` 是**线程级**——在长寿、多线程的 sandbox-init
-进程里直接 setns 既不安全也会污染自身。因此 sandbox-init 先用 pinned target cgroup fd
+进程里直接 setns 既不安全也会污染自身。因此内层 sandbox-init 先用 pinned target cgroup fd
 对 `exec-join` 做 `clone3(CLONE_INTO_CGROUP)`,注册 pid 后才通过内部握手放行;helper
-加入 pinned cgroup namespace并为其未来 child 选择应用 PID namespace。真正命令由一个
-内层 re-exec child 拉起:它先进入应用 mount namespace,沿用其中**已挂载的** `/proc` 与
-scoped cgroup2(不重挂),再解析 image 内用户并 final exec。private PID 模式下必须保留这
-两段 helper:外层若先进入应用 mount namespace,其 `/proc` 看不见外层 pid,
-`/proc/self/exe` 将无法用于 fork 内层 child。内层完成 mount join 后先停在 ready gate;
-外层此时加入同一 mount namespace,成功后才放行内层 final exec,然后只负责等待回收与
-转述退出码;任一 join 失败都不会执行用户命令,对 sandbox-init 主进程零副作用。
+加入 pinned cgroup namespace，并为其未来 child 选择 primary PID namespace。该 child
+re-exec 为 `exec-child-joined`，先进入 primary mount namespace，沿用已有 `/proc`
+与 scoped cgroup2，再解析镜像用户并 final exec。Private PID 模式需要两个 helper：
+若 `exec-join` 先进入 primary mount namespace，该 `/proc` 将看不见它，无法再通过
+`/proc/self/exe` 创建 child。`exec-child-joined` 完成 mount join 后停在 ready gate；
+`exec-join` 再加入同一 mount namespace，成功后放行 final exec，并等待回收、转述
+退出码。任一 join 失败都阻止用户命令执行，不改变两个常驻 sandbox-init 的 namespace。
 
-`exec-join` 与最终命令从出生起都继承最终应用 cgroup(`/app` 或 `/app/init`),应用内分别
+`exec-join` 与最终命令从出生起都继承最终 cgroup target(`/sandbox` 或 `/sandbox/init`),应用内分别
 看到 `0::/` 或 `0::/init`。没有独立 `/exec` cgroup,也没有任何事后
 `cgroup.procs` placement。
 
@@ -860,9 +801,9 @@ pty**,**再发 `EXIT_STATUS`**(退出码;被信号杀为 128+signo),**再**走 [
 ([阶段 3:supervisor](#supervision));supervisor 的子进程回收器把"非应用子进程"的退出态路由给对应 exec 会话,
 不误判为应用退出。
 
-**与 snapshot 的关系**。内层 helper 在 setup 前设置父死信号;降权可能清除此信号时,
+**与 snapshot 的关系**。`exec-child-joined` 在 setup 前设置父死信号;降权可能清除此信号时,
 它在降权后重设,并通过私有握手 socket 的无阻塞 EOF 检查确认原 `exec-join` 仍存活,
-之后才 final exec。因而外层辅助进程被杀会一并带走那条命令。会话
+之后才 final exec。因此 `exec-join` 被杀会一并带走那条命令。会话
 MUX 中途断(host 侧 `sandbox-ctl exec` 退出 / 失联)→ guest SIGKILL 该命令,命令
 不会比其会话存活更久。snapshot quiesce([quiesce 处理](#quiesce))开始时,host 先原子 gate 新请求、关闭并
 join 已登记的 exec handler;guest 随后**拒绝新的 exec、SIGKILL 所有在飞的 exec
@@ -945,7 +886,7 @@ socket,host 用 `net.FileListener` 包装后关掉原 fd,避免泄漏进 CH)或 
 在正常传输上保留显式半关闭；不保证 transport error 下仍完整交付。单条转发=单条逻辑流,无需流 ID 与应用窗口——vsock 连接自身的内核缓冲背压
 即流控(与 [MUX 子协议](#mux-wire) MUX 的多流窗口不同)。
 
-**与 snapshot 的关系**。转发中继与应用 MUX 同列入 quiesce 拆除([quiesce 处理](#quiesce) step 4):
+**与 snapshot 的关系**。内层在 freeze 前拆除转发中继与 primary MUX（[quiesce 处理](#quiesce)）：
 快照不能带在飞的转发连接,否则 restore 出来无对端、成半开 vsock 残留。quiesce 时
 guest 标记 quiescing 拒绝新 connect,逐条关 target + vsock(后者使用有界 SO_LINGER 协助拆除，残留 transport state 还依赖 [MUX 优雅关闭握手](#mux-close) reset);
 **accept 模式额外**关闭所有缓存的 accept listener(唤醒 park 中的 `Accept`,其会话已在
@@ -1038,11 +979,11 @@ vsock 端口固定 `5000`,**两个方向都复用同一端口号**,身份按方�
 | **冷启动** | guest→host | `hello` → `launch{spec}` → `launch_ack{stdio}` → `ack` | **升级 MUX** | guest 报 ready,host 回 LaunchSpec;guest 准备好 app stdio 后回 launch_ack,该连接成为 MUX |
 | **应用启动通知** | guest→host | `app_started{pid}` → `ack` | 关 | primary 通过 helper 握手并到达启动发布边界；不是 execve 成功或应用健康的独立证明 |
 | **应用退出通知** | guest→host | `app_exited{code, term_signal}` → `ack` | 关 | primary 终态退出；guest 在预算内等 ACK，超时仍 POWER_OFF；host 收到通知后用作退出码 |
-| **关闭请求** | host→guest | `shutdown` → `ack` | 关 | 仅 ACK 写出成功才触发终止：workload 尚未发布时 POWER_OFF；已有 supervisor 时向 guest PID 1 发 SIGTERM。ACK 不表示停机已完成。 |
+| **关闭请求** | host→guest | `shutdown` → `ack` | 关 | 仅 ACK 写出成功才触发终止。内层尚未就绪时外层终止启动；否则先在必要时 thaw，再请求内层按 primary 的 stop signal/grace 停机，最终外层 poweroff。ACK 不表示停机已完成。 |
 | **健康探测** | host→guest | `ping{id, t_send_ns}` → `pong{id, t_send_ns}` | 关 | host 计 RTT / 超时 / 失败数([ping 健康探测](#health)) |
 | **mem 报告** | guest→host | `mem_report{mem_report:{epoch,seq,mem_*}}` → `mem_report_ack` | 关 | guest observation;host sandbox-local controller 验证 epoch/seq 后结合 CH `vm.info` |
 | **用量观测** | host→guest | `usage_request{usage_request}` → `usage_response{usage_response}` | 复用 | 只返回新的原始内存/文件系统观测, Host 唯一归并 ([原始 Usage 观测](#usage-observations)) |
-| **快照前** | host→guest | `quiesce{skip_drop_caches}` → `quiesced{drop_caches_result}` | 关 | guest 冻结应用进程树 + 跑 prep + 关闭 MUX([quiesce 处理](#quiesce)),host 还须控制连接 EOF 和自身 admitted-handler drain 才可 `/vm.pause` |
+| **快照前** | host→guest | `quiesce{skip_drop_caches}` → `quiesced{drop_caches_result}` | 关 | 内层排空会话/restart，然后外层排空报告、递归冻结 `/sandbox` 并准备文件系统（[quiesce 处理](#quiesce)）；Host 还须控制连接 EOF 和自身 handler 屏障才可 pause。 |
 | **恢复后** | host→guest | `restore{epoch, wallclock_ns, network?}` → `restore_ack{epoch,stdio,app_state}` | **升级 MUX** | 快照恢复 vCPU 起跑后 host 通知 guest;guest 先推进 mem-report epoch,完成 thaw 并开放执行 gate 后回 ACK,然后重连 MUX并恢复报告。Host 在 ACK+MUX 前不启用 memory policy。clock/network 更新是 best-effort，失败也可能发 ACK；thaw 失败不发 ACK 且 gate 保持关闭（[时序](#timelines)）。`launch`/files/init/plugin 是 cold-only 配置,恢复时不重放。**RNG 重播种未实现** |
 | **MUX 重连** | host→guest | `attach{epoch}` → `attach_ack{epoch,stdio,app_state}` | **升级 MUX** | 有界尝试关闭/硬丢旧 MUX，接上新连接；guest 仍冻结时先 thaw 再重新开 gate 并发 ACK，涵盖同进程 resume 和失败 capture recovery，未冻结则跳过。Attach 是 stdio 传输替换，与 VM resume 不同；冻结查询或 thaw 失败时不发 ACK，gate 保持关闭。 |
 | **执行命令** | host→guest | `exec{spec}` → `exec_ack{stdio}` | **升级 MUX(独立会话)** | guest 为这条 `exec` 起一个兄弟进程并准备其 stdio,回 `exec_ack`,该连接成为这次 exec 会话**独立**的 MUX;并发多条互不影响;命令结束 guest 在 MUX 上发 EXIT_STATUS 再走 [MUX 优雅关闭握手](#mux-close) 关闭。详见 [exec 会话(`sandbox-ctl exec`)](#exec-sessions) |
@@ -1059,7 +1000,12 @@ Guest 实现了 `shutdown`，但当前 host 生命周期使用[信号处理](#si
 Schema 定义了 exited 常量，但 handler 未据实时状态产生 exited，也没有 `exited{code,term_signal}` 结构。
 ACK 在 thaw 成功并开放执行 gate 后发送，但不证明应用健康。Thaw 失败不发 ACK，exec/forward/report 等 gate 保持关闭。ACK 写出失败不会撤销已完成的 thaw 或执行准入，但不会恢复原本暂停的 report stream；host 仍将握手判为失败，并负责重试或终态清理。
 
-Thaw 由 PID 1 写 freezer 控制文件，不等待 app 或其 stdio。解冻的 app 可能因 console pump 尚未接通而阻塞在输出，但不会阻塞独立的 ACK。MUX 仅在 ACK 后启动，避免帧破坏握手；资源报告随后恢复。现有 exec session 排空和终止语义不变。
+外层先 thaw `/sandbox`，再请求已可运行的内层关闭旧 MUX、开放 exec/forward/plugin/restart
+gate；只有收到内层就绪确认，外层才写 Host ACK，并将连接交给内层承载 MUX。
+若在 thaw 之前等待内层就绪，就会等待一个仍被冻结的进程。解冻后的 primary 可能
+因 pump 尚未接通而阻塞输出，但不阻塞就绪 ACK。MUX 帧严格在 ACK 之后，资源报告
+在连接交接后恢复。内层就绪交换失败不发 Host ACK；结果未知的私有请求使 Guest
+失败，不允许同一通路继续接纳后续操作。
 
 这一更强的 ACK 屏障要求启动 Runtime 内包含更新后的 guest init。仅更新 host 不会替换已有内存 Snapshot 中的 PID 1。应从使用更新后 Runtime 启动的 guest 捕获替代快照；保留的旧快照仍采用原有 guest 行为，无需格式迁移且仍可读取。
 
@@ -1255,7 +1201,8 @@ REQUEST 只能在清理确认后进入 guest，不依赖 sleep 等待 transport 
 
 **四个触发点**（同一握手）：
 
-1. **quiesce 流程**([quiesce 处理](#quiesce) 第 5 步)——guest 在 quiesce 流程靠后一步关闭 MUX。
+1. **quiesce 流程**：内层在执行清理期间关闭 primary MUX，然后外层才冻结 `/sandbox`
+   （[quiesce 处理](#quiesce)）。
 2. **exec 会话结束**([exec 会话(`sandbox-ctl exec`)](#exec-sessions))——exec 命令退出后,guest 在该会话 MUX 上**先把
    stdout/stderr/pty 全部 EOF**,**再发 `EXIT_STATUS`**(payload = 退出码,被信号杀
    为 128+signo),**然后**走同一套 guest 发起的 `MUX_CLOSE` 握手。host(`sandbox-ctl
@@ -1316,94 +1263,93 @@ guest 对 vsock 连接使用有界 SO_LINGER；完整 transport reset 契约仍�
 
 ### 时序
 
-普通箭头表示管理消息，双线表示 MUX；“this conn → MUX”标明握手连接升级。
-Host→guest 始终 dial CH base UDS 并完成 CONNECT/OK；不是 host dial CID 2，CID 2 是 guest 视角的 host。
+Host→Guest 连接继续使用 CH base UDS 和 `CONNECT 5000`/`OK` 交换；CID 2 是 Guest
+视角的 Host。下图区分两个 sandbox-init 实例，不增加 Host 端点或消息。
 
-**冷启动**：
+**冷启动：** Host 在启动 CH 前监听 `<base>_5000`。外层先完成基础挂载、loopback 和
+dispatcher，再声明就绪；等待期间不挂载工作负载磁盘，Host 可以 ping。发送 Launch
+时才开始 launch timeout。
 
-```
-sandbox-ctl                                               sandbox-init (guest)
-listen <base>_5000
-spawn CH -----------------------------------------------> kernel boot
-                                                          基础挂载；lo UP；控制分发器
-                      <--- hello{runtime_ready} ------------------ dial CID=2:5000 [conn A]
-启动 ping；等待 Launch                                    等待，不挂工作负载 root
-提交全部 backend；launch{spec,stdio} --------------------> 组装工作负载 root；switch-root
-开始 launch 超时                                         network/mounts/files/init；准备 stdio
-                      <--- launch_ack{stdio} ------------- 环境就绪，尚未 final exec
-ack ----------------------------------------------------> conn A -> MUX
-initial SET_WINSIZE =====================================> tty；fork/exec primary
-                                                          app fd 为 PTY slave/pipes；bridge 启动
-                      <--- app_started{pid} [conn B] ------
-ack；close conn B
-ping -> pong；guest EOF [conn C..k]                        MUX stdio + WINDOW_UPDATE
-                      <--- app_exited{code,term_signal} --- 终态退出，有界输出 drain
-ack ----------------------------------------------------> POWER_OFF -> CH exit 0
-```
-
-**MUX 重连（ATTACH）**：
-
-```
-sandbox-ctl                                               sandbox-init
-capture resume/recovery 调 reattach                        旧 MUX 可能不存在或已坏
-dial <base> UDS；CONNECT 5000；读完 OK
-attach{epoch} ------------------------------------------> 有界优雅关闭/硬丢旧 MUX
-                                                          查冻结状态，仅仍冻结时 thaw
-                                                          开放 exec/forward/plugin/app-restart
-                      <--- attach_ack{epoch,stdio,app_state}
-initial SET_WINSIZE =====================================> this conn -> MUX；恢复输出 pump
-                                                          恢复 report gate
-恢复 MUX 流                                               恢复 MUX 流
-冻结状态查询或 thaw 失败时不发 ACK；guest log，gate 仍关闭。
+```mermaid
+sequenceDiagram
+    participant H as Host
+    participant O as 外层 sandbox-init
+    participant I as 内层 sandbox-init
+    O->>H: hello runtime_ready
+    H->>O: 发布全部 backend 后发送 launch
+    O->>O: root、network、mounts 和 files
+    O->>I: bootstrap 并交接 Launch 连接
+    I->>I: 顺序 init 与 stdio 准备
+    I->>H: launch_ack
+    H->>I: ack
+    Note over H,I: 同一连接成为 primary MUX
+    I->>I: 创建 primary 并取得外层可见 PID
+    I->>O: primary 已启动
+    O->>H: app_started
+    H->>O: ack
+    Note over O,I: 外层报告内存，内层监督进程
 ```
 
-**quiesce → snapshot**：
+握手后的 MUX 承载 TTY 尺寸和 stdio。Primary 终态退出时内层排空输出，外层发送
+`app_exited` 并在通知预算内等待 ACK；即使 ACK 未到也 poweroff，随后 VM 退出。
 
-```
-sandbox-ctl                                               sandbox-init
-暂停/排空 ping；gate 新 exec/forward
-dial <base> UDS；CONNECT 5000；读完 OK
-quiesce{skip_drop_caches} -------------------------------> 先排空 exec、mem_report
-                                                          freeze app；等 frozen 1
-                                                          sync；仅显式请求才 drop_caches=3
-                                                          拆 forward/accept listener
-                      <=== MUX_CLOSE ==================== 关闭 primary MUX
-MUX_CLOSE_ACK =========================================> 有界等 ACK，再 lingered close
-host 立即关本端 MUX
-                      <--- quiesced{drop_caches_result} --- 控制连接回复并 close
-等控制 EOF；join 已入场 host exec/forward half
-必需 barrier 完成 -> /vm.pause、/vm.snapshot
+**Quiesce 与捕获：** 依赖内层执行的所有清理都在外层递归 freeze 之前完成。
 
-快照：listener 保留，primary 冻结，无 active MUX；
-      CH local_port_last 已保存；
-      TRANSPORT_RESET 已写 used ring，reset-pending 状态已保存。
-Guest 有界 close 兜底与 CH transport reset 分别承担不同职责。
-```
-
-**restore**：
-
-```
-sandbox-ctl                                               sandbox-init
-CH restore activation 重发已入快照的 TRANSPORT_RESET IRQ（不再消费 descriptor）
-/vm.resume OK；backend RX 仍 gate ----------------------> 重置 connected socket，保留 listener
-dial <base> UDS；CONNECT 5000
-  REQUEST 等 RX gate
-                      <--- event-queue kick -------------- reset 已处理；CH 放开 RX
-restore{epoch,wallclock_ns,network?} --------------------> >0 时尽力 clock_settime
-                                                          可选尽力 network replace
-                                                          暂停的 mem_report 切新 epoch
-                                                          thaw app；开放执行 gate
-                      <--- restore_ack{epoch,stdio,app_state}
-initial SET_WINSIZE =====================================> this conn -> MUX；恢复输出 pump
-SafeTarget normalization；开放 observation epoch           barrier 后新 epoch/seq 恢复采样
-重启 ping ticker                                          listener 跨 capture 不变
-Clock/network 失败 log 并不阻止 ACK；ACK 在 thaw 成功并开放 gate 后发送，但不证明应用健康。
+```mermaid
+sequenceDiagram
+    participant H as Host
+    participant O as 外层 sandbox-init
+    participant I as 内层 sandbox-init
+    H->>H: gate exec/forward，排空 ping/usage
+    H->>O: quiesce
+    O->>O: 暂停原始 usage
+    O->>I: 排空执行
+    I->>I: join 启动、exec 和转发会话
+    I->>H: MUX_CLOSE
+    H->>I: MUX_CLOSE_ACK 并关连接
+    I->>O: 执行已排空
+    O->>O: 排空 mem_report，freeze sandbox，等待 frozen 1
+    O->>O: sync，按需 drop cache
+    O->>H: quiesced，然后控制连接 EOF
+    H->>H: join 已准入 handler，pause 并 snapshot
 ```
 
-**listener 跨快照保持打开**：quiesce 若关掉它，restore/attach 无人接收。
-Transport reset 遍历 connected sockets，不关 bind/listen sockets。
-CH 从保存的 local_port_last + 1 继续分配 host local port；
-重置 transport epoch 与保持端口分配连续性是两个独立职责。
+S 保留外层 listener 和私有通路的两个端点；内层及其进程树已冻结，无活跃 Host MUX。
+CH 保存 `local_port_last`、used ring 中预发布的 `TRANSPORT_RESET` 及 reset-pending
+状态。Guest 有界 close 兜底与 CH transport reset 分别承担不同职责。
+
+**Restore 或同 VM attach：** 真正 restore 先重新通知已进入快照的
+`TRANSPORT_RESET`，不消耗新 descriptor。Connected socket 被重置，listener 保留。
+CH 在 Guest 通过 event queue 确认处理 reset 前 gate backend RX，新 REQUEST 等待该门。
+
+Restore 在 thaw 前尽力更新 wall clock、按需替换网络，并推进已暂停的 memory-report
+epoch。Attach 保留 live epoch，只有树仍冻结时才 thaw，覆盖捕获恢复和同 VM resume。
+两者都遵循以下就绪顺序：
+
+```mermaid
+sequenceDiagram
+    participant H as Host
+    participant O as 外层 sandbox-init
+    participant I as 内层 sandbox-init
+    H->>O: restore 或 attach
+    O->>O: 准备观测状态，必要时 thaw sandbox
+    O->>I: 恢复执行
+    I->>I: 关闭旧 MUX，开放执行 gate
+    I->>O: 就绪
+    O->>H: restore_ack 或 attach_ack
+    O->>I: 交接已确认的连接
+    Note over H,I: MUX 恢复，包括 TTY 尺寸和输出 pump
+    O->>H: 恢复内存报告
+    H->>H: 启用 memory policy，重启 ping
+```
+
+冻结状态查询、thaw 或内层就绪失败均不发 ACK。时钟/网络失败仍只记录日志并尽力继续。
+ACK 确认执行就绪，不证明应用健康，也不等待 primary 消费 stdio。Host SafeTarget
+归一化及观测 epoch 仍在 ACK/MUX 建立后推进，不重放 Launch、files 或 init。
+
+外层 listener 跨捕获保持；关闭它会让 restore/attach 无人接收。Transport reset 不关
+bind/listen socket。CH 从已保存的 `local_port_last + 1` 继续分配本地端口；重置传输
+状态和保持分配连续性是两个独立职责。
 
 <a id="health"></a>
 
@@ -1457,6 +1403,9 @@ RTT 在完整 pong/guest-EOF exchange 后用 host time.Since(tSend) 计算，保
 - Primary 终态路径在 POWER_OFF 前尝试 app_exited；通知失败或 ACK 未到不阻止 poweroff。
 - Exec 在 quiesce 中、空 argv 或启动失败时拒绝；会话丢失会杀与 namespace helper 通过父死信号绑定的命令（[exec 会话(`sandbox-ctl exec`)](#exec-sessions)）。
 - Restore clock/network 失败 log 并继续；restore/attach thaw 失败时 gate 保持关闭且不发 ACK（[管理操作集](#management-operations)）。
+- 内层意外退出、私有通路断开，或已发私有请求结果无法确认时，Guest 终止，不重放
+  操作，也不因内层崩溃虚构 primary 成功退出。明确的操作错误可以只拒绝当前操作，
+  继续保留私有通路。
 
 **Host（sandbox-ctl）**：
 
@@ -1485,7 +1434,7 @@ Host 的 timeouts.* 项以 sandbox.yaml 配置为准，文档指明的默认是�
 | app_started | guest dial 后设置 200 ms socket I/O timeout，dial 另有 5 s retry；host 用 timeouts.app_notify | 不是总共 200 ms 的 dial+exchange deadline；raw AF_VSOCK 使用 per-I/O socket timeout |
 | app_exited | 同 app_started | 没有 ACK 仍 POWER_OFF |
 | ping | timeouts.ping 默认不强制，production 200 ms；capture drain 至多 8 s | 普通失败更新统计；capture 超时 cancel/join 并失败；fatal threshold 须有界 |
-| quiesce | 8 s | exec/report drain、freeze、sync、可选 drop、forward 与 MUX teardown 的协议预算 |
+| quiesce | 8 s | 依次完成内层 launch/exec/forward/MUX 排空、外层报告排空、递归 freeze、sync 和可选 drop 的协议预算 |
 | restore | timeouts.restore 默认不强制 response deadline | request 前 EOF/reset 可重试至总 deadline 或 context cancel；每次 CONNECT/OK 最多 2 s 或更短的剩余预算；写请求后不重放；demand paging 可延后恢复；之后转 MUX |
 | attach | 5 s | 替换握手，之后转 MUX |
 | exec | 10 s | guest fork/exec 与 PATH 解析后 ACK；只限握手，运行命令前清 deadline |

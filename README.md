@@ -29,13 +29,21 @@ The repository is one component repository even though it publishes two release-
 
 | Path | Purpose |
 | --- | --- |
-| `cmd/sandbox-init` | Guest PID 1: runtime setup, supervision and control protocol |
+| `cmd/sandbox-init` | Outer Guest management and inner PID 1 process execution, from one binary |
 | `pkg/guestabi` | Shared control, MUX and forward protocol packages consumed by Host and Guest |
 | `cmd/flatten-ctl` | OCI or directory to deterministic EROFS image builder, using shared `accelerator` packages |
 | `native-deps/` | Guest VMLinux/Envd source inputs, patch trees and native maintenance |
 | `scripts/guest-inspect.py` | Read guest kernel memory counters from the host using a compatible nonrandomized x86_64 layout |
 
 The runtime image places its initial guest tools under `/opt/sandbox-runtime/bin/`. VMLinux and the Cloud Hypervisor binary are not embedded in the runtime bundle: VMLinux is published as its own release unit, and Cloud Hypervisor is built and published by `sandboxer`.
+
+`sandbox-init` separates Guest management from user-process execution. The outer
+instance owns storage, Host control and capture preparation; an inner PID 1 owns
+initialization commands, the primary process, plugins and exec sessions. User
+processes share one cgroup namespace rooted at `/sandbox`, while
+`launch.pid_namespace` retains private and shared PID views. The
+[Guest ABI](docs/guest-abi.md#guest-processes) explains ownership, cgroup delegation
+and the drain/freeze/thaw ordering used for capture and restore.
 
 ## Choose a workflow or delivery contract
 

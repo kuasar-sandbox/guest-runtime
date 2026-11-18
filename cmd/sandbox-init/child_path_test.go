@@ -63,7 +63,7 @@ func TestNonRootCommandPath(t *testing.T) {
 			}
 			if mode == "init" {
 				spec := proto.InitSpec{Exec: name, User: user, Workdir: workdir, Env: map[string]string{"PATH": path}}
-				if err := runInit([]proto.InitSpec{spec}); err != nil {
+				if err := runPreparedInitForTest(spec); err != nil {
 					t.Fatal(err)
 				}
 			} else {

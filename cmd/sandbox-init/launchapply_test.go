@@ -161,6 +161,16 @@ func TestFileInjectionPreparesDanglingReferent(t *testing.T) {
 	}
 }
 
+// These tests exercise command resolution independently of the inner cgroup
+// setup. Init's phase-wide child waiter is tested in isolated subprocesses.
+func runPreparedInitForTest(spec proto.InitSpec) error {
+	cmd, err := prepareInitCommand(spec)
+	if err != nil {
+		return err
+	}
+	return cmd.Run()
+}
+
 func TestInitUsesConfiguredPath(t *testing.T) {
 	dir := t.TempDir()
 	const name = "init-path-test"
@@ -170,7 +180,7 @@ func TestInitUsesConfiguredPath(t *testing.T) {
 	}
 	t.Setenv("PATH", "")
 	spec := proto.InitSpec{Exec: name, Workdir: dir, Env: map[string]string{"PATH": dir, "VALUE": "child"}}
-	if err := runInit([]proto.InitSpec{spec}); err != nil {
+	if err := runPreparedInitForTest(spec); err != nil {
 		t.Fatal(err)
 	}
 	if data, err := os.ReadFile(filepath.Join(dir, "result")); err != nil || string(data) != "child" {
@@ -178,22 +188,22 @@ func TestInitUsesConfiguredPath(t *testing.T) {
 	}
 	spec.Exec = "true"
 	spec.Env = map[string]string{"VALUE": "keep-default-path"}
-	if err := runInit([]proto.InitSpec{spec}); err != nil {
+	if err := runPreparedInitForTest(spec); err != nil {
 		t.Fatalf("default PATH: %v", err)
 	}
 	t.Setenv("PATH", dir)
 	spec.Exec = name
 	spec.Env["PATH"] = ""
-	if err := runInit([]proto.InitSpec{spec}); !errors.Is(err, exec.ErrNotFound) {
+	if err := runPreparedInitForTest(spec); !errors.Is(err, exec.ErrNotFound) {
 		t.Fatalf("explicit empty PATH: %v", err)
 	}
 	spec.Exec = "./" + name
-	if err := runInit([]proto.InitSpec{spec}); err != nil {
+	if err := runPreparedInitForTest(spec); err != nil {
 		t.Fatalf("explicit relative executable: %v", err)
 	}
 	spec.Exec = name
 	spec.Env["PATH"] = "."
-	if err := runInit([]proto.InitSpec{spec}); !errors.Is(err, exec.ErrDot) {
+	if err := runPreparedInitForTest(spec); !errors.Is(err, exec.ErrDot) {
 		t.Fatalf("implicit relative executable: %v", err)
 	}
 }

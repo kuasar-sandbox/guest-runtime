@@ -25,7 +25,7 @@ func TestReattachAckWaitsForThawAndLaunchGates(t *testing.T) {
 			var finishErr error
 			go func() {
 				defer close(done)
-				handed, finishErr = finishReattach(guest, sup, bridge, 23, restore, func() error {
+				handed, finishErr = finishReattach(guest, sup, 23, restore, func() error {
 					close(started)
 					<-release
 					return nil
@@ -106,7 +106,7 @@ func TestReattachAckDoesNotWaitForConsoleDrain(t *testing.T) {
 			finished := make(chan struct{})
 			go func() {
 				defer close(finished)
-				_, err := finishReattach(guest, sup, bridge, 1, restore, func() error {
+				_, err := finishReattach(guest, sup, 1, restore, func() error {
 					// Simulate the thawed primary filling its output while the
 					// host still waits for ACK. No host MUX reader exists yet.
 					go func() {
@@ -175,7 +175,7 @@ func TestLiveAttachPreservesReportAndUsageOwnership(t *testing.T) {
 	client, _ := usageManagementConn(t, sup, bridge)
 	readUsageResponse(t, client, "old-host", 101)
 	guest, host := usageSocketPair(t)
-	handed, err := finishReattach(guest, sup, bridge, 24, false, func() error { return nil })
+	handed, err := finishReattach(guest, sup, 24, false, func() error { return nil })
 	t.Cleanup(func() { closeUsageTestMUX(t, bridge, host) })
 	if !handed || err != nil {
 		t.Fatalf("live attach: handed=%v err=%v", handed, err)

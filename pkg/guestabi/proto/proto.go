@@ -115,10 +115,10 @@ type LaunchSpec struct {
 	Args    []string          `json:"args,omitempty"`
 	Env     map[string]string `json:"env,omitempty"`
 	Workdir string            `json:"workdir,omitempty"`
-	// CgroupControl selects the application cgroup topology. false runs the
-	// application in the cgroup-namespace root (/); true keeps that real root
-	// empty, delegates its controllers, and runs sandbox-init-managed processes
-	// in /init. The namespace/freezer root is real /app in both modes.
+	// CgroupControl selects the user environment's cgroup topology. false puts
+	// the inner init and managed user processes in its namespace root (/);
+	// true keeps that root empty, delegates controllers, and places them in
+	// /init. Both modes use real /sandbox as namespace/freezer root.
 	CgroupControl bool `json:"cgroup_control,omitempty"`
 	// Placeholder, when true, runs no external program: the app child does
 	// all its namespace/cgroup/stdio setup but, instead of execve, waits for
@@ -138,7 +138,7 @@ type LaunchSpec struct {
 
 	// SharePID selects the app's PID namespace: false (default) ⇒ the app is
 	// PID 1 of its own namespace (CLONE_NEWPID); true ⇒ the app runs in
-	// sandbox-init's PID namespace, so sandbox-init (PID 1) reaps the app and
+	// the inner sandbox-init's PID namespace, whose PID 1 reaps the app and
 	// any orphaned descendants (config: launch.pid_namespace=shared).
 	SharePID bool `json:"share_pid,omitempty"`
 

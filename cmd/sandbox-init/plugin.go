@@ -12,7 +12,7 @@ import (
 )
 
 // Plugin supervision: companion processes (launch.plugin[]) run alongside the
-// user app in the same guest rootfs + app cgroup, each restarted per its own
+// user app in the same user environment and cgroup target, each restarted per its own
 // policy with the shared backoff (supervise.go). A plugin's exit never affects
 // the sandbox lifecycle — only the user app's exit does. Plugins are
 // sandbox-init's direct children, so the phase3Supervise Wait4(-1) reaper
@@ -53,7 +53,7 @@ func newPluginRegistry() *pluginRegistry {
 }
 
 // start launches the initial plugin set. Called once after the app completes
-// its cgroup bootstrap (app comes up first; plugins are companions).
+// its startup handshake (the app comes up first; plugins are companions).
 func (r *pluginRegistry) start(specs []proto.PluginSpec) {
 	for _, s := range specs {
 		p := &pluginProc{spec: s}
@@ -159,7 +159,7 @@ func (r *pluginRegistry) beginQuiesce() {
 	r.mu.Lock()
 	r.quiescing = true
 	r.mu.Unlock()
-	// Existing helpers must finish their clone and setup before /app can be
+	// Existing helpers must finish their clone and setup before /sandbox can be
 	// frozen. Their registration callbacks take mu, so join outside it.
 	r.launches.Wait()
 }

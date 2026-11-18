@@ -274,8 +274,8 @@ func TestMemReportStreamPauseAndDrainWaitsForInflightReport(t *testing.T) {
 
 	paused := make(chan struct{})
 	go func() {
-		if err := quiesceExecAndMemoryReports(newExecRegistry(), stream); err != nil {
-			t.Errorf("quiesceExecAndMemoryReports: %v", err)
+		if err := quiesceExecutionAndMemoryReports(func() error { return nil }, stream); err != nil {
+			t.Errorf("quiesceExecutionAndMemoryReports: %v", err)
 		}
 		close(paused)
 	}()
