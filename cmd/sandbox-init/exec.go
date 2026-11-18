@@ -387,11 +387,6 @@ func forkExecChild(spec *proto.ExecSpec, cs childStdio, appPid int, reg *execReg
 	}
 	args := append([]string{self, "exec-join", strconv.Itoa(appPid), ttyArg, userArg, spec.Cwd, spec.Argv[0]}, spec.Argv[1:]...)
 
-	ns, err := cgroupNamespaceFile()
-	if err != nil {
-		closeChildStdio(cs)
-		return 0, nil, err
-	}
 	parentSync, childSync, err := newChildSyncPair()
 	if err != nil {
 		closeChildStdio(cs)
@@ -415,7 +410,7 @@ func forkExecChild(spec *proto.ExecSpec, cs childStdio, appPid int, reg *execReg
 		// No Cloneflags / Setsid here: the helper joins the app's
 		// namespaces and the COMMAND (forked by the helper) gets the
 		// new session + controlling tty (see runExecJoin).
-		ExtraFiles:  []*os.File{ns, childSync}, // fd 3 cgroup ns, fd 4 sync
+		ExtraFiles:  []*os.File{childSync}, // fd 3 sync
 		SysProcAttr: sysAttr,
 	}
 	waitCh, err := reg.startChild(&cmd)
@@ -434,8 +429,9 @@ func forkExecChild(spec *proto.ExecSpec, cs childStdio, appPid int, reg *execReg
 }
 
 // runExecJoin is the native-exec namespace helper. It is born atomically in
-// the final application cgroup, joins the pinned cgroup namespace, selects the
-// primary PID namespace for its child, and opens the primary mount namespace.
+// the final application cgroup and inherits the inner init's cgroup namespace.
+// It selects the primary PID namespace for its child and opens the primary
+// mount namespace.
 //
 // The mount join is completed by exec-child-joined after the fork. With a
 // private primary PID namespace, its procfs cannot represent this outer helper,
@@ -445,7 +441,7 @@ func forkExecChild(spec *proto.ExecSpec, cs childStdio, appPid int, reg *execReg
 // ready, this helper joins the same mount namespace on its locked thread and
 // only then releases the child's final exec; it remains the status proxy.
 func runExecJoin(appPidStr, ttyStr, userSpec, cwd, argv0 string, args []string) {
-	sync, err := childSyncFromFD(childJoinedSyncFD)
+	sync, err := childSyncFromFD(childSyncFD)
 	if err != nil {
 		die("exec-join: sync: %v", err)
 	}
@@ -479,17 +475,6 @@ func runExecJoin(appPidStr, ttyStr, userSpec, cwd, argv0 string, args []string) 
 	if err != nil {
 		_ = unix.Close(mntFD)
 		sync.fail(fmt.Errorf("open app pid ns: %w", err))
-	}
-	unix.CloseOnExec(childCgroupNamespaceFD)
-	if err := cgroupJoinNamespace(childCgroupNamespaceFD); err != nil {
-		_ = unix.Close(mntFD)
-		_ = unix.Close(pidFD)
-		sync.fail(err)
-	}
-	if err := unix.Close(childCgroupNamespaceFD); err != nil {
-		_ = unix.Close(mntFD)
-		_ = unix.Close(pidFD)
-		sync.fail(fmt.Errorf("close cgroup namespace fd: %w", err))
 	}
 	// setns(CLONE_NEWPID) does not move us; it places our future
 	// child into the app's PID namespace.

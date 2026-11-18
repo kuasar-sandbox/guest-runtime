@@ -182,9 +182,9 @@ func (r *pluginRegistry) endQuiesce() {
 }
 
 // startPluginProcess starts a lightweight sandbox-init re-exec atomically in
-// the final application cgroup. The helper joins the pinned cgroup namespace,
-// installs a scoped cgroupfs in a private mount namespace, drops credentials,
-// and execs the plugin. Namespace, mount, placement, and final-exec failures
+// the final application cgroup, inheriting the inner init's execution
+// environment. The helper applies the plugin's credentials and working
+// directory before exec. Placement, setup, and final-exec failures
 // are returned as launch failures; there is no post-Start cgroup migration or
 // fail-open "continuing unfrozen" path.
 func startPluginProcess(s proto.PluginSpec, onSpawn func(int) error, onFailure func(int)) (int, error) {
@@ -198,17 +198,13 @@ func startPluginProcess(s proto.PluginSpec, onSpawn func(int) error, onFailure f
 			credStr = c.encode()
 		}
 	}
-	ns, err := cgroupNamespaceFile()
-	if err != nil {
-		return 0, err
-	}
 	parentSync, childSync, err := newChildSyncPair()
 	if err != nil {
 		return 0, fmt.Errorf("child handshake socketpair: %w", err)
 	}
 	self := "/proc/self/exe"
 	args := append([]string{self, "plugin-child", credStr, s.Workdir, s.Exec}, s.Args...)
-	sysAttr := &syscall.SysProcAttr{Cloneflags: syscall.CLONE_NEWNS}
+	sysAttr := &syscall.SysProcAttr{}
 	if err := cgroupConfigureClone(sysAttr, false); err != nil {
 		_ = parentSync.Close()
 		_ = childSync.Close()
@@ -225,7 +221,7 @@ func startPluginProcess(s proto.PluginSpec, onSpawn func(int) error, onFailure f
 		Stdin:       nil,
 		Stdout:      os.Stderr,
 		Stderr:      os.Stderr,
-		ExtraFiles:  []*os.File{ns, childSync}, // fd 3 cgroup ns, fd 4 sync
+		ExtraFiles:  []*os.File{childSync}, // fd 3 sync
 		SysProcAttr: sysAttr,
 	}
 	return coordinateChild(&cmd, parentSync, childSync, onSpawn, nil, onFailure, childSyncExecEOF)

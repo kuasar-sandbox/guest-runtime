@@ -46,16 +46,16 @@ const (
 	freezePollInterval   = 5 * time.Millisecond
 )
 
-// applicationCgroups owns the long-lived capabilities sandbox-init needs for
-// atomic placement and namespace joining. Every descriptor is O_CLOEXEC and is
-// passed to re-exec helpers only through an explicit ExtraFiles slot.
+// applicationCgroups owns the long-lived directory capabilities sandbox-init
+// needs for atomic placement. Every descriptor is O_CLOEXEC; user children
+// inherit the inner init's cgroup namespace without a namespace FD handoff.
 var applicationCgroups struct {
 	sync.RWMutex
 	control       bool
+	inner         bool     // directory capabilities belong to the scoped inner environment
 	processGroups bool     // preserve slot workloads' independent process groups
 	root          *os.File // /sandbox (outer) or its scoped / (inner)
 	target        *os.File // root or init leaf, used for direct clone placement
-	namespace     *os.File // the inner init's cgroup namespace
 }
 
 // cgroupMount mounts the guest-global cgroup v2 hierarchy, propagates root
@@ -101,7 +101,7 @@ func cgroupMount(control bool) error {
 
 	applicationCgroups.Lock()
 	defer applicationCgroups.Unlock()
-	if applicationCgroups.root != nil || applicationCgroups.target != nil || applicationCgroups.namespace != nil {
+	if applicationCgroups.root != nil || applicationCgroups.target != nil {
 		_ = root.Close()
 		_ = target.Close()
 		return errors.New("application cgroups already initialized")
@@ -179,8 +179,8 @@ func cgroupConfigureClone(attr *syscall.SysProcAttr, bootstrap bool) error {
 	if target == nil {
 		return errors.New("application cgroup target is not initialized")
 	}
-	if !bootstrap && applicationCgroups.namespace == nil {
-		return errors.New("application cgroup namespace is not initialized")
+	if !bootstrap && !applicationCgroups.inner {
+		return errors.New("inner application cgroup target is not initialized")
 	}
 	// A process in the autofs daemon process group can bypass its triggers.
 	// The inner is always in a separate group. Its non-TTY children retain
@@ -206,17 +206,6 @@ func managedProcessGroupsEnabled() bool {
 	return applicationCgroups.processGroups
 }
 
-// cgroupNamespaceFile returns sandbox-init's pinned application cgroup
-// namespace capability for an explicit ExtraFiles handoff.
-func cgroupNamespaceFile() (*os.File, error) {
-	applicationCgroups.RLock()
-	defer applicationCgroups.RUnlock()
-	if applicationCgroups.namespace == nil {
-		return nil, errors.New("application cgroup namespace is not initialized")
-	}
-	return applicationCgroups.namespace, nil
-}
-
 // cgroupControlEnabled reports the immutable launch topology selected at boot.
 func cgroupControlEnabled() bool {
 	applicationCgroups.RLock()
@@ -224,40 +213,23 @@ func cgroupControlEnabled() bool {
 	return applicationCgroups.control
 }
 
-// cgroupFinalizeBootstrap pins the inner init's namespace while it is blocked
-// in the internal handshake. In delegation mode it proves /sandbox has no
-// direct processes and enables every advertised controller before user code.
-func cgroupFinalizeBootstrap(pid int) error {
-	path := fmt.Sprintf("/proc/%d/ns/cgroup", pid)
-	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_CLOEXEC, 0)
-	if err != nil {
-		return fmt.Errorf("pin %s: %w", path, err)
-	}
-	ns := os.NewFile(uintptr(fd), path)
-	fail := func(err error) error {
-		_ = ns.Close()
-		return err
-	}
-
+// cgroupFinalizeBootstrap runs while the inner init is blocked in its ready
+// handshake. In delegation mode it proves /sandbox has no direct processes
+// and enables every advertised controller before user code.
+func cgroupFinalizeBootstrap(_ int) error {
 	if cgroupControlEnabled() {
 		procs, err := os.ReadFile(sandboxCgroupProcs)
 		if err != nil {
-			return fail(fmt.Errorf("verify application root processes: %w", err))
+			return fmt.Errorf("verify application root processes: %w", err)
 		}
 		if strings.TrimSpace(string(procs)) != "" {
-			return fail(fmt.Errorf("verify application root processes: %s is not empty", sandboxCgroupProcs))
+			return fmt.Errorf("verify application root processes: %s is not empty", sandboxCgroupProcs)
 		}
 		if err := cgroupEnableAdvertisedControllers(sandboxCgroupDir); err != nil {
-			return fail(fmt.Errorf("enable application-root controllers: %w", err))
+			return fmt.Errorf("enable application-root controllers: %w", err)
 		}
 	}
 
-	applicationCgroups.Lock()
-	defer applicationCgroups.Unlock()
-	if applicationCgroups.namespace != nil {
-		return fail(errors.New("application cgroup namespace already pinned"))
-	}
-	applicationCgroups.namespace = ns
 	return nil
 }
 
@@ -312,25 +284,10 @@ func missingControllers(want, got []string) []string {
 	return missing
 }
 
-// cgroupJoinNamespace joins the inner init's pinned cgroup namespace. It is
-// called only by short-lived, OS-thread-locked re-exec helpers.
-func cgroupJoinNamespace(fd int) error {
-	return cgroupJoinNamespaceWith(fd, unix.Setns)
-}
-
-func cgroupJoinNamespaceWith(fd int, setns func(int, int) error) error {
-	if fd < 0 {
-		return fmt.Errorf("invalid cgroup namespace fd %d", fd)
-	}
-	if err := setns(fd, unix.CLONE_NEWCGROUP); err != nil {
-		return fmt.Errorf("setns cgroup: %w", err)
-	}
-	return nil
-}
-
 // cgroupMountScoped replaces the inherited guest-global cgroup2 mount in a
-// child's private, rslave mount namespace. Because the calling task is already
+// new inner init's rslave mount namespace. Because the calling task is already
 // in the user cgroup namespace, the new mount exposes real /sandbox as /.
+// Subsequent user processes inherit this mount; they must not replace it.
 func cgroupMountScoped() error {
 	return cgroupMountScopedWith(unix.Unmount, unix.Mount)
 }

@@ -5,8 +5,6 @@ import (
 	"fmt"
 	"os"
 	"runtime"
-
-	"golang.org/x/sys/unix"
 )
 
 // prepareInnerEnvironment runs once in the inner init, before user init and
@@ -52,25 +50,17 @@ func cgroupOpenInner(control, processGroups bool) error {
 		_ = root.Close()
 		return fmt.Errorf("open inner cgroup target: %w", err)
 	}
-	nsFD, err := unix.Open("/proc/self/ns/cgroup", unix.O_RDONLY|unix.O_CLOEXEC, 0)
-	if err != nil {
-		_ = root.Close()
-		_ = target.Close()
-		return fmt.Errorf("pin inner cgroup namespace: %w", err)
-	}
-	namespace := os.NewFile(uintptr(nsFD), "inner-cgroup-namespace")
 	applicationCgroups.Lock()
 	defer applicationCgroups.Unlock()
-	if applicationCgroups.root != nil || applicationCgroups.target != nil || applicationCgroups.namespace != nil {
+	if applicationCgroups.root != nil || applicationCgroups.target != nil {
 		_ = root.Close()
 		_ = target.Close()
-		_ = namespace.Close()
 		return errors.New("inner cgroup capabilities already initialized")
 	}
 	applicationCgroups.control = control
+	applicationCgroups.inner = true
 	applicationCgroups.processGroups = processGroups
 	applicationCgroups.root = root
 	applicationCgroups.target = target
-	applicationCgroups.namespace = namespace
 	return nil
 }

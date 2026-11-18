@@ -157,7 +157,7 @@ This is an annotated JSON example; comments are explanatory, not literal JSON:
   "ext4_discard": "auto",                // auto (or omitted): discard; manual: nodiscard
   "placeholder": false,                  // true: no external exec; host rejects explicit launch.exec,
                                         // ignores image command and forces restart=always
-  "share_pid": false,                    // true: inner sandbox-init's PID namespace (pid_namespace=shared)
+  "share_pid": false,                    // true: inherit inner PID/mount namespaces (pid_namespace=shared)
   "user": "0:0",                         // uid:gid or name:group, guest /etc/passwd; empty -> root
   "stop_signal": 15,                     // signal number, resolved host-side; 0 -> SIGTERM
   "stop_grace_sec": 10,                  // guest PID 1's grace period; 0 -> default 10 s
@@ -214,10 +214,14 @@ host's launch_ack wait ([Failure semantics](#failures)).
   root. With `cgroup_control=false`, the inner and all directly managed processes
   live there and see `0::/`. With `true`, this root is empty and its controllers
   are delegated; those processes live in `/sandbox/init` and see `0::/init`.
-  The same rule covers init, primary, plugins and exec. See the
+  Init, primary, plugins and exec inherit the inner's cgroup namespace and
+  use the same placement rule. See the
   [complete topology and delegation rules](#application-cgroups).
-- **Mount namespace:** private, initially based on the inner's user root view
-  (overlay or single ext4), with a new proc mount in private PID mode.
+- **Mount namespace:** init commands, plugins and the shared-mode primary use
+  the inner's mount namespace and user root view (overlay or single ext4).
+  Only a private-mode primary receives a new mount namespace, with a new proc
+  mount matching its PID namespace. Native exec joins the primary's actual
+  mount namespace.
 - **Network:** with a configured network source, eth0 is virtio-net with a host
   TAP backend and cold-start IP configuration from init. Without a network
   source, no virtio-net is attached; loopback and vsock control still work.
@@ -433,11 +437,13 @@ the raw ext4 layout.
 **Payload relocation and version pinning:** C5 binds the pmem payload root
 under sysroot before switch-root. E carries it into `/`; the bind's pmem inode
 reference keeps it alive after the old mount loses pathname reachability.
-Before phase 2 forks the app, recursive shared propagation makes the mount
-available in the app's private mount namespace, read-only. Because the payload
-is part of `sandbox-runtime.bundle`, changing it changes that artifact's
-identity. Restore checks the runtime footer identity against E/C0 and requires
-the corresponding runtime artifact to be remapped; this is not a full payload
+The inner inherits this read-only mount when its execution environment is
+created. Init commands, plugins and the shared-mode primary use that same
+mount namespace; a private-mode primary inherits the mount into its own
+namespace. Because the payload is part of `sandbox-runtime.bundle`, changing
+it changes that artifact's identity. Restore checks the runtime footer identity
+against E/C0 and requires the corresponding runtime artifact to be remapped;
+this is not a full payload
 re-hash on every restore (see [sandbox lifecycle](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/runtime.md)). With the trusted,
 matching artifact, restored sandboxes retain the same payload version.
 The payload shares the runtime artifact's lifecycle and cannot be independently
@@ -633,7 +639,7 @@ of the selected primary executable or placeholder.
 The inner receives LaunchSpec and the original hello/launch connection. It
 performs these operations in order:
 
-1. Run `init` commands sequentially in the inner PID/cgroup environment, with
+1. Run `init` commands sequentially in the inner PID/mount/cgroup environment, with
    their configured environment, working directory and user. Output goes to
    the console. Nonzero exit or timeout fails launch. Timeout kills the current
    command; it does not introduce process-group or descendant termination.
@@ -644,10 +650,11 @@ performs these operations in order:
    with `/dev/null` for absent stdin. Send `launch_ack` on the same connection
    that carried Launch, and wait for the Host's `ack` before starting its MUX.
 3. Create the primary in the final cgroup target, using the same path for its
-   initial start and later restarts. Its mount namespace is private; private
-   PID mode also creates a PID namespace and remounts `/proc`, while shared
-   mode retains the inner PID namespace. The helper finishes namespace/mount
-   setup before dropping credentials and executing the selected program.
+   initial start and later restarts. Shared mode inherits the inner's PID,
+   mount and cgroup namespaces. Private mode adds PID and mount namespaces
+   and mounts a matching `/proc`, while retaining the inner's cgroup namespace
+   and scoped cgroup2 mount. The helper completes any required namespace/mount
+   setup before applying credentials and executing the selected program.
 4. Hold the primary at its pre-exec gate while the outer reads its pidfd to
    obtain the PID visible in the Guest's initial PID namespace. Register the
    primary with the inner supervisor before releasing the helper. The Host
@@ -721,37 +728,72 @@ bootstrap migration. With `false`, the inner remains in `/sandbox`; root
 controller propagation is best-effort and a delegated child layout is not
 promised. `nsdelegate`, scoped mounts and recursive freeze apply in both modes.
 
-After bootstrap, the inner opens its own scoped target and namespace
-descriptors. Every managed launch uses `clone3(CLONE_INTO_CGROUP)` to be born
-in the final target. The initial primary has no special placement path, and
-there is no post-Start migration of user processes. Required namespace or
-cgroup setup failures abort launch; no fallback runs a process outside the
-freezer tree. Internal descriptors are CLOEXEC and passed to helpers only
-through explicit slots; user programs do not inherit them.
+After bootstrap, the inner pins its scoped target directory. Every managed
+launch inherits the inner's cgroup namespace and uses
+`clone3(CLONE_INTO_CGROUP)` to be born in the final target. Children reuse the
+prepared scoped cgroup2 mount; they do not join another cgroup namespace or
+remount cgroup2. The initial primary has no special placement path, and there
+is no post-Start migration of user processes. Required namespace or cgroup
+setup failures abort launch; no fallback runs a process outside the freezer
+tree. Internal descriptors are CLOEXEC and passed to helpers only through
+explicit slots; user programs do not inherit them.
 
-**PID views:** `launch.pid_namespace=private` keeps the primary as PID 1 of
-its own namespace; native exec joins that primary's namespaces. With `shared`,
-the visible PID 1 is the inner init and it adopts orphaned descendants. Init
-commands and plugins run in the inner PID namespace in both modes. A private
+**PID and mount views:** `launch.pid_namespace=private` keeps the primary as
+PID 1 of its own namespace; native exec joins that primary's PID and mount
+namespaces. With `shared`, the visible PID 1 is the inner init and it adopts
+orphaned descendants. Init commands and plugins run in the inner PID namespace
+in both modes. A private
 primary cannot see them; a shared primary can. Shared `/proc/1/root` and
 `/proc/1/cgroup` now describe the inner's root and scoped cgroup placement,
 rather than the outer management process.
 
+The runtime creates these process contexts:
+
+| Process | PID namespace | Mount namespace | Cgroup namespace |
+| --- | --- | --- | --- |
+| Inner init, init commands and plugins | Inner | Inner | Inner |
+| Shared-mode primary | Inner | Inner | Inner |
+| Private-mode primary | New, primary is PID 1 | New, with matching `/proc` | Inner |
+| Native exec | Primary's actual namespace | Primary's actual namespace | Inner |
+
 **Plugins:** after primary startup, the inner launches configured plugins as
-its own children, sharing the user rootfs, network and final cgroup target.
+its own children. In both primary PID modes they inherit the inner's PID,
+mount and cgroup namespaces, user rootfs and network, and are born in the
+final cgroup target.
+Plugin startup and restart use this already prepared environment without
+creating another mount namespace or remounting `/proc` or cgroup2.
 Each has independent `never`, `on-failure` or `always` supervision (default
 `always`), using the common backoff. Output remains on the console and
 env/workdir/user remain configurable. Plugin exit does not decide the sandbox
 lifecycle; the primary's exit and `launch.restart` retain that role.
 
-**Credentials and mount propagation:** primary/plugin helpers complete scoped
-mount setup before dropping credentials. Init commands inherit the already
-prepared inner namespaces and can apply `SysProcAttr.Credential` directly.
-Image `/etc/passwd` remains authoritative for named users. The outer's shared
-mount tree propagates into the inner's shared/slave tree, then into user
-children's slave mount trees, so managed disk mounts remain visible while
-user mount changes do not propagate back to the outer. All share the Guest
-network namespace. Restore does not replay files, mounts or init commands.
+**Credentials and process groups:** sharing namespaces does not override the
+declared user, environment, working directory or stdio of any command.
+Primary/plugin helpers apply those settings before executing the program;
+private primary mount setup still precedes dropping credentials. Init commands
+inherit the prepared inner namespaces and can apply `SysProcAttr.Credential`
+directly. Image `/etc/passwd` remains authoritative for named users. Namespace
+sharing also does not require a shared process group or terminal session:
+autofs-related process-group separation and PTY session setup still apply.
+
+**Shared mounts and propagation:** init commands, plugins and the shared-mode
+primary use one mount table. Mounts and unmounts performed there are visible
+to the inner and all processes using that namespace, including native exec
+in shared mode. A plugin or shared primary exiting or restarting does not
+undo its mounts; they remain until explicitly unmounted or the environment
+is destroyed. Programs that create mounts must account for that lifetime.
+
+The outer's shared mount tree propagates into the inner's shared/slave tree:
+the inner receives managed disk mounts from the outer, and its shared mounts
+can propagate into a private primary's slave mount tree. A private primary
+therefore receives upstream mount changes while keeping its own `/proc` and
+local mount changes separate. Slave propagation prevents the inner's mount
+changes from propagating back to the outer, and prevents a private primary's
+mount changes from propagating back to the inner. These are the propagation
+relationships prepared by the runtime; a program can explicitly create its
+own namespace or change propagation inside its environment. All processes
+share the Guest network namespace. Restore preserves captured mount state
+without replaying files, mounts or init commands.
 
 #### Compatibility and memory restore
 
@@ -761,7 +803,12 @@ changes are the Guest-global path `/app` becoming `/sandbox`, init commands
 joining the user execution environment, and shared PID mode exposing the inner
 instead of outer PID 1. Scripts that inspected global paths or outer management
 processes must account for that change; ordinary scoped membership remains
-`/` or `/init` according to `cgroup_control`.
+`/` or `/init` according to `cgroup_control`. Plugins and shared-mode primaries
+also share the inner's mount namespace rather than receiving a private copy.
+Their mount changes are consequently visible across that environment and
+survive process exit or restart. Programs that previously relied on per-process
+mount isolation or automatic mount cleanup must manage those requirements
+explicitly.
 
 Cold start constructs this model from the selected Runtime. A memory Snapshot
 S preserves both instances, their namespace/cgroup topology and private
@@ -810,8 +857,9 @@ restartApp(backoff):
     install new-generation fds; pumps use the unchanged MUX streams
   phase2ForkApp:
     store new app_pid before releasing the helper
-    helper is born in final cgroup target with CLONE_INTO_CGROUP,
-    joins pinned cgroup namespace and mounts scoped cgroup2
+    helper inherits inner cgroup namespace and is born in final target with CLONE_INTO_CGROUP
+    shared: inherit inner PID/mount namespaces
+    private: create PID/mount namespaces and a matching /proc
     -> app_started{newpid}
   // host run connection survives and receives the new instance's output
 
@@ -1023,16 +1071,18 @@ The guest prepares stdio, starts the command and replies exec_ack; that
 connection then becomes this command's independent MUX. Each exec has its own
 handler goroutine, and multiple sessions can run concurrently.
 
-**Joining app namespaces and cgroup:** commands must use the app's mount, PID
-and cgroup namespaces so ps, /proc and PID-addressed signals refer to the
-app's process tree and filesystem view, analogous to docker exec.
+**Joining app namespaces and cgroup:** commands join the primary's actual mount
+and PID namespaces so ps, /proc and PID-addressed signals refer to its process
+tree and filesystem view, analogous to docker exec. They inherit the inner's
+cgroup namespace and are born in its pinned final cgroup target, even if the
+primary later moves itself into a user-created group.
 setns(CLONE_NEWPID) affects only subsequently forked children, and mount-namespace
 setns is thread-local. Performing those operations directly in long-lived,
 multithreaded sandbox-init would be unsafe.
 
 The inner `sandbox-init` creates `exec-join` with
 `clone3(CLONE_INTO_CGROUP)` against the pinned final target, registers its PID,
-then releases its private handshake. This helper joins the pinned cgroup
+then releases its private handshake. This helper retains the inherited cgroup
 namespace and selects the primary PID namespace for its future child.
 That child re-execs as `exec-child-joined`, joins the primary mount namespace,
 reuses its proc/scoped cgroup2 mounts, and resolves the image user before exec.

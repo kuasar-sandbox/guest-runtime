@@ -131,7 +131,7 @@ sandbox.yaml `launch:` 节(yaml override 优先,Env merge),host sandbox-ctl 合�
   "cgroup_control": false,                // 默认 false:进程见 /;true:空根下放 controller,进程见 /init
   "ext4_discard": "auto",                // auto（或省略）：discard；manual：nodiscard
   "placeholder": false,                  // true → 不 exec 外部程序,占位锚点等待停机;exec 互斥;host 强制 restart=always
-  "share_pid": false,                    // true → 应用进内层 sandbox-init 的 PID ns(pid_namespace=shared)
+  "share_pid": false,                    // true → 继承内层 PID/mount namespace(pid_namespace=shared)
   "user":    "0:0",                      // uid:gid 或 name:group(guest 侧 /etc/passwd 解析);空 → root
   "stop_signal":   15,                   // 停机信号编号(host 已从名字解析);0 → SIGTERM
   "stop_grace_sec": 10,                  // guest PID 1 停机宽限秒数；0 → 默认 10s，不保证 host teardown 走此路径
@@ -170,10 +170,13 @@ FileSpec 还支持 read_only，省略时 bind 可写。Tmpfs 注入避免直接�
 - **cgroup namespace**：真实 `/sys/fs/cgroup/sandbox` 是 namespace/freezer 根。
   `cgroup_control=false` 时内层及所有直接管理的进程位于该组，显示 `0::/`；
   `true` 时此根无直属进程且 controllers 已下放，进程位于 `/sandbox/init`，显示
-  `0::/init`。Init、primary、plugin、exec 共用该规则，详见
+  `0::/init`。Init、primary、plugin、exec 继承内层 cgroup namespace，并共用同一
+  放置规则，详见
   [完整拓扑与下放规则](#application-cgroups)。
-- **mount namespace**：私有挂载 namespace，起始视图来自内层用户 root（overlay
-  或 single ext4），private PID 模式重新挂载自己的 `/proc`。
+- **mount namespace**：init 命令、plugin 与 shared 模式的 primary 使用内层 mount
+  namespace 及用户 root 视图（overlay 或 single ext4）。仅 private 模式的 primary
+  新建 mount namespace，并挂载与自身 PID namespace 匹配的 `/proc`。Native exec
+  加入 primary 实际所在的 mount namespace。
 - **网络**:配置网络源时为 eth0(virtio-net,host TAP 后端),IP 由 sandbox-init 配好;
   无网络源时不挂 virtio-net,仅保留 `lo`,vsock 控制面仍可用
 - **/dev**:`devtmpfs`(/dev/null、/dev/random、/dev/urandom 等);`/dev/pts`(devpts)
@@ -341,8 +344,10 @@ target;switch-root 的 `MS_MOVE /sysroot → /` 会把该 bind 随整棵子树�
 
 **`/opt/sandbox-runtime` 的搬运与版本钉住**：C5 在 switch-root 前把 pmem 内的
 发布件根 bind 进 `/sysroot/opt/sandbox-runtime`,由 E 的 `MS_MOVE /sysroot → /` 随子树带进
-新 `/`,bind 持有 pmem inode 引用使其在原挂载被遮蔽后仍存活;phase2 fork 前的 `MS_REC|MS_SHARED`
-令其作为对等挂载传播进应用私有 mount ns(应用以只读看到)。因 payload 驻留 pmem，改它会改变 sandbox-runtime.bundle 的工件 identity。
+新 `/`,bind 持有 pmem inode 引用使其在原挂载被遮蔽后仍存活。内层创建执行环境时
+继承该只读挂载；init 命令、plugin 和 shared primary 使用同一 mount namespace，
+private primary 则将该挂载继承到自身 namespace。因 payload 属于
+sandbox-runtime.bundle，修改它会改变该制品的 identity。
 restore 将 runtime footer identity 与 E/C0 核对并要求重挂相应 runtime；这不是每次 restore 都对整个 payload
 重新 hash（见 [sandbox 生命周期](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/runtime_zh.md)）。在可信且匹配的工件前提下，恢复后 payload 版本保持一致。
 payload 与 runtime 同生命周期，不能独立热补丁；若需独立版本须改用独立只读 EROFS 设备（[扩展点](#extensions)）。
@@ -472,7 +477,7 @@ namespace。内层挂载自己的 `/proc` 和 scoped cgroup2，完成下文的�
 
 内层收到 LaunchSpec 和原 hello/launch 连接后，依次执行：
 
-1. 在内层 PID/cgroup 环境中顺序执行 `init`，采用各命令配置的环境、工作目录和用户，
+1. 在内层 PID/mount/cgroup 环境中顺序执行 `init`，采用各命令配置的环境、工作目录和用户，
    输出仍到 console。非零退出或超时使 launch 失败。超时只终止当前命令，不扩展为
    杀进程组或后代。串行阶段只有一个 waiter，同时收集当前命令状态和已收养孤儿的退出，
    随后交给正常 supervisor。Primary、plugin 和 exec 创建不能与该初始化阶段重叠。
@@ -480,9 +485,10 @@ namespace。内层挂载自己的 `/proc` 和 scoped cgroup2，完成下文的�
    `/dev/null`。在承载 Launch 的同一连接发送 `launch_ack`，收到 Host 的 `ack`
    后才启动 MUX。
 3. 直接在最终 cgroup target 创建 primary，首次启动与后续 restart 走同一路径。
-   Mount namespace 私有；private PID 模式额外创建 PID namespace 并重挂 `/proc`，
-   shared 模式保留内层 PID namespace。Helper 先完成 namespace/mount 设置，再降权
-   并执行所选程序。
+   Shared 模式继承内层 PID、mount 和 cgroup namespace。Private 模式新增 PID
+   和 mount namespace，挂载与之匹配的 `/proc`，同时保留内层 cgroup namespace
+   及 scoped cgroup2 挂载。Helper 先完成必要的 namespace/mount 设置，再应用
+   运行身份并执行所选程序。
 4. Primary 停在 pre-exec gate 时，由外层读取其 pidfd，取得 Guest 初始 PID namespace
    中可见的 PID。内层 supervisor 在放行 helper 前登记该进程。Host 仍收到这个外层
    可见的 primary PID，不收到内层 init 的 PID 或 primary 的 namespace-local PID。
@@ -538,28 +544,57 @@ controllers，再放行内层。这是唯一的 bootstrap 迁移。`false` 时�
 `/sandbox`，全局根 controller 下放保留 best-effort，不承诺可下放的子层级；
 两种模式都使用 `nsdelegate`、scoped 挂载和递归 freezer。
 
-Bootstrap 后，内层自行打开 scoped target 与 namespace 描述符，每次管理的进程
-启动都通过 `clone3(CLONE_INTO_CGROUP)` 直接出生在最终 target。首次 primary 没有
-特殊放置路径，用户进程也没有 Start 后再迁移的窗口。必要的 namespace/cgroup 设置
-失败即终止启动，不降级为在 freezer 树之外运行。内部描述符设置 CLOEXEC，只通过
-显式 slot 交给 helper，用户程序不继承。
+Bootstrap 后，内层持有 scoped target 的目录描述符。每次管理的进程启动都继承
+内层 cgroup namespace，并通过 `clone3(CLONE_INTO_CGROUP)` 直接出生在最终
+target。子进程沿用已准备好的 scoped cgroup2 挂载，不再加入其他 cgroup namespace
+或重新挂载 cgroup2。首次 primary 没有特殊放置路径，用户进程也没有 Start 后再迁移
+的窗口。必要的 namespace/cgroup 设置失败即终止启动，不降级为在 freezer 树之外
+运行。内部描述符设置 CLOEXEC，只通过显式 slot 交给 helper，用户程序不继承。
 
-**PID 视图：** `launch.pid_namespace=private` 保持 primary 为自身 namespace 的
-PID 1，native exec 加入该 primary 的 namespace；`shared` 中可见的 PID 1 是内层
-init，由它收养孤儿。Init 命令与 plugin 在两种模式下都运行于内层 PID namespace。
+**PID 与挂载视图：** `launch.pid_namespace=private` 保持 primary 为自身 namespace
+的 PID 1，native exec 加入该 primary 的 PID 和 mount namespace；`shared` 中
+可见的 PID 1 是内层 init，由它收养孤儿。Init 命令与 plugin 在两种模式下都运行于
+内层 PID namespace。
 Private primary 看不到它们，shared primary 可以看到。Shared 的 `/proc/1/root`
 和 `/proc/1/cgroup` 描述内层 root 与 scoped cgroup 放置，不再描述外层管理进程。
 
-**Plugin：** primary 启动后，内层将配置的 plugin 作为自身子进程拉起，共享用户
-rootfs、网络和最终 cgroup target。每个 plugin 独立选择 `never`、`on-failure` 或
+Runtime 创建的进程上下文如下：
+
+| 进程 | PID namespace | Mount namespace | Cgroup namespace |
+| --- | --- | --- | --- |
+| 内层 init、init 命令与 plugin | 内层 | 内层 | 内层 |
+| Shared primary | 内层 | 内层 | 内层 |
+| Private primary | 新建，primary 为 PID 1 | 新建，使用匹配的 `/proc` | 内层 |
+| Native exec | primary 实际所在的 namespace | primary 实际所在的 namespace | 内层 |
+
+**Plugin：** primary 启动后，内层将配置的 plugin 作为自身子进程拉起。无论 primary
+采用哪种 PID 模式，plugin 都继承内层 PID、mount 和 cgroup namespace、用户
+rootfs 与网络，并直接出生在最终 cgroup target。Plugin 首次启动与 restart 都使用已准备好的环境，
+不再创建 mount namespace，也不重新挂载 `/proc` 或 cgroup2。
+每个 plugin 独立选择 `never`、`on-failure` 或
 `always`（默认 `always`），使用共同退避规则，输出仍到 console，env/workdir/user
 仍可配置。Plugin 退出不决定沙箱生命周期，该职责仍属于 primary 及 `launch.restart`。
 
-**身份与挂载传播：** primary/plugin helper 先完成 scoped 挂载设置再降权。Init 命令
-继承准备好的内层 namespace，可直接使用 `SysProcAttr.Credential`；命名用户继续以
-镜像 `/etc/passwd` 为准。外层 shared 挂载树向内层 shared/slave 树传播，再进入用户
-子进程的 slave 挂载树，使管理的磁盘挂载可见，同时避免用户挂载反向传播至外层。
-所有进程共享 Guest 网络 namespace。Restore 不重放 files、mounts 或 init 命令。
+**运行身份与进程组：** 共享 namespace 不覆盖各命令声明的 user、env、workdir 或
+stdio。Primary/plugin helper 在执行程序前应用这些设置；private primary 仍先完成
+挂载设置再降权。Init 命令继承准备好的内层 namespace，可直接使用
+`SysProcAttr.Credential`；命名用户继续以镜像 `/etc/passwd` 为准。共享 namespace
+也不要求共用进程组或终端 session：autofs 所需的进程组分离与 PTY session 设置
+继续生效。
+
+**共享挂载与传播：** init 命令、plugin 和 shared primary 使用同一份挂载表。
+在其中执行的 mount/umount 对内层及使用该 namespace 的所有进程可见，也包括
+shared 模式下的 native exec。Plugin 或 shared primary 退出、restart 不会撤销其
+挂载；挂载持续存在，直到显式卸载或整个执行环境被销毁。创建挂载的程序需要按此
+生命周期管理它们。
+
+外层 shared 挂载树向内层 shared/slave 树传播：内层接收外层管理的磁盘挂载，
+内层 shared 挂载又能向 private primary 的 slave 挂载树传播。因此 private
+primary 仍接收上游挂载变化，同时保有自己的 `/proc` 与本地挂载变化。Slave
+传播关系阻止内层挂载变化反向进入外层，也阻止 private primary 的挂载变化反向
+进入内层。这是 runtime 准备的传播关系；程序可显式创建自己的 namespace 或调整
+执行环境内的传播设置。所有进程共享 Guest 网络 namespace。Restore 保留捕获时的
+挂载状态，不重放 files、mounts 或 init 命令。
 
 #### 兼容性与内存恢复
 
@@ -567,7 +602,10 @@ Host 消息、primary/placeholder 行为、退出通知、restart 策略以及�
 的契约保持不变。可观察变化包括 Guest 全局路径由 `/app` 改为 `/sandbox`、init 命令
 进入用户执行环境，以及 shared PID 模式暴露内层而非外层 PID 1。依赖全局路径或外层
 管理进程视图的脚本需要调整；普通 scoped membership 仍按 `cgroup_control` 显示
-`/` 或 `/init`。
+`/` 或 `/init`。Plugin 与 shared primary 也改为共享内层 mount namespace，不再
+各持一份私有副本。它们的挂载变化因而在该环境内跨进程可见，并在进程退出或
+restart 后保留。依赖原先逐进程挂载隔离或自动挂载清理的程序，需要显式管理这些
+需求。
 
 冷启动从选定 Runtime 构造此模型。内存 Snapshot S 保存两个实例、其 namespace/cgroup
 拓扑和私有通路；恢复必须使用 E/C0 identity 对应的 Runtime backing artifact，继续
@@ -610,8 +648,11 @@ restartApp(backoff):                                  // app 原地重启,launch
     等旧代全部 app→host pump:读到 EOF 且最后字节已写入 MUX
     超过 2s 仍未 EOF(例如后代继承 writer)→ 强制关闭旧代 fd,有界继续
     安装新代 fd,唤醒 pump 接到**不变的 MUX stream** → phase2ForkApp:
-    先 app_pid.store(newpid),再放行 helper;helper 以 CLONE_INTO_CGROUP 直接出生在最终
-    target、加入 pinned cgroup namespace并挂 scoped cgroup2 → app_started{newpid}
+    先 app_pid.store(newpid),再放行 helper;helper 继承内层 cgroup namespace，
+    以 CLONE_INTO_CGROUP 直接出生在最终 target
+    shared: 继承内层 PID/mount namespace
+    private: 新建 PID/mount namespace，并挂载匹配的 /proc
+    → app_started{newpid}
   // host 的 run 链路不断,持续收到新实例输出
 
 app_exit_then_reboot(status):
@@ -775,14 +816,15 @@ host 侧由 CH 把它写到 sandbox-ctl 给 CH 的 stdout(一根匿名管道),sa
 为这次会话准备 stdio、起进程、回 `exec_ack`,该连接随即成为这条会话**独立**的
 stdio MUX([MUX 子协议](#mux-wire))。每条反向 `exec` 连接由各自的 goroutine 服务,多会话并发独立。
 
-**加入应用的命名空间与 cgroup**。命令必须运行在**应用自己的 mount + pid + cgroup
-命名空间**内,
-这样 `ps` / `/proc/<pid>` / 按 pid 发信号都能看见并作用于应用进程树与其文件系统
-视图(语义同 `docker exec`)。但 `setns(CLONE_NEWPID)` 只对调用进程**之后 fork
+**加入应用的命名空间与 cgroup**。命令加入 primary 实际所在的 mount 和 PID
+namespace，使 `ps`、`/proc/<pid>` 与按 PID 发信号对应它的进程树和文件系统视图
+（语义同 `docker exec`）。命令继承内层 cgroup namespace，并直接出生在内层持有的
+最终 cgroup target；即使 primary 后来将自身移到用户创建的组，也不改变该放置规则。
+但 `setns(CLONE_NEWPID)` 只对调用进程**之后 fork
 的子进程**生效、`setns(CLONE_NEWNS)` 是**线程级**——在长寿、多线程的 sandbox-init
 进程里直接 setns 既不安全也会污染自身。因此内层 sandbox-init 先用 pinned target cgroup fd
 对 `exec-join` 做 `clone3(CLONE_INTO_CGROUP)`,注册 pid 后才通过内部握手放行;helper
-加入 pinned cgroup namespace，并为其未来 child 选择 primary PID namespace。该 child
+保留继承的 cgroup namespace，并为其未来 child 选择 primary PID namespace。该 child
 re-exec 为 `exec-child-joined`，先进入 primary mount namespace，沿用已有 `/proc`
 与 scoped cgroup2，再解析镜像用户并 final exec。Private PID 模式需要两个 helper：
 若 `exec-join` 先进入 primary mount namespace，该 `/proc` 将看不见它，无法再通过
