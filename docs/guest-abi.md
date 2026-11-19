@@ -1107,6 +1107,16 @@ the sandbox. Primary exit follows its own restart policy ([Phase 3: supervisor](
 The sole reaper routes non-primary child exits to their exec session rather
 than treating them as primary exit.
 
+Exec output has no fixed drain deadline: normal MUX backpressure must clear and
+every enabled output stream must reach EOF before the command status is sent.
+If a descendant inherits stdout, stderr or a PTY slave, the session stays open
+until that writer closes or the client cancels. An output read, transport write
+or EOF-send failure aborts the session without sending `EXIT_STATUS`.
+Cancellation, disconnection and quiesce close the session and local stdio ends,
+then join the input and output pumps before releasing the admitted exec session.
+This exec contract does not change the bounded drain used for primary restart
+or terminal primary exit.
+
 **Capture interaction:** before setup `exec-child-joined` sets a parent-death
 signal. If dropping credentials can clear it, it resets the signal afterward
 and uses a nonblocking EOF check on its private handshake socket to ensure the

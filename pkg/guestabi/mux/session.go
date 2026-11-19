@@ -176,11 +176,13 @@ func (s *Session) ExitStatus() (code int, ok bool) {
 
 // ExitReceived returns a channel closed when a FrameExitStatus has been
 // received. exec uses this to distinguish normal command completion from a
-// lost connection: the guest sends FrameExitStatus after all stdout/stderr
-// EOFs, so observing it means output is fully delivered. The host still lets
-// this Session finish the following MUX_CLOSE response before returning; that
-// is a local protocol barrier and does not depend on an underlying peer close
-// propagating through CH's hybrid-vsock proxy.
+// lost connection. The exec protocol orders FrameExitStatus after all output
+// stream EOFs; receiving it does not mean the host's local sinks have finished.
+// Before reporting success, the host must drain its output pumps and check
+// copy, sink-close and session errors. It also lets this Session finish the
+// following MUX_CLOSE response before returning; that is a local protocol
+// barrier and does not depend on an underlying peer close propagating through
+// CH's hybrid-vsock proxy.
 func (s *Session) ExitReceived() <-chan struct{} { return s.exitCh }
 
 // PeerClosed returns a channel closed when the peer sent MUX_CLOSE
