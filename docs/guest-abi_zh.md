@@ -389,7 +389,7 @@ overlay 数据盘 N: erofs ro → /sysdisks/disk-N-lower;ext4 rw,discard → /sy
 
 同一设备序号可以出现在多条映射中。`subpath` 是盘根内的相对目录，空串表示整盘根，旧制品也可能编码为 `.`。同一 slot 投影的源目录必须互不重叠。Guest 在安装前解析目标别名，逐对检查 slot 目标和其他有效挂载。宿主通过 `disk_slot_declared` 标记 slot 投影，包括在冷 Sandbox 制品中已绑定的 slot。`disk_slot` 仅对未绑定盘位请求 autofs，也用于识别旧宿主传来的空盘位。缺少的源目录在私有写层创建；源是符号链接、非目录或子挂载时访问失败。使用子目录或重复设备序号前，宿主检查 `runtime_ready` Hello 的 `disk_mount_projection_v1` 能力。
 
-单设备 `disk_slot` 在每个目标安装标准 autofs v5 直接触发点。Hello 中的 `disk_slot_v1` 表示内核提供 autofs。目录访问会打开块设备并尝试挂载。如果 VMM 不发送容量变更通知，动态盘位还需要 [Guest 内核在访问时刷新容量](vmlinux_zh.md#disk-slot-kernel)，才能挂载。空盘位使本次访问失败，并保留触发点。接入介质后首次成功访问挂载文件系统、投影对应子目录并继续查找。同盘各目标共用一个文件系统。应用 cgroup 无法直接打开盘位的块设备及别名。内存快照保存 autofs 句柄与已挂载的投影，Host 在恢复 Guest 前接回对应的盘内容。
+单设备 `disk_slot` 在每个目标安装标准 autofs v5 直接触发点。Hello 中的 `disk_slot_v1` 表示内核提供 autofs。目录访问会打开块设备并尝试挂载。如果 VMM 不发送容量变更通知，动态盘位还需要 [Guest 内核在访问时刷新容量](vmlinux_zh.md)，才能挂载。空盘位使本次访问失败，并保留触发点。接入介质后首次成功访问挂载文件系统、投影对应子目录并继续查找。同盘各目标共用一个文件系统。应用 cgroup 无法直接打开盘位的块设备及别名。内存快照保存 autofs 句柄与已挂载的投影，Host 在恢复 Guest 前接回对应的盘内容。
 
 `/sysdisks` 子树 switch-root 后不可见,但被 bind(及 overlayfs 对 lower/upper 的引用)持活——与
 root overlay 的 `/overlay/lower+upper` 隐藏后仍活、`/opt/sandbox-runtime` bind 同一机制。**恢复**时
