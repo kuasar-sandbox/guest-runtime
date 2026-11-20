@@ -180,6 +180,9 @@ type execBridge struct {
 	stdoutR   *os.File
 	stderrR   *os.File
 	wg        sync.WaitGroup // guest→host pumps (the ones that EOF the stream)
+	inputWG   sync.WaitGroup
+	errMu     sync.Mutex
+	outputErr error
 }
 
 func (b *execBridge) onSetWinsize(cols, rows uint16) {
@@ -195,17 +198,32 @@ func (b *execBridge) pump(sess *mux.Session) {
 	guestToHost := func(id uint8, src *os.File) {
 		defer b.wg.Done()
 		st := sess.Stream(id)
-		_, _ = io.Copy(st, src)
-		_ = st.CloseWrite()
+		var reader io.Reader = src
+		if id == mux.StreamPTY {
+			reader = execPTYReader{src}
+		}
+		if _, err := io.Copy(st, reader); err != nil {
+			b.failOutput(sess, fmt.Errorf("exec: output stream %d: %w", id, err))
+			return
+		}
+		if err := st.CloseWrite(); err != nil {
+			b.failOutput(sess, fmt.Errorf("exec: output stream %d EOF: %w", id, err))
+		}
 	}
 	if b.tty {
 		b.wg.Add(1)
 		go guestToHost(mux.StreamPTY, b.ptyMaster)
-		go func() { _, _ = io.Copy(b.ptyMaster, sess.Stream(mux.StreamPTY)) }()
+		b.inputWG.Add(1)
+		go func() {
+			defer b.inputWG.Done()
+			_, _ = io.Copy(b.ptyMaster, sess.Stream(mux.StreamPTY))
+		}()
 		return
 	}
 	if b.stdinW != nil {
+		b.inputWG.Add(1)
 		go func() {
+			defer b.inputWG.Done()
 			_, _ = io.Copy(b.stdinW, sess.Stream(mux.StreamStdin))
 			_ = b.stdinW.Close()
 		}()
@@ -220,15 +238,59 @@ func (b *execBridge) pump(sess *mux.Session) {
 	}
 }
 
-// drain waits (bounded) for the guest→host pumps to flush the child's
-// final output, then closes the sandbox-init-held fds.
-func (b *execBridge) drain() {
+// Linux PTY masters report EIO when the last slave closes. Normalize only
+// that read-side condition; a MUX write failure must remain an output error.
+type execPTYReader struct{ file *os.File }
+
+func (r execPTYReader) Read(p []byte) (int, error) {
+	n, err := r.file.Read(p)
+	if errors.Is(err, syscall.EIO) {
+		err = io.EOF
+	}
+	return n, err
+}
+
+func (b *execBridge) failOutput(sess *mux.Session, err error) {
+	b.errMu.Lock()
+	if b.outputErr == nil {
+		b.outputErr = err
+	}
+	b.errMu.Unlock()
+	// Wake the session owner even if the command itself has not exited yet.
+	_ = sess.Close()
+}
+
+func (b *execBridge) outputError() error {
+	b.errMu.Lock()
+	defer b.errMu.Unlock()
+	return b.outputErr
+}
+
+// drain preserves normal output backpressure through actual stream EOFs.
+// Descendants holding a writer keep the exec open until EOF or cancellation.
+// A disconnected/cancelled session closes the local fds to interrupt blocked
+// reads and joins the pumps before the session can leave the capture barrier.
+func (b *execBridge) drain(sess *mux.Session) error {
+	defer b.closeStdio()
 	done := make(chan struct{})
 	go func() { b.wg.Wait(); close(done) }()
 	select {
 	case <-done:
-	case <-time.After(2 * time.Second):
+		return b.outputError()
+	case <-sess.Done():
+		b.closeStdio()
+		<-done
+		if err := b.outputError(); err != nil {
+			return err
+		}
+		if err := sess.Err(); err != nil {
+			return err
+		}
+		return mux.ErrClosed
 	}
+}
+
+func (b *execBridge) closeStdio() {
 	if b.ptyMaster != nil {
 		_ = b.ptyMaster.Close()
 	}
@@ -241,6 +303,13 @@ func (b *execBridge) drain() {
 	if b.stderrR != nil {
 		_ = b.stderrR.Close()
 	}
+}
+
+func (b *execBridge) abort(sess *mux.Session) {
+	_ = sess.Close()
+	b.closeStdio()
+	b.wg.Wait()
+	b.inputWG.Wait()
 }
 
 // runExecSession services one proto.TypeExec reverse-channel conn end
@@ -297,7 +366,7 @@ func runExecSession(c *vsockConn, req *proto.Message, sup *supervisorState) {
 			// the sole SIGCHLD reaper to consume the failed setup attempt.
 			<-waitCh
 		}
-		eb.drain()
+		eb.closeStdio()
 		fail("exec: fork: " + err.Error())
 		return
 	}
@@ -307,7 +376,7 @@ func runExecSession(c *vsockConn, req *proto.Message, sup *supervisorState) {
 		logf("exec: write exec_ack pid=%d: %v", pid, err)
 		_ = syscall.Kill(pid, syscall.SIGKILL)
 		<-waitCh
-		eb.drain()
+		eb.closeStdio()
 		return
 	}
 
@@ -327,11 +396,21 @@ func runExecSession(c *vsockConn, req *proto.Message, sup *supervisorState) {
 	}
 
 	code := exitCodeFromStatus(st)
-	eb.drain() // flush + close child ends; guest→host streams EOF
-	if err := finishExecMux(sess, code, muxCloseTimeout); err != nil {
+	if err := finishExecSession(sess, eb, code); err != nil {
 		logf("exec: finish MUX pid=%d: %v", pid, err)
 	}
 	logf("exec: session done pid=%d code=%d", pid, code)
+}
+
+// A command status is valid only after every output pump completed its EOF.
+// A short copy or a cancelled drain aborts the session without reporting that
+// the command's output was delivered successfully.
+func finishExecSession(sess *mux.Session, bridge *execBridge, code int) error {
+	defer bridge.abort(sess)
+	if err := bridge.drain(sess); err != nil {
+		return err
+	}
+	return finishExecMux(sess, code, muxCloseTimeout)
 }
 
 // finishExecMux sends the status before MUX_CLOSE and waits for its ACK.

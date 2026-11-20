@@ -872,6 +872,14 @@ pty**,**再发 `EXIT_STATUS`**(退出码;被信号杀为 128+signo),**再**走 [
 ([阶段 3:supervisor](#supervision));supervisor 的子进程回收器把"非应用子进程"的退出态路由给对应 exec 会话,
 不误判为应用退出。
 
+Exec 输出没有固定的排空时限：必须等正常 MUX 背压解除，且所有已启用输出流
+都到达 EOF，才能发送命令退出状态。如果后代继承了 stdout、stderr 或 PTY slave，
+会话保持打开，直到该 writer 关闭或客户端取消。输出读取、传输写入或 EOF 帧发送
+失败时，中止会话，不发送 `EXIT_STATUS`。
+取消、断连和 quiesce 会关闭会话及本地 stdio 端，并在释放已准入的 exec 会话前
+join 输入、输出 pump。该 exec 合同不改变 primary 原地重启或最终退出时的有界
+排空策略。
+
 **与 snapshot 的关系**。`exec-child-joined` 在 setup 前设置父死信号;降权可能清除此信号时,
 它在降权后重设,并通过私有握手 socket 的无阻塞 EOF 检查确认原 `exec-join` 仍存活,
 之后才 final exec。因此 `exec-join` 被杀会一并带走那条命令。会话
