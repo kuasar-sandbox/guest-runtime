@@ -480,22 +480,10 @@ func handleReverseConnShutdown(c *vsockConn, execution executionControl, shutdow
 			return false
 		}
 		logf("reverse-channel: attach epoch=%d — re-establishing stdio MUX", req.Epoch)
-		// attach itself is only MUX-transport reconnect — NOT
-		// "post-snapshot resume" (it also serves plain live-VM MUX
-		// breaks where nothing was ever quiesced). Thaw belongs to the
-		// quiesce lifecycle and is state-driven: thaw iff the app is
-		// still frozen, which only holds for the resume_after=true path
-		// (VM resumed in place; this attach is just its first
-		// post-resume contact). Plain reconnect → not frozen → skipped
-		// (docs/guest-abi.md#management-operations, docs/runtime.md#capture-barrier resume recovery).
-		thaw := func() error {
-			if frozen, err := cgroupFrozen(); err != nil {
-				return fmt.Errorf("cgroupFrozen: %w", err)
-			} else if frozen {
-				return cgroupThaw()
-			}
-			return nil
-		}
+		// Clear the platform freeze request even if freeze confirmation failed:
+		// cgroup.events:frozen=0 does not imply cgroup.freeze=0. This is
+		// idempotent for an ordinary live MUX reconnect as well.
+		thaw := cgroupThaw
 		// Quiesce drains and pauses guest→host memory observations before the
 		// VM freeze. Attach resumes the same live epoch; a true restore instead
 		// advances the epoch in the TypeRestore branch above.
@@ -509,6 +497,12 @@ func handleReverseConnShutdown(c *vsockConn, execution executionControl, shutdow
 	case proto.TypeQuiesce:
 		if execution == nil {
 			_ = proto.WriteMessage(c, &proto.Message{Type: proto.TypeError, Msg: "workload not launched"})
+			return false
+		}
+		// A prior observed storage failure cannot be cleared by retrying a
+		// syscall. Reject before changing admission or contacting the inner.
+		if err := guestFilesystems.checkCaptureStart(); err != nil {
+			_ = proto.WriteMessage(c, &proto.Message{Type: proto.TypeError, Msg: err.Error()})
 			return false
 		}
 		usageCtx, usageCancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -535,7 +529,15 @@ func handleReverseConnShutdown(c *vsockConn, execution executionControl, shutdow
 			logf("reverse-channel: quiesce freeze failed, NOT sending quiesced: %v", err)
 			return false
 		}
-		dropCachesResult := runQuiesce(req.SkipDropCaches)
+		// User tasks are stopped; now drain outer autofs assembly/projection
+		// writes and keep their admission closed until attach/restore.
+		guestSlots.pauseMounts()
+		dropCachesResult, err := runQuiesce(req.SkipDropCaches)
+		if err != nil {
+			logf("reverse-channel: quiesce storage failed: %v", err)
+			_ = proto.WriteMessage(c, &proto.Message{Type: proto.TypeError, Msg: err.Error()})
+			return false
+		}
 		// This management connection is the final host→guest vsock flow before
 		// /vm.pause. Arm the same bounded linger as MUX/forward connections;
 		// the host waits for EOF after quiesced, so Close completes a transport
@@ -585,6 +587,7 @@ func finishReattach(c *vsockConn, execution executionControl, epoch uint32, newH
 	// Thaw only writes the freezer control file; it does not wait for the
 	// app or its output. Console pumps can stay parked until the ACK has
 	// been written and this connection can safely carry MUX frames.
+	guestSlots.resumeMounts()
 	if thaw != nil {
 		if err := thaw(); err != nil {
 			return false, fmt.Errorf("%s thaw: %w", operation, err)

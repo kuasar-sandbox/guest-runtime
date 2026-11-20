@@ -23,8 +23,9 @@ func TestRunQuiesceWith(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			synced := false
 			wrote := false
-			got := runQuiesceWith(tt.skip, func() {
+			got, err := runQuiesceWith(tt.skip, func() error {
 				synced = true
+				return nil
 			}, func(path string, data []byte) error {
 				wrote = true
 				if path != "/proc/sys/vm/drop_caches" || string(data) != "3\n" {
@@ -32,6 +33,9 @@ func TestRunQuiesceWith(t *testing.T) {
 				}
 				return tt.writeErr
 			})
+			if err != nil {
+				t.Fatal(err)
+			}
 			if !synced {
 				t.Fatal("sync must run for every cache policy")
 			}

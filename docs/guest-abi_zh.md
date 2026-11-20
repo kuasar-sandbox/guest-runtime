@@ -219,8 +219,8 @@ FileSpec 还支持 read_only，省略时 bind 可写。Tmpfs 注入避免直接�
   CH 已运行时，lifecycle 做 memory.high 准备后尝试 CH API 的 vmm.shutdown，有需要时退回向 CH 发 SIGTERM，
   请求后 5 s 未退升级 SIGKILL，第二次信号立即升级。这不保证向 guest PID 1 送达 SIGTERM 或完成 app stop grace。
   见 [lifecycle shutdown](https://github.com/kuasar-sandbox/sandboxer/blob/main/pkg/sandbox/lifecycle.go) 与 [run signal handling](https://github.com/kuasar-sandbox/sandboxer/blob/main/pkg/sandbox/run_signal.go)。
-- **外层 Guest PID 1 收到 SIGTERM/SIGINT 时**，先在必要时解冻，再请求内层停机；
-  内层尚未就绪时终止启动。已有 primary 时，内层禁止 restart，转发
+- **外层 Guest PID 1 收到 SIGTERM/SIGINT 时**，先重新开放外层挂载门禁、撤销平台冻结请求，
+  再请求内层停机；内层尚未就绪时终止启动。已有 primary 时，内层禁止 restart，转发
   `launch.stop_signal`（默认 SIGTERM），等待 `stop_grace_sec`（默认 10 s，来自
   Host `launch.stop_grace_period`），超时终止 primary。内层自身收到这两个信号时
   也使用同一 primary 停止路径，最终由外层 poweroff。这些配置约束 Guest 路径，
@@ -722,9 +722,10 @@ Quiesce 在 Host `/vm.pause` 前建立一致的 Guest 内存/文件系统捕获�
    Host memory barrier 前暂停。已准入的 ping 必须走到 Guest EOF 传输屏障；已排空
    的失败探测仍执行健康/致命策略，不能代替明确的 `quiesced`。即使普通 ping 等待
    无界，此排空仍有独立、有界的 quiesce 预算。
-2. **外层暂停原始 usage 并请求内层排空。** 推进 usage 代次，关闭并 join 旧连接；
-   阻塞的 source read 保留原槽位，不持锁等待 Host。外层先关闭执行准入，再发送私有
-   quiesce 请求。
+2. **外层检查存储状态、暂停原始 usage 并请求内层排空。** 如果此前观察到管理文件系统
+   的同步错误，则在改变 usage 准入或联系内层前拒绝请求。否则推进 usage 代次，
+   关闭并 join 旧连接；阻塞的 source read 保留原槽位，不持锁等待 Host。外层先关闭
+   执行准入，再发送私有 quiesce 请求。
 3. **内层完成执行清理。** 关闭 primary restart 与 plugin 启动准入，join 已准入的
    启动；拒绝新执行会话；杀死在途 exec helper，join 完整 fork/MUX/socket 清理。
    关闭转发目标和反向连接，清空缓存 accept listener，唤醒挂起的 `Accept`。
@@ -735,9 +736,12 @@ Quiesce 在 Host `/vm.pause` 前建立一致的 Guest 内存/文件系统捕获�
    在途交换。外层写 `/sys/fs/cgroup/sandbox/cgroup.freeze=1`，等待 `cgroup.events`
    出现 `frozen 1`。范围包括内层 PID 1、管理的进程和用户创建的后代。此后不再等待
    内层 handler，也不调用应用专有 freeze 接口。
-5. **外层准备文件系统。** 确认 freeze 后调用 `sync(2)`，防止 sync 后用户进程再次
-   产生脏页；除非 `skip_drop_caches=true`，随后向 `/proc/sys/vm/drop_caches` 写 `3`。
-   这是 Guest 文件系统准备，不定义 Host 物理磁盘持久性。
+5. **外层排空挂载操作并准备管理的文件系统。** 确认 freeze 后关闭外层 autofs 挂载门禁，
+   等待已准入的组装、投影操作及其 `READY`/`FAIL` 回复全部完成。等待新 autofs packet
+   的读取不持有此门禁。随后对每个已固定的管理可写文件系统调用 `syncfs(2)`，任意
+   错误均使捕获失败。只有全部同步成功且 `skip_drop_caches` 不为 true 时，才向
+   `/proc/sys/vm/drop_caches` 写 `3`。挂载门禁跨捕获保持关闭，直到 attach、restore
+   或正常 Guest 停机重新开放。
 6. **外层确认并关连接。** 发送 `quiesced{drop_caches_result}`，然后以有界 linger
    关闭该管理连接。Host 同时要求明确响应、控制连接 EOF 和自身已准入 exec/forward
    handler 排空完成，才能 `/vm.pause` 并捕获。
@@ -747,22 +751,47 @@ Quiesce 在 Host `/vm.pause` 前建立一致的 Guest 内存/文件系统捕获�
 Host vsock 会话。MUX/forward registry、有界 close 和 CH restore transport reset
 共同建立外部会话边界；一次 SO_LINGER 返回不证明全部内核 socket 状态都已消失。
 
-**缓存策略：** 先 sync，再按需 drop，因为只有干净缓存可以丢弃。丢弃 page/dentry/inode
-cache 可减少捕获的驻留内存，代价是恢复后的冷读。默认跳过写入，显式
-`--drop-caches=true` 才请求 drop；跳过时仍执行 freeze 和 sync。
+**文件系统范围：** 外层在根盘设置和数据盘组装时、应用获得访问前，为实际可写 ext4
+登记持久、可读的目录 FD。Overlay 盘固定其 ext4 upper，而非 overlay 视图；单盘则
+直接固定该 ext4。同一文件系统的多个投影按设备身份去重，共用最初的 FD。尚未触发的
+slot 没有已组装文件系统需要同步。登记检查文件系统类型并拒绝替换身份；组装失败会
+尝试卸载已完成的部分挂载，以便后续重试，并记录清理失败。FD 跨捕获、重试和内存恢复保持打开，同时
+保留文件系统身份与写回错误游标，即使应用后来用另一挂载覆盖路径也不改变同步对象。
+Quiesce 不重新打开应用可见路径，也不对 `O_PATH` 描述符调用 `syncfs`。
+
+内存 Snapshot S 关联的 Sandbox E 可以独立用于冷启动或导出，因此 S 保存了脏页并不能
+取消管理文件系统的写回要求。本序列不增加 `FIFREEZE`/`FITHAW` 或通用的应用异步 I/O
+全量排空机制，不刷新应用用户态缓冲，
+不建立应用事务一致性，不撤销外部凭据或会话，也不保证 Host 物理磁盘持久性。Host VMM、
+后端及 E/S 提交屏障仍有独立职责。外部 NFS/FUSE 挂载及应用创建的 loop/device-mapper
+文件系统不加入登记表；其阻塞 I/O 仍可能阻止 cgroup freeze，可选的全局缓存回收仍可能
+等待外部文件系统，因此定向同步不保证有界暂停时间。
+
+**缓存策略：** 先对管理文件系统执行 `syncfs`，再按需 drop，因为只有干净缓存可以丢弃。
+丢弃 page/dentry/inode cache 可减少捕获的驻留内存，代价是恢复后的冷读。默认跳过写入，显式
+`--drop-caches=true` 才请求 drop；跳过时仍执行 freeze 和管理文件系统的 `syncfs`。
 `quiesced.drop_caches_result` 返回 `skipped`、`succeeded` 或 `failed`。缺失代表旧
 Guest 的结果未知；若 Host 请求 skip，会告警并继续，因为旧 Guest 可能仍按原协议
 drop。该结果不保证缓存不会被内存压力或 balloon 回收。
 
-**错误与保证：** 执行/报告排空失败或 freeze 未确认时不发 `quiesced`。已发出的私有
-请求若无法确定结果，会关闭通路并终止 Guest，避免迟到会话操作穿过后续生命周期边界。
-Drop-caches open/write 失败只记录日志并返回 `failed`，不使捕获失败；本路径的
-`sync(2)` 没有返回错误值。Primary MUX 有界等待 ACK，失败硬关，forward 在 quiesce
-预算内并行关闭。这些措施不提供无限等待的 socket-removal 保证，CH 在恢复时处理
-残余连接状态（[MUX 优雅关闭握手](#mux-close)）。
+**错误与保证：** 执行/报告排空失败、freeze 未确认或管理文件系统同步失败时，均不发
+`quiesced`。同步错误以 `error{msg}` 返回并跳过缓存丢弃。首次观察到的同步错误在本代
+Guest 中持续保留：后续系统调用成功不能证明丢失的写入已恢复，因此后续捕获在暂停
+usage 或联系内层前就失败，包括同 VM reattach 成功之后。登记表及每个打开文件描述
+对应的错误游标始终串行访问，直到实际同步系统调用返回。外层在此期间也一直持有
+生命周期锁；Host 超时不会取消内核 I/O，也不允许恢复 handler 在同步尚未返回时解冻用户。
+
+已发出的私有请求若无法确定结果，会关闭通路并终止 Guest，避免迟到会话操作穿过后续
+生命周期边界。Drop-caches open/write 失败只记录日志并返回 `failed`，不使捕获失败。
+Primary MUX 有界等待 ACK，失败硬关，forward 在 quiesce 预算内并行关闭。这些措施不
+提供无限等待的 socket-removal 保证，CH 在恢复时处理残余连接状态
+（[MUX 优雅关闭握手](#mux-close)）。
 
 缺少 `quiesced` 或 Host EOF/handler 屏障失败时，捕获失败。Host 尝试同 VM 的
-resume/reattach recovery，成功后才继续运行，否则终止失败恢复。见[失败语义](#failures)
+resume/reattach recovery，成功后才继续运行，否则终止失败恢复。恢复先重新开放外层
+挂载门禁，再无条件写 `cgroup.freeze=0`：尚未确认的冻结可能保持 `cgroup.freeze=1`，
+而 `cgroup.events` 仍报告 `frozen 0`。正常 Guest 停机也采用先开挂载门禁再 thaw 的顺序，
+使停机 handler 可以访问待触发 slot。恢复和停机均不清除已保留的存储错误。见[失败语义](#failures)
 及 [sandbox 生命周期](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/runtime_zh.md)。
 
 **尚未实现的扩展：**
@@ -1029,13 +1058,13 @@ vsock 端口固定 `5000`,**两个方向都复用同一端口号**,身份按方�
 | **冷启动** | guest→host | `hello` → `launch{spec}` → `launch_ack{stdio}` → `ack` | **升级 MUX** | guest 报 ready,host 回 LaunchSpec;guest 准备好 app stdio 后回 launch_ack,该连接成为 MUX |
 | **应用启动通知** | guest→host | `app_started{pid}` → `ack` | 关 | primary 通过 helper 握手并到达启动发布边界；不是 execve 成功或应用健康的独立证明 |
 | **应用退出通知** | guest→host | `app_exited{code, term_signal}` → `ack` | 关 | primary 终态退出；guest 在预算内等 ACK，超时仍 POWER_OFF；host 收到通知后用作退出码 |
-| **关闭请求** | host→guest | `shutdown` → `ack` | 关 | 仅 ACK 写出成功才触发终止。内层尚未就绪时外层终止启动；否则先在必要时 thaw，再请求内层按 primary 的 stop signal/grace 停机，最终外层 poweroff。ACK 不表示停机已完成。 |
+| **关闭请求** | host→guest | `shutdown` → `ack` | 关 | 仅 ACK 写出成功才触发终止。内层尚未就绪时外层终止启动；否则先重新开放外层挂载门禁并撤销平台冻结请求，再请求内层按 primary 的 stop signal/grace 停机，最终外层 poweroff。ACK 不表示停机已完成。 |
 | **健康探测** | host→guest | `ping{id, t_send_ns}` → `pong{id, t_send_ns}` | 关 | host 计 RTT / 超时 / 失败数([ping 健康探测](#health)) |
 | **mem 报告** | guest→host | `mem_report{mem_report:{epoch,seq,mem_*}}` → `mem_report_ack` | 关 | guest observation;host sandbox-local controller 验证 epoch/seq 后结合 CH `vm.info` |
 | **用量观测** | host→guest | `usage_request{usage_request}` → `usage_response{usage_response}` | 复用 | 只返回新的原始内存/文件系统观测, Host 唯一归并 ([原始 Usage 观测](#usage-observations)) |
 | **快照前** | host→guest | `quiesce{skip_drop_caches}` → `quiesced{drop_caches_result}` | 关 | 内层排空会话/restart，然后外层排空报告、递归冻结 `/sandbox` 并准备文件系统（[quiesce 处理](#quiesce)）；Host 还须控制连接 EOF 和自身 handler 屏障才可 pause。 |
-| **恢复后** | host→guest | `restore{epoch, wallclock_ns, network?}` → `restore_ack{epoch,stdio,app_state}` | **升级 MUX** | 快照恢复 vCPU 起跑后 host 通知 guest;guest 先推进 mem-report epoch,完成 thaw 并开放执行 gate 后回 ACK,然后重连 MUX并恢复报告。Host 在 ACK+MUX 前不启用 memory policy。clock/network 更新是 best-effort，失败也可能发 ACK；thaw 失败不发 ACK 且 gate 保持关闭（[时序](#timelines)）。`launch`/files/init/plugin 是 cold-only 配置,恢复时不重放。**RNG 重播种未实现** |
-| **MUX 重连** | host→guest | `attach{epoch}` → `attach_ack{epoch,stdio,app_state}` | **升级 MUX** | 有界尝试关闭/硬丢旧 MUX，接上新连接；guest 仍冻结时先 thaw 再重新开 gate 并发 ACK，涵盖同进程 resume 和失败 capture recovery，未冻结则跳过。Attach 是 stdio 传输替换，与 VM resume 不同；冻结查询或 thaw 失败时不发 ACK，gate 保持关闭。 |
+| **恢复后** | host→guest | `restore{epoch, wallclock_ns, network?}` → `restore_ack{epoch,stdio,app_state}` | **升级 MUX** | 快照恢复 vCPU 起跑后 host 通知 guest;guest 先推进 mem-report epoch，重新开放外层挂载门禁、撤销平台冻结请求并开放执行 gate 后回 ACK，然后重连 MUX 并恢复报告。Host 在 ACK+MUX 前不启用 memory policy。clock/network 更新是 best-effort，失败也可能发 ACK；thaw 失败不发 ACK，也不开放已暂停的执行 gate（[时序](#timelines)）。`launch`/files/init/plugin 是 cold-only 配置,恢复时不重放。**RNG 重播种未实现** |
+| **MUX 重连** | host→guest | `attach{epoch}` → `attach_ack{epoch,stdio,app_state}` | **升级 MUX** | 重新开放外层挂载门禁，无条件撤销平台冻结请求，包括尚未确认的冻结。有界尝试关闭/硬丢旧 MUX，开放执行 gate 后发 ACK，再接上新连接。涵盖同进程 resume 和失败 capture recovery；普通运行中重连时撤销冻结请求也是幂等的。Attach 是 stdio 传输替换，与 VM resume 不同。 |
 | **执行命令** | host→guest | `exec{spec}` → `exec_ack{stdio}` | **升级 MUX(独立会话)** | guest 为这条 `exec` 起一个兄弟进程并准备其 stdio,回 `exec_ack`,该连接成为这次 exec 会话**独立**的 MUX;并发多条互不影响;命令结束 guest 在 MUX 上发 EXIT_STATUS 再走 [MUX 优雅关闭握手](#mux-close) 关闭。详见 [exec 会话(`sandbox-ctl exec`)](#exec-sessions) |
 | **端口转发** | host→guest | `connect{spec}` → `connect_ack` | **升级转发数据通道** | guest 为这条 `connect` 取得 `ConnectSpec.address` 上的目标连接——dial(默认)或 `Accept`(`spec.accept`,accept 模式可无限期阻塞,host 无 deadline park)——回 `connect_ack`,该连接成为这条转发的 fwd 帧数据通道([connect 转发帧子协议(fwd)](#forward-wire)),保留 TCP 半关闭;并发多条互不影响;quiesce 时主动拆除([quiesce 处理](#quiesce))。详见 [connect 端口转发会话(`sandbox-ctl run --connect`)](#forward-sessions) |
 | `error` | 任意 | (终止) | 关 | handler 显式拒绝时的人类可读原因；坏 framing/JSON 也可能直接关连接，不保证总发 error |
@@ -1048,13 +1077,14 @@ Guest 实现了 `shutdown`，但当前 host 生命周期使用[信号处理](#si
 
 当前 guest restore/attach handler 回显 request epoch，并固定发送 `app_state:"running"`。
 Schema 定义了 exited 常量，但 handler 未据实时状态产生 exited，也没有 `exited{code,term_signal}` 结构。
-ACK 在 thaw 成功并开放执行 gate 后发送，但不证明应用健康。Thaw 失败不发 ACK，exec/forward/report 等 gate 保持关闭。ACK 写出失败不会撤销已完成的 thaw 或执行准入，但不会恢复原本暂停的 report stream；host 仍将握手判为失败，并负责重试或终态清理。
+ACK 在 thaw 成功并开放执行 gate 后发送，但不证明应用健康。Thaw 失败不发 ACK，也不开放已暂停的 exec/forward/report gate；外层挂载门禁已经开放。ACK 写出失败不会撤销已完成的 thaw 或执行准入，但不会恢复原本暂停的 report stream；host 仍将握手判为失败，并负责重试或终态清理。
 
-外层先 thaw `/sandbox`，再请求已可运行的内层关闭旧 MUX、开放 exec/forward/plugin/restart
-gate；只有收到内层就绪确认，外层才写 Host ACK，并将连接交给内层承载 MUX。
+外层先重新开放挂载门禁，再撤销 `/sandbox` 上的平台冻结请求，即使此前未确认冻结，
+然后请求已可运行的内层关闭旧 MUX、开放 exec/forward/plugin/restart gate；只有收到
+内层就绪确认，外层才写 Host ACK，并将连接交给内层承载 MUX。
 若在 thaw 之前等待内层就绪，就会等待一个仍被冻结的进程。解冻后的 primary 可能
-因 pump 尚未接通而阻塞输出，但不阻塞就绪 ACK。MUX 帧严格在 ACK 之后，资源报告
-在连接交接后恢复。内层就绪交换失败不发 Host ACK；结果未知的私有请求使 Guest
+因 pump 尚未接通而阻塞输出，但不阻塞就绪 ACK。应用可以在 ACK 前恢复执行。
+MUX 帧严格在 ACK 之后，资源报告在连接交接后恢复。内层就绪交换失败不发 Host ACK；结果未知的私有请求使 Guest
 失败，不允许同一通路继续接纳后续操作。
 
 这一更强的 ACK 屏障要求启动 Runtime 内包含更新后的 guest init。仅更新 host 不会替换已有内存 Snapshot 中的 PID 1。应从使用更新后 Runtime 启动的 guest 捕获替代快照；保留的旧快照仍采用原有 guest 行为，无需格式迁移且仍可读取。
@@ -1089,7 +1119,7 @@ JSON 可读、调试友好，消息量少，无需 protobuf 工具链。
   "code":     0, "term_signal": 0,     // app_exited
   "id":       42,                      // ping/pong: 单调递增,host 分配
   "t_send_ns":1715000000000000000,     // host UnixNano 墙钟值，guest 原样回显；RTT 用 host time.Since
-  "skip_drop_caches": true,            // quiesce: freeze+sync 后保留缓存
+  "skip_drop_caches": true,            // quiesce: freeze+管理文件系统 syncfs 后保留缓存
   "drop_caches_result":"skipped",       // quiesced: skipped/succeeded/failed;缺失为 unknown
   "epoch":    3,                       // restore/attach uint32 request epoch，ACK 回显，非通用去重
   "wallclock_ns":1715000000000000000,  // restore: 尽力更新 CLOCK_REALTIME，失败也可 ACK；attach 不带
@@ -1359,7 +1389,8 @@ sequenceDiagram
     H->>I: MUX_CLOSE_ACK 并关连接
     I->>O: 执行已排空
     O->>O: 排空 mem_report，freeze sandbox，等待 frozen 1
-    O->>O: sync，按需 drop cache
+    O->>O: 排空外层挂载门禁，syncfs 管理文件系统
+    O->>O: 按需 drop cache
     O->>H: quiesced，然后控制连接 EOF
     H->>H: join 已准入 handler，pause 并 snapshot
 ```
@@ -1373,8 +1404,8 @@ CH 保存 `local_port_last`、used ring 中预发布的 `TRANSPORT_RESET` 及 re
 CH 在 Guest 通过 event queue 确认处理 reset 前 gate backend RX，新 REQUEST 等待该门。
 
 Restore 在 thaw 前尽力更新 wall clock、按需替换网络，并推进已暂停的 memory-report
-epoch。Attach 保留 live epoch，只有树仍冻结时才 thaw，覆盖捕获恢复和同 VM resume。
-两者都遵循以下就绪顺序：
+epoch。Attach 保留 live epoch。两者均重新开放外层挂载门禁并无条件撤销平台冻结请求，
+覆盖捕获失败后尚未确认的冻结和同 VM resume。两者都遵循以下就绪顺序：
 
 ```mermaid
 sequenceDiagram
@@ -1382,7 +1413,7 @@ sequenceDiagram
     participant O as 外层 sandbox-init
     participant I as 内层 sandbox-init
     H->>O: restore 或 attach
-    O->>O: 准备观测状态，必要时 thaw sandbox
+    O->>O: 准备观测状态，开放挂载门禁，撤销冻结请求
     O->>I: 恢复执行
     I->>I: 关闭旧 MUX，开放执行 gate
     I->>O: 就绪
@@ -1393,7 +1424,7 @@ sequenceDiagram
     H->>H: 启用 memory policy，重启 ping
 ```
 
-冻结状态查询、thaw 或内层就绪失败均不发 ACK。时钟/网络失败仍只记录日志并尽力继续。
+Thaw 或内层就绪失败均不发 ACK。时钟/网络失败仍只记录日志并尽力继续。
 ACK 确认执行就绪，不证明应用健康，也不等待 primary 消费 stdio。Host SafeTarget
 归一化及观测 epoch 仍在 ACK/MUX 建立后推进，不重放 Launch、files 或 init。
 
@@ -1452,7 +1483,8 @@ RTT 在完整 pong/guest-EOF exchange 后用 host time.Since(tSend) 计算，保
   pump 可等待显式 attach/restore。
 - Primary 终态路径在 POWER_OFF 前尝试 app_exited；通知失败或 ACK 未到不阻止 poweroff。
 - Exec 在 quiesce 中、空 argv 或启动失败时拒绝；会话丢失会杀与 namespace helper 通过父死信号绑定的命令（[exec 会话(`sandbox-ctl exec`)](#exec-sessions)）。
-- Restore clock/network 失败 log 并继续；restore/attach thaw 失败时 gate 保持关闭且不发 ACK（[管理操作集](#management-operations)）。
+- Restore clock/network 失败 log 并继续；restore/attach thaw 失败时不发 ACK，
+  也不开放已暂停的执行/report gate；外层挂载门禁已经开放（[管理操作集](#management-operations)）。
 - 内层意外退出、私有通路断开，或已发私有请求结果无法确认时，Guest 终止，不重放
   操作，也不因内层崩溃虚构 primary 成功退出。明确的操作错误可以只拒绝当前操作，
   继续保留私有通路。
@@ -1484,7 +1516,7 @@ Host 的 timeouts.* 项以 sandbox.yaml 配置为准，文档指明的默认是�
 | app_started | guest dial 后设置 200 ms socket I/O timeout，dial 另有 5 s retry；host 用 timeouts.app_notify | 不是总共 200 ms 的 dial+exchange deadline；raw AF_VSOCK 使用 per-I/O socket timeout |
 | app_exited | 同 app_started | 没有 ACK 仍 POWER_OFF |
 | ping | timeouts.ping 默认不强制，production 200 ms；capture drain 至多 8 s | 普通失败更新统计；capture 超时 cancel/join 并失败；fatal threshold 须有界 |
-| quiesce | 8 s | 依次完成内层 launch/exec/forward/MUX 排空、外层报告排空、递归 freeze、sync 和可选 drop 的协议预算 |
+| quiesce | 8 s | 依次完成内层 launch/exec/forward/MUX 排空、外层报告排空、递归 freeze、外层挂载排空、管理文件系统 `syncfs` 和可选 drop 的协议预算；超时使 Host 等待失败，不会取消阻塞的内核系统调用或释放 Guest 生命周期锁 |
 | restore | timeouts.restore 默认不强制 response deadline | request 前 EOF/reset 可重试至总 deadline 或 context cancel；每次 CONNECT/OK 最多 2 s 或更短的剩余预算；写请求后不重放；demand paging 可延后恢复；之后转 MUX |
 | attach | 5 s | 替换握手，之后转 MUX |
 | exec | 10 s | guest fork/exec 与 PATH 解析后 ACK；只限握手，运行命令前清 deadline |

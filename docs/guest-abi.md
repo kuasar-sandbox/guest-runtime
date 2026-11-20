@@ -281,9 +281,9 @@ them until thaw ([Phase 3: supervisor](#supervision)).
   completion of the app's stop grace. See
   [lifecycle shutdown](https://github.com/kuasar-sandbox/sandboxer/blob/main/pkg/sandbox/lifecycle.go) and
   [run signal handling](https://github.com/kuasar-sandbox/sandboxer/blob/main/pkg/sandbox/run_signal.go).
-- **If outer Guest PID 1 receives SIGTERM/SIGINT**, it requests shutdown of
-  the inner, thawing the tree if needed. Before inner readiness it terminates
-  startup. With a running primary, the inner suppresses restarts, forwards
+- **If outer Guest PID 1 receives SIGTERM/SIGINT**, it reopens the outer mount
+  gate, clears the platform freeze request and requests shutdown of the inner.
+  Before inner readiness it terminates startup. With a running primary, the inner suppresses restarts, forwards
   `launch.stop_signal` (default SIGTERM) and waits `stop_grace_sec` (default
   10 s, from Host `launch.stop_grace_period`), killing the primary on timeout.
   The same primary-stop path applies when the inner itself receives these
@@ -949,10 +949,13 @@ The operation has the following ordering:
    probe still follows its health/fatal policy, and does not replace the
    required `quiesced` response. This drain has its own bounded quiesce budget,
    even when ordinary ping waiting is unbounded.
-2. **Outer pauses raw usage and requests inner drain.** Usage generation
-   advances, and its old connection is closed/joined; blocked source reads
-   retain their original slots without holding locks while waiting on a Host.
-   Outer execution admission closes before the private quiesce request.
+2. **Outer checks storage state, pauses raw usage and requests inner drain.**
+   A previously observed managed-filesystem sync error rejects the request
+   before changing usage admission or contacting the inner. Otherwise usage
+   generation advances, and its old connection is closed/joined; blocked
+   source reads retain their original slots without holding locks while
+   waiting on a Host. Outer execution admission closes before the private
+   quiesce request.
 3. **Inner completes execution cleanup.** It closes primary-restart and plugin
    launch admission and joins admitted launches; rejects new execution
    sessions; kills in-flight exec helpers and joins their full fork/MUX/socket
@@ -968,10 +971,15 @@ The operation has the following ordering:
    for `cgroup.events` to report `frozen 1`. This includes the inner PID 1,
    managed processes and user-created descendants. No step after this point
    waits for an inner handler or an application-specific freeze endpoint.
-5. **Outer prepares filesystems.** It calls `sync(2)` after confirmed freeze,
-   preventing new user dirty pages after sync. Unless `skip_drop_caches` is
-   true, it writes `3` to `/proc/sys/vm/drop_caches`. This is Guest filesystem
-   preparation; it does not define Host physical-disk durability.
+5. **Outer drains mount work and prepares managed filesystems.** After
+   confirmed freeze, it closes the outer autofs mount gate and waits for
+   admitted assembly/projection operations and their `READY`/`FAIL` replies
+   to finish. Waiting for a new autofs packet happens outside this gate.
+   It then calls `syncfs(2)` on each pinned managed writable filesystem,
+   failing capture on any error. Only after all sync calls succeed, and
+   unless `skip_drop_caches` is true, it writes `3` to
+   `/proc/sys/vm/drop_caches`. The mount gate remains closed across capture
+   until attach, restore or normal Guest shutdown reopens it.
 6. **Outer confirms and closes.** It sends
    `quiesced{drop_caches_result}`, then closes that management connection with
    bounded linger. The Host requires this response, control EOF and its own
@@ -985,30 +993,71 @@ and CH's restore transport reset jointly establish the external-session
 boundary; a single SO_LINGER return does not prove that all kernel socket
 state has disappeared.
 
-**Cache policy:** sync precedes optional drop because only clean cache is
-discarded. Dropping page/dentry/inode cache can reduce captured resident memory
-at the cost of cold reads after restore. The default skips the write; use
-`--drop-caches=true` to request it. Freeze and sync still occur when cache
-dropping is skipped. `quiesced.drop_caches_result` reports `skipped`,
+**Filesystem scope:** the outer registers a persistent, readable directory
+FD for the actual writable ext4 at root setup and data-disk assembly, before
+application access. For overlay disks it pins the ext4 upper, not the overlay
+view; for a single disk it pins that ext4 directly. Multiple projections of
+one filesystem share its original FD, deduplicated by device identity.
+Untriggered slots have no assembled filesystem to sync. Registration checks
+filesystem type and rejects identity replacement; a failed assembly attempts
+to unmount its partial mounts before a later retry and logs cleanup failures.
+The FD remains open across captures,
+retries and memory restore, retaining both the selected filesystem and its
+writeback-error cursor even if an application later covers the path with
+another mount. Quiesce does not reopen application-visible paths or use
+`O_PATH` descriptors for `syncfs`.
+
+The memory Snapshot S has an associated Sandbox E whose disks can be consumed
+independently for cold start or export. Preserving dirty pages in S therefore
+does not remove the managed-filesystem writeback requirement. This sequence
+does not add `FIFREEZE`/`FITHAW` or a generic drain of application asynchronous
+I/O, flush application userspace buffers, establish application transaction
+consistency, revoke external credentials or sessions,
+or guarantee Host physical-disk durability. Host VMM/backend and E/S commit
+barriers remain separate. External NFS/FUSE mounts and application-created
+loop/device-mapper filesystems are not added to the registry. Their blocked
+I/O can still prevent cgroup freeze, and optional global cache reclaim can
+still wait on external filesystems; targeted sync is not a bounded-pause
+guarantee.
+
+**Cache policy:** managed `syncfs` precedes optional drop because only clean
+cache is discarded. Dropping page/dentry/inode cache can reduce captured resident
+memory at the cost of cold reads after restore. The default skips the write;
+use `--drop-caches=true` to request it. Freeze and managed `syncfs` still occur
+when cache dropping is skipped. `quiesced.drop_caches_result` reports `skipped`,
 `succeeded` or `failed`. Its absence means an older Guest with an unknown
 result; if skipping was requested, the Host warns and continues because an
 older Guest may have dropped caches under its original protocol. The result
 does not guarantee retention against memory pressure or balloon reclaim.
 
-**Errors and guarantees:** execution/report drain or freeze-confirmation
-failure prevents `quiesced`. An already-sent private request whose result
-cannot be established closes that channel and terminates the Guest, avoiding
-late session operations after a later lifecycle transition. Cache-drop
-open/write failure is logged and reported as `failed`, without failing capture;
-`sync(2)` has no returned error value in this path. Primary MUX close has a
-bounded ACK wait and hard-close fallback, and forwarding closes concurrently
-within the quiesce budget. These are not unbounded socket-removal guarantees;
-CH handles residual connected-socket state on restore
+**Errors and guarantees:** execution/report drain, freeze-confirmation or
+managed-filesystem sync failure prevents `quiesced`. A sync error is reported
+as `error{msg}` and skips cache dropping. The first observed sync error is
+retained for this Guest generation: a later successful syscall cannot prove
+that a lost write recovered, so later capture attempts fail before pausing
+usage or contacting the inner, including after successful same-VM reattach.
+The registry and each open-file-description's error cursor remain serialized
+until the actual synchronous syscall returns. The outer also retains its
+lifecycle lock throughout; a Host timeout does not cancel kernel I/O or permit
+a recovery handler to thaw users while sync is still running.
+
+An already-sent private request whose result cannot be established closes that
+channel and terminates the Guest, avoiding late session operations after a
+later lifecycle transition. Cache-drop open/write failure is logged and
+reported as `failed`, without failing capture. Primary MUX close has a bounded
+ACK wait and hard-close fallback, and forwarding closes concurrently within
+the quiesce budget. These are not unbounded socket-removal guarantees; CH
+handles residual connected-socket state on restore
 ([MUX graceful-close handshake](#mux-close)).
 
 Without `quiesced`, or if the Host's EOF/handler barriers fail, capture fails.
 The Host attempts same-VM resume/reattach recovery and continues only if it
-succeeds; otherwise it terminates the failed recovery. See
+succeeds; otherwise it terminates the failed recovery. Recovery first reopens
+the outer mount gate, then unconditionally writes `cgroup.freeze=0`: an
+unconfirmed freeze can leave `cgroup.freeze=1` while `cgroup.events` still
+reports `frozen 0`. Normal Guest shutdown uses the same mount-before-thaw
+ordering so stop handlers can access pending slots. Neither recovery nor
+shutdown clears a retained storage error. See
 [Failure semantics](#failures) and the
 [sandbox lifecycle](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/runtime.md).
 
@@ -1313,13 +1362,13 @@ The last column describes whether the connection closes or upgrades.
 | Cold start | guest→host | `hello` → `launch{spec}` → `launch_ack{stdio}` → `ack` | MUX | Guest announces readiness; host supplies LaunchSpec; guest applies it and prepares stdio before launch_ack. |
 | App start notification | guest→host | `app_started{pid}` → `ack` | Close | The primary passed the helper handshake and reached the startup publication boundary; this is not independent proof of execve success or application health. |
 | App exit notification | guest→host | `app_exited{code,term_signal}` → `ack` | Close | Terminal primary exit; guest waits for ACK up to its budget before powering off. Host uses this for its exit status. |
-| Shutdown request | host→guest | `shutdown` → `ack` | Close | Only a successful ACK write triggers termination. The outer stops startup if the inner is not ready; otherwise it thaws as needed and asks the inner to apply the primary stop-signal/grace policy. The outer powers off. ACK does not confirm completed shutdown. |
+| Shutdown request | host→guest | `shutdown` → `ack` | Close | Only a successful ACK write triggers termination. The outer stops startup if the inner is not ready; otherwise it reopens the outer mount gate, clears the platform freeze request and asks the inner to apply the primary stop-signal/grace policy. The outer powers off. ACK does not confirm completed shutdown. |
 | Health probe | host→guest | `ping{id,t_send_ns}` → `pong{id,t_send_ns}` | Close | Host measures RTT, timeouts and failures ([Ping health probes](#health)). |
 | Memory report | guest→host | `mem_report{mem_report:{epoch,seq,mem_*}}` → `mem_report_ack` | Close | Guest observation; host validates epoch/seq and combines it with CH vm.info in the sandbox-local controller. |
 | Usage observation | host→guest | `usage_request{usage_request}` → `usage_response{usage_response}` | Reuse | New raw memory/filesystem reads only; Host alone accumulates ([Raw usage observations](#usage-observations)). |
 | Before capture | host→guest | `quiesce{skip_drop_caches}` → `quiesced{drop_caches_result}` | Close | Inner session/restart drain, then outer report drain, recursive `/sandbox` freeze and filesystem prep ([Quiesce handling](#quiesce)); Host requires control EOF and its own handler barriers before pause. |
-| After restore | host→guest | `restore{epoch,wallclock_ns,network?}` → `restore_ack{epoch,stdio,app_state}` | MUX | After vCPUs resume, guest advances the report epoch, thaws and reopens execution gates before ACK, then reconnects MUX and resumes reports. Host enables memory policy only after ACK/MUX setup. Clock/network updates are best-effort ([Timelines](#timelines)); launch/files/init/plugins are cold-only and not replayed. RNG reseeding is not implemented. |
-| MUX replacement | host→guest | `attach{epoch}` → `attach_ack{epoch,stdio,app_state}` | MUX | Close/drop old MUX and attach the new connection. If the guest is still frozen, thaw it before reopening gates and sending ACK, including same-process resume and failed-capture recovery; otherwise skip thaw. Attach and VM resume are distinct operations. |
+| After restore | host→guest | `restore{epoch,wallclock_ns,network?}` → `restore_ack{epoch,stdio,app_state}` | MUX | After vCPUs resume, guest advances the report epoch, reopens the outer mount gate, clears the platform freeze request and reopens execution gates before ACK, then reconnects MUX and resumes reports. Host enables memory policy only after ACK/MUX setup. Clock/network updates are best-effort ([Timelines](#timelines)); launch/files/init/plugins are cold-only and not replayed. RNG reseeding is not implemented. |
+| MUX replacement | host→guest | `attach{epoch}` → `attach_ack{epoch,stdio,app_state}` | MUX | Reopen the outer mount gate and unconditionally clear the platform freeze request, including a pending, unconfirmed freeze. Close/drop old MUX and reopen execution gates before ACK, then attach the new connection. This covers same-process resume and failed-capture recovery; clearing the freeze request is idempotent for a live reconnect. Attach and VM resume are distinct operations. |
 | Execute command | host→guest | `exec{spec}` → `exec_ack{stdio}` | Independent MUX | Start a sibling command and wire its stdio; on completion send EXIT_STATUS then close ([Exec sessions (`sandbox-ctl exec`)](#exec-sessions) / [MUX graceful-close handshake](#mux-close)). Sessions can run concurrently. |
 | Port forward | host→guest | `connect{spec}` → `connect_ack` | Fwd relay | Dial the guest target, or Listen+Accept with spec.accept. Accept may park indefinitely without a host ACK deadline. Each forward is independent and is torn down for quiesce ([Connect port-forward sessions (`sandbox-ctl run --connect`)](#forward-sessions) / [Connect forwarding frame sub-protocol (fwd)](#forward-wire)). |
 | Error | Either | `error{msg}` | Close | Human-readable rejection where the handler sends one; malformed framing/JSON can instead terminate the connection. |
@@ -1337,21 +1386,24 @@ reconnect loop for every unexpected MUX error.
 The current guest echoes the request epoch in restore_ack/attach_ack and
 reports `app_state:"running"` in those handlers. The schema defines an exited
 state, but the handlers do not currently derive a live exited state or return
-structured `exited{code,term_signal}`. ACK follows successful thaw and execution-gate reopening; it is not an
-application-health guarantee. Thaw failure sends no ACK and leaves the
-launch/forward/report gates closed. ACK write failure leaves the completed
+structured `exited{code,term_signal}`. ACK follows successful thaw and
+execution-gate reopening; it is not an application-health guarantee. Thaw
+failure sends no ACK and does not reopen paused launch/forward/report gates;
+the outer mount gate is already open. ACK write failure leaves the completed
 thaw and execution admission in place but does not resume a paused report
 stream. The host still fails the handshake and owns retry or terminal cleanup.
 
-The outer first thaws `/sandbox`, then asks the now-runnable inner to close any
-old MUX and reopen its exec/forward/plugin/restart gates. Only after the inner
-confirms readiness does the outer write the Host ACK and hand that connection
-to the inner for MUX traffic. Waiting for inner readiness before thaw would
+The outer first reopens the mount gate, then clears the platform freeze request
+on `/sandbox` even if freeze was never confirmed, and asks the now-runnable
+inner to close any old MUX and reopen its exec/forward/plugin/restart gates.
+Only after the inner confirms readiness does the outer write the Host ACK and
+hand that connection to the inner for MUX traffic. Waiting for inner readiness before thaw would
 wait on a frozen process and cannot make progress. A thawed primary may block
 on output while its pumps are parked; this does not delay the readiness ACK.
-MUX frames follow ACK, and resource reports resume after the handoff. A failed
-inner readiness exchange sends no Host ACK; uncertain private requests fail
-the Guest rather than admitting a later operation on the same channel.
+Application execution can resume before ACK. MUX frames follow ACK, and
+resource reports resume after the handoff. A failed inner readiness exchange
+sends no Host ACK; uncertain private requests fail the Guest rather than
+admitting a later operation on the same channel.
 
 This stronger ACK barrier requires the updated guest init in the boot Runtime.
 A host-only update does not replace PID 1 in an existing memory Snapshot.
@@ -1394,7 +1446,7 @@ populates only fields relevant to its type. The complete types in
   "code": 0, "term_signal": 0,          // app_exited; separate scalar fields
   "id": 42,                            // ping/pong: monotonically assigned host ID
   "t_send_ns": 1715000000000000000,     // host UnixNano wall-clock value, echoed unchanged
-  "skip_drop_caches": true,            // quiesce: preserve caches after freeze+sync
+  "skip_drop_caches": true,            // quiesce: preserve caches after freeze+managed syncfs
   "drop_caches_result": "skipped",     // quiesced: skipped/succeeded/failed; absent -> unknown
   "epoch": 3,                          // restore/attach uint32 request epoch, echoed in ACK
   "wallclock_ns": 1715000000000000000, // restore: best-effort CLOCK_REALTIME update; absent on attach
@@ -1718,7 +1770,8 @@ sequenceDiagram
     H->>I: MUX_CLOSE_ACK and close
     I->>O: Execution drained
     O->>O: Drain mem_report; freeze sandbox; await frozen 1
-    O->>O: Sync; optionally drop caches
+    O->>O: Drain outer mount gate; syncfs managed filesystems
+    O->>O: Optionally drop caches
     O->>H: quiesced then control EOF
     H->>H: Join admitted handlers; pause and snapshot
 ```
@@ -1736,8 +1789,9 @@ processing acknowledges the reset; a new REQUEST waits behind that gate.
 
 Before thaw, restore applies best-effort wall clock and optional network
 replacement, and advances the paused memory-report epoch. Attach preserves the
-live epoch and thaws only if the tree remains frozen, including capture recovery
-and same-VM resume. Both use this readiness ordering:
+live epoch. Both reopen the outer mount gate and unconditionally clear the
+platform freeze request, including pending freeze after failed capture and
+same-VM resume. Both use this readiness ordering:
 
 ```mermaid
 sequenceDiagram
@@ -1745,7 +1799,7 @@ sequenceDiagram
     participant O as Outer sandbox-init
     participant I as Inner sandbox-init
     H->>O: restore or attach
-    O->>O: Prepare observation state; thaw sandbox if needed
+    O->>O: Prepare observations; reopen mount gate; clear freeze request
     O->>I: Resume execution
     I->>I: Close old MUX and reopen execution gates
     I->>O: Ready
@@ -1756,7 +1810,7 @@ sequenceDiagram
     H->>H: Enable memory policy and restart ping
 ```
 
-Frozen-state query, thaw or inner-readiness failure prevents ACK. Clock/network
+Thaw or inner-readiness failure prevents ACK. Clock/network
 failures are logged and remain best-effort. ACK follows execution readiness,
 not application health, and never waits for the primary to consume stdio.
 Host SafeTarget normalization and the observation epoch still follow ACK/MUX
@@ -1833,7 +1887,8 @@ This is best-effort classification, not a typed network-error taxonomy.
   Mid-session transport loss kills the exec command tied to its namespace
   helper through the parent-death mechanism ([Exec sessions (`sandbox-ctl exec`)](#exec-sessions)).
 - Restore clock/network failures log and continue. Restore/attach thaw failure
-  leaves gates closed and sends no ACK ([Management operations](#management-operations)).
+  sends no ACK and does not reopen paused execution/report gates; the outer
+  mount gate is already open ([Management operations](#management-operations)).
 - Unexpected inner exit, private-channel loss or an unknown result after a
   private request was sent terminates the Guest. These operations are not
   replayed, and an inner crash does not create a successful primary-exit fact.
@@ -1875,7 +1930,7 @@ Other budgets are protocol constants or guest-side waits:
 | app_started | Guest sets 200 ms socket I/O timeouts after dial; dial has a separate 5 s retry budget. Host read uses timeouts.app_notify. | This is not a single 200 ms total dial+exchange deadline; raw AF_VSOCK uses per-I/O socket timeouts. |
 | app_exited | Same as app_started | Missing ACK does not prevent POWER_OFF. |
 | ping | timeouts.ping, default no forced bound; production profile 200 ms; capture drain at most 8 s | Ordinary failure updates ping stats; capture expiry cancels/joins and fails capture. Fatal threshold requires a bounded probe. |
-| quiesce | 8 s | Inner launch/exec/forward/MUX drain, outer report drain, recursive freeze, sync and optional cache drop must fit the capture protocol, in that order. |
+| quiesce | 8 s | Protocol budget for inner launch/exec/forward/MUX drain, outer report drain, recursive freeze, outer mount drain, managed `syncfs` and optional cache drop, in that order. Expiry fails the Host wait; it does not cancel a blocked kernel syscall or release the Guest lifecycle lock. |
 | restore | timeouts.restore, default no forced response bound | Connection setup waits for guest acceptance; pre-request EOF/reset retries can continue through the total budget or context cancellation, with each CONNECT/OK attempt bounded at 2 s or the shorter remaining budget. No replay after request write. Demand paging can lengthen restoration; connection then becomes MUX. |
 | attach | 5 s | Covers the replacement handshake; connection then becomes MUX. |
 | exec | 10 s | Guest forks/execs and resolves PATH before ACK. Handshake only; clear deadline for MUX command execution. |

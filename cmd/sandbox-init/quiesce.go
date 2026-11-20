@@ -2,7 +2,6 @@ package main
 
 import (
 	"os"
-	"syscall"
 	"time"
 
 	"github.com/kuasar-sandbox/guest-runtime/pkg/guestabi/proto"
@@ -11,23 +10,24 @@ import (
 // runQuiesce executes the v1 pre-snapshot cleanup sequence
 // (docs/guest-abi.md#quiesce):
 //
-//  1. sync(2)                           — flush ext4 upperdir dirty
-//  2. optional drop_caches write        — drop page + dentry/inode cache
+//  1. syncfs(2) on pinned managed writable filesystems
+//  2. optional drop_caches write — drop clean page + dentry/inode cache
 //
-// Sync always runs. The drop is skipped only when the host explicitly asks;
-// otherwise errors are logged and reported but **do not abort** the function.
-// Cache cleanup is a best-effort dedup aid, not a snapshot gate.
+// Filesystem errors abort capture. Cache cleanup remains a best-effort dedup
+// aid, not a snapshot gate. External mounts never enter the managed registry.
 //
 // The /tmp tmpfs reset and the application-level signal hook described
 // in docs/guest-abi.md#quiesce (quiesce extension items) are not implemented here.
-func runQuiesce(skipDropCaches bool) proto.DropCachesResult {
-	return runQuiesceWith(skipDropCaches, syscall.Sync, writeFile)
+func runQuiesce(skipDropCaches bool) (proto.DropCachesResult, error) {
+	return runQuiesceWith(skipDropCaches, guestFilesystems.sync, writeFile)
 }
 
-func runQuiesceWith(skipDropCaches bool, syncFn func(), writeFn func(string, []byte) error) proto.DropCachesResult {
+func runQuiesceWith(skipDropCaches bool, syncFn func() error, writeFn func(string, []byte) error) (proto.DropCachesResult, error) {
 	t0 := time.Now()
 
-	syncFn()
+	if err := syncFn(); err != nil {
+		return proto.DropCachesSkipped, err
+	}
 	tSync := time.Since(t0)
 
 	tDrop := time.Duration(0)
@@ -44,7 +44,7 @@ func runQuiesceWith(skipDropCaches bool, syncFn func(), writeFn func(string, []b
 
 	logf("quiesce: sync=%dµs drop_caches=%dµs result=%s total=%dµs",
 		tSync.Microseconds(), tDrop.Microseconds(), result, time.Since(t0).Microseconds())
-	return result
+	return result, nil
 }
 
 func writeFile(path string, data []byte) error {
