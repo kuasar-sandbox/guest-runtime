@@ -197,6 +197,9 @@ func (c *executorClient) shutdown() {
 	if !c.stopping.CompareAndSwap(false, true) {
 		return
 	}
+	// Graceful user exit may first access a pending slot. Reopen the outer
+	// mount gate before making the inner runnable, as reattach does.
+	guestSlots.resumeMounts()
 	// The inner handles application stop signal and grace. A frozen inner
 	// cannot do so until thaw; pre-launch shutdown terminates bootstrap/init.
 	if err := cgroupThaw(); err != nil {
