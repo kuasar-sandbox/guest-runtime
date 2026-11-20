@@ -516,7 +516,7 @@ For a single-device `disk_slot`, the runtime-ready Hello advertises
 v5 direct trigger. An access opens the block device and attempts to mount its
 filesystem. For dynamic slots on a VMM
 without capacity-change notifications, mounting also requires the
-[Guest kernel to refresh the disk capacity on access](vmlinux.md#disk-slot-kernel).
+[Guest kernel to refresh the disk capacity on access](vmlinux.md).
 An empty slot fails the access and leaves the trigger installed.
 Once media is present, the first successful access mounts the disk, projects the
 requested directory, and continues the lookup. All targets on the same disk
