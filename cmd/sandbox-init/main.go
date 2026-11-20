@@ -275,6 +275,9 @@ func phaseWorkloadRoot(spec *proto.LaunchSpec) error {
 	if singleDiskRoot {
 		usageRoot = "/sysroot"
 	}
+	if err := guestFilesystems.register("root", usageRoot); err != nil {
+		return fmt.Errorf("register root filesystem: %w", err)
+	}
 	if err := guestUsage.register("root", usageRoot); err != nil {
 		logf("usage root registration: %v", err)
 	}

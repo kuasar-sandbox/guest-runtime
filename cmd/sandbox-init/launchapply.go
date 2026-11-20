@@ -104,7 +104,26 @@ func bindVolumeDir(root, runDir, source, target string) error {
 }
 
 // assembleDataDisk mounts one disk once on its hidden pmem staging directory.
-func assembleDataDisk(m proto.MountSpec, asm, ext4Options string) error {
+func assembleDataDisk(m proto.MountSpec, asm, ext4Options string) (retErr error) {
+	// No projection is published until assembly and filesystem registration
+	// succeed. Roll back partial mounts so a failed slot request is retryable.
+	var mounted []string
+	mount := func(source, target, fstype string, flags uintptr, data string) error {
+		if err := unix.Mount(source, target, fstype, flags, data); err != nil {
+			return err
+		}
+		mounted = append(mounted, target)
+		return nil
+	}
+	defer func() {
+		if retErr != nil {
+			for i := len(mounted) - 1; i >= 0; i-- {
+				if err := unix.Unmount(mounted[i], unix.MNT_DETACH); err != nil {
+					logf("disk %d failed assembly cleanup %s: %v", m.DiskIndex, mounted[i], err)
+				}
+			}
+		}
+	}()
 	needed := []string{asm}
 	if m.DiskOverlay {
 		needed = append(needed, asm+"-lower", asm+"-upper")
@@ -121,16 +140,16 @@ func assembleDataDisk(m proto.MountSpec, asm, ext4Options string) error {
 	}
 	if !m.DiskOverlay {
 		// single: the writable ext4 mounted directly at the assembled point.
-		if err := unix.Mount(m.DiskDevs[0], asm, "ext4", 0, ext4Options); err != nil {
+		if err := mount(m.DiskDevs[0], asm, "ext4", 0, ext4Options); err != nil {
 			return fmt.Errorf("disk %d mount ext4 on %s: %w", m.DiskIndex, asm, err)
 		}
 	} else {
 		// overlay: ro erofs base + rw ext4 upper → overlayfs at the assembled point.
 		lower, upper := asm+"-lower", asm+"-upper"
-		if err := unix.Mount(m.DiskDevs[0], lower, "erofs", unix.MS_RDONLY, ""); err != nil {
+		if err := mount(m.DiskDevs[0], lower, "erofs", unix.MS_RDONLY, ""); err != nil {
 			return fmt.Errorf("disk %d mount erofs lower: %w", m.DiskIndex, err)
 		}
-		if err := unix.Mount(m.DiskDevs[1], upper, "ext4", 0, ext4Options); err != nil {
+		if err := mount(m.DiskDevs[1], upper, "ext4", 0, ext4Options); err != nil {
 			return fmt.Errorf("disk %d mount ext4 upper: %w", m.DiskIndex, err)
 		}
 		if err := os.MkdirAll(upper+"/upperdir", 0o755); err != nil {
@@ -140,13 +159,16 @@ func assembleDataDisk(m proto.MountSpec, asm, ext4Options string) error {
 			return fmt.Errorf("disk %d mkdir workdir: %w", m.DiskIndex, err)
 		}
 		opts := fmt.Sprintf("lowerdir=%s,upperdir=%s/upperdir,workdir=%s/workdir", lower, upper, upper)
-		if err := unix.Mount("overlay", asm, "overlay", 0, opts); err != nil {
+		if err := mount("overlay", asm, "overlay", 0, opts); err != nil {
 			return fmt.Errorf("disk %d mount overlay on %s: %w", m.DiskIndex, asm, err)
 		}
 	}
 	usagePath := asm
 	if m.DiskOverlay {
 		usagePath = asm + "-upper"
+	}
+	if err := guestFilesystems.register(fmt.Sprintf("disk-%d", m.DiskIndex), usagePath); err != nil {
+		return fmt.Errorf("register disk %d filesystem: %w", m.DiskIndex, err)
 	}
 	if err := guestUsage.register(fmt.Sprintf("disk-%d", m.DiskIndex), usagePath); err != nil {
 		logf("usage disk registration: %v", err)
