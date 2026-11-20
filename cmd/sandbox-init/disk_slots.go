@@ -37,6 +37,25 @@ func diskSlotSupported() bool {
 type diskSlots struct {
 	sync.RWMutex
 	disks map[int]*diskSlot
+	// capture gates outer-owned assembly and projection writes. Lifecycle
+	// management serializes pauseMounts/resumeMounts; trigger readers never
+	// hold this lock while waiting for a new autofs packet.
+	capture     sync.RWMutex
+	captureHeld bool
+}
+
+func (r *diskSlots) pauseMounts() {
+	if !r.captureHeld {
+		r.capture.Lock()
+		r.captureHeld = true
+	}
+}
+
+func (r *diskSlots) resumeMounts() {
+	if r.captureHeld {
+		r.captureHeld = false
+		r.capture.Unlock()
+	}
 }
 
 var guestSlots = diskSlots{disks: make(map[int]*diskSlot)}
@@ -128,6 +147,7 @@ func (s *diskSlot) serveTrigger(reader *os.File, ctl, mountFD int, subpath strin
 			logf("disk %d lost autofs trigger (size %d, read %v)", s.spec.DiskIndex, n, err)
 			break
 		}
+		guestSlots.capture.RLock()
 		s.mu.Lock()
 		err = s.project(subpath, mountFD)
 		reply := autofsReply{Major: 1, Minor: 1, Size: uint32(unsafe.Sizeof(autofsReply{})), MountFD: int32(mountFD), Token: binary.NativeEndian.Uint32(packet[8:12])}
@@ -143,6 +163,7 @@ func (s *diskSlot) serveTrigger(reader *os.File, ctl, mountFD int, subpath strin
 		}
 		_, _, errno := unix.Syscall(unix.SYS_IOCTL, uintptr(ctl), op, uintptr(unsafe.Pointer(&reply)))
 		s.mu.Unlock()
+		guestSlots.capture.RUnlock()
 		if errno != 0 {
 			logf("autofs reply disk %d: %v", s.spec.DiskIndex, errno)
 			break

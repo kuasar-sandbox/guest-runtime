@@ -19,6 +19,8 @@ func TestReattachAckWaitsForThawAndLaunchGates(t *testing.T) {
 		t.Run(map[bool]string{false: "attach", true: "restore"}[restore], func(t *testing.T) {
 			_, sup, bridge := usageReattachFixture(t)
 			guest, host := usageSocketPair(t)
+			guestSlots.pauseMounts()
+			t.Cleanup(guestSlots.resumeMounts)
 			started, release, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
 			var once sync.Once
 			var handed bool
@@ -26,6 +28,13 @@ func TestReattachAckWaitsForThawAndLaunchGates(t *testing.T) {
 			go func() {
 				defer close(done)
 				handed, finishErr = finishReattach(guest, sup, 23, restore, func() error {
+					// A resumed application may immediately trigger a lazy disk.
+					// Its outer-owned mount must be admitted before user thaw.
+					if !guestSlots.capture.TryRLock() {
+						t.Error("application thaw reached with mount admission closed")
+					} else {
+						guestSlots.capture.RUnlock()
+					}
 					close(started)
 					<-release
 					return nil
