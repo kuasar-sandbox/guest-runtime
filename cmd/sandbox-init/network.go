@@ -84,8 +84,8 @@ func parsePlatformConfig(spec *proto.NetworkSpec) (*platformConfig, error) {
 		}
 		cfg.family = unix.AF_INET6
 	}
-	if spec.MTU < 0 {
-		return nil, fmt.Errorf("negative MTU: %d", spec.MTU)
+	if spec.MTU < 0 || uint64(spec.MTU) > uint64(^uint32(0)) {
+		return nil, fmt.Errorf("MTU is outside the netlink uint32 range: %d", spec.MTU)
 	}
 	if spec.Nexthop != "" {
 		cfg.gateway = net.ParseIP(spec.Nexthop)
@@ -270,6 +270,7 @@ func (p *platformNetwork) configure(ctx context.Context, c networkRequester, ind
 	if err := networkLinkUp(ctx, c, index, cfg.mtu); err != nil {
 		return fmt.Errorf("platform link up: %w", err)
 	}
+	addressPresent, removedAddress := false, false
 	if replace {
 		if p.defaultRoute != nil {
 			_, err := c.request(ctx, unix.RTM_DELROUTE, unix.NLM_F_ACK, p.defaultRoute)
@@ -282,18 +283,42 @@ func (p *platformNetwork) configure(ctx context.Context, c networkRequester, ind
 			if a.scope != unix.RT_SCOPE_UNIVERSE {
 				continue
 			}
+			if a.family == cfg.family && a.prefix == cfg.prefix && a.ip.Equal(cfg.ip) {
+				// Removing the last IPv4 address also removes routes that
+				// depend on it. An unchanged identity need not be removed.
+				addressPresent = true
+				continue
+			}
 			// Reconstruct only the address identity, not read-only dump flags
 			// or lifetime attributes. Both old address families are replaced.
 			_, err := c.request(ctx, unix.RTM_DELADDR, unix.NLM_F_ACK, networkAddressBody(index, a.family, a.ip, a.prefix))
 			if err != nil && !errors.Is(err, unix.EADDRNOTAVAIL) && !errors.Is(err, unix.ENOENT) {
 				return fmt.Errorf("delete platform address: %w", err)
 			}
+			removedAddress = true
+		}
+		if addressPresent && removedAddress {
+			// Deleting an IPv4 primary can also remove secondary addresses.
+			// Recheck only the retained configuration value, never TCP, so
+			// a desired secondary is re-added if the kernel removed it.
+			current, err := networkAddresses(ctx, c, index)
+			if err != nil {
+				return fmt.Errorf("verify retained platform address: %w", err)
+			}
+			addressPresent = false
+			for _, a := range current {
+				if a.family == cfg.family && a.scope == unix.RT_SCOPE_UNIVERSE && a.prefix == cfg.prefix && a.ip.Equal(cfg.ip) {
+					addressPresent = true
+					break
+				}
+			}
 		}
 	}
 	flags := uint16(unix.NLM_F_ACK | unix.NLM_F_CREATE | unix.NLM_F_EXCL)
-	_, err := c.request(ctx, unix.RTM_NEWADDR, flags, networkAddressBody(index, cfg.family, cfg.ip, cfg.prefix))
-	if err != nil {
-		return fmt.Errorf("add platform address: %w", err)
+	if !addressPresent {
+		if _, err := c.request(ctx, unix.RTM_NEWADDR, flags, networkAddressBody(index, cfg.family, cfg.ip, cfg.prefix)); err != nil {
+			return fmt.Errorf("add platform address: %w", err)
+		}
 	}
 	if cfg.gateway != nil {
 		body := platformDefaultRoute(index, cfg.family, cfg.gateway)

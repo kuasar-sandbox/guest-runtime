@@ -110,11 +110,46 @@ func TestPlatformDefaultDeleteKeyHasNoWildcardMetric(t *testing.T) {
 	}
 }
 
+func TestPlatformSameAddressIsRetainedAndSecondaryLossIsRepaired(t *testing.T) {
+	for _, otherAddress := range []bool{false, true} {
+		t.Run(map[bool]string{false: "same-primary", true: "secondary-deleted-with-primary"}[otherAddress], func(t *testing.T) {
+			cfg, _ := parsePlatformConfig(&proto.NetworkSpec{IPCIDR: "192.0.2.2/24"})
+			old := []platformAddress{{family: unix.AF_INET, ip: net.ParseIP("192.0.2.2"), prefix: 24, scope: unix.RT_SCOPE_UNIVERSE}}
+			if otherAddress {
+				old = append(old, platformAddress{family: unix.AF_INET, ip: net.ParseIP("192.0.2.1"), prefix: 24, scope: unix.RT_SCOPE_UNIVERSE})
+			}
+			// The simulated kernel loses the desired secondary on primary
+			// deletion. A subsequent complete address dump is therefore empty.
+			c := &platformTestConn{}
+			p := &platformNetwork{}
+			if err := p.configure(context.Background(), c, 7, cfg, old, true); err != nil {
+				t.Fatal(err)
+			}
+			if !otherAddress {
+				if len(c.calls) != 1 || c.calls[0].kind != unix.RTM_NEWLINK {
+					t.Fatalf("unchanged address was disturbed: %+v", c.calls)
+				}
+			} else {
+				want := []uint16{unix.RTM_NEWLINK, unix.RTM_DELADDR, unix.RTM_GETADDR, unix.RTM_NEWADDR}
+				if len(c.calls) != len(want) {
+					t.Fatalf("missing retained-address repair: %+v", c.calls)
+				}
+				for i, kind := range want {
+					if c.calls[i].kind != kind {
+						t.Fatalf("request %d = %d, want %d", i, c.calls[i].kind, kind)
+					}
+				}
+			}
+		})
+	}
+}
+
 func TestPlatformConfigRejectsInvalidIdentityBeforeWrites(t *testing.T) {
 	for _, spec := range []*proto.NetworkSpec{
 		{IPCIDR: "bad"}, {IPCIDR: "192.0.2.2/24", Nexthop: "2001:db8::1"},
 		{IPCIDR: "2001:db8::2/64", Nexthop: "192.0.2.1"},
 		{IPCIDR: "::ffff:192.0.2.2/120"}, {IPCIDR: "192.0.2.2/24", MTU: -1},
+		{IPCIDR: "192.0.2.2/24", MTU: 1 << 32},
 	} {
 		if _, err := parsePlatformConfig(spec); err == nil {
 			t.Fatalf("accepted %+v", spec)

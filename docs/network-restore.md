@@ -24,8 +24,10 @@ Restore continues under its existing best-effort network policy.
 | True Restore with absent/empty IP | Preserve IP/default; apply an explicitly supplied hostname | Clear platform ARP/NDP | Attempt release of the pre-change batch |
 | Attach / same-VM reconnect | Preserve | Preserve | Preserve |
 
-With a new IP, configuration replacement removes the platform NIC's old global
-addresses in **both** families. IPv6 link-local addresses are retained. Only
+With a supplied IP, configuration replacement removes the platform NIC's other
+global addresses in **both** families. An already matching address and prefix
+are retained, avoiding Linux's dependent-route removal when the last IPv4
+address is deleted. IPv6 link-local addresses are retained. Only
 init's recorded default route is removed; no default-route table flush is used.
 An empty gateway with a new IP removes the old owned default. A new default is
 created exclusively and recorded only after a successful kernel ACK. An
@@ -37,6 +39,10 @@ Platform defaults use explicit nonzero metrics (IPv4: 1; IPv6: 1024). Linux
 treats metric zero as a wildcard in deletion, so recording zero would not make
 the delete key exact. These metrics preserve the ordinary single-default path;
 user route priorities retain their normal Linux meaning.
+
+A real IP/prefix change still has Linux's normal effects on connected routes
+and routes dependent on the removed address. The platform does not reconstruct
+user routes after that identity change.
 
 Neighbor deletion covers IPv4 and IPv6 dynamic entries on the bound device.
 Permanent, NOARP and proxy entries, bridge FDBs and entries on user devices are

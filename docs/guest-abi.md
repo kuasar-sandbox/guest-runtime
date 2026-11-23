@@ -1821,8 +1821,9 @@ Host SafeTarget normalization and the observation epoch still follow ACK/MUX
 establishment. Launch, files and init are not replayed.
 
 The network reset uses the single virtio-net interface bound by outer init
-before user launch. Configuration replacement removes its old global IPv4 and
-IPv6 addresses and only the default route successfully installed by init; an
+before user launch. Configuration replacement removes its other global IPv4 and
+IPv6 addresses, retains an already matching address/prefix, and deletes only the
+default route successfully installed by init; an
 empty nexthop with a new IP removes that owned default. Dynamic ARP/NDP entries
 on this interface are cleared; static/NOARP/proxy entries and bridge FDBs stay.
 TCP selection happens before configuration changes, using old local addresses
