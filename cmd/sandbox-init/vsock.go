@@ -357,6 +357,12 @@ func handleReverseConn(c *vsockConn, execution executionControl) bool {
 	})
 }
 func handleReverseConnShutdown(c *vsockConn, execution executionControl, shutdown func()) (handedToMUX bool) {
+	return handleReverseConnNetwork(c, execution, shutdown, applyNetworkReplace, cgroupThaw)
+}
+
+// Dependency arguments keep the complete Restore readiness path testable with
+// network faults, without changing production policy or the wire protocol.
+func handleReverseConnNetwork(c *vsockConn, execution executionControl, shutdown func(), replaceNetwork func(*proto.NetworkSpec) error, thaw func() error) (handedToMUX bool) {
 	// Per-conn handshake deadline: tight enough that a stuck host can't
 	// pin a goroutine forever, generous enough for quiesce (drop_caches +
 	// the MUX-close round-trip can take a few seconds). Cleared before a
@@ -439,18 +445,12 @@ func handleReverseConnShutdown(c *vsockConn, execution executionControl, shutdow
 				logf("reverse-channel: restore wall clock set to host now (epoch=%d)", req.Epoch)
 			}
 		}
-		// Re-apply the IP layer flush-and-replace when the host supplies a
-		// fresh NetworkSpec (clone from a golden snapshot taking a new
-		// identity). Best-effort + logged, like clock_settime: applied before
-		// the thaw so the app resumes onto the new identity. nil → keep the
-		// snapshot's network.
-		if req.Network != nil {
-			logf("reverse-channel: restore network re-apply starting (epoch=%d)", req.Epoch)
-			if err := applyNetworkReplace(req.Network); err != nil {
-				logf("reverse-channel: restore applyNetwork: %v", err)
-			} else {
-				logf("reverse-channel: restore network re-applied (epoch=%d)", req.Epoch)
-			}
+		// Every true restore has stale platform neighbor/TCP state, even
+		// with nil or unchanged configuration. Network errors remain best
+		// effort; the bounded TCP attempt cannot veto thaw or readiness.
+		logf("reverse-channel: restore network reset starting (epoch=%d)", req.Epoch)
+		if err := replaceNetwork(req.Network); err != nil {
+			logf("reverse-channel: restore network: %v", err)
 		}
 		// Establish a new observation epoch and pause sampling before
 		// restore_ack. This serializes with an in-flight mem_report exchange, so
@@ -463,7 +463,7 @@ func handleReverseConnShutdown(c *vsockConn, execution executionControl, shutdow
 			return false
 		}
 		logf("reverse-channel: restore mem_report epoch=%d", reportEpoch)
-		handed, err := finishReattach(c, execution, req.Epoch, true, cgroupThaw)
+		handed, err := finishReattach(c, execution, req.Epoch, true, thaw)
 		if err != nil {
 			logf("reverse-channel: %v", err)
 			return handed
@@ -483,7 +483,6 @@ func handleReverseConnShutdown(c *vsockConn, execution executionControl, shutdow
 		// Clear the platform freeze request even if freeze confirmation failed:
 		// cgroup.events:frozen=0 does not imply cgroup.freeze=0. This is
 		// idempotent for an ordinary live MUX reconnect as well.
-		thaw := cgroupThaw
 		// Quiesce drains and pauses guest→host memory observations before the
 		// VM freeze. Attach resumes the same live epoch; a true restore instead
 		// advances the epoch in the TypeRestore branch above.

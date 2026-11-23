@@ -1787,9 +1787,13 @@ have distinct responsibilities.
 while the listener remains. CH gates backend RX until Guest event-queue
 processing acknowledges the reset; a new REQUEST waits behind that gate.
 
-Before thaw, restore applies best-effort wall clock and optional network
-replacement, and advances the paused memory-report epoch. Attach preserves the
-live epoch. Both reopen the outer mount gate and unconditionally clear the
+Before thaw, restore applies the best-effort wall clock and platform network
+reset, and advances the paused memory-report epoch. Every true Restore resets
+dynamic platform neighbors and makes a bounded attempt to release old platform
+TCP connections, including when `network` is absent or unchanged. An absent
+`network` preserves configured values. TCP failure, unsupported kernel features
+or timeout are logged and never prevent thaw or ACK. Attach preserves network
+state and the live epoch. Both reopen the outer mount gate and unconditionally clear the
 platform freeze request, including pending freeze after failed capture and
 same-VM resume. Both use this readiness ordering:
 
@@ -1815,6 +1819,21 @@ failures are logged and remain best-effort. ACK follows execution readiness,
 not application health, and never waits for the primary to consume stdio.
 Host SafeTarget normalization and the observation epoch still follow ACK/MUX
 establishment. Launch, files and init are not replayed.
+
+The network reset uses the single virtio-net interface bound by outer init
+before user launch. Configuration replacement removes its other global IPv4 and
+IPv6 addresses, retains an already matching address/prefix, and deletes only the
+default route successfully installed by init; an
+empty nexthop with a new IP removes that owned default. Dynamic ARP/NDP entries
+on this interface are cleared; static/NOARP/proxy entries and bridge FDBs stay.
+TCP selection happens before configuration changes, using old local addresses
+and ordinary route output through the platform interface. It excludes listeners,
+TIME_WAIT and other interfaces, and never enters user network namespaces. Exact
+socket cookies are used for one finite release batch, with a shared 50 ms TCP
+deadline and no peer wait, rescan or post-thaw cleanup. This covers the existing
+sandboxer network; it is not a classifier for arbitrary tunnels, encapsulation
+or packet redirection. See [Network restore](network-restore.md) for delivery
+scope, failure behavior and validation.
 
 The outer listener remains across capture; closing it would leave no receiver
 for restore/attach. Transport reset does not close bind/listen sockets. CH
