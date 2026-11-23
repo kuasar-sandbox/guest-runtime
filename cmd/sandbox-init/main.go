@@ -447,6 +447,11 @@ func waitForLaunch() (*proto.LaunchSpec, *vsockConn, error) {
 // applyEnvironment runs in the outer mount namespace so its managed mounts
 // remain available to storage/autofs and propagate into the user environment.
 func applyEnvironment(spec *proto.LaunchSpec) error {
+	// Bind even with nil NetworkSpec, before any user init can rename or
+	// create interfaces. A restore must reuse this ownership decision.
+	if err := bindPlatformNetwork(spec.Network); err != nil {
+		return fmt.Errorf("bind platform network: %w", err)
+	}
 	if spec.Network != nil {
 		if err := applyNetwork(spec.Network); err != nil {
 			return fmt.Errorf("apply network: %w", err)
