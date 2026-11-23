@@ -1264,7 +1264,7 @@ JSON 可读、调试友好，消息量少，无需 protobuf 工具链。
   "drop_caches_result":"skipped",       // quiesced: skipped/succeeded/failed;缺失为 unknown
   "epoch":    3,                       // restore/attach uint32 request epoch，ACK 回显，非通用去重
   "wallclock_ns":1715000000000000000,  // restore: 尽力更新 CLOCK_REALTIME，失败也可 ACK；attach 不带
-  "network": { "ip_cidr": "169.254.4.1/31", "mtu": 1450, "nexthop": "", "hostname": "c1", "interface": "eth0" }, // restore 可选:尽力 flush-and-replace，失败 log 并继续；省略保留网络
+  "network": { "ip_cidr": "169.254.4.1/31", "mtu": 1450, "nexthop": "", "hostname": "c1", "interface": "eth0" }, // restore 可选:省略保留配置值，仍清理平台动态邻居并有限尝试释放旧TCP；失败log并继续
   "mem_report": {                       // mem_report payload
     "epoch": 2, "seq": 17,              // 独立 uint64 observation epoch/seq
     "mem_total_bytes": 8589934592,
