@@ -352,7 +352,7 @@ func handleReverseConn(c *vsockConn, execution executionControl) bool {
 		if client, ok := execution.(*executorClient); ok {
 			client.shutdown()
 		} else {
-			doReboot()
+			go doReboot()
 		}
 	})
 }
@@ -370,20 +370,23 @@ func handleReverseConnShutdown(c *vsockConn, execution executionControl, shutdow
 		return false
 	}
 	switch req.Type {
-	case proto.TypeShutdown, proto.TypeQuiesce, proto.TypeRestore, proto.TypeAttach:
+	case proto.TypeQuiesce, proto.TypeRestore, proto.TypeAttach:
 		managementLifecycle.Lock()
 		defer managementLifecycle.Unlock()
-		if client, ok := execution.(*executorClient); ok && client.stopping.Load() && req.Type != proto.TypeShutdown {
+		if client, ok := execution.(*executorClient); ok && client.stopping.Load() {
 			_ = proto.WriteMessage(c, &proto.Message{Type: proto.TypeError, Msg: "sandbox is shutting down"})
 			return false
 		}
 	}
 	switch req.Type {
 	case proto.TypeShutdown:
-		if err := proto.WriteMessage(c, &proto.Message{Type: proto.TypeAck}); err == nil {
+		// Accept once before replying. A lost ACK cannot undo a stop that
+		// the Host may already be independently fencing against its deadline.
+		if client, ok := execution.(*executorClient); !ok || client.systemd == nil {
 			initialLaunch.exited(0)
-			shutdown()
 		}
+		shutdown()
+		_ = proto.WriteMessage(c, &proto.Message{Type: proto.TypeAck})
 		return false
 	case proto.TypeUsageRequest:
 		guestUsage.serve(c, req)
@@ -519,6 +522,10 @@ func handleReverseConnShutdown(c *vsockConn, execution executionControl, shutdow
 			logf("reverse-channel: quiesce execution drain failed: %v", err)
 			return false
 		}
+		if client, ok := execution.(*executorClient); ok && client.stopping.Load() {
+			_ = proto.WriteMessage(c, &proto.Message{Type: proto.TypeError, Msg: "environment stopped during quiesce"})
+			return false
+		}
 		// Freeze the app tree BEFORE sync: no new dirty pages after
 		// sync (cleaner deterministic image) and the snapshot captures
 		// the app stopped. NOT best-effort — an unconfirmed freeze is a
@@ -544,6 +551,12 @@ func handleReverseConnShutdown(c *vsockConn, execution executionControl, shutdow
 		// teardown barrier instead of leaving a half-closed 4-tuple in memory S.
 		if err := c.SetLinger(muxCloseLingerSec); err != nil {
 			logf("reverse-channel: quiesce SO_LINGER: %v (continuing)", err)
+		}
+		if client, ok := execution.(*executorClient); ok {
+			if err := client.commitLifecycleResponse(); err != nil {
+				_ = proto.WriteMessage(c, &proto.Message{Type: proto.TypeError, Msg: err.Error()})
+				return false
+			}
 		}
 		if err := proto.WriteMessage(c, &proto.Message{
 			Type:             proto.TypeQuiesced,
@@ -600,6 +613,11 @@ func finishReattach(c *vsockConn, execution executionControl, epoch uint32, newH
 	}
 	spec := execution.stdioSpec()
 	resp := &proto.Message{Type: ack, Epoch: epoch, Stdio: &spec, AppState: proto.AppStateRunning}
+	if client, ok := execution.(*executorClient); ok {
+		if err := client.commitLifecycleResponse(); err != nil {
+			return false, err
+		}
+	}
 	if err := proto.WriteMessage(c, resp); err != nil {
 		return false, fmt.Errorf("write %s_ack: %w", operation, err)
 	}
@@ -738,9 +756,9 @@ func exchangeMemReport(conn interface {
 // app_exited notification. sig != 0 means the app was killed by that
 // signal (code is then 128+sig per the shell convention). Best-effort —
 // the guest reboots regardless of outcome (docs/guest-abi.md#supervision).
-func notifyAppExited(code, sig int) {
+func notifyAppExited(code, sig int, reason string) {
 	if innerEvents != nil {
-		if _, err := innerEvents.request(executorMessage{Op: "exited", Code: code, Signal: sig}, -1); err != nil {
+		if _, err := innerEvents.request(executorMessage{Op: "exited", Code: code, Signal: sig, Reason: reason}, -1); err != nil {
 			logf("primary exit notification: %v", err)
 		}
 		return

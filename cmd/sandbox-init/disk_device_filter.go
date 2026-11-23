@@ -93,7 +93,7 @@ func attachDeviceFilter(devices []blockDevice) error {
 	if applicationCgroups.root == nil {
 		return errors.New("application cgroup unavailable")
 	}
-	args := struct{ Target, Prog, Attach, Flags uint32 }{uint32(applicationCgroups.root.Fd()), uint32(fd), unix.BPF_CGROUP_DEVICE, 0}
+	args := struct{ Target, Prog, Attach, Flags uint32 }{uint32(applicationCgroups.root.Fd()), uint32(fd), unix.BPF_CGROUP_DEVICE, unix.BPF_F_ALLOW_MULTI}
 	_, _, errno = unix.Syscall(unix.SYS_BPF, unix.BPF_PROG_ATTACH, uintptr(unsafe.Pointer(&args)), unsafe.Sizeof(args))
 	if errno != 0 {
 		return fmt.Errorf("install slot device filter: %w", errno)

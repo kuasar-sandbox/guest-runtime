@@ -98,6 +98,16 @@ const (
 // netlink-based applyNetwork pass. nil → no network configuration.
 // Stdio carries the app stdio mode the host wants (see StdioSpec).
 type LaunchSpec struct {
+	// Systemd selects the environment PID 1: off (also the legacy empty
+	// value), auto, runtime, or provided. Active modes always delegate the
+	// executor service and share its environment PID namespace, without
+	// rewriting the caller's CgroupControl or SharePID policy for future boots.
+	Systemd string `json:"systemd,omitempty"`
+	// SystemdPathDefault records Host default provenance, not user policy.
+	// Only an actually selected Runtime installation may prefix this PATH.
+	// Explicit caller PATH values keep their normal override precedence.
+	SystemdPathDefault bool `json:"systemd_path_default,omitempty"`
+
 	// DiskMountProjectionV1 opts older guests into mount conflict checks.
 	// Current guests identify guarded mounts using their slot declarations.
 	DiskMountProjectionV1 bool `json:"disk_mount_projection_v1,omitempty"`
@@ -233,12 +243,14 @@ type InitSpec struct {
 // up). It runs in the same guest rootfs + cgroup as the app, with stdout/
 // stderr on the guest console. A plugin's exit never reboots the sandbox.
 type PluginSpec struct {
-	Exec    string            `json:"exec"`
-	Args    []string          `json:"args,omitempty"`
-	Env     map[string]string `json:"env,omitempty"`
-	Workdir string            `json:"workdir,omitempty"`
-	User    string            `json:"user,omitempty"`
-	Restart string            `json:"restart,omitempty"`
+	// Internal provenance of a materialized default PATH, never user policy.
+	SystemdPathDefault bool              `json:"systemd_path_default,omitempty"`
+	Exec               string            `json:"exec"`
+	Args               []string          `json:"args,omitempty"`
+	Env                map[string]string `json:"env,omitempty"`
+	Workdir            string            `json:"workdir,omitempty"`
+	User               string            `json:"user,omitempty"`
+	Restart            string            `json:"restart,omitempty"`
 }
 
 // NetworkSpec is the resolved guest IP-layer config sandbox-init applies
@@ -366,6 +378,9 @@ const (
 )
 
 type Message struct {
+	// SystemdV1 covers the systemd environment, executor delegation and
+	// bounded lifecycle contract. Hosts require it only for active modes.
+	SystemdV1 bool `json:"systemd_v1,omitempty"`
 	// InitialLaunchStateV1 is advertised in hello before Launch apply.
 	InitialLaunchStateV1 bool                `json:"initial_launch_state_v1,omitempty"`
 	InitialLaunchState   *InitialLaunchState `json:"initial_launch_state,omitempty"`
@@ -404,6 +419,11 @@ type Message struct {
 	// 128+signal on that terminal path.
 	Code       int `json:"code,omitempty"`
 	TermSignal int `json:"term_signal,omitempty"`
+
+	// environment_exited: the outer reports the actual systemd PID 1 Wait
+	// result independently of the primary process and hypervisor exit. The
+	// Host acknowledges this fact before the outer powers off the VM.
+	EnvironmentExit *EnvironmentExit `json:"environment_exit,omitempty"`
 
 	// ping/pong: host-assigned monotonic ID and echoed UnixNano wall time.
 	// The host measures elapsed RTT with time.Since, not wall-clock subtraction.
@@ -454,6 +474,22 @@ type Message struct {
 	Msg string `json:"msg,omitempty"`
 }
 
+// EnvironmentExit records a completed systemd environment lifetime. State is
+// the observed lifecycle outcome; Code and TermSignal retain the real PID 1
+// Wait result, including a signal used by Linux PID-namespace reboot. A clean
+// hypervisor exit cannot replace a missing or failed environment observation.
+type EnvironmentExit struct {
+	State      string `json:"state"`
+	Code       int    `json:"code"`
+	TermSignal int    `json:"term_signal,omitempty"`
+	Reason     string `json:"reason"`
+}
+
+const (
+	EnvironmentStopped = "stopped"
+	EnvironmentFailed  = "failed"
+)
+
 // MemReport is one sequenced guest observation. MemTotal is diagnostic only;
 // VM Capacity is host-owned and must not be inferred from this report.
 type MemReport struct {
@@ -484,29 +520,30 @@ const (
 	// Deprecated: binding completes on the host.
 	TypeDiskBind = "disk_bind"
 	// Deprecated: binding completes on the host.
-	TypeDiskBindAck  = "disk_bind_ack"
-	TypeHello        = "hello"
-	TypeLaunch       = "launch"
-	TypeLaunchAck    = "launch_ack"
-	TypeAppStarted   = "app_started"
-	TypeAppExited    = "app_exited"
-	TypeShutdown     = "shutdown" // base/runtime shutdown; reply ack precedes termination
-	TypePing         = "ping"
-	TypePong         = "pong"
-	TypeRestore      = "restore"
-	TypeRestoreAck   = "restore_ack"
-	TypeAttach       = "attach"
-	TypeAttachAck    = "attach_ack"
-	TypeQuiesce      = "quiesce"
-	TypeQuiesced     = "quiesced"
-	TypeExec         = "exec"
-	TypeExecAck      = "exec_ack"
-	TypeConnect      = "connect"
-	TypeConnectAck   = "connect_ack"
-	TypeMemReport    = "mem_report"
-	TypeMemReportAck = "mem_report_ack"
-	TypeAck          = "ack"
-	TypeError        = "error"
+	TypeDiskBindAck       = "disk_bind_ack"
+	TypeHello             = "hello"
+	TypeLaunch            = "launch"
+	TypeLaunchAck         = "launch_ack"
+	TypeAppStarted        = "app_started"
+	TypeAppExited         = "app_exited"
+	TypeEnvironmentExited = "environment_exited"
+	TypeShutdown          = "shutdown" // stop is committed before best-effort acknowledgement
+	TypePing              = "ping"
+	TypePong              = "pong"
+	TypeRestore           = "restore"
+	TypeRestoreAck        = "restore_ack"
+	TypeAttach            = "attach"
+	TypeAttachAck         = "attach_ack"
+	TypeQuiesce           = "quiesce"
+	TypeQuiesced          = "quiesced"
+	TypeExec              = "exec"
+	TypeExecAck           = "exec_ack"
+	TypeConnect           = "connect"
+	TypeConnectAck        = "connect_ack"
+	TypeMemReport         = "mem_report"
+	TypeMemReportAck      = "mem_report_ack"
+	TypeAck               = "ack"
+	TypeError             = "error"
 )
 
 // Default per-message deadlines (docs/guest-abi.md#health). Callers

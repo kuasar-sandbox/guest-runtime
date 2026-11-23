@@ -212,7 +212,7 @@ func startPluginProcess(s proto.PluginSpec, onSpawn func(int) error, onFailure f
 	}
 	// Preserve the documented/default PATH for bare plugin executables;
 	// explicit plugin PATH still wins.
-	pluginEnv := execEnv(s.Env)
+	pluginEnv := execEnvWithPathSource(s.Env, s.SystemdPathDefault)
 	cmd := exec.Cmd{
 		Path:        self,
 		Args:        args,
