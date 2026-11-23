@@ -1,0 +1,49 @@
+{
+  "schema": 1,
+  "prefix": "/run/sandbox-runtime/systemd",
+  "systemd": {
+    "version": "257.13",
+    "commit": "70b5d110be7702afc4dbce012f60d49506d513da",
+    "url": "https://codeload.github.com/systemd/systemd/tar.gz/70b5d110be7702afc4dbce012f60d49506d513da#systemd-257.13.tar.gz",
+    "sha256": "5adcf82e930c1554c964d07d2827095dafede19ebed0e4fd3dd028b099878253",
+    "patches": [{
+      "file": "systemd-patches/0001-private-configuration-search-path.patch",
+      "sha256": "e91ba8aaedc24b8fabe9a53c26d9d5f67ffe4e7461c16205800c8511cb1b1203"
+    }]
+  },
+  "dbus": {
+    "version": "1.14.10",
+    "url": "https://dbus.freedesktop.org/releases/dbus/dbus-1.14.10.tar.xz",
+    "sha256": "ba1f21d2bd9d339da2d4aa8780c09df32fea87998b73da24f49ab9df1e36a50f"
+  },
+  "dlopen": [
+    "libnss_files.so.2", "libnss_dns.so.2", "libresolv.so.2",
+    "liblzma.so.5", "liblz4.so.1", "libzstd.so.1", "libcrypto.so.3",
+    "libssl.so.3", "libpcre2-8.so.0", "libseccomp.so.2",
+    "libacl.so.1", "libmount.so.1", "libblkid.so.1", "libcap.so.2"
+  ],
+  "meson_options": [
+    "mode=release", "man=disabled", "html=disabled", "tests=false", "install-tests=false",
+    "translations=false", "sysvinit-path=", "sysvrcnd-path=", "pam=disabled",
+    "logind=false", "networkd=false", "resolve=false", "timesyncd=false", "machined=false",
+    "homed=disabled", "portabled=false", "userdb=false", "bootloader=disabled", "efi=false",
+    "ukify=disabled", "firstboot=false", "sysusers=true", "tmpfiles=true", "nss-systemd=false",
+    "nss-myhostname=false", "nss-mymachines=disabled", "nss-resolve=disabled", "default-dnssec=no",
+    "default-kill-user-processes=false", "hostnamed=false", "localed=false", "timedated=false",
+    "importd=disabled", "repart=disabled", "sysupdate=disabled", "sysupdated=disabled",
+    "vmspawn=disabled", "oomd=false", "coredump=false", "pstore=false", "rfkill=false",
+    "backlight=false", "vconsole=false", "kernel-install=false", "hwdb=false", "hibernate=false",
+    "quotacheck=false", "libcryptsetup=disabled", "libcryptsetup-plugins=disabled",
+    "mountfsd=false", "nsresourced=false", "storagetm=false", "xdg-autostart=false",
+    "selinux=disabled", "apparmor=disabled", "smack=false", "ima=false", "ipe=false",
+    "polkit=disabled", "bpf-framework=disabled", "install-sysconfdir=false", "ldconfig=false", "utmp=false",
+    "acl=enabled", "blkid=enabled", "seccomp=enabled", "xz=enabled", "lz4=enabled", "zstd=enabled",
+    "pcre2=enabled", "openssl=enabled", "cryptolib=openssl", "default-compression=zstd",
+    "audit=disabled", "fdisk=disabled", "kmod=disabled", "xenctrl=disabled",
+    "passwdqc=disabled", "pwquality=disabled", "microhttpd=disabled", "libcurl=disabled",
+    "libidn2=disabled", "libidn=disabled", "libiptc=disabled", "qrencode=disabled",
+    "gcrypt=disabled", "gnutls=disabled", "p11kit=disabled", "libfido2=disabled", "tpm2=disabled",
+    "elfutils=disabled", "zlib=disabled", "bzip2=disabled", "xkbcommon=disabled",
+    "glib=disabled", "dbus=disabled", "libarchive=disabled"
+  ]
+}

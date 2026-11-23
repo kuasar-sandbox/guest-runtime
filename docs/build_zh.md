@@ -58,11 +58,11 @@ Host packer 仅在构建时组装 runtime bundle，必须匹配宿主架构。`f
 ## 构建
 
 ```bash
-GOWORK=off make native-deps                # VMLinux、Envd 及 Native 输入
+GOWORK=off make native-deps     # VMLinux、Envd 及私有 systemd 安装
 make flatten-ctl                # OCI/directory -> deterministic EROFS builder
 make build                      # 组装 sandbox-runtime.bundle
 make sandbox-runtime            # 使用选定的 sandbox-init 二进制组装 Runtime
-make build TARGET_ARCH=aarch64  # 在依赖支持的范围内交叉构建
+make systemd                    # 构建并验证原生 systemd 安装
 ```
 
 `make sandbox-runtime` 使用:
@@ -70,9 +70,10 @@ make build TARGET_ARCH=aarch64  # 在依赖支持的范围内交叉构建
 - `bin/<arch>/sandbox-init`;
 - `native-deps/bin/<arch>/envd`;
 - `bin/<arch>/flatten-ctl`;
+- `SYSTEMD_PAYLOAD`（默认 `native-deps/bin/<arch>/systemd`）；
 - 作为 Host image packer 的 `BUILD_MKFS_EROFS`。
 
-普通装配会复用已有可执行输入，不会在源码或 pin 变化后自动刷新已有 `sandbox-init` 或 Envd。`make build` 先重编译 `sandbox-init` 和 `flatten-ctl`，直接执行 `make sandbox-runtime` 则会复用已有可执行文件。发行复现应使用[下文](#精确复现发行依赖)的专用依赖选择流程。
+普通装配会复用已有可执行输入，不会在源码或 pin 变化后自动刷新已有 `sandbox-init` 或 Envd。`make build` 先重编译 `sandbox-init` 和 `flatten-ctl`，直接执行 `make sandbox-runtime` 则会复用已有可执行文件。systemd 清单缺失时调用 `make systemd`；已有安装仍须通过源码 pin、架构、完整文件树和 ELF 依赖闭包校验。配方或构建环境变化后，显式执行 `make systemd` 比较输入记录并按需重建。发行复现应使用[下文](#精确复现发行依赖)的专用依赖选择流程。
 
 缺少 `sandbox-init`、Envd 或 `flatten-ctl`，或其不可执行时，Makefile 调用对应构建目标。宿主 `mkfs.erofs` 必须已在 `PATH` 中，或由 `BUILD_MKFS_EROFS` 指定；缺少时 Runtime 构建明确失败。项目不再维护 erofs-utils 补丁、编译或分发 mkfs。Workbench 或宿主可安装发行版的 erofs-utils，用于构建时打包和独立校验。
 
@@ -81,9 +82,11 @@ make build TARGET_ARCH=aarch64  # 在依赖支持的范围内交叉构建
 | 输出 | Build target |
 | --- | --- |
 | `bin/<arch>/flatten-ctl` | `make flatten-ctl` |
+| `bin/<arch>/sandbox-init` | `make sandbox-init` |
 | `bin/<arch>/sandbox-runtime.bundle` | `make sandbox-runtime` |
 | `native-deps/bin/<arch>/vmlinux` | `make native-deps` |
-| `native-deps/bin/<arch>/envd` | `make native-deps` |
+| `native-deps/bin/<arch>/envd` | `make envd` |
+| `native-deps/bin/<arch>/systemd/` | `make systemd`（原生架构） |
 
 ## 装配 Runtime 镜像
 
@@ -91,10 +94,10 @@ make build TARGET_ARCH=aarch64  # 在依赖支持的范围内交叉构建
 
 ```bash
 make flatten-ctl                 # 构建目标架构 guest 内工具
-make native-deps                 # 构建 vmlinux / envd
+make native-deps                 # 原生构建 vmlinux / envd / systemd
 make sandbox-runtime             # 生成 bin/<arch>/sandbox-runtime.bundle
 make build                       # 构建 flatten-ctl + sandbox-runtime
-make build TARGET_ARCH=aarch64
+make build TARGET_ARCH=aarch64 SYSTEMD_PAYLOAD=/path/to/verified-aarch64/systemd
 ```
 
 执行 `make sandbox-runtime` 前必须已有**宿主可执行的 `mkfs.erofs`**。可安装宿主 erofs-utils，或通过 `BUILD_MKFS_EROFS` 指定宿主工具。项目不编译 mkfs；该工具仅打包 runtime bundle；目标 Guest 使用静态 `flatten-ctl` 内部的 Go 生成器，不再安装 `GUEST_MKFS_EROFS`。
@@ -106,8 +109,10 @@ make build TARGET_ARCH=aarch64
    调用本仓 `make sandbox-init`。
 3. 使用目标架构 `ENVD`(默认 `native-deps/bin/<arch>/envd`),缺失时触发构建。
 4. 使用本仓目标架构 `FLATTEN_CTL`(默认 `bin/<arch>/flatten-ctl`),缺失时触发构建。
-5. 检查所选 `flatten-ctl` 的构建记录中有外部 go-erofs 模块；缺少该带版本与校验和依赖的二进制会明确失败，须先执行 `make flatten-ctl` 或选择匹配的二进制。组装 staging，使用宿主 `BUILD_MKFS_EROFS` 生成临时 runtime EROFS。
-6. host `runtime-bundle` 工具复制 EROFS、补齐 PMEM 对齐、计算 SHA256,
+5. 检查所选 `flatten-ctl` 的构建记录中有外部 go-erofs 模块；缺少该带版本与校验和依赖的二进制会明确失败，须先执行 `make flatten-ctl` 或选择匹配的二进制。
+6. 解析 `SYSTEMD_PAYLOAD`，清单不存在时构建默认原生安装，并按 `native-deps/deps/systemd-lock.json` 校验完整内容。
+7. 组装 staging：将 `/opt/sandbox-runtime/bin/sandbox-init` 硬链接到 `/sbin/init`，复制公共静态工具，将完整私有安装放入 `/usr/lib/sandbox-runtime/systemd`。宿主 `BUILD_MKFS_EROFS` 使用 root 属主、零 xattr 和经过校验的权限生成 EROFS。
+8. host `runtime-bundle` 工具复制 EROFS、补齐 PMEM 对齐、计算 SHA256,
    追加空 marker ZIP，将完成的临时文件原子重命名为 `bin/<arch>/sandbox-runtime.bundle`。
 
 最后的原子重命名不保证整个 Make 目标失败时保留旧产物：Makefile 在运行 mkfs 前已移除旧 bundle，后续失败可能导致没有 bundle。应在隔离的 checkout/输出目录构建并验证结果，再部署到新的不可变路径供后续启动使用。保留运行中 VM 或快照仍引用的旧产物，不要覆盖正在使用的文件。
@@ -118,12 +123,26 @@ make build TARGET_ARCH=aarch64
 ### 架构
 
 runtime 镜像按 target arch 构建。构建目录文件名统一为 `sandbox-runtime.bundle`,
-其 EROFS prefix 内的 `/sbin/init`、`envd`、`flatten-ctl`
-必须都是同一 target arch 的可执行文件。
+其 EROFS prefix 内的 `/sbin/init`、`envd`、`flatten-ctl` 和私有 systemd 安装内的所有 ELF
+必须匹配同一 target arch。
 
 `TARGET_ARCH=amd64` 归一化为 `x86_64`;`TARGET_ARCH=arm64` 归一化为 `aarch64`。
 交叉构建不更新 host 架构软链,避免把通用入口指向 host 不可执行的二进制。
 宿主打包工具始终与这些目标架构 payload 分离。
+
+## 构建私有 systemd 安装
+
+`make systemd` 使用 `native-deps/deps/systemd-lock.json` 固定的源码和功能选项。两个源码归档均强制校验锁定的 SHA256，覆盖归档位置不代表可以跳过校验。原生 Ubuntu 构建环境需要 Meson、Ninja、patchelf、静态 BusyBox 及 [Native 维护文档](../native-deps/README_zh.md#systemd-私有安装)列出的开发库。选定 Workbench 必须预先包含这些依赖，普通构建作业不安装软件包，也不需要 root 权限。
+
+安装包含 manager、executor、shutdown helper、units、generators、系统总线、工具、匹配且未经改写的 ELF loader、普通动态依赖及明确列出的 dlopen/NSS 依赖。每次构建记录配方和编译器身份，以及提供实际依赖字节的二进制包/源包版本。只有输入记录和完整安装均验证通过时才复用已有输出；重建重新解压已验证归档，所选架构下的临时源码目录可丢弃。
+
+bundle 将完整目录存放于 `/usr/lib/sandbox-runtime/systemd`，仅当最终 launch 选择 Runtime systemd 时，Guest 才把它只读投影到 `/run/sandbox-runtime/systemd`。可执行文件与库路径在编译或封装阶段固定到该活动前缀，用户 rootfs 不需要提供匹配 libc。公共静态工具继续位于 `/opt/sandbox-runtime/bin`，其中 executor 入口与 `/sbin/init` 为同一硬链接对象。
+
+源码锁还固定私有配置搜索补丁的摘要。`/etc`、`/run` 管理员配置保持优先，私有 vendor 目录先于 rootfs 的 `/usr/local/lib`、`/usr/lib`，覆盖 sysusers、tmpfiles、preset 及 manager/journald drop-in。Runtime 在私有目录提供 journal 限额、兼容 `/bin` 布局的 PATH，以及禁用无用 getty 实例的 preset；仍保留 rootfs vendor 配置和普通用户服务。
+
+Runtime EROFS 使用独立、非内联、未压缩的 flat 数据布局，不进行去重。`--chunksize` 默认也会去重，因此它与 `-Ededupe` 都不能使用。Linux 6.1 DAX 把一个物理页关联到一个 inode mapping，独立 ELF 文件共享物理数据页会触发内核告警。发布回读对所有 native 普通文件及公共可执行文件校验此布局，拒绝重叠物理区间；公共 executor 硬链接引用同一个 inode，仍合法。这只约束 Runtime bundle，不改变用户 rootfs 的生成方式。
+
+安装校验不执行目标二进制。原生配置测试从没有 messagebus 账号的 rootfs 开始，实际验证 sysusers、tmpfiles、preset 及配置优先级。原生 D-Bus 验证还检查传统非 root 服务激活、helper 的真实 UID 守卫和私有前缀代码映射。Guest 集成测试仍须检查实际投影的 mount flags、PID 1 启动、daemon reexec、停止及 E/S 行为；通过静态安装校验本身不代表已经完成 VM 验证。
 
 ## 构建内核
 
@@ -179,20 +198,21 @@ libssl-dev  / openssl-devel
 |---|---|---|---|
 | `vmlinux` | linux 6.1.169(LTS,cdn.kernel.org) | `deps/linux-patches/` + `deps/vmlinux/*.config` | `sandboxer`/`sandbox-ctl`(guest 内核) |
 | `envd` | e2b-dev/runtime 2026.22(源码 tarball) | — | `guest-runtime`(注入 `sandbox-runtime.bundle`) |
+| `systemd/` | systemd 257.13 + D-Bus 1.14.10 | `deps/systemd-lock.json` 及原生闭包配方 | `sandbox-runtime.bundle` 中可选择的 systemd 启动模式 |
 | `versitygw`(可选) | versity/versitygw v1.5.0 | — | 按需用于本地/单节点 S3-compatible 文件存储集成 |
 
-pin 落在 Makefile 变量(`LINUX_TARBALL` / `ENVD_TARBALL` 及可选
+Linux、Envd、可选网关的 pin 落在 Makefile 变量(`LINUX_TARBALL` / `ENVD_TARBALL` 及可选
 `VERSITYGW_TARBALL`,支持 `url#filename` 与本地路径两种形式),配套的
 `*_TARBALL_SHA256` 为空时跳过校验。当前 Linux、Envd 默认输入配置了 hash;
 可选网关的 hash 按部署验证策略补充。升级版本需要修改变量并重验 patch 应用。只改 pin 不会使已有二进制或已解压源码失效：Envd 解压复用 `.extracted` 标记，内核 fetch 复用 `linux-patches-base`。改变上游输入时，应先保留本地工作，再选择新的源码/输出路径；`make clean` 不会重置这些源码缓存。
 
 先使用正常 Makefile 目标构建所选源码,再打包匹配的输出。在仓库根目录执行的
-`make release-runtime` 准备选定依赖、重编译 `flatten-ctl` 并调用
+`make release-runtime` 准备选定依赖、重编译 `sandbox-init` 和 `flatten-ctl`、构建或验证原生 systemd 安装，再调用
 `sandbox-runtime` 后再打包；`make release-vmlinux` 只依赖 `vmlinux`。直接调用 `release.sh package` 会复用预构建文件,不重建
 原生依赖、不替换源码 checkout、不重置缓存。Runtime 与 Kernel 保持独立构建、
 打包及选择。
 
-Runtime 包输入为 `bin/<arch>/{sandbox-runtime.bundle,flatten-ctl}`；bundle
+Runtime 包输入为 `bin/<arch>/{sandbox-runtime.bundle,sandbox-init,flatten-ctl}` 及选定的 `native-deps/bin/<arch>/systemd/` 安装；bundle
 预先由宿主 `mkfs.erofs` 构建，该工具不属于 Runtime 载荷。Kernel 使用
 `native-deps/bin/<arch>/vmlinux`。已有 `RELEASE_BIN_DIR`、
 `RELEASE_NATIVE_BIN_DIR` 可选择匹配输出目录。
@@ -201,10 +221,11 @@ Runtime 包输入为 `bin/<arch>/{sandbox-runtime.bundle,flatten-ctl}`；bundle
 `RELEASE_LINUX_SOURCE_DIR` 选择对应源码树;
 `RELEASE_SANDBOX_INIT_BIN`、`RELEASE_ENVD_BIN` 选择与镜像匹配的 init 和 Envd
 二进制,用于材料收集与镜像一致性检查。
+`RELEASE_SYSTEMD_PAYLOAD` 选择已经验证的原生安装，其清单必须与镜像内安装相同，许可材料同时收集到外层归档。`make release-runtime` 固定使用本轮构建或验证的默认原生输出。
 源码版本、原生链接映射与这些产物应一并保留。原生 pin 变化需要同步更新配方、
 输入摘要与许可证收集；路径覆盖不表示可以把不同源码字节标记为配置的版本。
 
-Runtime Go 构建的 workspace 只包含本轮选定的 guest-runtime 和 accelerator 模块。`sandbox-init` 与 `flatten-ctl` 均从本模块构建；sandboxer 不加入 Runtime Go workspace。`flatten-ctl` 必须标识 Linux `github.com/kuasar-sandbox/guest-runtime/cmd/flatten-ctl` 主入口及所选 amd64 或 arm64 目标。当次生产者检查自身干净的 Go VCS 元数据。正常二进制构建信息和具有版本、校验和的外部 go-erofs 依赖保留，不打包独立来源记录。
+Runtime Go 构建的 workspace 只包含本轮选定的 guest-runtime 和 accelerator 模块。`sandbox-init` 与 `flatten-ctl` 均从本模块构建；sandboxer 不加入 Runtime Go workspace。`flatten-ctl` 必须标识 Linux `github.com/kuasar-sandbox/guest-runtime/cmd/flatten-ctl` 主入口及所选 amd64 或 arm64 目标。当次生产者检查自身干净的 Go VCS 元数据。正常二进制构建信息和具有版本、校验和的外部 go-erofs 依赖保留，不打包独立 Go 来源记录。私有原生安装自带文件、ELF 和源码身份清单，作为其完整性验证合同的一部分。
 
 许可证收集统一解析本仓两个 Go 程序的编译器，并独立解析 Envd 的编译器选择。
 若这些目录选择不同的编译器版本,则按各载荷实际版本收集对应安装的 Go 及随附
@@ -212,15 +233,14 @@ Runtime Go 构建的 workspace 只包含本轮选定的 guest-runtime 和 accele
 及匹配的 module 校验和,沿用正常 Go 缓存与路由。选定内部组件使用显式 workspace；Envd 保持隔离的 shared module 本地替换；官方包不支持其他无版本的第三方替换。这些材料收集器
 不下载或认证编译器分发,独立验证也不要求安装与载荷相同版本的编译器。
 
-许可证和声明分别放在 `share/licenses/runtime` 或 `share/licenses/vmlinux`。声明缺失、目录不可读、遍历不完整或不同输入冲突时收集失败。Kernel 保留所选 Linux 源码的 `COPYING` 和完整 `LICENSES` 树。不发布来源表或历史构建、测试记录。
+许可证和声明分别放在 `share/licenses/runtime` 或 `share/licenses/vmlinux`。声明缺失、目录不可读、遍历不完整或不同输入冲突时收集失败。Kernel 保留所选 Linux 源码的 `COPYING` 和完整 `LICENSES` 树。私有原生安装在 bundle 内保留自己的清单、源码 pin 和依赖身份。不发布独立外层来源表或历史构建、测试记录。
 
-验证只接受所选单元的载荷：Runtime 的 `bin/` 下为 `sandbox-runtime.bundle` 和 `flatten-ctl`；Kernel 为 `bin/vmlinux` 及运行身份文件 `bin/vmlinux.sha256`。验证精确路径、重复条目、类型、root 属主、权限和载荷完整性。其他单元的材料和无关目录在解包前被拒绝。Runtime 包不能替换独立选择的 Kernel，也不能改变无关安装根目录的权限。
+验证只接受所选单元的载荷：Runtime 的 `bin/` 下为 `sandbox-runtime.bundle`、`sandbox-init` 和 `flatten-ctl`；Kernel 为 `bin/vmlinux` 及运行身份文件 `bin/vmlinux.sha256`。验证精确路径、重复条目、类型、root 属主、权限和载荷完整性。其他单元的材料和无关目录在解包前被拒绝。Runtime 包不能替换独立选择的 Kernel，也不能改变无关安装根目录的权限。
 
 Runtime 独立验证使用已安装在 `PATH` 中的可信主机 `fsck.erofs` 和
 `dump.erofs`,不下载 EROFS 源码或现场编译读取器。读取器须支持镜像格式、
 `fsck.erofs --extract` 及 `dump.erofs --path/--cat/--ls`。
-验证检查 bundle 对齐和前缀摘要,不展开目录树地验证完整 EROFS 文件系统,只把
-init、Envd、flatten-ctl 读入固定私有文件。镜像内属主/权限、Go main
+验证检查 bundle 对齐和前缀摘要，不展开目录树地验证完整 EROFS 文件系统，通过可信读取器读取固定公共工具及完整原生安装。校验 executor 硬链接、每项清单、loader/DSO/dlopen/NSS 闭包、固定上游身份和许可材料。经过审阅的 D-Bus activation helper 是唯一 root 所有的 4755 文件；读取原始 inode 权限并要求零 xattr，拒绝其他特权位或文件 capabilities。原生许可字节必须与外层 `share/licenses/runtime/systemd-runtime` 一致。镜像内属主/权限、Go main
 身份和目标架构须一致。发布前，内嵌 init 与 Envd 必须分别等于本次选定的输入二进制；消费发布包不要求来源证明。内嵌
 flatten-ctl 必须等于外部对应载荷。残留的内嵌或外部 mkfs 载荷会被拒绝。不执行任何归档可执行文件。Kernel 验证
 不需要 EROFS 读取器、Runtime 载荷或依赖 checkout。
@@ -242,15 +262,16 @@ flatten-ctl 必须等于外部对应载荷。残留的内嵌或外部 mkfs 载�
 ### 构建目标
 
 ```bash
-make build      # =all: vmlinux + envd
+make build      # =all: vmlinux + envd + systemd
 make vmlinux    # guest 内核
 make envd       # e2b guest agent
+make systemd    # 私有原生 systemd/D-Bus 安装
 make versitygw  # 可选网关,不包含在 build 中
 make clean      # 移除 Native 输出，保留源码树与 tarball
 make help       # 列举目标
 ```
 
-此处 `make clean` 删除选定的 `LINUX_BUILD_OUT` 和整个 Native `bin/` 目录（所有架构），保留 `build/src/` 与 `build/tarball/`。根目录 `make clean` 先删除本仓根级 `bin/` 和 `build/`，再委派此 Native 清理，不会删除默认 Native 源码树。重置源码缓存或补丁工作前，先阅读[幂等与缓存](../native-deps/README_zh.md#幂等与缓存)。
+此处 `make clean` 删除选定的 `LINUX_BUILD_OUT`、所选架构的 systemd 临时构建/源码目录及整个 Native `bin/` 目录（所有架构），保留共享 `build/src/` 与 `build/tarball/`。根目录 `make clean` 先删除本仓根级 `bin/` 和 `build/`，再委派此 Native 清理，不会删除默认 Native 源码树。重置源码缓存或补丁工作前，先阅读[幂等与缓存](../native-deps/README_zh.md#幂等与缓存)。
 
 构建耗时取决于主机、工具链及缓存状态,以上命令不承诺固定耗时。
 
@@ -317,12 +338,12 @@ CGO_ENABLED=0 -trimpath -ldflags "-s -w"`)→ `bin/<arch>/envd`。GOARCH 即选�
 不更新;交叉产物运行验证需对应的 native host。
 
 ```bash
-make TARGET_ARCH=aarch64 build
+make TARGET_ARCH=aarch64 build SYSTEMD_PAYLOAD=/path/to/verified-aarch64/systemd
 ```
 
 ### 交叉工具链准备
 
-Kbuild 需要目标 C 工具链，例如在 x86_64 宿主安装 `gcc-aarch64-linux-gnu`。Envd 和 flatten-ctl 使用 Go 交叉构建。Runtime 打包器始终使用宿主 erofs-utils，不再需要为 EROFS 安装目标架构的静态 Libgcrypt、Libgpg-error 或 libuuid。
+Kbuild 需要目标 C 工具链，例如在 x86_64 宿主安装 `gcc-aarch64-linux-gnu`。Envd、sandbox-init 和 flatten-ctl 使用 Go 交叉构建。私有 systemd 安装先在匹配的原生宿主构建，再通过 `SYSTEMD_PAYLOAD` 供交叉装配使用；原生 systemd 构建目标会明确拒绝不匹配的宿主。官方 Runtime 发布在两种架构分别原生构建。Runtime 打包器始终使用宿主 erofs-utils，不再需要为 EROFS 安装目标架构的静态 Libgcrypt、Libgpg-error 或 libuuid。
 
 ## WSL2 注意
 

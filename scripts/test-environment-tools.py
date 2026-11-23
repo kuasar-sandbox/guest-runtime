@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Release jobs consume the environment CLI without installing or selecting tools."""
 import os
+import importlib.util
 import re
 from pathlib import Path
 import shutil
@@ -11,6 +12,27 @@ import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def install_systemd_fixture(root):
+    # Reuse the native verifier's non-executable synthetic installation. The
+    # real validator still runs; these ordering tests do not compile systemd.
+    spec = importlib.util.spec_from_file_location(
+        "systemd_fixture", ROOT / "native-deps/deps/test-systemd-payload.py")
+    fixture_module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(fixture_module)
+    fixture = fixture_module.InstallationTests()
+    fixture.setUp()
+    payload = root / "native-deps/bin/x86_64/systemd"
+    try:
+        shutil.copytree(fixture.root, payload)
+    finally:
+        fixture.doCleanups()
+    for name in ("scripts/release-systemd-payload.py", "native-deps/deps/systemd-lock.json"):
+        target = root / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(ROOT / name, target)
+    return payload
 
 
 class EnvironmentTools(unittest.TestCase):
@@ -126,6 +148,7 @@ class RuntimeGeneratorInput(unittest.TestCase):
         for goal in ('build', 'all'):
             with self.subTest(goal=goal), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
+                install_systemd_fixture(root)
                 binary = root / 'bin/x86_64/flatten-ctl'
                 binary.parent.mkdir(parents=True)
                 binary.write_text('old CLI')
@@ -205,6 +228,7 @@ else:
     def check_generator(self, metadata, *, expected):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
+            install_systemd_fixture(root)
             payload = root / 'payload'
             payload.write_text('#!/bin/sh\ntouch "' + str(root / 'executed-payload') + '"\n')
             payload.chmod(0o755)

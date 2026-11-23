@@ -203,11 +203,30 @@ prepare_runtime_verifier() {
     || fail "Runtime validation requires dump.erofs on PATH"
 }
 
+runtime_requires_systemd() {
+  # Selected-source historical builds retain their original payload contract.
+  # A standalone current validator always uses its own trusted contract; the
+  # image cannot opt out by omitting a manifest or a capability marker.
+  if [ -n "${RELEASE_SOURCE_ROOT:-}" ]; then
+    [ -f "$ROOT/native-deps/deps/systemd-lock.json" ]
+  else
+    [ -f "$TOOL_ROOT/scripts/release-systemd-payload.py" ]
+  fi
+}
+
 validate_runtime_payloads() {
   local extract="$1" target_arch="$2" go_arch payloads="$WORK/runtime-payloads" binary package module info
   case "$target_arch" in x86_64) go_arch=amd64 ;; aarch64) go_arch=arm64 ;; *) fail "invalid target: $target_arch" ;; esac
   prepare_runtime_verifier
+  local systemd_args=()
+  if runtime_requires_systemd; then
+    systemd_args+=(--systemd-arch "$target_arch")
+    if [ -f "$ROOT/native-deps/deps/systemd-lock.json" ]; then
+      systemd_args+=(--systemd-lock "$ROOT/native-deps/deps/systemd-lock.json")
+    fi
+  fi
   python3 "${TOOL_ROOT:-$ROOT}/scripts/release-runtime-payloads.py" --without-mkfs \
+    "${systemd_args[@]}" \
     "$extract/bin/sandbox-runtime.bundle" "$RUNTIME_FSCK" "$RUNTIME_DUMP" "$payloads" \
     || fail "Runtime embedded payload verification failed"
   cmp -s "$payloads/flatten-ctl" "$extract/bin/flatten-ctl" \
@@ -233,6 +252,11 @@ validate_runtime_payloads() {
   done
   release_materials_validate_go "$extract" runtime bin/sandbox-runtime.bundle:/sbin/init "$payloads/init"
   release_materials_validate_go "$extract" runtime bin/sandbox-runtime.bundle:/opt/sandbox-runtime/bin/envd "$payloads/envd"
+  if runtime_requires_systemd; then
+    release_materials_require_license "$extract" runtime systemd-runtime
+    diff -qr "$payloads/systemd-licenses" "$extract/share/licenses/runtime/systemd-runtime" >/dev/null \
+      || fail "systemd licenses differ from the verified embedded installation"
+  fi
 }
 
 validate_bundle() {
@@ -356,6 +380,16 @@ package_release() {
       release_materials_add_go_binary "$STAGE/bin/sandbox-init" bin/sandbox-init
       release_materials_add_go_binary "$STAGE/bin/sandbox-init" bin/sandbox-runtime.bundle:/sbin/init
       release_materials_add_go_binary "$envd_bin" bin/sandbox-runtime.bundle:/opt/sandbox-runtime/bin/envd
+      if runtime_requires_systemd; then
+        local systemd_payload="${RELEASE_SYSTEMD_PAYLOAD:-$native_bin_dir/systemd}"
+        python3 "$TOOL_ROOT/scripts/release-systemd-payload.py" verify "$systemd_payload" \
+          --arch "$arch" --lock "$ROOT/native-deps/deps/systemd-lock.json" \
+          || fail "selected systemd installation is not qualified"
+        # The verifier has checked every path, type, mode, source identity and
+        # notice. Preserve this complete notice tree, including common licenses
+        # referenced by Debian/Ubuntu copyright files.
+        cp -a "$systemd_payload/share/licenses" "$STAGE/share/licenses/runtime/systemd-runtime"
+      fi
       ;;
     vmlinux)
       local linux_source linux_license_sha
@@ -392,6 +426,14 @@ EOF
       || fail "embedded sandbox-init differs from the selected build binary"
     cmp -s "$WORK/runtime-payloads/envd" "$envd_bin" \
       || fail "embedded envd differs from the selected build binary"
+    if runtime_requires_systemd; then
+      python3 - "$WORK/runtime-payloads/systemd-manifest.json" \
+        "${RELEASE_SYSTEMD_PAYLOAD:-$native_bin_dir/systemd}/share/sandbox-runtime/systemd-manifest.json" <<'PY'
+import json, sys
+if json.load(open(sys.argv[1])) != json.load(open(sys.argv[2])):
+    raise SystemExit('release: embedded systemd differs from the selected installation')
+PY
+    fi
   fi
   echo "==> prepared $output for $version"
 }

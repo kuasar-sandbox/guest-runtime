@@ -1,0 +1,28 @@
+Subject: [PATCH] Add the private vendor prefix to configuration search paths
+
+The unit and generator search paths are selected by the Guest launcher. Other
+configuration readers use CONF_PATHS directly: sysusers, tmpfiles, presets,
+journald and manager drop-ins must see this installation's vendor data too.
+Keep administrator /etc and /run first, followed by the private installation,
+then retain both image vendor directories. This patch applies only to the
+source-built Runtime installation; provided systemd is unchanged.
+
+--- a/src/basic/constants.h
++++ b/src/basic/constants.h
+@@ -61,14 +61,16 @@
+ #define CONF_PATHS_NULSTR(n)                    \
+         "/etc/" n "\0"                          \
+         "/run/" n "\0"                          \
++        PREFIX_NOSLASH "/lib/" n "\0"           \
+         "/usr/local/lib/" n "\0"                \
+         "/usr/lib/" n "\0"
+ 
+ #define CONF_PATHS(n)                           \
+         "/etc/" n,                              \
+         "/run/" n,                              \
++        PREFIX_NOSLASH "/lib/" n,               \
+         "/usr/local/lib/" n,                    \
+         "/usr/lib/" n
+ 
+ #define CONF_PATHS_STRV(n)                      \
+         STRV_MAKE(CONF_PATHS(n))

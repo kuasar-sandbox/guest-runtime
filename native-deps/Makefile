@@ -3,10 +3,11 @@
 # Produces native build/test tools and guest artifacts the Go repos do not link:
 #   vmlinux           (guest kernel)       — used by sandboxer / sandbox-ctl
 #   envd              (e2b guest agent)    — injected into sandbox-runtime.bundle
+#   systemd/          (private installation) — projected only when selected
 #
 # (librocksdb, accelerator's CGO link dep, is built in that repo.)
 #
-# `make build` builds vmlinux + envd. Each
+# `make build` builds vmlinux + envd + systemd. Each
 # artifact has fetch / (patch) / build sub-stages; idempotency lives inside the
 # scripts. vmlinux is the multi-minute cold build.
 # Cross-compile by setting TARGET_ARCH; CROSS_PREFIX auto-derives when
@@ -118,14 +119,20 @@ endef
 # ---------------------------------------------------------------------------
 # Targets
 # ---------------------------------------------------------------------------
-.PHONY: all build vmlinux envd versitygw \
+.PHONY: all build vmlinux envd systemd versitygw \
         linux-fetch linux-patches-apply linux-patches linux-patches-format linux-build \
         test clean help
 
 all: build
 
 # All native artifacts. vmlinux is the multi-minute cold build.
-build: vmlinux envd
+build: vmlinux envd systemd
+
+# systemd is native-only: closure discovery uses the selected native builder's
+# packages. The script validates the complete previous output and its input
+# receipt before reuse; a directory existing alone is never a cache hit.
+systemd:
+	$(DEPS_ENV) bash deps/build-systemd.sh
 
 # --- envd (e2b guest agent; injected into sandbox-runtime.bundle) -----------
 envd: $(ENVD_BIN)
@@ -189,19 +196,22 @@ test-scripts:
 	bash deps/test-common.sh
 	PYTHONDONTWRITEBYTECODE=1 python3 deps/test-vmlinux-config.py
 	PYTHONDONTWRITEBYTECODE=1 python3 deps/test-envd-budget.py
+	PYTHONDONTWRITEBYTECODE=1 python3 deps/test-systemd-payload.py
 
 clean:
 	# Preserve build/tarball/ (re-downloading source is expensive) and the
 	# arch-neutral source trees under build/src/ (may contain WIP patch dev
 	# under build/src/linux/.git).
 	rm -rf $(LINUX_BUILD_OUT)
+	rm -rf $(BUILD_DIR)/systemd
 	rm -rf bin
 
 help:
 	@echo "native-deps — native dependency builds. Targets:"
-	@echo "  build (=all)          vmlinux + envd (multi-min cold)"
+	@echo "  build (=all)          vmlinux + envd + systemd (multi-min cold)"
 	@echo "  vmlinux               build the guest kernel (~5-10 min cold)"
 	@echo "  envd                  build the e2b guest agent (e2b-dev/runtime; pin via ENVD_TARBALL)"
+	@echo "  systemd               build and verify native systemd/D-Bus private-prefix installation"
 	@echo "  versitygw             build the S3 gateway (opt-in; for builder.files_storage on single-node/local)"
 	@echo "  linux-patches-format  extract HEAD linux commits back to deps/linux-patches/"
 	@echo "  test                  dependency script regressions"

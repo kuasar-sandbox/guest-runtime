@@ -4,7 +4,7 @@
 #   sandbox-init              guest PID 1
 #   flatten-ctl               OCI/dir -> deterministic EROFS builder
 #   sandbox-runtime.bundle    virtio-pmem/DAX guest runtime image
-#   native-deps/bin/*         vmlinux, envd
+#   native-deps/bin/*         vmlinux, envd, systemd installation
 #
 # sandbox-init and flatten-ctl are built from this module. Their selected
 # target binaries and envd are packed into one runtime image. The reusable
@@ -12,7 +12,7 @@
 
 SHELL := /bin/bash
 
-.PHONY: all build flatten-ctl sandbox-init sandbox-runtime native-deps envd vmlinux test vet test-e2e-scripts release-runtime release-vmlinux test-release clean help
+.PHONY: all build flatten-ctl sandbox-init sandbox-runtime native-deps envd systemd vmlinux test vet test-e2e-scripts release-runtime release-vmlinux test-release clean help
 
 # ---------------------------------------------------------------------------
 # Architecture selection (identical block across all kuasar-sandbox repos)
@@ -44,6 +44,7 @@ GO_BUILD_FLAGS := -trimpath
 
 SANDBOX_INIT  ?= $(BINDIR)/sandbox-init
 ENVD          ?= native-deps/bin/$(TARGET_ARCH)/envd
+SYSTEMD_PAYLOAD ?= native-deps/bin/$(TARGET_ARCH)/systemd
 FLATTEN_CTL   ?= $(BINDIR)/flatten-ctl
 STORE_CTL     ?= ../accelerator/$(BINDIR)/store-ctl
 
@@ -84,6 +85,9 @@ sandbox-init:
 envd:
 	$(MAKE) -C native-deps envd BINDIR="bin/$(TARGET_ARCH)"
 
+systemd:
+	$(MAKE) -C native-deps systemd BINDIR="bin/$(TARGET_ARCH)"
+
 vmlinux:
 	$(MAKE) -C native-deps vmlinux
 
@@ -99,24 +103,31 @@ sandbox-runtime:
 	@set -o pipefail; $(GO) version -m "$(FLATTEN_CTL)" | awk -F '\t' '\
 	  $$2 == "dep" && $$3 == "github.com/kuasar-sandbox/go-erofs" && $$4 ~ /^v/ && $$5 ~ /^h1:/ { found++ } \
 	  END { exit found != 1 }' || { echo "selected flatten-ctl lacks the linked Go EROFS generator; rebuild with make flatten-ctl or select a matching FLATTEN_CTL" >&2; exit 1; }
+	@[ -f "$(SYSTEMD_PAYLOAD)/share/sandbox-runtime/systemd-manifest.json" ] || $(MAKE) systemd
+	python3 -B scripts/release-systemd-payload.py verify "$(SYSTEMD_PAYLOAD)" \
+	    --arch "$(TARGET_ARCH)" --lock native-deps/deps/systemd-lock.json
 	rm -rf $(BUILD_DIR)/sandbox-runtime
 	mkdir -p $(BUILD_DIR)/sandbox-runtime/sbin $(BUILD_DIR)/sandbox-runtime/proc \
 	         $(BUILD_DIR)/sandbox-runtime/sys $(BUILD_DIR)/sandbox-runtime/dev \
 	         $(BUILD_DIR)/sandbox-runtime/overlay/lower $(BUILD_DIR)/sandbox-runtime/overlay/upper \
-	         $(BUILD_DIR)/sandbox-runtime/sysroot $(BUILD_DIR)/sandbox-runtime/opt/sandbox-runtime/bin
+	         $(BUILD_DIR)/sandbox-runtime/sysroot $(BUILD_DIR)/sandbox-runtime/opt/sandbox-runtime/bin \
+	         $(BUILD_DIR)/sandbox-runtime/usr/lib/sandbox-runtime
 	@# Pre-baked mountpoints for boot.disks[] data disks (max 8, ordinals 0-7).
 	mkdir -p $(BUILD_DIR)/sandbox-runtime/sysdisks/disk-{0..7}{,-lower,-upper}
 	cp "$(SANDBOX_INIT)" $(BUILD_DIR)/sandbox-runtime/sbin/init
-	chmod +x $(BUILD_DIR)/sandbox-runtime/sbin/init
+	chmod 0755 $(BUILD_DIR)/sandbox-runtime/sbin/init
+	ln $(BUILD_DIR)/sandbox-runtime/sbin/init $(BUILD_DIR)/sandbox-runtime/opt/sandbox-runtime/bin/sandbox-init
+	cp -a "$(SYSTEMD_PAYLOAD)" $(BUILD_DIR)/sandbox-runtime/usr/lib/sandbox-runtime/systemd
 	cp "$(ENVD)" $(BUILD_DIR)/sandbox-runtime/opt/sandbox-runtime/bin/envd
 	cp "$(FLATTEN_CTL)" $(BUILD_DIR)/sandbox-runtime/opt/sandbox-runtime/bin/flatten-ctl
 	chmod 0755 $(BUILD_DIR)/sandbox-runtime/opt/sandbox-runtime/bin/envd \
 	           $(BUILD_DIR)/sandbox-runtime/opt/sandbox-runtime/bin/flatten-ctl
 	mkdir -p "$(BINDIR)"
 	rm -f $(BUILD_DIR)/sandbox-runtime.erofs "$(BINDIR)/sandbox-runtime.bundle"
+	@# DAX requires each inode's data pages to have a unique physical mapping.
+	@# Chunking deduplicates even without -Ededupe; use flat, non-inline data.
 	"$(BUILD_MKFS_EROFS)" \
-	    -Ededupe \
-	    --chunksize=4096 \
+	    -Enoinline_data \
 	    --all-root \
 	    -T0 \
 	    -b4096 \
@@ -165,9 +176,11 @@ release-runtime:
 	workspace="$$(python3 -B "$(KUASAR_PLATFORM_DIR)/ci/integration/go_workspace.py" \
 		--root .. --owners guest-runtime --version "$(RUNTIME_VERSION)" --dependency-tag "accelerator=$$accelerator_tag")"; \
 	$(release_make) sandbox-init flatten-ctl GOWORK="$$workspace" BINDIR="$(abspath $(BINDIR))"; \
+	$(release_make) systemd; \
 	$(release_make) sandbox-runtime GOWORK="$$workspace" BINDIR="$(abspath $(BINDIR))" \
 		FLATTEN_CTL="$(abspath $(BINDIR))/flatten-ctl" \
-		SANDBOX_INIT="$(abspath $(BINDIR))/sandbox-init"; \
+		SANDBOX_INIT="$(abspath $(BINDIR))/sandbox-init" \
+		SYSTEMD_PAYLOAD="$(abspath native-deps/bin/$(TARGET_ARCH)/systemd)"; \
 	rm -rf "$(BUILD_DIR)/release-runtime-bundle"; \
 	GOWORK="$$workspace" RELEASE_BIN_DIR="$(abspath $(BINDIR))" \
 	RELEASE_SOURCE_ROOT="$(CURDIR)" \
@@ -175,6 +188,7 @@ release-runtime:
 	SOURCE_DATE_EPOCH="$$(git show -s --format=%ct HEAD)" \
 	RELEASE_ACCELERATOR_VERSION="$$accelerator_tag" \
 	RELEASE_ENVD_BIN="$(abspath $(ENVD))" \
+	RELEASE_SYSTEMD_PAYLOAD="$(abspath native-deps/bin/$(TARGET_ARCH)/systemd)" \
 	RELEASE_SANDBOX_INIT_BIN="$(abspath $(BINDIR))/sandbox-init" \
 		bash scripts/release.sh package runtime "$(RUNTIME_VERSION)" "$(TARGET_ARCH)" \
 		$(BUILD_DIR)/release-runtime-bundle
@@ -200,8 +214,9 @@ help:
 	@echo "  sandbox-runtime    pack guest payloads into guest erofs"
 	@echo "  sandbox-init       build the guest PID 1 binary"
 	@echo "  envd               build e2b guest agent"
+	@echo "  systemd            build and verify native systemd/D-Bus installation"
 	@echo "  vmlinux            build the guest kernel"
-	@echo "  native-deps        build vmlinux / envd"
+	@echo "  native-deps        build vmlinux / envd / systemd"
 	@echo "  test               unit/static checks"
 	@echo "  vet                Go static analysis"
 	@echo "  test-e2e-scripts   fixture, assertion and lifecycle regressions (no Docker required)"
