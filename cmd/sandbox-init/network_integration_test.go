@@ -73,6 +73,9 @@ func TestPlatformNetworkLinuxIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("isolated network integration: %v\n%s", err, out)
 	}
+	if strings.Contains(string(out), "--- SKIP: TestPlatformNetworkLinuxIntegration (") {
+		networkIntegrationUnavailable(t, "isolated network prerequisites:\n%s", out)
+	}
 	t.Logf("isolated network integration:\n%s", out)
 }
 
@@ -124,6 +127,7 @@ func networkIntegrationSandbox(t *testing.T) {
 		networkIntegrationUnavailable(t, "network namespace sysfs: %v", err)
 	}
 	networkIntegrationSysctls(t)
+	networkIntegrationRequireDestroy(t)
 	peer := networkIntegrationStartPeer(t)
 	pid := strconv.Itoa(peer.Process.Pid)
 	ip := func(args ...string) { networkIntegrationSetupCommand(t, "ip", args...) }
@@ -174,6 +178,31 @@ func networkIntegrationSandbox(t *testing.T) {
 	t.Run("TCP", func(t *testing.T) { networkIntegrationTCP(t, index) })
 	t.Run("Neighbors", func(t *testing.T) { networkIntegrationNeighbors(t, index) })
 	t.Run("Configuration", func(t *testing.T) { networkIntegrationConfiguration(t, index) })
+}
+
+func networkIntegrationRequireDestroy(t *testing.T) {
+	t.Helper()
+	diag, err := openNetworkConn(unix.NETLINK_SOCK_DIAG)
+	if err == nil {
+		defer diag.close()
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		// An active TCP socket cannot have zero source and destination ports.
+		// A concrete zero cookie keeps even this capability probe constrained;
+		// the all-ones INET_DIAG_NOCOOKIE wildcard is deliberately not used.
+		body := make([]byte, 56)
+		body[0], body[1] = unix.AF_INET, unix.IPPROTO_TCP
+		binary.NativeEndian.PutUint32(body[4:8], ^uint32(0))
+		_, err = diag.request(ctx, platformSockDestroy, unix.NLM_F_ACK, body)
+	}
+	if errors.Is(err, unix.ENOENT) {
+		return
+	}
+	if errors.Is(err, unix.EOPNOTSUPP) || errors.Is(err, unix.EPROTONOSUPPORT) || errors.Is(err, unix.EAFNOSUPPORT) ||
+		errors.Is(err, unix.EPERM) || errors.Is(err, unix.EACCES) || errors.Is(err, unix.ENOSYS) {
+		networkIntegrationUnavailable(t, "exact TCP socket destruction unavailable: %v", err)
+	}
+	t.Fatalf("TCP destroy capability probe wanted ENOENT: %v", err)
 }
 
 type networkIntegrationPeerProcess struct {
