@@ -649,20 +649,9 @@ func runExecJoin(appPidStr, ttyStr, userSpec, cwd, argv0 string, args []string) 
 // only carries the operator's explicit --env, so a sane PATH must
 // always be present or bare argv[0] lookups (`ls`, `sh`) would fail.
 func execEnv(extra map[string]string) []string {
-	return execEnvWithPathSource(extra, false)
-}
-
-func execEnvWithPathSource(extra map[string]string, defaultPath bool) []string {
 	m := map[string]string{"PATH": executionDefaultPath()}
 	for k, v := range extra {
 		m[k] = v
-	}
-	if runtimeSystemdTools {
-		_, explicit := extra["PATH"]
-		if defaultPath {
-			m["PATH"] = prependSystemdTools(m["PATH"])
-		}
-		m[systemdPathMarker] = systemdPathMarkerValue(defaultPath || !explicit)
 	}
 	out := make([]string, 0, len(m))
 	for k, v := range m {

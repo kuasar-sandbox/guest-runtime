@@ -421,17 +421,6 @@ func (e *innerExecutor) handle(msg executorMessage, fd *int) (executorMessage, e
 }
 
 func (e *innerExecutor) launch(spec *proto.LaunchSpec, conn *vsockConn) error {
-	if runtimeSystemdTools {
-		if spec.Env == nil {
-			spec.Env = make(map[string]string)
-		}
-		if path, exists := spec.Env["PATH"]; !exists {
-			spec.Env["PATH"] = executionDefaultPath()
-			spec.SystemdPathDefault = true
-		} else if spec.SystemdPathDefault {
-			spec.Env["PATH"] = prependSystemdTools(path)
-		}
-	}
 	cs, bridge, err := phase2Apply(spec, conn)
 	if err != nil {
 		return err

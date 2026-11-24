@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -313,54 +312,4 @@ func testEnvMap(env []string) map[string]string {
 		}
 	}
 	return m
-}
-
-func TestSystemdLoginPathUsesProvenanceNotValue(t *testing.T) {
-	previous := runtimeSystemdTools
-	runtimeSystemdTools = true
-	t.Cleanup(func() { runtimeSystemdTools = previous })
-	for _, tc := range []struct {
-		name, path string
-		trusted    bool
-		marker     string
-	}{
-		{"explicit-default-looking", executionDefaultPath(), false, "0"},
-		{"explicit-empty", "", false, "0"},
-		{"product-default", "/custom/image/bin:/bin", true, "1"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			env := testEnvMap(execEnvWithPathSource(map[string]string{"PATH": tc.path, systemdPathMarker: "1"}, tc.trusted))
-			want := tc.path
-			if tc.trusted {
-				want = prependSystemdTools(want)
-			}
-			if env["PATH"] != want || env[systemdPathMarker] != tc.marker {
-				t.Fatalf("lost PATH authority: %+v", env)
-			}
-		})
-	}
-}
-
-func TestSystemdStandardLoginProfilePreservesExplicitChoice(t *testing.T) {
-	prefix := t.TempDir()
-	if err := os.Mkdir(filepath.Join(prefix, "bin"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	script := filepath.Join(t.TempDir(), "profile.sh")
-	if err := os.WriteFile(script, []byte(strings.ReplaceAll(systemdLoginScript(), systemdPrefix, prefix)), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	for _, tc := range []struct{ marker, path, want string }{
-		{"1", "/image/bin:/bin", prefix + "/bin:/image/bin:/bin"},
-		{"0", "/chosen", "/chosen"},
-		{"0", "", ""},
-		{"1", prefix + "/bin:/bin", prefix + "/bin:/bin"},
-	} {
-		cmd := exec.Command("/bin/sh", "-c", `. "$1"; printf '%s' "$PATH"`, "sh", script)
-		cmd.Env = []string{"PATH=" + tc.path, systemdPathMarker + "=" + tc.marker}
-		got, err := cmd.Output()
-		if err != nil || string(got) != tc.want {
-			t.Fatalf("marker=%s path=%q: got %q err=%v", tc.marker, tc.path, got, err)
-		}
-	}
 }

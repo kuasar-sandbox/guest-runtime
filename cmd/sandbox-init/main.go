@@ -604,7 +604,7 @@ func phase2ForkApp(spec *proto.LaunchSpec, cs childStdio, onSpawn func(int) erro
 	cmd := exec.Cmd{
 		Path:        self,
 		Args:        args,
-		Env:         envSliceFromMap(spec.Env, spec.SystemdPathDefault),
+		Env:         envSliceFromMap(spec.Env),
 		Dir:         "/",
 		Stdin:       cs.stdin,
 		Stdout:      cs.stdout,
@@ -891,19 +891,13 @@ func waitForDevice(path string, timeout time.Duration) error {
 	return fmt.Errorf("device %s did not appear within %s", path, timeout)
 }
 
-func envSliceFromMap(m map[string]string, defaultPath bool) []string {
+func envSliceFromMap(m map[string]string) []string {
 	if len(m) == 0 {
 		return execEnv(nil)
 	}
 	out := make([]string, 0, len(m))
 	for k, v := range m {
-		if runtimeSystemdTools && k == systemdPathMarker {
-			continue
-		}
 		out = append(out, k+"="+v)
-	}
-	if runtimeSystemdTools {
-		out = append(out, systemdPathMarker+"="+systemdPathMarkerValue(defaultPath))
 	}
 	return out
 }

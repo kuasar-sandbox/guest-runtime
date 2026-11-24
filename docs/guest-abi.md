@@ -214,11 +214,6 @@ document's persistent/ephemeral disclosure boundaries.
 The wire NetworkSpec key is **ip_cidr**, not the host YAML key ip.
 `start_timeout` is absent from LaunchSpec because it controls only the
 host's launch_ack wait ([Failure semantics](#failures)).
-`systemd_path_default` on LaunchSpec and PluginSpec is internal PATH-source
-metadata supplied by a trusted Host projection, not a public launch setting.
-An explicit PATH, including an empty value, does not acquire that provenance
-merely because its bytes match a platform default.
-
 <a id="application-environment"></a>
 
 ### The application environment
@@ -403,23 +398,14 @@ freezes the whole `/sandbox`, including systemd, its independent units and
 all executor descendants. The existing `nsdelegate` boundary applies;
 privileged Guest code is not isolated from its own environment by this alias.
 
-Only the Runtime selection projects its matching manager/tool tree. Its
-default execution PATH includes `/run/sandbox-runtime/systemd/bin`, preserving
-the original default directories. Host and artifact metadata preserve whether
-Launch or a plugin PATH came from platform/image defaults. Explicit PATH,
-including empty or a value identical to a default, stays authoritative;
-ordinary plugins retain their independent environment rather than inheriting
-Launch.Env. A product layer may construct a plugin's environment from its
-image defaults and retain that provenance through the trusted Host API.
-
-Runtime mode also supplies a read-only tmpfs-backed
-`/etc/profile.d/00-sandbox-runtime-systemd.sh` for login shells whose standard
-profile sources that directory. An authoritative internal environment marker
-allows it to retain the tool prefix for default PATHs after normal profile
-initialization; explicit PATHs do not opt in. Nonempty or symlink conflicts at
-the reserved filename fail launch. User shell startup files retain their
-ordinary precedence, so shells that do not source `/etc/profile.d` are outside
-this login-profile guarantee. Off/provided modes do not install the script.
+Only the Runtime selection projects its matching manager/tool tree. Native exec
+and platform helper commands use a default PATH that includes
+`/run/sandbox-runtime/systemd/bin` plus the existing standard directories.
+Explicit caller PATH values, including empty values, remain authoritative;
+a user may also invoke the tool by absolute path. The guest does not inject
+shell profile scripts or track PATH origin across the Host, artifacts and plugins.
+Ordinary plugins keep their independent environment, rather than inheriting
+Launch.Env.
 
 Platform payload, loader and injected control mounts remain available through
 the graceful-stop window and final shutdown helper. The mount contract does
@@ -864,12 +850,12 @@ SIGTERM/SIGINT instead of executing an external program. The Host still forces
 It is not the inner init, and replacing it does not repeat environment
 bootstrap or `init` commands.
 
-In direct/provided mode, primary and one-shot `init` commands receive a default
-PATH only when their entire environment map is empty. Plugins and native exec
-start with a default PATH and overlay supplied entries, including an explicitly
-empty PATH. Runtime systemd adds its private tools only for a default PATH;
-the trusted provenance and standard login-profile rules above preserve an
-explicit caller choice. Plugin Env remains independent from Launch.Env.
+Primary and one-shot `init` commands receive a default PATH only when their
+entire environment map is empty. Plugins and native exec start with a default
+PATH and overlay explicit supplied entries, including an empty PATH. The native
+exec default includes the private tools if Runtime systemd was selected; no
+login profile is injected and explicit PATHs are not rewritten. Plugin Env
+remains independent from Launch.Env.
 The bridge's primary-side fds are replaced by generation on restart; the MUX
 session survives, with the bounded output drain described in [Phase 3](#supervision).
 

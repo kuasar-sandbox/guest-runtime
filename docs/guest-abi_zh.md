@@ -164,10 +164,6 @@ FileSpec 还支持 read_only，省略时 bind 可写。Tmpfs 注入避免直接�
 参见 sandbox 生命周期的 persistent/ephemeral 暴露边界。Wire NetworkSpec 使用 **ip_cidr**，不是 host YAML 的 ip。
 `start_timeout` 不在 LaunchSpec——它只约束 host 侧
 等待 launch_ack(见 [失败语义](#failures))。
-LaunchSpec 和 PluginSpec 的 `systemd_path_default` 是可信 Host 投影传入的内部 PATH
-来源，不是公开 launch 配置。显式 PATH（包括空值）即使字节恰好等于平台默认值，
-也不会据此获得默认来源。
-
 <a id="application-environment"></a>
 
 ### 用户应用看到的环境
@@ -303,17 +299,10 @@ Systemd 管理自己的 scopes、slices 和 units。Executor 及其直接管理�
 将受管进程原子创建在叶子中。递归捕获冻结完整 `/sandbox`，包括 systemd、其独立 units
 及 executor 后代。继续使用既有 `nsdelegate` 边界；该 alias 不构成对同 Guest 特权代码的隔离。
 
-只有实际选中 Runtime 安装时投影匹配的 manager/tool 树。默认执行 PATH 包含
-`/run/sandbox-runtime/systemd/bin` 并保留原默认目录。Host 和 artifact 内部元数据记录
-Launch/plugin PATH 是否来自平台或镜像默认；显式 PATH（包括空值或与默认字节相同的值）
-仍具覆盖权。普通 plugin Env 独立，不继承 Launch.Env。产品层可用完整镜像默认构建
-自己 plugin 的环境，并经可信 Host API 保留默认来源。
-
-Runtime 模式同时提供只读 tmpfs 注入文件 `/etc/profile.d/00-sandbox-runtime-systemd.sh`，
-适用于标准 profile 会读取该目录的登录 shell。Executor 权威设置的内部环境标记允许
-脚本在正常 profile 初始化后保留默认 PATH 的工具前缀；显式 PATH 不参与。保留文件名
-已有非空文件或符号链接时启动失败。用户 shell 启动文件仍遵循自身优先级，不读取
-`/etc/profile.d` 的 shell 不属于此登录保证。Off/provided 不安装该脚本。
+只有实际选中 Runtime 安装时，才投影匹配的 manager/tool 树。原生 exec 和平台 helper
+的默认 PATH 包含 `/run/sandbox-runtime/systemd/bin` 及原有标准目录。调用者显式设置
+PATH（包括空值）时保持原值，也可以使用工具的绝对路径。Guest 不注入 shell profile，
+不在 Host、产物或 plugin 之间追踪 PATH 的默认来源。普通 plugin Env 独立于 Launch.Env。
 
 平台 payload、loader 与注入控制挂载保留到 grace 窗口及最终 shutdown helper 完成。
 这不为任意用户 units 或用户自行创建的 mount 施加全局关机顺序。
@@ -631,10 +620,10 @@ Placeholder 使用相同设置和 primary 生命周期，末步等待 SIGTERM/SI
 外部程序。Host 仍强制 `restart=always`，从 exec 杀死 placeholder 会原地重启。
 Placeholder 与内层 init 是不同进程；替换 placeholder 不重做环境 bootstrap 或 `init`。
 
-Direct/provided 模式中，primary 和一次性 `init` 命令仅在整个环境 map 为空时补默认 PATH。
-Plugin 和 native exec 先设置默认 PATH，再用传入条目覆盖，包括显式空 PATH。Runtime
-systemd 仅为默认来源加入私有工具；上述可信来源和标准 login profile 规则保留显式选择。
-Plugin Env 仍独立于 Launch.Env。Restart 按代替换 bridge
+Primary 和一次性 `init` 命令仅在整个环境 map 为空时补默认 PATH。Plugin 和 native exec
+先设置默认 PATH，再用调用者提供的条目覆盖，包括显式空 PATH。只有实际选中 Runtime
+systemd 时，native exec 默认 PATH 才加入私有工具目录；不改写显式 PATH，也不注入登录
+profile。Plugin Env 继续独立于 Launch.Env。Restart 按代替换 bridge
 的 primary 侧 fd，保留 MUX session，并采用[阶段 3](#supervision)的有界输出排空。
 
 <a id="application-cgroups"></a>

@@ -285,7 +285,7 @@ TTYPath=/dev/console
 	}
 	paths := []string{systemdExecutorPath, systemdControl, cgroupMountPoint, "/dev/console", "/proc"}
 	if installation.runtime {
-		paths = append(paths, systemdPrefix, systemdLoginProfile)
+		paths = append(paths, systemdPrefix)
 	}
 	seen := map[string]bool{}
 	for _, line := range strings.Split(string(info), "\n") {
@@ -351,11 +351,6 @@ func startSystemdExecutor(spec *proto.LaunchSpec, installation *systemdInstallat
 		return nil, nil, err
 	}
 	token := hex.EncodeToString(buf)
-	if installation.runtime {
-		if err := prepareSystemdLoginPath(); err != nil {
-			return nil, nil, err
-		}
-	}
 	if err := prepareSystemdUnits(spec, installation, token); err != nil {
 		return nil, nil, err
 	}

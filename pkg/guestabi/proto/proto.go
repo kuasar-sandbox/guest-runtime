@@ -103,11 +103,6 @@ type LaunchSpec struct {
 	// executor service and share its environment PID namespace, without
 	// rewriting the caller's CgroupControl or SharePID policy for future boots.
 	Systemd string `json:"systemd,omitempty"`
-	// SystemdPathDefault records Host default provenance, not user policy.
-	// Only an actually selected Runtime installation may prefix this PATH.
-	// Explicit caller PATH values keep their normal override precedence.
-	SystemdPathDefault bool `json:"systemd_path_default,omitempty"`
-
 	// DiskMountProjectionV1 opts older guests into mount conflict checks.
 	// Current guests identify guarded mounts using their slot declarations.
 	DiskMountProjectionV1 bool `json:"disk_mount_projection_v1,omitempty"`
@@ -243,14 +238,12 @@ type InitSpec struct {
 // up). It runs in the same guest rootfs + cgroup as the app, with stdout/
 // stderr on the guest console. A plugin's exit never reboots the sandbox.
 type PluginSpec struct {
-	// Internal provenance of a materialized default PATH, never user policy.
-	SystemdPathDefault bool              `json:"systemd_path_default,omitempty"`
-	Exec               string            `json:"exec"`
-	Args               []string          `json:"args,omitempty"`
-	Env                map[string]string `json:"env,omitempty"`
-	Workdir            string            `json:"workdir,omitempty"`
-	User               string            `json:"user,omitempty"`
-	Restart            string            `json:"restart,omitempty"`
+	Exec    string            `json:"exec"`
+	Args    []string          `json:"args,omitempty"`
+	Env     map[string]string `json:"env,omitempty"`
+	Workdir string            `json:"workdir,omitempty"`
+	User    string            `json:"user,omitempty"`
+	Restart string            `json:"restart,omitempty"`
 }
 
 // NetworkSpec is the resolved guest IP-layer config sandbox-init applies
