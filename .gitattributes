@@ -1,0 +1,2 @@
+# Unified patches retain a single context marker on otherwise blank lines.
+native-deps/deps/systemd-patches/*.patch whitespace=-blank-at-eol

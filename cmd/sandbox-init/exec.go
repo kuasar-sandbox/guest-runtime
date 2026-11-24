@@ -438,6 +438,15 @@ func finishExecMux(sess *mux.Session, code int, timeout time.Duration) error {
 // namespaces. A restart gap is an error; it must never select PID 1 or a reused
 // numeric PID belonging to an unrelated plugin.
 func (s *supervisorState) forkExec(spec *proto.ExecSpec, cs childStdio) (int, <-chan syscall.WaitStatus, error) {
+	if systemdEnabled(s.spec) {
+		if s.shutdown.Load() || s.quiescing.Load() {
+			closeChildStdio(cs)
+			return 0, nil, errors.New("exec: systemd environment is stopping or quiescing")
+		}
+		// The executor's namespace identity outlives any primary generation.
+		// Initial admission is still owned by innerExecutor after Launch.
+		return forkExecChild(spec, cs, os.Getpid(), s.execReg)
+	}
 	s.primaryMu.RLock()
 	defer s.primaryMu.RUnlock()
 	pid := int(s.appPid.Load())
@@ -640,8 +649,7 @@ func runExecJoin(appPidStr, ttyStr, userSpec, cwd, argv0 string, args []string) 
 // only carries the operator's explicit --env, so a sane PATH must
 // always be present or bare argv[0] lookups (`ls`, `sh`) would fail.
 func execEnv(extra map[string]string) []string {
-	const defaultPath = "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-	m := map[string]string{"PATH": defaultPath[len("PATH="):]}
+	m := map[string]string{"PATH": executionDefaultPath()}
 	for k, v := range extra {
 		m[k] = v
 	}

@@ -31,6 +31,9 @@ type executorMessage struct {
 	PID     int               `json:"pid,omitempty"`
 	Code    int               `json:"code,omitempty"`
 	Signal  int               `json:"signal,omitempty"`
+	Token   string            `json:"token,omitempty"`
+	Epoch   uint64            `json:"epoch,omitempty"`
+	Reason  string            `json:"reason,omitempty"`
 }
 
 type executorReply struct {
@@ -74,7 +77,11 @@ func executorLinkFromFile(file *os.File) (*executorLink, error) {
 		_ = conn.Close()
 		return nil, errors.New("executor connection is not a Unix socket")
 	}
-	return &executorLink{conn: u, writing: make(chan struct{}, 1), pending: make(map[uint64]chan executorReply), done: make(chan struct{})}, nil
+	return newExecutorLink(u), nil
+}
+
+func newExecutorLink(conn *net.UnixConn) *executorLink {
+	return &executorLink{conn: conn, writing: make(chan struct{}, 1), pending: make(map[uint64]chan executorReply), done: make(chan struct{})}
 }
 
 func (l *executorLink) close() {
@@ -94,6 +101,17 @@ func (l *executorLink) send(msg executorMessage, fd int) error {
 }
 
 func (l *executorLink) sendContext(ctx context.Context, msg executorMessage, fd int) error {
+	return l.sendFrame(ctx, msg, fd, false)
+}
+
+// A refresh has no execution side effect and uses its own discardable epoch.
+// If no header byte or descriptor was sent, its timeout leaves the stream
+// usable. Any partial frame is a real protocol failure and closes the link.
+func (l *executorLink) sendControl(ctx context.Context, msg executorMessage, fd int) error {
+	return l.sendFrame(ctx, msg, fd, true)
+}
+
+func (l *executorLink) sendFrame(ctx context.Context, msg executorMessage, fd int, allowUnsentTimeout bool) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -137,7 +155,13 @@ func (l *executorLink) sendContext(ctx context.Context, msg executorMessage, fd 
 	if fd >= 0 {
 		rights = unix.UnixRights(fd)
 	}
-	n, _, err := l.conn.WriteMsgUnix(header, rights, nil)
+	n, oobn, err := l.conn.WriteMsgUnix(header, rights, nil)
+	if err != nil && allowUnsentTimeout && n == 0 && oobn == 0 {
+		var timeout net.Error
+		if errors.As(err, &timeout) && timeout.Timeout() {
+			return err
+		}
+	}
 	if err == nil {
 		err = wireio.WriteAll(l.conn, header[n:])
 	}

@@ -17,16 +17,18 @@ guest-runtime 构建 PID 1，将其打入 Runtime Bundle，并提供共享 Go �
 
 | 目标 | 实现方式 |
 |---|---|
-| 启动快 | 同一静态 Go 二进制提供外层 Guest PID 1 和内层 PID 1，无 systemd / dracut / busybox 链路 |
+| 启动快 | Direct 模式由同一静态 Go 二进制提供外层 Guest PID 1 和内层 executor；systemd 由显式 launch 策略选择 |
 | 启动状态可验证 | sandbox-init 版本固定;launch、quiesce、restore 和 attach 使用显式握手与状态屏障 |
 | 跨 sandbox 共享 | virtio-pmem + DAX 通过 host page cache 共享同一文件的只读页，不共享 guest 私有可写 RAM |
-| 一 VM = 一 primary app | 默认 private PID 模式用 clone(NEWPID\|NEWNS) 让 app 看到自己 PID=1；也支持 shared PID 模式 |
-| 生命周期可寻址 | app 启动/退出通知与 quiesce/restore 握手走 vsock；host VMM 停机是独立路径（[信号处理](#signals)） |
+| 一 VM = 一 primary app | Direct 支持 private/shared PID 视图；systemd 共用一个环境 PID namespace，保留同一 primary 生命周期 |
+| 生命周期可寻址 | app、systemd 环境终止事实及 quiesce/restore 握手走 vsock；正常关机与物理退役有明确边界（[信号处理](#signals)） |
 | app I/O 干净 | 应用 stdin/stdout/stderr(或一个伪终端)走 vsock 转发,与内核 dmesg 隔离 |
 
 <a id="system-boundary"></a>
 
 ## 系统中的位置
+
+下图展示 direct 模式。可选 systemd 拓扑见 [systemd 环境](#systemd-environments)。
 
 ```mermaid
 flowchart TB
@@ -46,7 +48,8 @@ flowchart TB
 Runtime Bundle 是共享只读 Host backing file。Guest 内核挂载它并执行 `/sbin/init`。
 外层实例组装并切换工作负载 root，应用 mounts/files/network，然后启动同一二进制的
 内层实例。内层执行初始化并监督用户进程。Private 模式中主进程是自身 namespace 的
-PID 1；shared 模式中用户看到的 PID 1 是内层实例。
+PID 1；direct shared 模式中用户看到的 PID 1 是内层实例。Systemd 模式中环境 PID 1
+为 systemd，它通过保留 service 启动同一 executor；primary、plugin 和 exec 共用该环境的 PID/mount namespace。
 
 Host endpoint 为 `RunRoot/PathID/vsock.sock`。`RunRoot` 默认 `/run/sandbox`；
 `PathID` 默认 `SandboxID`，也可独立指定（[Host 路径](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/runtime_zh.md#run)）。Launch、ping、应用 started/exited 通知使用下文
@@ -63,7 +66,7 @@ Host endpoint 为 `RunRoot/PathID/vsock.sock`。`RunRoot` 默认 `/run/sandbox`�
 | 实例 | 进程与 cgroup 范围 | 职责 |
 | --- | --- | --- |
 | 外层 `sandbox-init` | Guest PID 1，位于 `/sandbox` 之外 | Host listener 与生命周期事实；root 和磁盘组装、autofs 及存储操作；网络/时钟更新；原始 usage 和 `mem_report`；递归 freeze/thaw 与 Guest poweroff |
-| 内层 `sandbox-init` | 子 PID namespace 的 PID 1，位于 `/sandbox` 内 | 顺序 `init`；primary 与 plugin 监督；孤儿回收；exec 和转发会话；应用 stdio 与 MUX |
+| 内层 `sandbox-init` | 位于 `/sandbox` 内：direct 时为环境 PID 1，systemd 时为保留 service 的主进程和 subreaper | 顺序 `init`；primary 与 plugin 监督；孤儿回收；exec 和转发会话；应用 stdio 与 MUX |
 
 外层接收既有 Host 协议，通过私有 Unix socket 将执行连接交给内层。描述符交接保留
 原连接及未读字节，外层只释放自身副本，不 shutdown 内层持有的 socket。私有协议是
@@ -81,7 +84,7 @@ Host endpoint 为 `RunRoot/PathID/vsock.sock`。`RunRoot` 默认 `/run/sandbox`�
 - **不在 Guest 归并用量**: 按请求返回原始 usage 观测, 不增加 Guest ticker、
   累计、面积、峰值或历史补发 ([原始 Usage 观测](#usage-observations)).
 - **无容器运行时**:平台直接管理 sandbox 生命周期,不引入 runc / crun / podman
-- **无 systemd / OpenRC**:进程监督由 sandbox-init 自己写的 supervisor 完成
+- **不隐式选择 init 系统**：默认仍为 direct；systemd 需要下文的显式 launch 策略。通用 executor 继续监督平台 primary、plugin 和执行会话。
 - **init 操作不依赖 busybox / util-linux**:mount / mkdir / chdir / chroot /
   reboot / openpty 通过 Go syscall 完成；runtime 同时包含下节列出的独立 guest payload 工具。
 - **外层 runtime 不提供发行版 rootfs**:应用镜像提供 /etc、/usr 等内容；
@@ -100,6 +103,7 @@ Host endpoint 为 `RunRoot/PathID/vsock.sock`。`RunRoot` 默认 `/run/sandbox`�
 - `/sbin/init` 必须是匹配 Guest 架构的 sandbox-init；本仓 `make sandbox-init` 生成它。
 - Runtime 预建早期挂载及数据盘 staging 目录；phase 1a 按下文构造实际用户 rootfs，外层 Runtime 不是通用发行版 `/etc`、`/usr` 或共享库环境。
 - `/opt/sandbox-runtime/` 是保留的只读 Guest payload 根，phase 1a 将其 bind 到用户 rootfs 同名路径，遮蔽用户镜像已有内容；应用必须遵守应用环境章节的约束。
+- 选中 Runtime systemd 时，将匹配的 manager、工具、loader、库、units 和 shutdown helpers 作为完整只读安装投影到 `/run/sandbox-runtime/systemd`；provided 使用最终工作负载 rootfs 的安装。
 - virtio-pmem/DAX 复用相同 backing file 的只读页，不共享各 Guest 私有可写 RAM。init 和 payload 可执行文件都必须匹配目标架构。
 
 Runtime 生产、host/target mkfs 区分和 Native 构建操作见 [Native 指南](../native-deps/README_zh.md)。Host–Guest 握手、挂载次序与 ABI 继续由本文完整定义。
@@ -128,13 +132,14 @@ sandbox.yaml `launch:` 节(yaml override 优先,Env merge),host sandbox-ctl 合�
   "env":     {"PATH": "...", "HOME": "/root"},
   "workdir": "/",
   "restart": "never",                    // never|on-failure|always(in-place 重启 + 退避)
-  "cgroup_control": false,                // 默认 false:进程见 /;true:空根下放 controller,进程见 /init
+  "systemd": "off",                      // off|auto|runtime|provided；wire 省略时为 off
+  "cgroup_control": false,                // direct 放置策略；systemd 恒定委托 service 根
   "ext4_discard": "auto",                // auto（或省略）：discard；manual：nodiscard
   "placeholder": false,                  // true → 不 exec 外部程序,占位锚点等待停机;exec 互斥;host 强制 restart=always
-  "share_pid": false,                    // true → 继承内层 PID/mount namespace(pid_namespace=shared)
+  "share_pid": false,                    // direct 策略；systemd 恒定共享环境 PID/mount namespace
   "user":    "0:0",                      // uid:gid 或 name:group(guest 侧 /etc/passwd 解析);空 → root
   "stop_signal":   15,                   // 停机信号编号(host 已从名字解析);0 → SIGTERM
-  "stop_grace_sec": 10,                  // guest PID 1 停机宽限秒数；0 → 默认 10s，不保证 host teardown 走此路径
+  "stop_grace_sec": 10,                  // Guest 停机宽限秒数；非正值 → 默认 10s
   "network": { "interface": "eth0", "ip_cidr": "169.254.1.1/31", "mtu": 1500, "nexthop": "", "hostname": "my-sandbox" },
   "mounts":  [ {"target": "/tmp", "type": "tmpfs", "options": "nosuid,nodev,mode=1777"},
                {"target": "/var/log", "type": "empty"} ],
@@ -159,22 +164,22 @@ FileSpec 还支持 read_only，省略时 bind 可写。Tmpfs 注入避免直接�
 参见 sandbox 生命周期的 persistent/ephemeral 暴露边界。Wire NetworkSpec 使用 **ip_cidr**，不是 host YAML 的 ip。
 `start_timeout` 不在 LaunchSpec——它只约束 host 侧
 等待 launch_ack(见 [失败语义](#failures))。
-
 <a id="application-environment"></a>
 
 ### 用户应用看到的环境
 
-- **PID 1**：默认 `pid_namespace=private` 时 primary 是自身 namespace 的 PID 1；
+- **PID 1**：direct 默认 `pid_namespace=private` 时 primary 是自身 namespace 的 PID 1；
   shared 中内层 `sandbox-init` 是 PID 1 并回收孤儿。Init 命令与 plugin 使用内层
-  PID namespace，native exec 加入 primary 的 namespace，外层管理实例不可见。
+  PID namespace，native exec 加入 primary 的 namespace。Systemd 模式中 systemd 是 PID 1，
+  平台执行共用该环境；外层管理实例始终不可见。
 - **cgroup namespace**：真实 `/sys/fs/cgroup/sandbox` 是 namespace/freezer 根。
-  `cgroup_control=false` 时内层及所有直接管理的进程位于该组，显示 `0::/`；
+  Direct 的 `cgroup_control=false` 时内层及所有直接管理的进程位于该组，显示 `0::/`；
   `true` 时此根无直属进程且 controllers 已下放，进程位于 `/sandbox/init`，显示
-  `0::/init`。Init、primary、plugin、exec 继承内层 cgroup namespace，并共用同一
-  放置规则，详见
+  `0::/init`。Systemd 模式中它们位于保留 service 的 `init` 叶子，空的委托 service 根
+  可由 `/run/sandbox-init/cgroup` 访问。Init、primary、plugin、exec 共用环境 cgroup namespace，详见
   [完整拓扑与下放规则](#application-cgroups)。
 - **mount namespace**：init 命令、plugin 与 shared 模式的 primary 使用内层 mount
-  namespace 及用户 root 视图（overlay 或 single ext4）。仅 private 模式的 primary
+  namespace 及用户 root 视图（overlay 或 single ext4）。仅 direct private 模式的 primary
   新建 mount namespace，并挂载与自身 PID namespace 匹配的 `/proc`。Native exec
   加入 primary 实际所在的 mount namespace。
 - **网络**:配置网络源时为 eth0(virtio-net,host TAP 后端),IP 由 sandbox-init 配好;
@@ -200,22 +205,30 @@ FileSpec 还支持 read_only，省略时 bind 可写。Tmpfs 注入避免直接�
 ### 退出语义
 
 - `restart: never`:应用退出 → sandbox-init 收尾 MUX、发 `app_exited{code,term_signal}`
-  → reboot → CH 退 → sandbox-ctl 退,sandbox 销毁。退出码(或致死信号)透传到
-  sandbox-ctl 的进程退出码，前提是通知已成功到达；失败时的传播限制见 [失败语义](#failures)
+  → poweroff → CH 退 → sandbox-ctl 退，sandbox 销毁。通知报告 primary 的真实退出码或
+  致死信号；当前 Host 将其单独记录，`sandbox-ctl run` 使用 owner/VMM 的结果，不从
+  `app_exited` 回调推导自身进程退出码。通知失败可能丢失 primary 事实，见 [失败语义](#failures)。
 - `restart: always`:应用退出 → **原地重启**(同进程内 refork + rewireApp,[阶段 3:supervisor](#supervision)),
   沙箱长活、stdio MUX 跨重启存活,host 链路不断
 - `restart: on-failure`:非零退出 / 被信号杀 → 原地重启;干净退出 → 同 `never`
-  (通知 + reboot)
+  (通知 + poweroff)
 
 原地重启是同进程内 fork,**不**重新走整个 sandbox 启动序(退避 10ms→60s,存活满
 60s 重置;停机信号或 quiesce 窗口期间不重拉,[阶段 3:supervisor](#supervision))。
+
+Systemd 模式下，primary 的终止条件在 outer poweroff 前触发环境停止事务。
+`app_exited` 描述 primary，独立的 `environment_exited` 描述真实 manager 生命周期。
+CH 正常退出不能覆盖环境失败或缺失的必要终止事实。Primary 原地重启不会重启 systemd 或重放 Init。
 
 <a id="signals"></a>
 
 ### 信号处理
 
 - sandbox-ctl 通过 vsock 发 quiesce / restore / attach / ping，这些消息不直接给 primary app 发信号。
-- **Host VMM 停机与 guest app 停机是两条路径**。Host 收 SIGTERM/SIGINT 后，先取消 pre-spawn/controller work；
+- **Host 正常关机使用 Guest 协议**。`Runtime.Shutdown` 与 localctl `shutdown` 请求 Guest
+  停止事务并等待真实退出，受下文统一期限约束。Guest ACK 仅表示受理。物理 `Close`
+  保留退役和回滚语义，销毁冻结捕获源不会解冻它执行 stop hooks。
+- **Host 进程信号保留物理退役路径**。Host 收 SIGTERM/SIGINT 后，先取消 pre-spawn/controller work；
   CH 已运行时，lifecycle 做 memory.high 准备后尝试 CH API 的 vmm.shutdown，有需要时退回向 CH 发 SIGTERM，
   请求后 5 s 未退升级 SIGKILL，第二次信号立即升级。这不保证向 guest PID 1 送达 SIGTERM 或完成 app stop grace。
   见 [lifecycle shutdown](https://github.com/kuasar-sandbox/sandboxer/blob/main/pkg/sandbox/lifecycle.go) 与 [run signal handling](https://github.com/kuasar-sandbox/sandboxer/blob/main/pkg/sandbox/run_signal.go)。
@@ -223,12 +236,110 @@ FileSpec 还支持 read_only，省略时 bind 可写。Tmpfs 注入避免直接�
   再请求内层停机；内层尚未就绪时终止启动。已有 primary 时，内层禁止 restart，转发
   `launch.stop_signal`（默认 SIGTERM），等待 `stop_grace_sec`（默认 10 s，来自
   Host `launch.stop_grace_period`），超时终止 primary。内层自身收到这两个信号时
-  也使用同一 primary 停止路径，最终由外层 poweroff。这些配置约束 Guest 路径，
-  不保证 Host VMM teardown 使用该握手。
+  也使用同一 primary 停止路径。Systemd 激活时这些触发进入同一环境停止事务，
+  executor 退出不会立即杀 manager；最终由外层 poweroff。
 - tty 模式 host 终端 raw 时，Ctrl-C（0x03）按字节经 MUX PTY 送入 guest，
   由 guest line discipline 转成应用 SIGINT。Host 停 sandbox 或 terminal escape 是另一路径
   （[sandbox 生命周期](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/runtime_zh.md)）。
 - quiesce.signal（[quiesce 处理](#quiesce)）是未实现提案。
+
+<a id="systemd-environments"></a>
+
+### systemd 环境
+
+`launch.systemd` 是既有 launch 对象中的单一策略：
+
+| 值 | 冷启动选择 |
+| --- | --- |
+| `off` | 使用既有 direct executor；没有来源定义时默认如此。 |
+| `auto` | 优先使用最终工作负载 rootfs 中合格的 systemd；仅候选不存在时使用 Runtime 安装。已存在但损坏或不兼容的候选使启动失败。 |
+| `runtime` | 使用 `/run/sandbox-runtime/systemd` 中与 Runtime 匹配的完整安装。 |
+| `provided` | 要求最终工作负载 rootfs 提供合格安装。 |
+
+本轮仅接受 Linux amd64、arm64 上动态链接 glibc 的 manager。它必须具有唯一合法的
+解释器（分别为 `ld-linux-x86-64.so.2`、`ld-linux-aarch64.so.1`）、来自 `libc.so.6`
+的版本化 GLIBC 导入，以及 SONAME 匹配且包含 `GLIBC_PRIVATE` 版本定义的 loader。
+发行版解释器符号链接和 Runtime 私有前缀均受支持；静态 manager、musl 和其他 loader
+ABI 不在资格范围内，`auto` 发现此类已有候选也会启动失败。这一边界保证信号 38
+对应所支持 manager 的 glibc `SIGRTMIN+4` poweroff 请求；ELF 资格检查不认证文件生产者。
+
+Host 字段省略时继承来源 E，显式 `off` 覆盖来源。非 off 自动要求 `hello.systemd_v1`，
+不增加 capability 配置或 cgroup 开关。Memory Snapshot S 恢复已捕获的 manager、executor、
+socket、mount 和 namespace，不重新选择安装、不附着第二个 executor、不重放 Launch Init。
+原始 direct `share_pid` 和 `cgroup_control` 继续作为 portable 策略保存，但 systemd 实际
+运行恒定共享环境并委托 service。改变模式需要冷启动，不能在 memory restore 中覆盖。
+
+#### Manager、executor 与启动屏障
+
+外层仍是 `/sandbox` 之外的 Guest PID 1。Bootstrap 进入环境 PID/mount/cgroup namespace，
+先迁入 `init.scope`、使环境 cgroup 根无直属进程，再 exec systemd 成为环境 PID 1。
+Systemd 启动保留的 `sandbox-init.service`，其主进程是 direct 共用的 executor，并设置
+child subreaper。Native exec 或故障恢复均不启动第二个 executor。
+
+Executor 经平台私有 socket 一次附着。Outer 核对实例身份、可执行文件、peer credentials、
+pidfd 和 namespace，再核对 manager 中真实 service 的 MainPID 与 ControlGroup。
+Executor 在内部连接 `/run/systemd/private` 后移交 FD，outer 因而可独立认证 manager
+direct peer，不依赖系统 message bus。Manager reexec 可刷新此连接，不重放 Launch。
+
+Service 核验委托、完成 outer 附着后由主进程发送 `READY=1`。**READY 先于 Launch Init**，
+因此 Init 内调用 `systemctl` 不会等待自身 service 就绪。随后沿用 Init → `launch_ack` →
+Host ACK/MUX → primary/plugins → `app_started` 的次序。Service READY 与 `app_started`
+都不是产品健康检查，也不代表所有用户 units 已启动。`TimeoutStartSec=infinity` 保留
+既有 Host launch deadline 与 Init 命令 timeout 语义。
+
+#### 委托、工具与 PATH
+
+整个环境仍位于真实 `/sys/fs/cgroup/sandbox` 下，用户 `/sys/fs/cgroup` 将此边界显示为 `/`。
+Systemd 管理自己的 scopes、slices 和 units。Executor 及其直接管理的进程位于保留 service
+的 `init` 叶子；空的 service 根必须完整委托 `cpu`、`io`、`memory`、`pids`，缺任一项即
+启动失败，不静默缩小集合。
+
+`/run/sandbox-init/cgroup` 是指向该 cgroup mount 内已核验 service 根的保留符号链接，
+既不是 `init` 叶子，也不是 manager 根，不假定固定 slice 名。Executor 钉住核验后的目标，
+将受管进程原子创建在叶子中。递归捕获冻结完整 `/sandbox`，包括 systemd、其独立 units
+及 executor 后代。继续使用既有 `nsdelegate` 边界；该 alias 不构成对同 Guest 特权代码的隔离。
+
+只有实际选中 Runtime 安装时，才投影匹配的 manager/tool 树。原生 exec 和平台 helper
+的默认 PATH 包含 `/run/sandbox-runtime/systemd/bin` 及原有标准目录。调用者显式设置
+PATH（包括空值）时保持原值，也可以使用工具的绝对路径。Guest 不注入 shell profile，
+不在 Host、产物或 plugin 之间追踪 PATH 的默认来源。普通 plugin Env 独立于 Launch.Env。
+
+平台 payload、loader 与注入控制挂载保留到 grace 窗口及最终 shutdown helper 完成。
+这不为任意用户 units 或用户自行创建的 mount 施加全局关机顺序。
+
+#### 停止事务与环境结果
+
+Host 正常关机、primary 终止条件、executor 故障与 Guest poweroff 汇入同一停止事务。
+首次受理固定原因和期限、关闭执行与 restart 准入，并行发起 primary drain 与 manager
+poweroff。Systemd 接收容器 poweroff 请求；不能用 SIGTERM 停 manager，因为它表示 reexec。
+Executor EOF 不取消 timer，也不立即杀 manager；只有真实 manager Wait 完成才结束环境 timer。
+
+Outer 每秒独立查询 manager private peer；每轮连接、认证与查询共用一秒预算。
+首个有效 `SystemState=stopping` 观测进入停止事务，不等待用户 unit 的停止依赖将 TERM
+传到保留 service。健康链路的检测最多一个周期加一次查询。首次 peer 核验后，连续五秒
+活动时间没有有效状态回复即失败；仅重连不重置该预算。初次附着仍受既有 launch deadline 约束。
+
+**G** 取正整数 wire `stop_grace_sec`，非正值使用既有 10 秒；内部收尾窗口 **F = 5 秒**。
+Primary drain 使用 G；Guest 在首次受理后 G+F 到期强制结束 manager。Host 独立固定
+Guest/CH 期限 G+F 与最终 VMM fence G+2F，通信耗时计入其中。重复请求和 ACK 丢失均不
+重置预算，调用者更短的期限可进一步收紧 Host 边界。期限约束升级动作，成功仍要求
+真实进程退出及 Host 清理完成，不能以已发信号代替。
+
+真实 manager Wait 之后、outer poweroff 之前，Guest 报告
+`environment_exited{environment_exit:{state,code,term_signal,reason}}`，并在有界预算内等待 ACK。
+`state` 为 `stopped` 或 `failed`，code/signal 保留真实 Wait 结果。Linux 子 PID namespace
+poweroff 可能返回 SIGINT，所以正常分类同时依据已受理停止证据与 Wait。Observer 故障、
+Launch 失败、manager 意外死亡或强制结束，即使后续 VMM 退出码为零也保持失败。Host 正常
+关机要求活动 systemd 环境提供该事实；物理退役可以缺省，但不能清除已经收到的失败。
+
+Quiesce 在冻结前暂停新 manager 查询/重连，等待在途调用结束并保存剩余健康预算，冻结
+时间不消耗预算。恢复先开放 outer 挂载门禁、thaw `/sandbox`，恢复并验证 manager 状态，
+再开放 executor 准入并提交 restore/attach ACK。停止受理与成功 capture/restore 发布
+线性化；正在停止的环境不能发布成功 `quiesced` 或恢复 ACK。
+
+实现边界见 [bootstrap 与委托](../cmd/sandbox-init/systemd.go)、
+[manager 控制](../cmd/sandbox-init/systemd_peer.go)、[停止分类](../cmd/sandbox-init/systemd_stop.go)
+及 [observer 暂停恢复](../cmd/sandbox-init/systemd_observer.go)。
 
 <a id="initialization"></a>
 
@@ -243,7 +354,8 @@ FileSpec 还支持 read_only，省略时 bind 可写。Tmpfs 注入避免直接�
 基础初始化不依赖工作负载，只挂载 proc/sysfs/devtmpfs，启动 loopback 和反向控制
 分发器，然后发送 `hello{phase:"runtime_ready"}`。等待期间分发器响应 ping 和 shutdown，
 拒绝仅适用于工作负载的 exec/connect/quiesce/attach/restore。单纯 socket listen 不代表
-该就绪屏障。`shutdown` 在终止前回复 `ack`。内层发布 primary 后，外层分发器将执行
+该就绪屏障。`shutdown` 先锁存停止请求，再尽力回复受理 `ack`；回复失败不撤销已受理停止。
+内层发布 primary 后，外层分发器将执行
 连接交给其 supervisor 和 stdio bridge，自身继续处理 Guest 管理操作。
 
 Launch 请求驱动全部工作负载 root 组装。等待请求不计入 launch 执行期限；host 在
@@ -288,7 +400,7 @@ E. switch-root:
 F. switch-root 之后的基础挂载:
    mount -t cgroup2 -o nsdelegate cgroup2 /sys/fs/cgroup;验证 nsdelegate
    mkdir /sys/fs/cgroup/sandbox          ← 用户 cgroup namespace/freezer 根
-   launch.cgroup_control=true 时另 mkdir /sys/fs/cgroup/sandbox/init,严格启用 Guest 根 controllers;
+   Direct 的 launch.cgroup_control=true 时另 mkdir /sys/fs/cgroup/sandbox/init,严格启用 Guest 根 controllers;
    内层 bootstrap 在用户命令之前完成 /sandbox 下放(用户 cgroup namespace 与 controller 拓扑)
    mount -t devpts devpts /dev/pts (newinstance,ptmxmode=0666)        ← tty 模式 openpty 需要
 ```
@@ -470,10 +582,13 @@ switch-root 前安装。文件先暂存于 tmpfs，按请求的 owner、mode 和
 属性 bind 到目标，再卸载 staging。冷启动网络、挂载、文件失败均终止启动；恢复时
 尽力更新时钟和网络是另一项契约。
 
-外层通过 `clone3(CLONE_INTO_CGROUP)` 将内层直接创建在真实 `/sandbox`，同时建立
+Direct 模式中，外层通过 `clone3(CLONE_INTO_CGROUP)` 将内层直接创建在真实 `/sandbox`，同时建立
 新的 PID 和 mount namespace。Fork 子进程在 re-exec 前创建以该组为根的 cgroup
 namespace。内层挂载自己的 `/proc` 和 scoped cgroup2，完成下文的下放设置，再报告
 就绪。该 bootstrap 属于执行环境，不依赖 primary 选择哪个程序或是否为 placeholder。
+
+Systemd 模式使用前述 [manager/service bootstrap 与 READY 屏障](#systemd-environments)，
+再进入以下共用 executor 顺序；其实际 primary PID/mount 视图恒定为 shared。
 
 内层收到 LaunchSpec 和原 hello/launch 连接后，依次执行：
 
@@ -505,8 +620,10 @@ Placeholder 使用相同设置和 primary 生命周期，末步等待 SIGTERM/SI
 外部程序。Host 仍强制 `restart=always`，从 exec 杀死 placeholder 会原地重启。
 Placeholder 与内层 init 是不同进程；替换 placeholder 不重做环境 bootstrap 或 `init`。
 
-Primary 和一次性 `init` 命令仅在整个环境 map 为空时补默认 PATH。Plugin 和 native
-exec 先设置默认 PATH，再用传入条目覆盖，包括显式空 PATH。Restart 按代替换 bridge
+Primary 和一次性 `init` 命令仅在整个环境 map 为空时补默认 PATH。Plugin 和 native exec
+先设置默认 PATH，再用调用者提供的条目覆盖，包括显式空 PATH。只有实际选中 Runtime
+systemd 时，native exec 默认 PATH 才加入私有工具目录；不改写显式 PATH，也不注入登录
+profile。Plugin Env 继续独立于 Launch.Env。Restart 按代替换 bridge
 的 primary 侧 fd，保留 MUX session，并采用[阶段 3](#supervision)的有界输出排空。
 
 <a id="application-cgroups"></a>
@@ -517,7 +634,9 @@ exec 先设置默认 PATH，再用传入条目覆盖，包括显式空 PATH。Re
 **递归 freezer 根**。外层留在 Guest 全局根；内层、`init` 命令、primary、plugin、
 exec helper/命令及其后代均位于 `/sandbox` 之下，捕获操作覆盖整棵树。
 
-`launch.cgroup_control` 默认 `false`，选择同一个执行环境内部的进程放置及下放方式：
+下表描述 **direct 模式**：`launch.cgroup_control` 默认 `false`，选择同一执行环境的进程
+放置和下放方式。Systemd 实际使用前述恒定委托 service 根与 `init` 叶子，同时保存此原始
+配置，供后续 direct 冷启动使用。
 
 | Guest 真实路径 | 用户 cgroup 挂载内路径 | `false` | `true` |
 | --- | --- | --- | --- |
@@ -617,7 +736,8 @@ restart 后保留。依赖原先逐进程挂载隔离或自动挂载清理的程
 
 ### 阶段 3:supervisor
 
-此循环运行于内层 PID 1。接手串行 init 后先主动回收一次，覆盖阶段切换窗口中退出
+此循环运行于内层 executor：direct 时为 PID 1，systemd 时为保留 service 的 subreaper。
+接手串行 init 后先主动回收一次，覆盖阶段切换窗口中退出
 的孤儿。外层单独等待内层，负责 Host 通知和最终 poweroff。
 
 ```
@@ -635,7 +755,7 @@ loop:
         // handled
       else:                                          // exec 子进程 → 投递其会话;
         execReg.deliver(pid, status)                 //   或 shared-PID app 的孤儿 → 静默收割
-    sigterm/sigint:                                  // 内层 PID 1 收到信号
+    sigterm/sigint:                                  // 内层 executor 收到信号
       shutting_down = true                           // 阻止在飞的 restart 再 fork
       send spec.stop_signal to app_pid               // 默认 SIGTERM;覆盖镜像 StopSignal
       wait up to spec.stop_grace_sec (默认 10s);超时 SIGKILL
@@ -733,8 +853,9 @@ Quiesce 在 Host `/vm.pause` 前建立一致的 Guest 内存/文件系统捕获�
    然后经有界 `MUX_CLOSE`/`MUX_CLOSE_ACK` 关闭 primary MUX，失败时硬关闭，输出
    pump 等待后续 attach。完成这些工作之后才回复外层。
 4. **外层排空报告并冻结整个用户环境。** 内层确认排空后，暂停 `mem_report` 并 join
-   在途交换。外层写 `/sys/fs/cgroup/sandbox/cgroup.freeze=1`，等待 `cgroup.events`
-   出现 `frozen 1`。范围包括内层 PID 1、管理的进程和用户创建的后代。此后不再等待
+   在途交换。Systemd 激活时还暂停并 join 独立 manager observer，保存剩余健康预算。
+   外层写 `/sys/fs/cgroup/sandbox/cgroup.freeze=1`，等待 `cgroup.events`
+   出现 `frozen 1`。范围包括 manager/executor、受管进程、独立 systemd units 和用户后代。此后不再等待
    内层 handler，也不调用应用专有 freeze 接口。
 5. **外层排空挂载操作并准备管理的文件系统。** 确认 freeze 后关闭外层 autofs 挂载门禁，
    等待已准入的组装、投影操作及其 `READY`/`FAIL` 回复全部完成。等待新 autofs packet
@@ -744,7 +865,7 @@ Quiesce 在 Host `/vm.pause` 前建立一致的 Guest 内存/文件系统捕获�
    或正常 Guest 停机重新开放。
 6. **外层确认并关连接。** 发送 `quiesced{drop_caches_result}`，然后以有界 linger
    关闭该管理连接。Host 同时要求明确响应、控制连接 EOF 和自身已准入 exec/forward
-   handler 排空完成，才能 `/vm.pause` 并捕获。
+   handler 排空完成，才能 `/vm.pause` 并捕获。最终发布拒绝已经受理的停止事务。
 
 外层 listener、存储/autofs 和控制状态因此留在冻结树之外。私有 outer/inner 通路
 保留在内存中，两个端点仍存在，也没有未完成的 quiesce 请求；它不是必须丢弃的
@@ -1057,8 +1178,9 @@ vsock 端口固定 `5000`,**两个方向都复用同一端口号**,身份按方�
 |---|---|---|---|---|
 | **冷启动** | guest→host | `hello` → `launch{spec}` → `launch_ack{stdio}` → `ack` | **升级 MUX** | guest 报 ready,host 回 LaunchSpec;guest 准备好 app stdio 后回 launch_ack,该连接成为 MUX |
 | **应用启动通知** | guest→host | `app_started{pid}` → `ack` | 关 | primary 通过 helper 握手并到达启动发布边界；不是 execve 成功或应用健康的独立证明 |
-| **应用退出通知** | guest→host | `app_exited{code, term_signal}` → `ack` | 关 | primary 终态退出；guest 在预算内等 ACK，超时仍 POWER_OFF；host 收到通知后用作退出码 |
-| **关闭请求** | host→guest | `shutdown` → `ack` | 关 | 仅 ACK 写出成功才触发终止。内层尚未就绪时外层终止启动；否则先重新开放外层挂载门禁并撤销平台冻结请求，再请求内层按 primary 的 stop signal/grace 停机，最终外层 poweroff。ACK 不表示停机已完成。 |
+| **应用退出通知** | guest→host | `app_exited{code, term_signal}` → `ack` | 关 | primary 终态退出；guest 在预算内等 ACK，超时仍 POWER_OFF；Host 与 owner/VMM 结果分开记录。 |
+| **环境终止通知** | guest→host | `environment_exited{environment_exit}` → `ack` | 关 | 真实 systemd PID 1 Wait 已完成；state/reason 和真实 code/signal 独立描述环境结果，不代替 primary 退出。Host 记录后才回复 ACK。 |
+| **关闭请求** | host→guest | `shutdown` → `ack` | 关 | Outer 先受理并锁存停止，再尽力回复 ACK；ACK 丢失不撤销动作。终止启动，或重新开放挂载门禁、撤销平台冻结后开始正常 executor drain。Systemd 激活时进入统一有界环境事务。ACK 只表示受理。 |
 | **健康探测** | host→guest | `ping{id, t_send_ns}` → `pong{id, t_send_ns}` | 关 | host 计 RTT / 超时 / 失败数([ping 健康探测](#health)) |
 | **mem 报告** | guest→host | `mem_report{mem_report:{epoch,seq,mem_*}}` → `mem_report_ack` | 关 | guest observation;host sandbox-local controller 验证 epoch/seq 后结合 CH `vm.info` |
 | **用量观测** | host→guest | `usage_request{usage_request}` → `usage_response{usage_response}` | 复用 | 只返回新的原始内存/文件系统观测, Host 唯一归并 ([原始 Usage 观测](#usage-observations)) |
@@ -1069,8 +1191,9 @@ vsock 端口固定 `5000`,**两个方向都复用同一端口号**,身份按方�
 | **端口转发** | host→guest | `connect{spec}` → `connect_ack` | **升级转发数据通道** | guest 为这条 `connect` 取得 `ConnectSpec.address` 上的目标连接——dial(默认)或 `Accept`(`spec.accept`,accept 模式可无限期阻塞,host 无 deadline park)——回 `connect_ack`,该连接成为这条转发的 fwd 帧数据通道([connect 转发帧子协议(fwd)](#forward-wire)),保留 TCP 半关闭;并发多条互不影响;quiesce 时主动拆除([quiesce 处理](#quiesce))。详见 [connect 端口转发会话(`sandbox-ctl run --connect`)](#forward-sessions) |
 | `error` | 任意 | (终止) | 关 | handler 显式拒绝时的人类可读原因；坏 framing/JSON 也可能直接关连接，不保证总发 error |
 
-Guest 实现了 `shutdown`，但当前 host 生命周期使用[信号处理](#signals)中的 CH shutdown
-路径，不使用这条 guest 消息。不能由 host VMM teardown 推断 guest 收到了 stop signal。
+Host `Runtime.Shutdown` 与 localctl `shutdown` 使用 Guest shutdown 请求。Local owner
+分别报告受理并等待真实退役；Guest ACK 与本地 accepted 都不表示完成。物理 Close 和
+强制 VMM teardown 保持独立语义（[信号处理](#signals)）。
 
 `ATTACH` 是已有 sandbox-ctl run 生命周期的内部机制，不是其他进程接管会话的接口。
 当前集成由 capture resume/recovery 显式调用 reattach；协议可以替换坏 MUX，但没有覆盖所有异常断链的自主后台重连 loop。
@@ -1080,6 +1203,7 @@ Schema 定义了 exited 常量，但 handler 未据实时状态产生 exited，�
 ACK 在 thaw 成功并开放执行 gate 后发送，但不证明应用健康。Thaw 失败不发 ACK，也不开放已暂停的 exec/forward/report gate；外层挂载门禁已经开放。ACK 写出失败不会撤销已完成的 thaw 或执行准入，但不会恢复原本暂停的 report stream；host 仍将握手判为失败，并负责重试或终态清理。
 
 外层先重新开放挂载门禁，再撤销 `/sandbox` 上的平台冻结请求，即使此前未确认冻结，
+Systemd 激活时恢复保存的 observer 预算，并在开放执行前取得有效 manager 状态。
 然后请求已可运行的内层关闭旧 MUX、开放 exec/forward/plugin/restart gate；只有收到
 内层就绪确认，外层才写 Host ACK，并将连接交给内层承载 MUX。
 若在 thaw 之前等待内层就绪，就会等待一个仍被冻结的进程。解冻后的 primary 可能
@@ -1110,6 +1234,7 @@ JSON 可读、调试友好，消息量少，无需 protobuf 工具链。
     "pid": 4711
   },
   "ext4_discard_v1": true,             // hello：支持可写 ext4 的 auto/manual 策略
+  "systemd_v1": true,                  // hello：systemd 环境、service 与生命周期合同
   "launch":   { ... LaunchSpec ... },  // launch (含 stdio 节,见 launch 配置(LaunchSpec))
   "exec":     { "argv":[...], "env":{}, "cwd":"", "user":"", "stdio":{} },  // exec: ExecSpec(exec 会话(sandbox-ctl exec))
   "connect":  { "network":"tcp", "address":"127.0.0.1:49983", "accept":false },  // connect: ConnectSpec(connect 端口转发会话(sandbox-ctl run --connect); accept=true ⇒ guest Listen+Accept)
@@ -1117,6 +1242,11 @@ JSON 可读、调试友好，消息量少，无需 protobuf 工具链。
   "app_state":"running",               // 当前 restore/attach handler 固定 running，不是实时健康保证
   "pid":      4711,                    // app_started
   "code":     0, "term_signal": 0,     // app_exited
+  "environment_exit": {               // environment_exited；真实 manager Wait，不是 primary 状态
+    "state": "stopped",                // stopped|failed
+    "code": 0, "term_signal": 0,
+    "reason": "Host shutdown"
+  },
   "id":       42,                      // ping/pong: 单调递增,host 分配
   "t_send_ns":1715000000000000000,     // host UnixNano 墙钟值，guest 原样回显；RTT 用 host time.Since
   "skip_drop_caches": true,            // quiesce: freeze+管理文件系统 syncfs 后保留缓存

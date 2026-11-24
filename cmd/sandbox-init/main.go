@@ -7,6 +7,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -46,6 +47,14 @@ const (
 )
 
 func main() {
+	if len(os.Args) == 3 && os.Args[1] == "systemd-bootstrap" {
+		runSystemdBootstrap(os.Args[2])
+		return
+	}
+	if len(os.Args) == 5 && os.Args[1] == "systemd-executor" {
+		runSystemdService(os.Args[2], os.Args[3] == "1", os.Args[4] == "runtime")
+		return
+	}
 	// One-shot init command forked with its final credential, Dir and Env.
 	if len(os.Args) >= 3 && os.Args[1] == "init-command" {
 		path, err := initCommandPath(os.Args[2], os.Environ(), ".")
@@ -118,14 +127,14 @@ func main() {
 	go func() {
 		for sig := range stopCh {
 			logf("outer received %v", sig)
-			managementLifecycle.Lock()
-			initialLaunch.exited(0)
 			if current := executor.Load(); current != nil {
+				if current.systemd == nil {
+					initialLaunch.exited(0)
+				}
 				current.shutdown()
 			} else {
 				doReboot()
 			}
-			managementLifecycle.Unlock()
 		}
 	}()
 
@@ -139,38 +148,59 @@ func main() {
 	logf("runtime ready: launch spec received; assembling workload root")
 
 	if err := phaseWorkloadRoot(spec); err != nil {
+		if systemdEnabled(spec) {
+			failSystemdLaunch(conn, fmt.Errorf("workload root: %w", err))
+		}
 		die("workload root: %v", err)
 	}
 	if err := applyEnvironment(spec); err != nil {
+		if systemdEnabled(spec) {
+			failSystemdLaunch(conn, fmt.Errorf("apply environment: %w", err))
+		}
 		die("apply environment: %v", err)
 	}
 	client, child, err := startExecutor(spec)
 	if err != nil {
+		if systemdEnabled(spec) {
+			failSystemdLaunch(conn, fmt.Errorf("start systemd environment: %w", err))
+		}
 		die("start inner init: %v", err)
 	}
 	executor.Store(client)
 	if err := client.launch(conn); err != nil {
 		initialLaunch.failed(err)
 		logf("inner launch failed: %v", err)
-		_ = child.Process.Kill()
-		_ = child.Wait()
+		if client.systemd != nil {
+			client.beginEnvironmentStop("Launch failed", stopFailed)
+		} else {
+			_ = child.Process.Kill()
+		}
+		<-client.processDone
+		client.reportEnvironmentExit()
 		doReboot()
 	}
-	exit := make(chan error, 1)
-	go func() { exit <- child.Wait() }()
 	select {
-	case err := <-exit:
+	case <-client.processDone:
 		if !client.terminal.Load() {
-			logf("inner init exited without primary exit notification: %v", err)
+			logf("environment PID 1 exited without primary exit notification (stopping=%t): %v", client.stopping.Load(), client.processErr)
 		}
 	case <-client.ended:
-		_ = child.Process.Kill()
-		<-exit
+		if client.systemd != nil {
+			client.beginEnvironmentStop("primary terminal exit", stopNormal)
+		} else {
+			_ = child.Process.Kill()
+		}
+		<-client.processDone
 	case <-client.link.done:
 		logf("inner management connection closed")
-		_ = child.Process.Kill()
-		<-exit
+		if client.systemd != nil {
+			client.beginEnvironmentStop("executor control EOF", stopUnverified)
+		} else {
+			_ = child.Process.Kill()
+		}
+		<-client.processDone
 	}
+	client.reportEnvironmentExit()
 	// An unexpected inner exit is a Guest failure, not an invented successful
 	// primary exit. Preserve the last published initial-launch fact.
 	doReboot()
@@ -224,6 +254,9 @@ func phaseBaseRuntime() error {
 // phaseWorkloadRoot begins only after host storage commit. It is the first
 // phase that probes or mounts workload block devices.
 func phaseWorkloadRoot(spec *proto.LaunchSpec) error {
+	if err := pinSystemdPayload(spec); err != nil {
+		return err
+	}
 	ext4Options, err := ext4MountOptions(spec.Ext4Discard)
 	if err != nil {
 		return err
@@ -312,7 +345,7 @@ func phaseWorkloadRoot(spec *proto.LaunchSpec) error {
 	if err := applyVolumeMounts(spec, ext4Options, runDir); err != nil {
 		return fmt.Errorf("apply volume mounts: %w", err)
 	}
-	if err := phase1bSwitchRoot(spec.CgroupControl); err != nil {
+	if err := phase1bSwitchRoot(spec.CgroupControl || systemdEnabled(spec)); err != nil {
 		return fmt.Errorf("switch root: %w", err)
 	}
 	if err := guestSlots.protectDevices(); err != nil {
@@ -428,7 +461,7 @@ func waitForLaunch() (*proto.LaunchSpec, *vsockConn, error) {
 		_ = conn.Close()
 		return nil, nil, err
 	}
-	if err := proto.WriteMessage(conn, &proto.Message{Type: proto.TypeHello, Phase: "runtime_ready", InitialLaunchStateV1: true, Ext4DiscardV1: true, DiskMountProjectionV1: true, DiskSlotV1: diskSlotSupported()}); err != nil {
+	if err := proto.WriteMessage(conn, &proto.Message{Type: proto.TypeHello, Phase: "runtime_ready", InitialLaunchStateV1: true, Ext4DiscardV1: true, DiskMountProjectionV1: true, DiskSlotV1: diskSlotSupported(), SystemdV1: true}); err != nil {
 		return fail(fmt.Errorf("send runtime_ready: %w", err))
 	}
 	msg, err := proto.ReadMessage(conn)
@@ -534,7 +567,7 @@ func phase2ForkApp(spec *proto.LaunchSpec, cs childStdio, onSpawn func(int) erro
 	// Shared primaries inherit the inner init's PID and mount namespaces.
 	// A private primary becomes PID 1 in a new PID namespace and needs a new
 	// mount namespace for its matching /proc without changing the inner view.
-	isolated := !spec.SharePID
+	isolated := !spec.SharePID && !systemdEnabled(spec)
 	isoArg := "0"
 	if isolated {
 		isoArg = "1"
@@ -655,6 +688,9 @@ func phase3Supervise(s *supervisorState, b *consoleBridge, sigCh chan os.Signal)
 			}
 		case syscall.SIGTERM, syscall.SIGINT:
 			s.shutdown.Store(true) // stop any in-flight app restart from re-forking
+			if systemdEnabled(s.spec) {
+				notifyEnvironmentStopping("service-signal")
+			}
 			stopSig := s.stopSignal
 			if stopSig == 0 {
 				stopSig = syscall.SIGTERM
@@ -666,14 +702,31 @@ func phase3Supervise(s *supervisorState, b *consoleBridge, sigCh chan os.Signal)
 			s.primaryMu.Lock()
 			appPid := int(s.appPid.Load())
 			logf("received %v, sending %v to app pid=%d (grace %s)", sig, stopSig, appPid, grace)
+			var status syscall.WaitStatus
+			var observed bool
 			if appPid > 0 {
 				_ = syscall.Kill(appPid, stopSig)
-				waitOrTimeout(appPid, grace)
+				var reapGrace time.Duration
+				if systemdEnabled(s.spec) {
+					// Leave four seconds of the service's G+5 stop budget for
+					// output drainage and publication of the observed exit.
+					reapGrace = time.Second
+				}
+				status, observed = waitOrTimeout(appPid, grace, reapGrace)
 			}
 			s.appPid.Store(0)
 			s.primaryMu.Unlock()
 			b.appExited()
-			notifyAppExited(0, 0)
+			if !systemdEnabled(s.spec) {
+				notifyAppExited(0, 0, "service-signal")
+			} else if observed {
+				code, sig := status.ExitStatus(), 0
+				if status.Signaled() {
+					sig = int(status.Signal())
+					code = 128 + sig
+				}
+				notifyAppExited(code, sig, "service-signal")
+			}
 			doReboot()
 			return
 		}
@@ -699,10 +752,22 @@ func handleAppExit(status syscall.WaitStatus, s *supervisorState, b *consoleBrid
 		return false
 	}
 	logf("app exited code=%d signal=%d (restart=%s) — draining MUX, notifying host, rebooting", code, sig, s.spec.Restart)
+	if systemdEnabled(s.spec) {
+		notifyEnvironmentStopping("primary-terminal")
+	}
 	b.appExited() // close app fds, flush guest→host streams (bounded)
-	notifyAppExited(code, sig)
+	notifyAppExited(code, sig, "primary-terminal")
 	doReboot() // does not return
 	return true
+}
+
+func notifyEnvironmentStopping(reason string) {
+	if innerEvents == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	_ = innerEvents.sendContext(ctx, executorMessage{Op: "stopping", Reason: reason}, -1)
 }
 
 // restartApp re-forks the user app in place after the backoff delay, re-wiring
@@ -722,7 +787,7 @@ func restartApp(s *supervisorState, b *consoleBridge, delay time.Duration) {
 			return
 		}
 		logf("restart: fork app: %v (rebooting)", err)
-		notifyAppExited(1, 0)
+		notifyAppExited(1, 0, "executor-failed")
 		doReboot()
 		return
 	}
@@ -782,18 +847,33 @@ func (s *supervisorState) launchRestart(b *consoleBridge) (int, int, error) {
 	return pid, outerPID, err
 }
 
-func waitOrTimeout(pid int, timeout time.Duration) {
+func waitOrTimeout(pid int, timeout, reapGrace time.Duration) (syscall.WaitStatus, bool) {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		var status syscall.WaitStatus
 		wpid, err := syscall.Wait4(pid, &status, syscall.WNOHANG, nil)
 		if err != nil || wpid == pid {
-			return
+			return status, err == nil && wpid == pid
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
 	logf("graceful shutdown timed out, sending SIGKILL")
 	_ = syscall.Kill(pid, syscall.SIGKILL)
+	// SIGKILL delivery is asynchronous. A systemd executor must observe
+	// the child's actual status before it exits and publishes app_exited.
+	// Direct mode keeps its existing immediate post-kill check.
+	deadline = time.Now().Add(reapGrace)
+	for {
+		var status syscall.WaitStatus
+		wpid, err := syscall.Wait4(pid, &status, syscall.WNOHANG, nil)
+		if (err != nil && err != syscall.EINTR) || wpid == pid {
+			return status, err == nil && wpid == pid
+		}
+		if !time.Now().Before(deadline) {
+			return status, false
+		}
+		time.Sleep(min(10*time.Millisecond, time.Until(deadline)))
+	}
 }
 
 func doReboot() {
@@ -831,7 +911,7 @@ func waitForDevice(path string, timeout time.Duration) error {
 
 func envSliceFromMap(m map[string]string) []string {
 	if len(m) == 0 {
-		return []string{"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"}
+		return execEnv(nil)
 	}
 	out := make([]string, 0, len(m))
 	for k, v := range m {

@@ -355,6 +355,14 @@ jobs:
           run: |
             set -euo pipefail
             bash /inputs/release/ci/native-cache/native-cache.sh restore-or-build envd
+            # Historical selected sources do not have this installation. New
+            # sources build both native architectures inside the fixed
+            # Workbench and validate every file before Runtime assembly. The
+            # unpacked prefix remains private: its intentional absolute links
+            # are delivered inside verified EROFS, never as host output links.
+            if [ -f guest-runtime/native-deps/deps/build-systemd.sh ]; then
+              make -C guest-runtime systemd
+            fi
             GOWORK="$(python3 -B /inputs/release/ci/integration/go_workspace.py \
               --root /src --owners guest-runtime --bound-release --version '${{ needs.preflight.outputs.version }}' \
               --dependency accelerator '${{ needs.preflight.outputs.accelerator_version }}' '${{ needs.preflight.outputs.accelerator_sha }}')"

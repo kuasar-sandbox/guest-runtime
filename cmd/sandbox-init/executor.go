@@ -28,17 +28,22 @@ type executionControl interface {
 }
 
 type executorClient struct {
-	link      *executorLink
-	process   *os.Process
-	spec      *proto.LaunchSpec
-	ready     atomic.Bool
-	stopping  atomic.Bool
-	terminal  atomic.Bool
-	ended     chan struct{}
-	endOnce   sync.Once
-	report    sync.Once
-	admission sync.RWMutex // no requests can be sent to a frozen inner init
-	paused    bool
+	link        *executorLink
+	process     *os.Process
+	spec        *proto.LaunchSpec
+	ready       atomic.Bool
+	stopping    atomic.Bool
+	terminal    atomic.Bool
+	ended       chan struct{}
+	endOnce     sync.Once
+	report      sync.Once
+	admission   sync.RWMutex // no requests can be sent to a frozen inner init
+	paused      bool
+	systemd     *systemdEnvironment
+	processDone chan struct{} // real environment PID 1 Wait, independent of the executor link
+	processErr  error         // published by closing processDone
+	stopMu      sync.Mutex    // stop latch versus lifecycle response commit; never held across I/O
+	stopFact    environmentStopFact
 }
 
 // innerEvents exists only in the inner re-exec. Helpers exec a fresh image and
@@ -50,6 +55,13 @@ func startExecutor(spec *proto.LaunchSpec) (*executorClient, *exec.Cmd, error) {
 	// the inner's slave mount tree, and through its shared peers to user mounts.
 	if err := unix.Mount("", "/", "", unix.MS_REC|unix.MS_SHARED, ""); err != nil {
 		return nil, nil, fmt.Errorf("make outer mounts shared: %w", err)
+	}
+	installation, err := selectSystemd(spec)
+	if err != nil {
+		return nil, nil, err
+	}
+	if installation != nil {
+		return startSystemdExecutor(spec, installation)
 	}
 	link, childLink, err := newExecutorPair()
 	if err != nil {
@@ -96,7 +108,16 @@ func startExecutor(spec *proto.LaunchSpec) (*executorClient, *exec.Cmd, error) {
 		}
 		return nil, nil, fmt.Errorf("inner bootstrap: %w", err)
 	}
+	client.startProcessWait(cmd)
 	return client, cmd, nil
+}
+
+func (c *executorClient) startProcessWait(cmd *exec.Cmd) {
+	c.processDone = make(chan struct{})
+	go func() {
+		c.processErr = cmd.Wait()
+		close(c.processDone)
+	}()
 }
 
 func (c *executorClient) launch(conn *vsockConn) error {
@@ -110,6 +131,54 @@ func (c *executorClient) launch(conn *vsockConn) error {
 
 func (c *executorClient) handleEvent(msg executorMessage, fd *int) (executorMessage, error) {
 	switch msg.Op {
+	case "systemd-failed":
+		if c.systemd == nil {
+			return executorMessage{}, errors.New("unexpected systemd setup failure")
+		}
+		select {
+		case c.systemd.attached <- fmt.Errorf("systemd executor setup: %s", msg.Error):
+		default:
+		}
+		return executorMessage{}, nil
+	case "systemd-attach":
+		if c.systemd == nil {
+			return executorMessage{}, errors.New("unexpected systemd attach")
+		}
+		return executorMessage{}, c.attachSystemd(msg, fd)
+	case "systemd-ready":
+		if c.systemd == nil {
+			return executorMessage{}, errors.New("unexpected systemd READY")
+		}
+		c.systemd.mu.Lock()
+		defer c.systemd.mu.Unlock()
+		if c.systemd.peer == nil {
+			return executorMessage{}, errors.New("systemd READY before verified attach")
+		}
+		if err := c.confirmSystemdReady(); err != nil {
+			return executorMessage{}, err
+		}
+		select {
+		case <-c.systemd.ready:
+			return executorMessage{}, errors.New("duplicate systemd READY")
+		default:
+			close(c.systemd.ready)
+		}
+		return executorMessage{}, nil
+	case "systemd-peer-fd":
+		if c.systemd == nil {
+			return executorMessage{}, errors.New("unexpected systemd peer")
+		}
+		c.systemd.receivePeer(msg, fd)
+		return executorMessage{}, nil
+	case "stopping":
+		if c.systemd != nil {
+			proof := stopUnverified
+			if msg.Reason == "primary-terminal" {
+				proof = stopNormal
+			}
+			c.beginEnvironmentStop("executor "+msg.Reason, proof)
+		}
+		return executorMessage{}, nil
 	case "identity":
 		if *fd < 0 {
 			return executorMessage{}, errors.New("missing primary pidfd")
@@ -128,7 +197,17 @@ func (c *executorClient) handleEvent(msg executorMessage, fd *int) (executorMess
 		c.report.Do(func() { go runMemReporter(memReportInterval) })
 		return executorMessage{}, nil
 	case "exited":
-		notifyAppExited(msg.Code, msg.Signal)
+		if c.systemd != nil {
+			proof := stopUnverified
+			if msg.Reason == "primary-terminal" {
+				proof = stopNormal
+			}
+			if msg.Reason == "executor-failed" {
+				proof = stopFailed
+			}
+			c.beginEnvironmentStop("executor "+msg.Reason, proof)
+		}
+		notifyAppExited(msg.Code, msg.Signal, msg.Reason)
 		c.terminal.Store(true)
 		c.endOnce.Do(func() { close(c.ended) })
 		return executorMessage{}, nil
@@ -172,14 +251,44 @@ func (c *executorClient) runSession(conn *vsockConn, req *proto.Message) (bool, 
 func (c *executorClient) quiesce() error {
 	c.admission.Lock()
 	defer c.admission.Unlock()
+	if c.stopping.Load() {
+		return errors.New("cannot quiesce a stopping environment")
+	}
 	c.paused = true
 	_, err := c.link.request(executorMessage{Op: "quiesce"}, -1)
+	if err == nil && c.systemd != nil {
+		err = c.systemd.observer.Load().request(true)
+	}
+	if err == nil && c.stopping.Load() {
+		err = errors.New("environment stopped during quiesce")
+	}
 	return err
+}
+
+// A lifecycle response commits before its bounded socket write. Concurrent
+// stop can retire that committed state, but an already accepted stop can never
+// be published as capturable/runnable. Keeping I/O outside stopMu ensures even
+// a blocked Host response cannot delay the stop latch and its absolute timer.
+func (c *executorClient) commitLifecycleResponse() error {
+	c.stopMu.Lock()
+	defer c.stopMu.Unlock()
+	if c.stopping.Load() {
+		return errors.New("environment is stopping")
+	}
+	return nil
 }
 
 func (c *executorClient) prepareReattach() error {
 	c.admission.Lock()
 	defer c.admission.Unlock()
+	if c.systemd != nil {
+		if err := c.systemd.observer.Load().request(false); err != nil {
+			return err
+		}
+		if c.stopping.Load() {
+			return errors.New("systemd environment is stopping")
+		}
+	}
 	_, err := c.link.request(executorMessage{Op: "resume"}, -1)
 	if err == nil {
 		c.paused = false
@@ -194,39 +303,7 @@ func (c *executorClient) attachSession(conn *vsockConn) (bool, error) {
 }
 
 func (c *executorClient) shutdown() {
-	if !c.stopping.CompareAndSwap(false, true) {
-		return
-	}
-	// Graceful user exit may first access a pending slot. Reopen the outer
-	// mount gate before making the inner runnable, as reattach does.
-	guestSlots.resumeMounts()
-	// The inner handles application stop signal and grace. A frozen inner
-	// cannot do so until thaw; pre-launch shutdown terminates bootstrap/init.
-	if err := cgroupThaw(); err != nil {
-		logf("shutdown thaw: %v", err)
-	}
-	if c.ready.Load() {
-		if err := c.process.Signal(syscall.SIGTERM); err != nil {
-			_ = c.process.Kill()
-		}
-	} else {
-		_ = c.process.Kill()
-	}
-	// Keep shutdown bounded even if the user environment cannot complete its
-	// own grace/drain. Only the outer can recover from an unresponsive PID 1.
-	grace := time.Duration(c.spec.StopGraceSec) * time.Second
-	if grace <= 0 {
-		grace = gracefulShutdown
-	}
-	go func() {
-		timer := time.NewTimer(grace + 5*time.Second)
-		defer timer.Stop()
-		select {
-		case <-timer.C:
-			_ = c.process.Kill()
-		case <-c.link.done:
-		}
-	}()
+	c.beginEnvironmentStop("Host shutdown", stopNormal)
 }
 
 type innerExecutor struct {
@@ -282,6 +359,21 @@ func takeExecutorConn(fd *int) (*vsockConn, error) {
 }
 
 func (e *innerExecutor) handle(msg executorMessage, fd *int) (executorMessage, error) {
+	// This control-only refresh must not wait behind Launch/Init's mutex.
+	// It neither admits execution nor consumes the one-shot Launch state.
+	if msg.Op == "systemd-peer" {
+		ctx, cancel := context.WithTimeout(context.Background(), systemdObserveQuery)
+		defer cancel()
+		peer, err := connectSystemdManager(ctx)
+		if peer >= 0 {
+			defer unix.Close(peer)
+		}
+		response := executorMessage{Op: "systemd-peer-fd", Epoch: msg.Epoch}
+		if err != nil {
+			response.Error = err.Error()
+		}
+		return executorMessage{}, innerEvents.sendControl(ctx, response, peer)
+	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if msg.Op == "launch" {

@@ -106,7 +106,7 @@ extract_tarball() {
     rm -rf "$dest_dir"
     local staging
     staging="$(mktemp -d)"
-    tar -xzf "$tarball" -C "$staging"
+    tar -xf "$tarball" -C "$staging"
 
     # If staging has exactly one entry and it's a directory, promote it.
     local entries

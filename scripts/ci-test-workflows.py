@@ -200,6 +200,9 @@ def check(platform):
     ]
     for component in ("envd",):
         assert "bash /inputs/release/ci/native-cache/native-cache.sh restore-or-build " + component in build["with"]["run"]
+    assert "if [ -f guest-runtime/native-deps/deps/build-systemd.sh ]; then" in build["with"]["run"]
+    assert "make -C guest-runtime systemd" in build["with"]["run"]
+    assert build["with"]["run"].index("make -C guest-runtime systemd") < build["with"]["run"].index("make -C guest-runtime sandbox-runtime")
     assert 'BUILD_MKFS_EROFS="$(command -v mkfs.erofs)"' in build["with"]["run"]
     assert "restore-or-build erofs" not in build["with"]["run"]
     for goal in ("test", "vet", "sandbox-init flatten-ctl", "sandbox-runtime"):

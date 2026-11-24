@@ -57,9 +57,10 @@ class ReleaseWorkspaceTests(unittest.TestCase):
         requirement=original[original.index('go_requirement ='):].split('\nACCELERATOR_VERSION',1)[0]
         variables += 'GO := go\n'+recursive+'\n'+requirement+'\nACCELERATOR_VERSION ?= $(call go_requirement,accelerator)\n'
         variables += ''.join(name.upper()+'_VERSION := v0.1.10\n' for name in set(self.deps)-{'accelerator'})
-        build = '\n.PHONY: release release-runtime build flatten-ctl sandbox-init sandbox-runtime\nbuild flatten-ctl:\n\t@mkdir -p "$(BINDIR)"\n\tgo build -o "$(BINDIR)/flatten-ctl" .\n'
+        build = '\n.PHONY: release release-runtime build flatten-ctl sandbox-init sandbox-runtime systemd\nbuild flatten-ctl:\n\t@mkdir -p "$(BINDIR)"\n\tgo build -o "$(BINDIR)/flatten-ctl" .\n'
         build += 'sandbox-init:\n\t@mkdir -p "$(BINDIR)"\n\tgo build -o "$(BINDIR)/sandbox-init" .\n'
-        build += 'sandbox-runtime:\n\t@test "$(FLATTEN_CTL)" = "$(BINDIR)/flatten-ctl"\n\t@test "$$("$(FLATTEN_CTL)")" = selected-local\n\t@cp "$(FLATTEN_CTL)" "$(BINDIR)/sandbox-runtime.bundle"\n'
+        build += 'systemd:\n\t@mkdir -p native-deps/bin/$(TARGET_ARCH)/systemd\n\t@printf selected-native > native-deps/bin/$(TARGET_ARCH)/systemd/built\n'
+        build += 'sandbox-runtime:\n\t@test "$(FLATTEN_CTL)" = "$(BINDIR)/flatten-ctl"\n\t@test "$$("$(FLATTEN_CTL)")" = selected-local\n\t@test "$(SYSTEMD_PAYLOAD)" = "$(abspath native-deps/bin/$(TARGET_ARCH)/systemd)"\n\t@test "$$(cat "$(SYSTEMD_PAYLOAD)/built")" = selected-native\n\t@cp "$(FLATTEN_CTL)" "$(BINDIR)/sandbox-runtime.bundle"\n'
         # The release recipe is copied verbatim; only costly build/package boundaries are fixtures.
         (self.owner/'Makefile').write_text(variables+self.target+':\n'+recipe+'\n'+build)
         scripts=self.owner/'scripts'; scripts.mkdir()
@@ -113,9 +114,11 @@ class ReleaseWorkspaceTests(unittest.TestCase):
                 (output/'flatten-ctl').unlink(missing_ok=True)
                 shutil.copyfile('/bin/true', output/'flatten-ctl')
                 package=self.run_release('GOWORK='+override, 'BINDIR=bin/custom',
-                                         'FLATTEN_CTL=/old/flatten-ctl', 'RELEASE_BIN_DIR=/old/package')
+                                         'FLATTEN_CTL=/old/flatten-ctl', 'RELEASE_BIN_DIR=/old/package',
+                                         'SYSTEMD_PAYLOAD=/old/systemd')
                 self.assertEqual(package['RELEASE_BIN_DIR'],str(output))
                 self.assertEqual(package['RELEASE_SOURCE_ROOT'],str(self.owner))
+                self.assertEqual(package['RELEASE_SYSTEMD_PAYLOAD'], str(self.owner/'native-deps/bin/x86_64/systemd'))
                 self.assertEqual(package['GOWORK'], 'off')
                 info = subprocess.check_output(['go', 'version', '-m', str(output/'flatten-ctl')],
                                                env=self.env, text=True)

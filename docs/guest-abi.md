@@ -21,16 +21,19 @@ The binary is built from `cmd/sandbox-init` and installed as `/sbin/init` in the
 
 | Goal | Implementation |
 |---|---|
-| Fast startup | One static Go binary supplies outer Guest PID 1 and inner PID 1; no systemd / dracut / busybox startup chain |
+| Fast startup | Direct mode uses one static Go binary for outer Guest PID 1 and the inner executor; systemd is an explicit launch policy |
 | Verifiable startup state | A fixed sandbox-init version; explicit launch, quiesce, restore and attach handshakes and state barriers |
 | Sharing across sandboxes | virtio-pmem + DAX lets sandboxes share file-backed read-only pages through the host page cache |
-| One VM, one primary app | Default private PID mode uses clone(NEWPID\|NEWNS), making the app PID 1 in its namespace; shared PID mode is also available |
-| Observable lifecycle | Application start/exit notifications and explicit quiesce/restore exchanges use vsock; host VMM shutdown is a separate path ([Signal handling](#signals)) |
+| One VM, one primary app | Direct mode supports private and shared PID views; systemd mode shares one environment PID namespace and retains the same primary lifecycle |
+| Observable lifecycle | Application facts, systemd environment exit and quiesce/restore exchanges use vsock; normal shutdown and physical retirement have distinct contracts ([Signal handling](#signals)) |
 | Separate app I/O | Application stdin/stdout/stderr, or a pseudoterminal, is forwarded over vsock separately from kernel dmesg |
 
 <a id="system-boundary"></a>
 
 ## Position in the system
+
+The following diagram shows direct mode. The optional systemd topology is
+defined in [systemd environments](#systemd-environments).
 
 ```mermaid
 flowchart TB
@@ -51,8 +54,11 @@ The Runtime Bundle is a shared read-only host backing file. The Guest kernel
 mounts it and executes `/sbin/init`. The outer instance assembles and switches
 the workload root, applies its mounts/files/network, and starts an inner
 instance of the same executable. The inner instance runs initialization and
-supervises user processes. The primary is PID 1 in its own namespace in private
-mode; the inner instance is the visible PID 1 in shared mode.
+supervises user processes. In direct mode, the primary is PID 1 in its own
+namespace in private mode; the inner instance is the visible PID 1 in shared
+mode. In systemd mode, systemd is environment PID 1 and starts this same
+executor as its reserved service; primary, plugins and exec share that
+environment's PID and mount namespaces.
 
 The host endpoint is `RunRoot/PathID/vsock.sock`. `RunRoot` defaults to
 `/run/sandbox`; `PathID` defaults to `SandboxID` but can be selected independently
@@ -73,7 +79,7 @@ the inner once, before any user `init` command. Their responsibilities are:
 | Instance | Process and cgroup scope | Responsibilities |
 | --- | --- | --- |
 | Outer `sandbox-init` | Guest PID 1, outside `/sandbox` | Host listener and lifecycle facts; root and disk assembly, autofs and storage operations; network/clock updates; raw usage and `mem_report`; recursive freeze/thaw and Guest poweroff |
-| Inner `sandbox-init` | PID 1 of a child PID namespace, inside `/sandbox` | Serial `init`; primary and plugin supervision; orphan reaping; exec and forwarding sessions; application stdio and MUX |
+| Inner `sandbox-init` | Inside `/sandbox`: environment PID 1 in direct mode, or the reserved service's main process and subreaper in systemd mode | Serial `init`; primary and plugin supervision; orphan reaping; exec and forwarding sessions; application stdio and MUX |
 
 The outer accepts the existing Host protocol and passes execution connections
 to the inner through a private Unix socket. Descriptor transfer preserves the
@@ -98,7 +104,9 @@ children. The user PID namespace does not expose the outer instance.
   without introducing runc / crun / podman.
 - **No Guest usage aggregation:** raw on-request usage observations have no
   Guest ticker, totals, areas, peaks or historical replay ([Raw usage observations](#usage-observations)).
-- **No systemd / OpenRC:** sandbox-init implements process supervision.
+- **No implicit init-system selection:** direct mode remains the default;
+  systemd requires the explicit launch policy below. The common executor still
+  supervises the platform primary, plugins and execution sessions.
 - **No busybox / util-linux dependency for init operations:** mounting, directory
   creation, chdir, chroot, reboot and openpty use Go syscall interfaces.
   The runtime also carries the separately built guest payload tools listed below.
@@ -121,6 +129,10 @@ The [Runtime Bundle specification](runtime-bundle.md) owns complete packaging, f
 - `/sbin/init` must be sandbox-init for the guest architecture; this repository builds it with `make sandbox-init`.
 - Runtime supplies the early-mount and data-disk staging directories. Phase 1a constructs the actual user rootfs below; the outer runtime is not a distribution `/etc`, `/usr` or shared-library environment.
 - `/opt/sandbox-runtime/` is the reserved read-only guest-payload root. Phase 1a bind-mounts it into the same path of the user rootfs, hiding existing image contents there; applications must respect the application-environment contract.
+- A selected Runtime systemd installation is projected read-only at
+  `/run/sandbox-runtime/systemd`. Its manager, tools, loaders, libraries, units
+  and shutdown helpers are one matching bundle; provided mode uses the final
+  workload rootfs installation instead.
 - virtio-pmem/DAX reuses the same backing file’s read-only pages, not each guest’s private writable RAM. Init and payload executables must match the target architecture.
 
 See the [Native guide](../native-deps/README.md) for production of the bundle and host/target mkfs selection. This specification continues to define the complete host/guest handshake, mount ordering and ABI.
@@ -153,11 +165,12 @@ This is an annotated JSON example; comments are explanatory, not literal JSON:
   "env": {"PATH": "...", "HOME": "/root"},
   "workdir": "/",
   "restart": "never",                    // never|on-failure|always; in-place restart with backoff
-  "cgroup_control": false,               // false: processes see /; true: empty delegated root, /init
+  "systemd": "off",                      // off|auto|runtime|provided; omitted wire value is off
+  "cgroup_control": false,               // direct-mode placement; systemd always delegates its service
   "ext4_discard": "auto",                // auto (or omitted): discard; manual: nodiscard
   "placeholder": false,                  // true: no external exec; host rejects explicit launch.exec,
                                         // ignores image command and forces restart=always
-  "share_pid": false,                    // true: inherit inner PID/mount namespaces (pid_namespace=shared)
+  "share_pid": false,                    // direct-mode policy; systemd always shares its environment
   "user": "0:0",                         // uid:gid or name:group, guest /etc/passwd; empty -> root
   "stop_signal": 15,                     // signal number, resolved host-side; 0 -> SIGTERM
   "stop_grace_sec": 10,                  // guest PID 1's grace period; 0 -> default 10 s
@@ -201,25 +214,28 @@ document's persistent/ephemeral disclosure boundaries.
 The wire NetworkSpec key is **ip_cidr**, not the host YAML key ip.
 `start_timeout` is absent from LaunchSpec because it controls only the
 host's launch_ack wait ([Failure semantics](#failures)).
-
 <a id="application-environment"></a>
 
 ### The application environment
 
-- **PID 1:** in default `pid_namespace=private`, the primary is PID 1 of its
+- **PID 1:** in direct mode's default `pid_namespace=private`, the primary is PID 1 of its
   own namespace. In shared mode, the inner `sandbox-init` is PID 1 and reaps
   orphans. Init commands and plugins use the inner PID namespace; native exec
-  joins the primary's namespaces. The outer management instance is not visible.
+  joins the primary's namespaces. In systemd mode, systemd is PID 1 and all
+  platform execution uses its shared environment. The outer management
+  instance is not visible.
 - **Cgroup namespace:** real `/sys/fs/cgroup/sandbox` is the namespace/freezer
-  root. With `cgroup_control=false`, the inner and all directly managed processes
+  root. In direct mode with `cgroup_control=false`, the inner and all directly managed processes
   live there and see `0::/`. With `true`, this root is empty and its controllers
   are delegated; those processes live in `/sandbox/init` and see `0::/init`.
-  Init, primary, plugins and exec inherit the inner's cgroup namespace and
-  use the same placement rule. See the
+  In systemd mode they occupy the reserved service's `init` leaf, with its
+  empty delegated service root available at `/run/sandbox-init/cgroup`.
+  Init, primary, plugins and exec inherit the environment's cgroup namespace.
+  See the
   [complete topology and delegation rules](#application-cgroups).
 - **Mount namespace:** init commands, plugins and the shared-mode primary use
   the inner's mount namespace and user root view (overlay or single ext4).
-  Only a private-mode primary receives a new mount namespace, with a new proc
+  Only a direct private-mode primary receives a new mount namespace, with a new proc
   mount matching its PID namespace. Native exec joins the primary's actual
   mount namespace.
 - **Network:** with a configured network source, eth0 is virtio-net with a host
@@ -253,9 +269,11 @@ host's launch_ack wait ([Failure semantics](#failures)).
 
 - **restart: never:** app exit → bounded MUX drain → app_exited notification →
   POWER_OFF → CH exit → sandbox-ctl exit and sandbox destruction.
-  The reported app exit status or fatal signal determines sandbox-ctl's exit
-  status when that notification is received; notification failure limits
-  propagation ([Failure semantics](#failures)).
+  The notification reports the primary's actual exit status or fatal signal.
+  The current Host records this separately; `sandbox-ctl run` uses its owner/VMM
+  result and does not derive its process exit code from the `app_exited`
+  callback. Notification failure can lose the primary fact
+  ([Failure semantics](#failures)).
 - **restart: always:** app exit triggers an in-place refork and rewireApp ([Phase 3: supervisor](#supervision)).
   The VM stays alive and the same stdio MUX survives.
 - **restart: on-failure:** nonzero or signaled exit restarts in place; clean exit
@@ -266,13 +284,24 @@ repeating the complete sandbox boot. Backoff is 10 ms→60 s, reset after 60 s
 uptime. Shutdown suppresses further restarts, while a quiesce window delays
 them until thaw ([Phase 3: supervisor](#supervision)).
 
+With systemd active, a terminal primary exit starts the environment stop
+transaction before outer poweroff. `app_exited` describes the primary; the
+separate `environment_exited` fact describes the actual manager lifetime.
+A failed or missing required environment fact cannot be replaced by a clean
+CH exit. A primary restart does not restart systemd or replay `init`.
+
 <a id="signals"></a>
 
 ### Signal handling
 
 - sandbox-ctl sends quiesce / restore / attach / ping over vsock. These messages
   do not directly signal the primary app.
-- **Host shutdown and guest-app shutdown are separate.** On host SIGTERM/SIGINT,
+- **Normal Host shutdown uses the Guest protocol.** `Runtime.Shutdown` and
+  localctl `shutdown` request the Guest stop transaction and wait for actual
+  exit, with the bounded escalation below. The Guest ACK means accepted,
+  not completed. Physical `Close` retains its retirement/rollback meaning;
+  destroying a frozen capture source does not thaw it to run stop hooks.
+- **Host process signals retain the physical teardown path.** On host SIGTERM/SIGINT,
   sandbox-ctl's lifecycle first cancels pre-spawn/controller work. With CH
   running, its shutdown path attempts ordered `vmm.shutdown` through the CH
   API after the memory.high preparation, falls back to SIGTERM to CH if needed,
@@ -287,13 +316,151 @@ them until thaw ([Phase 3: supervisor](#supervision)).
   `launch.stop_signal` (default SIGTERM) and waits `stop_grace_sec` (default
   10 s, from Host `launch.stop_grace_period`), killing the primary on timeout.
   The same primary-stop path applies when the inner itself receives these
-  signals. The outer owns final poweroff. These settings govern the Guest
-  path; they are not a guaranteed Host VMM teardown handshake.
+  signals. With systemd active, these triggers join the single environment
+  stop transaction rather than killing the manager when the executor exits.
+  The outer owns final poweroff.
 - In tty mode the host terminal is raw. Keyboard Ctrl-C (0x03) travels as a byte
   over the PTY stream, and the guest terminal line discipline turns it into
   SIGINT for the application. Host sandbox termination or terminal escape uses
   the separate lifecycle controls ([sandbox lifecycle](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/runtime.md)).
 - The proposed quiesce.signal hook ([Quiesce handling](#quiesce)) is not implemented.
+
+<a id="systemd-environments"></a>
+
+### systemd environments
+
+`launch.systemd` is one policy in the existing launch object:
+
+| Value | Cold-start selection |
+| --- | --- |
+| `off` | Use the existing direct executor; this is the no-source default. |
+| `auto` | Use a qualified systemd installation in the final workload rootfs; use the Runtime installation only when no candidate exists. A broken or incompatible candidate fails launch. |
+| `runtime` | Use the matching Runtime installation at `/run/sandbox-runtime/systemd`. |
+| `provided` | Require a qualified installation supplied by the final workload rootfs. |
+
+This release qualifies dynamically linked glibc managers on Linux amd64 and
+arm64. The manager must have one valid interpreter, respectively
+`ld-linux-x86-64.so.2` or `ld-linux-aarch64.so.1`, versioned `libc.so.6` imports,
+and a matching loader with the glibc SONAME and `GLIBC_PRIVATE` version
+definition. Distribution interpreter symlinks and the Runtime private-prefix
+loader are supported. Static managers, musl and other loader ABIs are not
+qualified; an existing incompatible candidate also fails `auto` launch.
+This boundary makes signal 38 the supported manager's glibc `SIGRTMIN+4`
+poweroff request; ELF qualification does not authenticate the file producer.
+
+An omitted Host field inherits a source E policy; explicit `off` overrides it.
+Non-off policy automatically requires `hello.systemd_v1`; there is no separate
+capability configuration or cgroup switch. A memory Snapshot S resumes its
+captured manager, executor, sockets, mounts and namespaces: it does not
+reselect the installation, reattach a second executor or replay Launch Init.
+The original direct-mode `share_pid` and `cgroup_control` values remain portable
+policy, but active systemd always uses a shared environment and delegated
+service. Changing a mode requires a cold launch, not a memory-restore override.
+
+#### Manager, executor and startup barrier
+
+The outer remains Guest PID 1 outside `/sandbox`. A bootstrap enters the
+environment PID/mount/cgroup namespaces, moves into `init.scope`, and leaves
+the environment cgroup root empty before executing systemd as its PID 1.
+Systemd starts the reserved `sandbox-init.service`; its main process is the
+same platform executor used by direct mode, with child-subreaper enabled.
+There is no second executor for native exec or recovery.
+
+The executor attaches once over the private platform socket. The outer checks
+the instance identity, executable, peer credentials, pidfd and namespaces,
+then checks the manager's actual service MainPID and ControlGroup. An
+executor-connected FD for `/run/systemd/private` lets the outer authenticate
+a direct manager peer independently of the system message bus. Manager
+reexec can refresh that connection without replaying Launch.
+
+The service verifies delegation and completes outer attachment before its
+main process sends `READY=1`. **READY precedes Launch Init**: Init can call
+`systemctl` without waiting on its own service's readiness. The existing
+Init → `launch_ack` → Host ACK/MUX → primary/plugins → `app_started` ordering
+then applies. Service READY and `app_started` are not product-health checks
+and do not imply that all user units have started. `TimeoutStartSec=infinity`
+preserves the existing Host launch deadline and Init timeout semantics.
+
+#### Delegation, tools and PATH
+
+The entire environment remains below real `/sys/fs/cgroup/sandbox`; the
+user's `/sys/fs/cgroup` shows that boundary as `/`. Systemd owns its scopes,
+slices and units. The executor and its directly managed children use the
+reserved service's `init` leaf. The service root is empty and delegates the
+complete controller set `cpu`, `io`, `memory`, `pids`; any missing controller
+fails launch rather than silently shrinking the set.
+
+`/run/sandbox-init/cgroup` is a reserved symlink to the verified service root
+in this cgroup mount. It is neither the `init` leaf nor the manager root, and
+does not assume a fixed slice name. The executor pins the verified target
+and creates managed processes atomically in its leaf. Recursive capture
+freezes the whole `/sandbox`, including systemd, its independent units and
+all executor descendants. The existing `nsdelegate` boundary applies;
+privileged Guest code is not isolated from its own environment by this alias.
+
+Only the Runtime selection projects its matching manager/tool tree. Native exec
+and platform helper commands use a default PATH that includes
+`/run/sandbox-runtime/systemd/bin` plus the existing standard directories.
+Explicit caller PATH values, including empty values, remain authoritative;
+a user may also invoke the tool by absolute path. The guest does not inject
+shell profile scripts or track PATH origin across the Host, artifacts and plugins.
+Ordinary plugins keep their independent environment, rather than inheriting
+Launch.Env.
+
+Platform payload, loader and injected control mounts remain available through
+the graceful-stop window and final shutdown helper. The mount contract does
+not impose ordering on arbitrary user units or user-created mounts.
+
+#### Stop transaction and environment result
+
+Normal Host shutdown, terminal primary exit, executor failure and Guest
+poweroff join one stop transaction. The first accepted trigger fixes the
+reason and deadline, closes execution/restart admission, and begins primary
+drain and manager poweroff concurrently. Systemd receives its container
+poweroff request; SIGTERM is not used to stop the manager because it requests
+manager reexec. Executor EOF neither cancels the timer nor immediately kills
+the manager. Only actual manager Wait ends the environment timer.
+
+The outer independently polls the manager's private peer every second, with
+one shared one-second connection/authentication/query budget per attempt.
+The first successful `SystemState=stopping` observation joins the stop
+transaction, without waiting for the reserved service's TERM to pass user
+unit stop dependencies. A healthy observation can take up to one period plus
+one query. After initial peer validation, five consecutive active seconds
+without a valid state reply are a failure; merely reconnecting does not reset
+that budget. Initial attachment remains covered by the existing launch deadline.
+
+Let **G** be positive wire `stop_grace_sec`, otherwise the existing 10-second
+default, and **F = 5 seconds** be the internal finalization window. Primary
+drain has G; Guest forced manager termination occurs by G+F from first stop
+acceptance. The Host independently fixes a Guest/CH deadline at G+F and a
+final VMM fence at G+2F, including communication time. Repeated requests and
+ACK loss do not renew either budget. A shorter caller deadline can tighten
+the Host boundary. These are escalation deadlines; success still requires
+real process exit and Host cleanup, not just a sent signal.
+
+After actual manager Wait and before outer poweroff, the Guest reports
+`environment_exited{environment_exit:{state,code,term_signal,reason}}` and
+waits within a bounded ACK exchange. `state` is `stopped` or `failed`, while
+code/signal preserve the actual wait result. Linux PID-namespace poweroff can
+produce SIGINT, so a normal result uses the accepted stop evidence as well as
+Wait. Observer failure, failed launch, unexpected manager death or forced
+termination remain failed even if the later VMM exit is zero. Host normal
+shutdown requires this fact for an active systemd environment; physical
+retirement may omit it, but cannot erase a failure already received.
+
+Quiesce pauses new manager queries/reconnections, joins the in-flight attempt
+and preserves the remaining observer health budget before freezing. Frozen
+time does not consume that budget. Restore opens the outer mount gate,
+thaws `/sandbox`, resumes and verifies manager observation, and only then
+reopens executor admission and commits the restore/attach ACK. Stop acceptance
+and successful capture/restore publication are serialized; a stopping
+environment cannot publish a successful `quiesced` or resume ACK.
+
+The implementation boundaries are [bootstrap and delegation](../cmd/sandbox-init/systemd.go),
+[manager control](../cmd/sandbox-init/systemd_peer.go),
+[stop classification](../cmd/sandbox-init/systemd_stop.go) and
+[observer pause/resume](../cmd/sandbox-init/systemd_observer.go).
 
 <a id="initialization"></a>
 
@@ -309,8 +476,9 @@ Base initialization is workload-independent. It mounts only proc/sysfs/devtmpfs,
 starts loopback and the reverse control dispatcher, then announces
 `hello{phase:"runtime_ready"}`. The dispatcher answers ping and shutdown while
 waiting; workload-only exec/connect/quiesce/attach/restore are rejected. A listening
-socket alone is not this readiness barrier. `shutdown` replies `ack` before
-termination. Once the inner publishes the primary, the outer dispatcher routes
+socket alone is not this readiness barrier. `shutdown` first latches the stop
+request and then attempts its acceptance `ack`; a failed write does not undo
+the accepted stop. Once the inner publishes the primary, the outer dispatcher routes
 execution connections to its supervisor and stdio bridge while retaining
 Guest management operations.
 
@@ -361,7 +529,7 @@ E. switch-root:
 F. Basic mounts after switch-root:
    mount -t cgroup2 -o nsdelegate cgroup2 /sys/fs/cgroup; verify nsdelegate
    mkdir /sys/fs/cgroup/sandbox         # user cgroup namespace and freezer root
-   With launch.cgroup_control=true, also create /sys/fs/cgroup/sandbox/init
+   In direct mode with launch.cgroup_control=true, also create /sys/fs/cgroup/sandbox/init
      and strictly enable the Guest-root controllers. The inner bootstrap
      completes /sandbox delegation before any user command (User cgroup namespace and controller topology).
    mount -t devpts devpts /dev/pts -o newinstance,ptmxmode=0666
@@ -629,12 +797,16 @@ mode and optional read-only setting, then detached from staging. Cold-start
 network, mount and file failures are fatal; restore's best-effort clock/network
 updates are a separate contract.
 
-The outer then creates the inner with new PID and mount namespaces, atomically
+In direct mode, the outer then creates the inner with new PID and mount namespaces, atomically
 inside real `/sandbox` through `clone3(CLONE_INTO_CGROUP)`. Before re-exec, the
 fork child creates a cgroup namespace rooted at that group. The inner mounts
 its own `/proc` and scoped cgroup2 view, completes the delegation setup below,
 and reports readiness. This bootstrap belongs to the environment, independently
 of the selected primary executable or placeholder.
+
+Systemd mode uses the manager/service bootstrap and READY barrier described
+in [systemd environments](#systemd-environments), then enters the same executor
+sequence below. Its effective primary PID/mount view is always shared.
 
 The inner receives LaunchSpec and the original hello/launch connection. It
 performs these operations in order:
@@ -680,7 +852,10 @@ bootstrap or `init` commands.
 
 Primary and one-shot `init` commands receive a default PATH only when their
 entire environment map is empty. Plugins and native exec start with a default
-PATH and overlay supplied entries, including an explicitly empty PATH.
+PATH and overlay explicit supplied entries, including an empty PATH. The native
+exec default includes the private tools if Runtime systemd was selected; no
+login profile is injected and explicit PATHs are not rewritten. Plugin Env
+remains independent from Launch.Env.
 The bridge's primary-side fds are replaced by generation on restart; the MUX
 session survives, with the bounded output drain described in [Phase 3](#supervision).
 
@@ -693,8 +868,10 @@ Real `/sys/fs/cgroup/sandbox` is both the **user cgroup namespace root** and the
 the inner, `init` commands, primary, plugins, exec helpers/commands and their
 descendants all belong below `/sandbox`. Capture operates on this whole tree.
 
-`launch.cgroup_control` defaults to `false` and selects placement/delegation
-within that same environment:
+The following table describes **direct mode**. `launch.cgroup_control` defaults
+to `false` and selects placement/delegation within that same environment.
+Active systemd instead uses its always-delegated service root and `init` leaf
+described above, while preserving this raw setting for future direct boots.
 
 | Real Guest path | Path in the user cgroup mount | `false` | `true` |
 | --- | --- | --- | --- |
@@ -738,7 +915,7 @@ setup failures abort launch; no fallback runs a process outside the freezer
 tree. Internal descriptors are CLOEXEC and passed to helpers only through
 explicit slots; user programs do not inherit them.
 
-**PID and mount views:** `launch.pid_namespace=private` keeps the primary as
+**Direct-mode PID and mount views:** `launch.pid_namespace=private` keeps the primary as
 PID 1 of its own namespace; native exec joins that primary's PID and mount
 namespaces. With `shared`, the visible PID 1 is the inner init and it adopts
 orphaned descendants. Init commands and plugins run in the inner PID namespace
@@ -823,7 +1000,8 @@ memory restore.
 
 ### Phase 3: supervisor
 
-This loop runs in the inner PID 1. It performs an initial reap sweep when taking
+This loop runs in the inner executor: PID 1 in direct mode, or the reserved
+service's subreaper in systemd mode. It performs an initial reap sweep when taking
 over from serial init, so orphan exits at that phase boundary are collected.
 The outer separately waits for the inner and owns Host notification/poweroff.
 
@@ -842,7 +1020,7 @@ loop:
         // handled
       else:
         execReg.deliver(pid, status)                // exec child, or silently reaped orphan
-    sigterm/sigint:                                 // signals received by inner PID 1
+    sigterm/sigint:                                 // signals received by the inner executor
       shutting_down = true                         // prevent pending restart forks
       send spec.stop_signal to app_pid             // default SIGTERM
       wait spec.stop_grace_sec (default 10 s); SIGKILL on timeout
@@ -967,9 +1145,11 @@ The operation has the following ordering:
    output pumps parked for a later attach. Only then does it reply to the outer.
 4. **Outer drains reports and freezes the whole user environment.** After
    inner drain succeeds, `mem_report` is paused and any in-flight exchange is
-   joined. The outer writes `/sys/fs/cgroup/sandbox/cgroup.freeze=1` and waits
-   for `cgroup.events` to report `frozen 1`. This includes the inner PID 1,
-   managed processes and user-created descendants. No step after this point
+   joined. With systemd active, the independent manager observer is paused and
+   joined while preserving its remaining health budget. The outer writes
+   `/sys/fs/cgroup/sandbox/cgroup.freeze=1` and waits for `cgroup.events` to
+   report `frozen 1`. This includes the manager/executor, managed processes,
+   independent systemd units and user-created descendants. No step after this point
    waits for an inner handler or an application-specific freeze endpoint.
 5. **Outer drains mount work and prepares managed filesystems.** After
    confirmed freeze, it closes the outer autofs mount gate and waits for
@@ -984,6 +1164,7 @@ The operation has the following ordering:
    `quiesced{drop_caches_result}`, then closes that management connection with
    bounded linger. The Host requires this response, control EOF and its own
    admitted exec/forward-handler drains before `/vm.pause` and capture.
+   The final publication rejects an already accepted stop transaction.
 
 This ordering leaves the outer listener, storage/autofs and control state
 outside the frozen subtree. The private outer/inner channel stays in memory
@@ -1292,7 +1473,7 @@ arguments.
 ```
 (1) Management connection: a fresh connection for an operation's handshake.
     Ordinary operations finish request/response and close; no keepalive or multiplexing.
-    hello/launch, app_started, app_exited, ping, mem_report, quiesce,
+    hello/launch, app_started, app_exited, environment_exited, ping, mem_report, quiesce,
     restore, attach, exec, connect, shutdown                        (Management operations / Management wire format and fields)
     Wire: [4B LE length][JSON].
     Launch has its explicit four-message handshake; upgrade operations retain the conn.
@@ -1361,8 +1542,9 @@ The last column describes whether the connection closes or upgrades.
 |---|---|---|---|---|
 | Cold start | guest→host | `hello` → `launch{spec}` → `launch_ack{stdio}` → `ack` | MUX | Guest announces readiness; host supplies LaunchSpec; guest applies it and prepares stdio before launch_ack. |
 | App start notification | guest→host | `app_started{pid}` → `ack` | Close | The primary passed the helper handshake and reached the startup publication boundary; this is not independent proof of execve success or application health. |
-| App exit notification | guest→host | `app_exited{code,term_signal}` → `ack` | Close | Terminal primary exit; guest waits for ACK up to its budget before powering off. Host uses this for its exit status. |
-| Shutdown request | host→guest | `shutdown` → `ack` | Close | Only a successful ACK write triggers termination. The outer stops startup if the inner is not ready; otherwise it reopens the outer mount gate, clears the platform freeze request and asks the inner to apply the primary stop-signal/grace policy. The outer powers off. ACK does not confirm completed shutdown. |
+| App exit notification | guest→host | `app_exited{code,term_signal}` → `ack` | Close | Terminal primary exit; guest waits for ACK up to its budget before powering off. Host records this separately from the owner/VMM result. |
+| Environment exit notification | guest→host | `environment_exited{environment_exit}` → `ack` | Close | Actual systemd PID 1 Wait has completed; state, reason and actual code/signal describe the environment independently of primary exit. Host records the fact before ACK. |
+| Shutdown request | host→guest | `shutdown` → `ack` | Close | The outer accepts and latches stop before attempting ACK; ACK loss does not cancel it. Startup is stopped or the mount gate is reopened and the platform freeze request cleared before normal executor drain. With systemd active this joins its bounded environment transaction. ACK confirms acceptance, not completed shutdown. |
 | Health probe | host→guest | `ping{id,t_send_ns}` → `pong{id,t_send_ns}` | Close | Host measures RTT, timeouts and failures ([Ping health probes](#health)). |
 | Memory report | guest→host | `mem_report{mem_report:{epoch,seq,mem_*}}` → `mem_report_ack` | Close | Guest observation; host validates epoch/seq and combines it with CH vm.info in the sandbox-local controller. |
 | Usage observation | host→guest | `usage_request{usage_request}` → `usage_response{usage_response}` | Reuse | New raw memory/filesystem reads only; Host alone accumulates ([Raw usage observations](#usage-observations)). |
@@ -1373,9 +1555,10 @@ The last column describes whether the connection closes or upgrades.
 | Port forward | host→guest | `connect{spec}` → `connect_ack` | Fwd relay | Dial the guest target, or Listen+Accept with spec.accept. Accept may park indefinitely without a host ACK deadline. Each forward is independent and is torn down for quiesce ([Connect port-forward sessions (`sandbox-ctl run --connect`)](#forward-sessions) / [Connect forwarding frame sub-protocol (fwd)](#forward-wire)). |
 | Error | Either | `error{msg}` | Close | Human-readable rejection where the handler sends one; malformed framing/JSON can instead terminate the connection. |
 
-The guest implements `shutdown`, but the current host lifecycle uses the CH
-shutdown path described in [Signal handling](#signals), not this guest message.
-Do not infer delivery of the guest stop signal from host VMM teardown.
+Host `Runtime.Shutdown` and localctl `shutdown` use the Guest shutdown request.
+The local owner separately publishes acceptance and waits for actual retirement;
+neither a Guest ACK nor a local acceptance response proves completion. Physical
+Close and forced VMM teardown remain separate ([Signal handling](#signals)).
 
 Attach is an internal mechanism of the existing sandbox-ctl run lifecycle,
 not an interface for another process to take over a session. The current
@@ -1394,7 +1577,9 @@ thaw and execution admission in place but does not resume a paused report
 stream. The host still fails the handshake and owns retry or terminal cleanup.
 
 The outer first reopens the mount gate, then clears the platform freeze request
-on `/sandbox` even if freeze was never confirmed, and asks the now-runnable
+on `/sandbox` even if freeze was never confirmed. With systemd active it resumes
+the saved observer budget and obtains a valid manager state before execution
+admission. It then asks the now-runnable
 inner to close any old MUX and reopen its exec/forward/plugin/restart gates.
 Only after the inner confirms readiness does the outer write the Host ACK and
 hand that connection to the inner for MUX traffic. Waiting for inner readiness before thaw would
@@ -1436,6 +1621,7 @@ populates only fields relevant to its type. The complete types in
     "pid": 4711
   },
   "ext4_discard_v1": true,             // hello: supports auto/manual writable ext4 policy
+  "systemd_v1": true,                  // hello: systemd environment/service/lifecycle contract
   "launch": { ... LaunchSpec ... },    // launch, including stdio (Launch configuration (LaunchSpec))
   "exec": { "argv": [...], "env": {}, "cwd": "", "user": "", "stdio": {} },
   "connect": { "network": "tcp", "address": "127.0.0.1:49983", "accept": false },
@@ -1444,6 +1630,11 @@ populates only fields relevant to its type. The complete types in
   "app_state": "running",              // current restore/attach handlers always send running
   "pid": 4711,                         // app_started
   "code": 0, "term_signal": 0,          // app_exited; separate scalar fields
+  "environment_exit": {               // environment_exited; actual manager Wait, not primary status
+    "state": "stopped",                // stopped|failed
+    "code": 0, "term_signal": 0,
+    "reason": "Host shutdown"
+  },
   "id": 42,                            // ping/pong: monotonically assigned host ID
   "t_send_ns": 1715000000000000000,     // host UnixNano wall-clock value, echoed unchanged
   "skip_drop_caches": true,            // quiesce: preserve caches after freeze+managed syncfs

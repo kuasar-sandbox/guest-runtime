@@ -1,5 +1,8 @@
 """Read fixed Runtime payloads using trusted host tools, never image executables."""
 import hashlib
+import argparse
+import importlib.util
+import json
 import os
 from pathlib import Path
 import re
@@ -66,7 +69,7 @@ def run_reader(command, output):
     subprocess.run(command, stdout=output, stderr=subprocess.DEVNULL, check=True)
 
 
-def read_payloads(image, fsck, dump, destination, *, without_mkfs=False):
+def read_payloads(image, fsck, dump, destination, *, without_mkfs=False, systemd_arch=None, systemd_lock=None):
     verify_bundle(image)
     destination.mkdir(mode=0o700)
     # --extract without a destination validates every file but creates no host
@@ -83,7 +86,15 @@ def read_payloads(image, fsck, dump, destination, *, without_mkfs=False):
         require({".", "..", "envd", "flatten-ctl"} <= set(names),
                 "cannot verify Runtime tool directory")
         require("mkfs.erofs" not in names, "Go Runtime must not contain obsolete mkfs.erofs")
-    for label, path in PAYLOADS.items():
+    selected = dict(PAYLOADS)
+    flat_extents = {}
+    if systemd_arch:
+        selected["executor"] = "/opt/sandbox-runtime/bin/sandbox-init"
+        source = Path(__file__).with_name("release-systemd-payload.py")
+        specification = importlib.util.spec_from_file_location("systemd_payload", source)
+        validator = importlib.util.module_from_spec(specification)
+        specification.loader.exec_module(validator)
+    for label, path in selected.items():
         if without_mkfs and label == "mkfs.erofs":
             continue
         metadata = destination / (label + ".metadata")
@@ -96,24 +107,61 @@ def read_payloads(image, fsck, dump, destination, *, without_mkfs=False):
                 "required Runtime payload is not a regular file: " + label)
         require(len(re.findall(r"^Uid: 0\s+Gid: 0\s+Access: 0755/rwxr-xr-x$", text, re.M)) == 1,
                 "required Runtime payload must be root-owned mode 0755: " + label)
+        if systemd_arch:
+            nids = re.findall(r"^NID: ([0-9]+)\s+", text, re.M)
+            require(len(nids) == 1 and validator.erofs_inode_mode(image, int(nids[0])) == stat.S_IFREG | 0o755,
+                    "required Runtime tool has unexpected privilege bits: " + label)
+            require(re.search(r"Xattr size: 0(?:\s|$)", text) is not None,
+                    "required Runtime tool has unverified xattrs or capabilities: " + label)
         size = int(sizes[0])
+        if systemd_arch:
+            flat_extents[int(nids[0])] = validator.erofs_flat_extent(image, int(nids[0]), size)
         target = destination / label
         with target.open("xb") as output:
             os.chmod(target, 0o600)
             run_reader([str(dump), "--cat", "--path=" + path, str(image)], output)
         require(target.stat().st_size == size, "Runtime payload read size differs: " + label)
+    if systemd_arch:
+        init_info = (destination / "init.metadata").read_text()
+        executor_info = (destination / "executor.metadata").read_text()
+        init_nid = re.findall(r"^NID: ([0-9]+)\s+Links: ([0-9]+)\s+", init_info, re.M)
+        executor_nid = re.findall(r"^NID: ([0-9]+)\s+Links: ([0-9]+)\s+", executor_info, re.M)
+        require(len(init_nid) == len(executor_nid) == 1 and init_nid == executor_nid
+                and int(init_nid[0][1]) >= 2,
+                "Runtime executor entry must be a hardlink to /sbin/init")
+        require((destination / "init").read_bytes() == (destination / "executor").read_bytes(),
+                "Runtime executor entry differs from /sbin/init")
+        tree = validator.ErofsTree(image, dump)
+        lock = json.loads(Path(systemd_lock).read_text()) if systemd_lock else None
+        validator.verify(tree, systemd_arch, lock)
+        flat_extents.update(tree.flat_extents)
+        validator.require_disjoint_extents(flat_extents)
+        manifest = json.loads(tree.read(validator.MANIFEST))
+        (destination / "systemd-manifest.json").write_text(json.dumps(manifest, sort_keys=True))
+        # Copy only manifest-verified regular license bytes into private paths;
+        # never materialize in-image links or apply image ownership on the host.
+        for name, entry in manifest["files"].items():
+            if name.startswith("share/licenses/") and entry["type"] == "file":
+                target = destination / "systemd-licenses" / name.removeprefix("share/licenses/")
+                target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+                target.write_bytes(tree.read(name))
+                target.chmod(0o600)
 
 
 if __name__ == "__main__":
     try:
-        arguments = sys.argv[1:]
-        without_mkfs = arguments[:1] == ["--without-mkfs"]
-        if without_mkfs:
-            arguments = arguments[1:]
-        require(len(arguments) == 4, "expected [--without-mkfs] bundle, trusted fsck, trusted dump and private output")
+        parser = argparse.ArgumentParser(description=__doc__)
+        parser.add_argument("--without-mkfs", action="store_true")
+        parser.add_argument("--systemd-arch", choices=("x86_64", "aarch64"))
+        parser.add_argument("--systemd-lock", type=Path)
+        for name in ("image", "fsck", "dump", "destination"):
+            parser.add_argument(name, type=Path)
+        arguments = parser.parse_args()
         # The trusted caller selects the payload contract. Historical callers
         # still require mkfs; an image cannot opt itself out of this check.
-        read_payloads(*(Path(argument) for argument in arguments), without_mkfs=without_mkfs)
+        read_payloads(arguments.image, arguments.fsck, arguments.dump, arguments.destination,
+                      without_mkfs=arguments.without_mkfs, systemd_arch=arguments.systemd_arch,
+                      systemd_lock=arguments.systemd_lock)
     except (ValueError, OSError, subprocess.SubprocessError, zipfile.BadZipFile) as error:
         # Do not forward raw image-controlled native diagnostics to a CI log.
         message = str(error) if isinstance(error, ValueError) else type(error).__name__

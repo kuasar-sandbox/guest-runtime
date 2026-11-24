@@ -594,3 +594,77 @@ func TestOuterPIDFromFD(t *testing.T) {
 		t.Fatalf("reaped child still identified as %d, %v", pid, err)
 	}
 }
+
+func TestControlRefreshUnsentTimeoutPreservesStream(t *testing.T) {
+	left, right := executorPairForTest(t)
+	if err := left.conn.SetWriteBuffer(4096); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := left.conn.SyscallConn()
+	if err != nil {
+		t.Fatal(err)
+	}
+	filled := 0
+	var fillErr error
+	if err := raw.Control(func(fd uintptr) {
+		buf := make([]byte, 4096)
+		for {
+			n, err := unix.Write(int(fd), buf)
+			if n > 0 {
+				filled += n
+			}
+			if errors.Is(err, unix.EAGAIN) {
+				return
+			}
+			if err != nil {
+				fillErr = err
+				return
+			}
+		}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if fillErr != nil {
+		t.Fatal(fillErr)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
+	defer cancel()
+	if err := left.sendControl(ctx, executorMessage{Op: "systemd-peer", Epoch: 1}, -1); err == nil {
+		t.Fatal("full stream did not time out")
+	}
+	select {
+	case <-left.done:
+		t.Fatal("zero-byte refresh timeout closed execution stream")
+	default:
+	}
+	if _, err := io.CopyN(io.Discard, right.conn, int64(filled)); err != nil {
+		t.Fatal(err)
+	}
+	ctx2, cancel2 := context.WithTimeout(context.Background(), time.Second)
+	defer cancel2()
+	if err := left.sendControl(ctx2, executorMessage{Op: "systemd-peer", Epoch: 2}, -1); err != nil {
+		t.Fatal(err)
+	}
+	msg, fd, err := right.receive()
+	if err != nil || fd != -1 || msg.Epoch != 2 {
+		t.Fatalf("preserved stream corrupted: %+v fd=%d err=%v", msg, fd, err)
+	}
+}
+
+func TestControlRefreshPartialFrameTimeoutClosesStream(t *testing.T) {
+	left, _ := executorPairForTest(t)
+	if err := left.conn.SetWriteBuffer(4096); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
+	defer cancel()
+	err := left.sendControl(ctx, executorMessage{Op: "systemd-peer-fd", Error: strings.Repeat("x", 64*1024)}, -1)
+	if err == nil {
+		t.Fatal("blocked partial frame did not time out")
+	}
+	select {
+	case <-left.done:
+	default:
+		t.Fatal("partial frame left a corrupt stream open")
+	}
+}

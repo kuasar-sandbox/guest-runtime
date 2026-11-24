@@ -65,11 +65,11 @@ Other prerequisites and native-source locations are documented in [Native build 
 ## Build
 
 ```bash
-GOWORK=off make native-deps                # VMLinux, Envd and native inputs
+GOWORK=off make native-deps     # VMLinux, Envd and private systemd installation
 make flatten-ctl                # OCI/directory -> deterministic EROFS builder
 make build                      # assemble sandbox-runtime.bundle
 make sandbox-runtime            # assemble with the selected sandbox-init binary
-make build TARGET_ARCH=aarch64  # cross-build where documented dependencies support it
+make systemd                    # build/verify the native systemd installation
 ```
 
 `make sandbox-runtime` consumes:
@@ -77,9 +77,10 @@ make build TARGET_ARCH=aarch64  # cross-build where documented dependencies supp
 - `bin/<arch>/sandbox-init`;
 - `native-deps/bin/<arch>/envd`;
 - `bin/<arch>/flatten-ctl`;
+- `SYSTEMD_PAYLOAD` (default `native-deps/bin/<arch>/systemd`);
 - `BUILD_MKFS_EROFS` as the host image packer.
 
-Ordinary assembly reuses executable input binaries; it does not refresh existing `sandbox-init` or Envd after source or pin changes. `make build` rebuilds `sandbox-init` and `flatten-ctl` first, while direct `make sandbox-runtime` reuses it if executable. Use the release-specific dependency selection described [below](#reproduce-release-dependencies-exactly) for release reproduction.
+Ordinary assembly reuses executable input binaries; it does not refresh existing `sandbox-init` or Envd after source or pin changes. `make build` rebuilds `sandbox-init` and `flatten-ctl` first, while direct `make sandbox-runtime` reuses it if executable. A missing systemd manifest invokes `make systemd`; a supplied installation is always verified, including source pins, architecture, every file and the ELF dependency closure. Run `make systemd` explicitly to compare the installed build-input receipt and rebuild after recipe or builder changes. Use the release-specific dependency selection described [below](#reproduce-release-dependencies-exactly) for release reproduction.
 
 When `sandbox-init`, Envd or `flatten-ctl` is absent or not executable, the Makefile invokes its corresponding build target. Host `mkfs.erofs` must be installed on `PATH` or selected by `BUILD_MKFS_EROFS`; otherwise the Runtime build fails explicitly. The project no longer maintains erofs-utils patches or builds and distributes mkfs. Workbench and host environments may install distribution erofs-utils packages for build-time packing and independent validation.
 
@@ -88,9 +89,11 @@ When `sandbox-init`, Envd or `flatten-ctl` is absent or not executable, the Make
 | Output | Build target |
 | --- | --- |
 | `bin/<arch>/flatten-ctl` | `make flatten-ctl` |
+| `bin/<arch>/sandbox-init` | `make sandbox-init` |
 | `bin/<arch>/sandbox-runtime.bundle` | `make sandbox-runtime` |
 | `native-deps/bin/<arch>/vmlinux` | `make native-deps` |
-| `native-deps/bin/<arch>/envd` | `make native-deps` |
+| `native-deps/bin/<arch>/envd` | `make envd` |
+| `native-deps/bin/<arch>/systemd/` | `make systemd` (native architecture) |
 
 ## Assemble the Runtime image
 
@@ -98,10 +101,10 @@ Common entry points:
 
 ```bash
 make flatten-ctl                 # Build the target-architecture guest tool.
-make native-deps                 # Build vmlinux / envd.
+make native-deps                 # Build vmlinux / envd / systemd natively.
 make sandbox-runtime             # Produce bin/<arch>/sandbox-runtime.bundle.
 make build                       # Build flatten-ctl + sandbox-runtime.
-make build TARGET_ARCH=aarch64
+make build TARGET_ARCH=aarch64 SYSTEMD_PAYLOAD=/path/to/verified-aarch64/systemd
 ```
 
 A **host-executable `mkfs.erofs` must already be available** before `make sandbox-runtime`. Install host erofs-utils or set `BUILD_MKFS_EROFS`. The project does not build mkfs. It only packs the runtime bundle; the target Guest uses the Go generator linked into static `flatten-ctl`, with no `GUEST_MKFS_EROFS` payload.
@@ -112,8 +115,10 @@ The target's input and build sequence is:
 2. If the selected `SANDBOX_INIT` (default `bin/<arch>/sandbox-init`) is absent, build it with `make sandbox-init`.
 3. Resolve target `ENVD` (default `native-deps/bin/<arch>/envd`), building it when missing.
 4. Resolve this repository's target `FLATTEN_CTL` (default `bin/<arch>/flatten-ctl`), building it when missing.
-5. Verify the selected `flatten-ctl` build record links the external go-erofs module. A binary lacking that versioned, checksummed dependency fails explicitly; run `make flatten-ctl` or select a matching binary. Assemble the staging tree and use host `BUILD_MKFS_EROFS` to create temporary runtime EROFS.
-6. The host `runtime-bundle` tool copies EROFS, adds PMEM alignment padding, computes SHA256 and appends the empty-marker ZIP, renaming its completed temporary file to `bin/<arch>/sandbox-runtime.bundle` atomically.
+5. Verify the selected `flatten-ctl` build record links the external go-erofs module. A binary lacking that versioned, checksummed dependency fails explicitly; run `make flatten-ctl` or select a matching binary.
+6. Resolve `SYSTEMD_PAYLOAD`, building the default native installation if its manifest is absent. Verify its complete contents against `native-deps/deps/systemd-lock.json`.
+7. Assemble the staging tree: hardlink `/opt/sandbox-runtime/bin/sandbox-init` to `/sbin/init`, copy the common static tools, and preserve the private installation at `/usr/lib/sandbox-runtime/systemd`. Use host `BUILD_MKFS_EROFS` to pack the tree with root ownership, no xattrs and the verified modes.
+8. The host `runtime-bundle` tool copies EROFS, adds PMEM alignment padding, computes SHA256 and appends the empty-marker ZIP, renaming its completed temporary file to `bin/<arch>/sandbox-runtime.bundle` atomically.
 
 That final rename is not a rollback guarantee for the whole Make target: the Makefile removes the previous bundle before running mkfs. A later failure can leave no bundle. Build in an isolated checkout/output directory, validate the result, then deploy it under a new immutable path for future launches. Retain old artifacts still referenced by running VMs or snapshots; do not overwrite files in use.
 
@@ -121,9 +126,23 @@ See [the native-build workflow](../native-deps/README.md) for host EROFS prerequ
 
 ### Architectures
 
-The runtime image is built for the target architecture. Its build-directory filename is always `sandbox-runtime.bundle`. `/sbin/init`, `envd`, `flatten-ctl` inside the EROFS prefix must all be executable files for that same target architecture.
+The runtime image is built for the target architecture. Its build-directory filename is always `sandbox-runtime.bundle`. `/sbin/init`, `envd`, `flatten-ctl` and every ELF in the private systemd installation must match that target architecture.
 
 `TARGET_ARCH=amd64` normalizes to `x86_64`; `TARGET_ARCH=arm64` normalizes to `aarch64`. Cross-builds do not update host-architecture symlinks, avoiding host entry points to non-runnable binaries. The host packing tool remains separate from this target payload.
+
+## Build the private systemd installation
+
+`make systemd` uses the fixed sources and features in `native-deps/deps/systemd-lock.json`. Both source archives require their pinned SHA256; changing an archive location does not disable verification. The native Ubuntu builder supplies Meson, Ninja, patchelf, static BusyBox and the development libraries listed in [Native maintenance](../native-deps/README.md#private-systemd-installation). The selected Workbench must already contain those packages; ordinary build jobs do not install packages or need root privileges.
+
+The installation contains manager, executor, shutdown helper, units, generators, system bus, tools, a matching unchanged ELF loader, regular shared dependencies and explicit dlopen/NSS dependencies. Each build records recipe and compiler identities plus the actual binary/source package versions that provided dependency bytes. An existing output is reused only when its receipt and the complete installation validate; rebuilds re-extract verified archives into disposable native build directories.
+
+The bundle stores that tree at `/usr/lib/sandbox-runtime/systemd`. Guest projects it read-only at `/run/sandbox-runtime/systemd` only when the final launch decision selects Runtime systemd. Its executable and library paths are compiled or rewritten for that active prefix; the user rootfs need not provide a matching libc. Common static tools remain under `/opt/sandbox-runtime/bin`, including the executor entry hardlinked to `/sbin/init`.
+
+The source lock also pins the private configuration-search patch. `/etc` and `/run` administrator configuration keep priority; the private vendor directory precedes rootfs `/usr/local/lib` and `/usr/lib`. This applies to sysusers, tmpfiles, presets and manager/journald drop-ins. Runtime supplies private journal limits, a PATH that also works on rootfs layouts with `/bin`, and presets disabling unused getty instances. It retains rootfs vendor configuration and ordinary user services.
+
+Runtime EROFS uses flat, non-inline, uncompressed data without deduplication. `--chunksize` also enables deduplication by default, so neither that option nor `-Ededupe` is used. Linux 6.1 DAX associates a physical page with one inode mapping; sharing data pages across independent ELF files can produce a kernel warning. Trusted release readback checks every native regular file and common executable for the required layout and rejects overlapping physical extents. The public executor hardlink remains valid because both paths identify one inode. These packing requirements apply to the Runtime bundle, independently of user rootfs generation.
+
+The installation verifier runs without executing target binaries. Native configuration qualification starts without a messagebus account and exercises sysusers, tmpfiles, presets and configuration precedence. Native D-Bus qualification additionally checks traditional non-root service activation, the helper's real-UID guard and private-prefix code mappings. Actual Guest integration must also verify the active projection's mount flags, PID 1 startup, daemon reexec, shutdown and E/S behavior. Passing the static installation gate alone is not a VM qualification result.
 
 ## Build the kernel
 
@@ -168,19 +187,20 @@ Fetching and patch development also require Git and the download/archive tools l
 | --- | --- | --- | --- |
 | `vmlinux` | Linux 6.1.169 (LTS, cdn.kernel.org) | `deps/linux-patches/` and `deps/vmlinux/*.config` | sandboxer / sandbox-ctl guest kernel |
 | `envd` | e2b-dev/runtime 2026.22 source tarball | — | Guest agent in `sandbox-runtime.bundle` |
+| `systemd/` | systemd 257.13 + D-Bus 1.14.10 | `deps/systemd-lock.json` and native closure recipe | Optional systemd launch mode in `sandbox-runtime.bundle` |
 | `versitygw` (opt-in) | versity/versitygw v1.5.0 | — | Local/single-node S3-compatible file-storage integration where required |
 
-Pins live in Makefile variables (`LINUX_TARBALL`, `ENVD_TARBALL`, and optional `VERSITYGW_TARBALL`), accepting `url#filename` or a local path. An empty corresponding `*_TARBALL_SHA256` skips verification. The current default Linux and Envd inputs have hashes configured; the optional gateway hash must be supplied when required by the deployment's verification policy. Updating a version means updating those variables and revalidating patch application. A changed pin alone does not invalidate existing binaries or extracted sources: Envd extraction reuses its `.extracted` marker, and kernel fetch reuses `linux-patches-base`. Preserve local work and select fresh source/output paths when changing upstream inputs; `make clean` does not reset these source caches.
+Linux, Envd and optional gateway pins live in Makefile variables (`LINUX_TARBALL`, `ENVD_TARBALL`, and optional `VERSITYGW_TARBALL`), accepting `url#filename` or a local path. An empty corresponding `*_TARBALL_SHA256` skips verification. The current default Linux and Envd inputs have hashes configured; the optional gateway hash must be supplied when required by the deployment's verification policy. Updating a version means updating those variables and revalidating patch application. A changed pin alone does not invalidate existing binaries or extracted sources: Envd extraction reuses its `.extracted` marker, and kernel fetch reuses `linux-patches-base`. Preserve local work and select fresh source/output paths when changing upstream inputs; `make clean` does not reset these source caches.
 
 Use the normal Makefile targets to build the selected sources, then package the
 matching outputs. From the repository root, `make release-runtime` prepares the
-selected dependencies, rebuilds `flatten-ctl` and invokes `sandbox-runtime` before
+selected dependencies, rebuilds `sandbox-init` and `flatten-ctl`, builds or verifies the selected native systemd installation, and invokes `sandbox-runtime` before
 packaging, while `make release-vmlinux` depends only on `vmlinux`.
 Calling `release.sh package` directly reuses prebuilt files; it does not rebuild
 native dependencies, replace source checkouts or reset caches. Runtime and
 Kernel remain independently built, packaged and selected.
 
-Runtime package inputs are `bin/<arch>/{sandbox-runtime.bundle,flatten-ctl}`;
+Runtime package inputs are `bin/<arch>/{sandbox-runtime.bundle,sandbox-init,flatten-ctl}` and the selected `native-deps/bin/<arch>/systemd/` installation;
 the bundle is built earlier with a host `mkfs.erofs`, which is not a Runtime
 payload. Kernel uses
 `native-deps/bin/<arch>/vmlinux`. Existing `RELEASE_BIN_DIR` and
@@ -189,11 +209,12 @@ payload. Kernel uses
 `RELEASE_ENVD_SOURCE_DIR` and
 `RELEASE_LINUX_SOURCE_DIR` select the corresponding source trees;
 `RELEASE_SANDBOX_INIT_BIN` and `RELEASE_ENVD_BIN` select the matching init
-and Envd binaries for material collection and image consistency checks. Keep source versions, native link maps and these outputs
+and Envd binaries for material collection and image consistency checks.
+`RELEASE_SYSTEMD_PAYLOAD` selects the already verified native installation; its manifest must equal the embedded installation and its notices are collected into the outer archive. `make release-runtime` always selects the native output it just built or verified. Keep source versions, native link maps and these outputs
 together. Native pin changes require updating the recipe, input digests and license collection together; a path override is not permission to label different source
 bytes as the configured version.
 
-Runtime Go builds use a workspace containing exactly the selected guest-runtime and accelerator modules. `sandbox-init` and `flatten-ctl` are both built from this module; sandboxer is not a Runtime Go workspace member. `flatten-ctl` must identify the Linux `github.com/kuasar-sandbox/guest-runtime/cmd/flatten-ctl` main package and selected amd64 or arm64 target. The current producer checks its own clean Go VCS metadata. Normal binary build information and the versioned, checksummed external go-erofs dependency remain intact; no separate source records are packaged.
+Runtime Go builds use a workspace containing exactly the selected guest-runtime and accelerator modules. `sandbox-init` and `flatten-ctl` are both built from this module; sandboxer is not a Runtime Go workspace member. `flatten-ctl` must identify the Linux `github.com/kuasar-sandbox/guest-runtime/cmd/flatten-ctl` main package and selected amd64 or arm64 target. The current producer checks its own clean Go VCS metadata. Normal binary build information and the versioned, checksummed external go-erofs dependency remain intact; no separate Go source records are packaged. The private native installation has its own file/ELF/source manifest as part of its verification contract.
 
 License collection resolves the Go compiler selection for the two guest-runtime binaries together and separately for Envd. When these select different compiler versions,
 each payload's actual version and the corresponding installed Go/bundled
@@ -205,17 +226,16 @@ Compiler distributions are neither downloaded nor authenticated by these
 material collectors, and standalone validation does not require the payload's
 compiler version.
 
-Licenses and notices are isolated under `share/licenses/runtime` or `share/licenses/vmlinux`. Collection rejects missing notices, unreadable subtrees, partial traversals and collisions between different inputs. Kernel includes Linux `COPYING` and the complete `LICENSES` tree from its selected source. No source tables or historical build/test records are shipped.
+Licenses and notices are isolated under `share/licenses/runtime` or `share/licenses/vmlinux`. Collection rejects missing notices, unreadable subtrees, partial traversals and collisions between different inputs. Kernel includes Linux `COPYING` and the complete `LICENSES` tree from its selected source. The native installation also retains its own manifest, source pins and dependency identities inside the bundle. No separate outer source tables or historical build/test records are shipped.
 
-Validation accepts only the selected unit's payloads: Runtime has `sandbox-runtime.bundle` and `flatten-ctl` under `bin/`; Kernel has `bin/vmlinux` and its runtime identity file `bin/vmlinux.sha256`. It checks exact paths, duplicate entries, types, root ownership, permissions and payload integrity. Foreign unit materials and unrelated directories are refused before extraction. A Runtime archive cannot replace the independently selected Kernel or alter unrelated deployment-root modes.
+Validation accepts only the selected unit's payloads: Runtime has `sandbox-runtime.bundle`, `sandbox-init` and `flatten-ctl` under `bin/`; Kernel has `bin/vmlinux` and its runtime identity file `bin/vmlinux.sha256`. It checks exact paths, duplicate entries, types, root ownership, permissions and payload integrity. Foreign unit materials and unrelated directories are refused before extraction. A Runtime archive cannot replace the independently selected Kernel or alter unrelated deployment-root modes.
 
 Standalone Runtime validation uses trusted host `fsck.erofs` and
 `dump.erofs` already installed on `PATH`. It does not download EROFS sources
 or compile readers on demand. These readers must support the image format,
 `fsck.erofs --extract` and `dump.erofs --path/--cat/--ls`.
 Validation checks the bundle's alignment and prefix digest, verifies the
-complete EROFS filesystem without extracting its tree, and reads only init,
-Envd and flatten-ctl into fixed private files. In-image ownership/modes,
+complete EROFS filesystem without extracting its tree, and reads selected common tools plus the complete native installation through trusted readers. It verifies the executor hardlink, every manifest entry, loader/DSO/dlopen/NSS closure, fixed upstream identities and notices. The reviewed D-Bus activation helper is the sole root-owned 4755 file; raw inode modes and zero xattrs reject other privilege bits or file capabilities. Native notice bytes must match `share/licenses/runtime/systemd-runtime` in the outer archive. In-image ownership/modes,
 Go main identities and target architectures must match. Before publication, embedded init and Envd must equal the actual selected input binaries; published package consumption does not require source provenance. Embedded flatten-ctl must equal its outer
 payload. An obsolete embedded or outer mkfs payload is rejected. No archive executable is run. Kernel validation needs no EROFS
 reader, Runtime payload or dependency checkout.
@@ -237,15 +257,16 @@ Run the following native targets from `guest-runtime/native-deps/`. The root `ma
 ### Build targets
 
 ```bash
-make build      # =all: vmlinux + envd
+make build      # =all: vmlinux + envd + systemd
 make vmlinux    # Guest kernel
 make envd       # E2B guest agent
+make systemd    # Private native systemd/D-Bus installation
 make versitygw  # Optional gateway; not part of build
 make clean      # Remove native output; preserve source trees and tarballs
 make help       # List targets
 ```
 
-`make clean` here removes the selected `LINUX_BUILD_OUT` and the entire native `bin/` directory (all architectures), but preserves `build/src/` and `build/tarball/`. Root-level `make clean` first removes this repository's root `bin/` and `build/`, then delegates to this native cleanup; it does not delete the default native source trees. See [idempotency and caching](../native-deps/README.md#idempotency-and-caching) before resetting any cached source or patch work.
+`make clean` here removes the selected `LINUX_BUILD_OUT`, the selected architecture's disposable systemd build/source directory and the entire native `bin/` directory (all architectures), but preserves the shared `build/src/` and `build/tarball/`. Root-level `make clean` first removes this repository's root `bin/` and `build/`, then delegates to this native cleanup; it does not delete the default native source trees. See [idempotency and caching](../native-deps/README.md#idempotency-and-caching) before resetting any cached source or patch work.
 
 Build duration depends on the host, toolchain and cache state; these commands do not carry a fixed timing guarantee.
 
@@ -290,12 +311,12 @@ The target invokes the fetch, patch-application and build stages of `deps/build-
 The default is `uname -m`. When `HOST_ARCH != TARGET_ARCH`, cross-compilation is enabled and `CROSS_PREFIX` is derived as `<target>-linux-gnu-` (explicit overrides are supported). Outputs go to `bin/<target>/`; host `bin/` symlinks are not updated. Running target binaries requires a suitable native host.
 
 ```bash
-make TARGET_ARCH=aarch64 build
+make TARGET_ARCH=aarch64 build SYSTEMD_PAYLOAD=/path/to/verified-aarch64/systemd
 ```
 
 ### Cross toolchain preparation
 
-Kbuild needs the target C toolchain, for example `gcc-aarch64-linux-gnu` on an x86_64 host. Envd and flatten-ctl cross-build with Go. Runtime packing always uses host erofs-utils; target static Libgcrypt, Libgpg-error and libuuid are no longer EROFS build prerequisites.
+Kbuild needs the target C toolchain, for example `gcc-aarch64-linux-gnu` on an x86_64 host. Envd, sandbox-init and flatten-ctl cross-build with Go. The private systemd installation is built on a matching native host, then selected through `SYSTEMD_PAYLOAD` for cross-assembly; the native systemd build target deliberately rejects a mismatched host. Official Runtime release builds run natively on both architectures. Runtime packing always uses host erofs-utils; target static Libgcrypt, Libgpg-error and libuuid are no longer EROFS build prerequisites.
 
 ## WSL2 notes
 
