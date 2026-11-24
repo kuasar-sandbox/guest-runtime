@@ -706,7 +706,13 @@ func phase3Supervise(s *supervisorState, b *consoleBridge, sigCh chan os.Signal)
 			var observed bool
 			if appPid > 0 {
 				_ = syscall.Kill(appPid, stopSig)
-				status, observed = waitOrTimeout(appPid, grace)
+				var reapGrace time.Duration
+				if systemdEnabled(s.spec) {
+					// Leave four seconds of the service's G+5 stop budget for
+					// output drainage and publication of the observed exit.
+					reapGrace = time.Second
+				}
+				status, observed = waitOrTimeout(appPid, grace, reapGrace)
 			}
 			s.appPid.Store(0)
 			s.primaryMu.Unlock()
@@ -841,7 +847,7 @@ func (s *supervisorState) launchRestart(b *consoleBridge) (int, int, error) {
 	return pid, outerPID, err
 }
 
-func waitOrTimeout(pid int, timeout time.Duration) (syscall.WaitStatus, bool) {
+func waitOrTimeout(pid int, timeout, reapGrace time.Duration) (syscall.WaitStatus, bool) {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		var status syscall.WaitStatus
@@ -853,9 +859,21 @@ func waitOrTimeout(pid int, timeout time.Duration) (syscall.WaitStatus, bool) {
 	}
 	logf("graceful shutdown timed out, sending SIGKILL")
 	_ = syscall.Kill(pid, syscall.SIGKILL)
-	var status syscall.WaitStatus
-	wpid, err := syscall.Wait4(pid, &status, syscall.WNOHANG, nil)
-	return status, err == nil && wpid == pid
+	// SIGKILL delivery is asynchronous. A systemd executor must observe
+	// the child's actual status before it exits and publishes app_exited.
+	// Direct mode keeps its existing immediate post-kill check.
+	deadline = time.Now().Add(reapGrace)
+	for {
+		var status syscall.WaitStatus
+		wpid, err := syscall.Wait4(pid, &status, syscall.WNOHANG, nil)
+		if (err != nil && err != syscall.EINTR) || wpid == pid {
+			return status, err == nil && wpid == pid
+		}
+		if !time.Now().Before(deadline) {
+			return status, false
+		}
+		time.Sleep(min(10*time.Millisecond, time.Until(deadline)))
+	}
 }
 
 func doReboot() {
