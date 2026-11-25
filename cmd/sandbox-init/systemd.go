@@ -277,6 +277,24 @@ TTYPath=/dev/console
 	if err := writeReserved("/run/systemd/system/"+systemdTarget, "[Unit]\nDescription=Sandbox environment\nDefaultDependencies=no\nRequires="+systemdService+" default.target\nAfter="+systemdService+"\n"); err != nil {
 		return err
 	}
+	if err := prepareSystemdBootBarrier(
+		"/run/systemd/system",
+		"/etc/systemd/system.control",
+		"/run/systemd/system.control",
+		"/run/systemd/transient",
+		"/run/systemd/generator.early",
+		"/etc/systemd/system",
+		"/etc/systemd/system.attached",
+		"/run/systemd/system.attached",
+		"/run/systemd/generator",
+		systemdPrefix+"/lib/systemd/system",
+		"/usr/local/lib/systemd/system",
+		"/usr/lib/systemd/system",
+		"/lib/systemd/system",
+		"/run/systemd/generator.late",
+	); err != nil {
+		return err
+	}
 	// Protect actual platform mounts and their mounted parents. A path is not
 	// necessarily a mount, and the delegation symlink must never become one.
 	info, err := os.ReadFile("/proc/self/mountinfo")
