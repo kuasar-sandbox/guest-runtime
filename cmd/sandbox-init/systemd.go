@@ -277,7 +277,7 @@ TTYPath=/dev/console
 	if err := writeReserved("/run/systemd/system/"+systemdTarget, "[Unit]\nDescription=Sandbox environment\nDefaultDependencies=no\nRequires="+systemdService+" default.target\nAfter="+systemdService+"\n"); err != nil {
 		return err
 	}
-	if err := prepareSystemdBootBarrier("/run/systemd/system", "/etc/systemd/system", "/usr/local/lib/systemd/system", "/usr/lib/systemd/system", "/lib/systemd/system"); err != nil {
+	if err := prepareSystemdBootBarrier("/run/systemd/system", "/etc/systemd/system", "/etc/systemd/system.attached", "/run/systemd/system.attached", systemdPrefix+"/lib/systemd/system", "/usr/local/lib/systemd/system", "/usr/lib/systemd/system", "/lib/systemd/system"); err != nil {
 		return err
 	}
 	// Protect actual platform mounts and their mounted parents. A path is not
