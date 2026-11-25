@@ -14,12 +14,23 @@ const systemdSysinitDropIn = "[Unit]\nRequires=" + systemdService + "\nAfter=" +
 // through systemd's default dependencies on sysinit.target.
 func prepareSystemdBootBarrier(unitDir string, otherUnitDirs ...string) error {
 	const dropIn = "sysinit.target.d/50-sandbox-init.conf"
-	for _, dir := range append(otherUnitDirs, unitDir) {
+	for _, dir := range otherUnitDirs {
 		if err := verifySystemdBootBarrier(filepath.Join(dir, dropIn)); err != nil {
 			return err
 		}
 	}
-	return writeReserved(filepath.Join(unitDir, dropIn), systemdSysinitDropIn)
+
+	path := filepath.Join(unitDir, dropIn)
+	if err := verifySystemdBootBarrier(path); err != nil {
+		return err
+	}
+	if _, err := os.Lstat(path); err == nil {
+		// The exact runtime-owned file is already present.
+		return nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("inspect systemd boot barrier %s: %w", path, err)
+	}
+	return writeReserved(path, systemdSysinitDropIn)
 }
 
 // verifySystemdBootBarrier accepts an existing copy only when it is the exact
