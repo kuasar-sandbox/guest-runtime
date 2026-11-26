@@ -23,7 +23,7 @@ type executionControl interface {
 	stdioSpec() proto.StdioSpec
 	runSession(*vsockConn, *proto.Message) (bool, error)
 	quiesce() error
-	prepareReattach() error
+	prepareReattach(restored bool) error
 	attachSession(*vsockConn) (bool, error)
 }
 
@@ -278,7 +278,7 @@ func (c *executorClient) commitLifecycleResponse() error {
 	return nil
 }
 
-func (c *executorClient) prepareReattach() error {
+func (c *executorClient) prepareReattach(restored bool) error {
 	c.admission.Lock()
 	defer c.admission.Unlock()
 	if c.systemd != nil {
@@ -289,7 +289,11 @@ func (c *executorClient) prepareReattach() error {
 			return errors.New("systemd environment is stopping")
 		}
 	}
-	_, err := c.link.request(executorMessage{Op: "resume"}, -1)
+	op := "attach"
+	if restored {
+		op = "restore"
+	}
+	_, err := c.link.request(executorMessage{Op: op}, -1)
 	if err == nil {
 		c.paused = false
 	}
@@ -299,7 +303,7 @@ func (c *executorClient) prepareReattach() error {
 func (c *executorClient) attachSession(conn *vsockConn) (bool, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	return c.transfer(ctx, executorMessage{Op: "attach"}, conn)
+	return c.transfer(ctx, executorMessage{Op: "attach-session"}, conn)
 }
 
 func (c *executorClient) shutdown() {
@@ -392,7 +396,7 @@ func (e *innerExecutor) handle(msg executorMessage, fd *int) (executorMessage, e
 		return executorMessage{}, errors.New("workload not launched")
 	}
 	switch msg.Op {
-	case "session", "attach":
+	case "session", "attach-session":
 		conn, err := takeExecutorConn(fd)
 		if err != nil {
 			return executorMessage{}, err
@@ -413,8 +417,18 @@ func (e *innerExecutor) handle(msg executorMessage, fd *int) (executorMessage, e
 		return executorMessage{}, err
 	case "quiesce":
 		return executorMessage{}, sup.quiesce()
-	case "resume":
-		return executorMessage{}, sup.prepareReattach()
+	case "restore", "attach":
+		ctx := msg.context()
+		if err := ctx.Err(); err != nil {
+			return executorMessage{}, err
+		}
+		if err := sup.prepareReattach(msg.Op == "restore"); err != nil {
+			return executorMessage{}, err
+		}
+		if msg.Op == "restore" && systemdEnabled(sup.spec) {
+			return executorMessage{}, restartSystemdRestoreTarget(ctx)
+		}
+		return executorMessage{}, ctx.Err()
 	default:
 		return executorMessage{}, fmt.Errorf("unknown execution operation %q", msg.Op)
 	}
@@ -496,7 +510,12 @@ func (s *supervisorState) quiesce() error {
 	return nil
 }
 
-func (s *supervisorState) prepareReattach() error {
+func (s *supervisorState) prepareReattach(restored bool) error {
+	// Quiesce still gates every restart here. Pending/new instances initialize
+	// normally after admission reopens; never send them this restore's signal.
+	if restored {
+		s.notifyRestore(syscall.Kill)
+	}
 	s.bridge.closeLiveMUX()
 	if err := resumeAfterThaw(s, nil); err != nil {
 		return err

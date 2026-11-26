@@ -20,12 +20,13 @@ import (
 )
 
 const (
-	systemdSource       = "/usr/lib/sandbox-runtime/systemd"
-	systemdPrefix       = "/run/sandbox-runtime/systemd"
-	systemdControl      = "/run/sandbox-init"
-	systemdService      = "sandbox-init.service"
-	systemdTarget       = "sandbox-init.target"
-	systemdExecutorPath = "/opt/sandbox-runtime/bin/sandbox-init"
+	systemdSource        = "/usr/lib/sandbox-runtime/systemd"
+	systemdPrefix        = "/run/sandbox-runtime/systemd"
+	systemdControl       = "/run/sandbox-init"
+	systemdService       = "sandbox-init.service"
+	systemdTarget        = "sandbox-init.target"
+	systemdRestoreTarget = "sandbox-restore.target"
+	systemdExecutorPath  = "/opt/sandbox-runtime/bin/sandbox-init"
 	// Both supported Linux/glibc ABIs reserve RT signals 32 and 33. This is
 	// libc SIGRTMIN+4, not the kernel's unadjusted SIGRTMIN+4.
 	systemdPoweroffSignal = syscall.Signal(38)
@@ -275,6 +276,10 @@ TTYPath=/dev/console
 		return err
 	}
 	if err := writeReserved("/run/systemd/system/"+systemdTarget, "[Unit]\nDescription=Sandbox environment\nDefaultDependencies=no\nRequires="+systemdService+" default.target\nAfter="+systemdService+"\n"); err != nil {
+		return err
+	}
+	// No Install/dependency link: cold boot and source attach do not run hooks.
+	if err := writeReserved("/run/systemd/system/"+systemdRestoreTarget, "[Unit]\nDescription=Sandbox restore initialization\n"); err != nil {
 		return err
 	}
 	if err := prepareSystemdBootBarrier(

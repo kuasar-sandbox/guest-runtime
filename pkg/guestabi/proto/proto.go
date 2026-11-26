@@ -160,6 +160,9 @@ type LaunchSpec struct {
 	// StopSignal is the signal number sandbox-init forwards to the app on
 	// shutdown (host already resolved any signal name → number). 0 → SIGTERM.
 	StopSignal int `json:"stop_signal,omitempty"`
+	// RestoreSignal is delivered to the live main process on memory restore.
+	// 0 means unsubscribed; it never falls back to StopSignal.
+	RestoreSignal int `json:"restore_signal,omitempty"`
 	// StopGraceSec is how long to wait after StopSignal before SIGKILL.
 	// 0 → guest default (10 s).
 	StopGraceSec int `json:"stop_grace_sec,omitempty"`
@@ -244,6 +247,8 @@ type PluginSpec struct {
 	Workdir string            `json:"workdir,omitempty"`
 	User    string            `json:"user,omitempty"`
 	Restart string            `json:"restart,omitempty"`
+	// RestoreSignal independently subscribes this plugin; 0 means no signal.
+	RestoreSignal int `json:"restore_signal,omitempty"`
 }
 
 // NetworkSpec is the resolved guest IP-layer config sandbox-init applies

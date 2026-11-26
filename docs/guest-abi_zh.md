@@ -224,7 +224,7 @@ CH 正常退出不能覆盖环境失败或缺失的必要终止事实。Primary 
 
 ### 信号处理
 
-- sandbox-ctl 通过 vsock 发 quiesce / restore / attach / ping，这些消息不直接给 primary app 发信号。
+- sandbox-ctl 通过 vsock 发 quiesce / restore / attach / ping，这些消息仅在已订阅的内存恢复时给 primary app 发信号（见[恢复通知](#restore-notifications)）。
 - **Host 正常关机使用 Guest 协议**。`Runtime.Shutdown` 与 localctl `shutdown` 请求 Guest
   停止事务并等待真实退出，受下文统一期限约束。Guest ACK 仅表示受理。物理 `Close`
   保留退役和回滚语义，销毁冻结捕获源不会解冻它执行 stop hooks。
@@ -926,6 +926,73 @@ resume/reattach recovery，成功后才继续运行，否则终止失败恢复�
 Quiesce 不关闭外层 vsock listener，不终止或发信号给 primary，不重置 RNG，也不清理
 应用日志。停止用户执行依靠递归 cgroup freezer，不依靠 SIGTERM 或 stdout 反压。
 恢复时 RNG 重播种仍未实现。
+
+<a id="restore-notifications"></a>
+
+### 恢复通知
+
+只有真正从内存 Snapshot restore 时才通知 Guest 组件。冷启动、普通进程重启、
+捕获后原机继续运行、捕获失败恢复原机及普通 attach 都不触发。两个位置独立订阅：
+
+```yaml
+launch:
+  exec: /usr/local/bin/application
+  restore_signal: SIGUSR1
+  plugin:
+    - exec: /usr/local/bin/credential-agent
+      restore_signal: SIGUSR2
+```
+
+Host 接受带或不带 `SIG` 的信号名，或 `"10"` 等十进制字符串，启动前校验 Linux
+信号编号 1–64。LaunchSpec 和各 PluginSpec 的 `restore_signal` 保存已解析整数；
+0 表示未订阅，不回退到 StopSignal。冷派生时省略字段继承源 E 策略，显式 `""`
+清除订阅；plugin 列表继续整体替换。策略保存在制品和捕获的内存中，内存 restore
+拒绝 launch 覆盖。已有快照保留其中的 Runtime 和行为。
+
+解冻后，outer 发送私有 `restore` 或 `attach` 生命周期请求。Restore 时，inner 在
+重新开放 restart 准入前，向仍存活且已订阅的主程序及 plugin 主进程投递信号。
+已退出或尚未启动的实例略过；不广播进程组或子孙进程，不排队、不向后续实例补发。
+投递错误记录日志，不单独导致恢复失败。信号是异步的，普通信号可能合并；通知完成
+不表示 handler 或业务初始化完成。组件须在捕获前安装 handler，自行处理刷新和幂等；
+Runtime 不将信号转换成 envd HTTP 请求。
+
+启用 systemd 时，Runtime 提供 `sandbox-restore.target`，但不接入冷启动链。Inner
+每轮真正 restore 都 restart 该 target，包括捕获时已经 active 的情况，并等待匹配
+job 的最终结果。组件可以安装并 enable 以下 unit，或建立等效依赖链接：
+
+```ini
+[Unit]
+Description=Refresh credentials after sandbox restore
+PartOf=sandbox-restore.target
+Before=sandbox-restore.target
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/libexec/sandbox-refresh-credentials
+TimeoutStartSec=5s
+[Install]
+RequiredBy=sandbox-restore.target
+```
+
+`systemctl enable sandbox-refresh-credentials.service` 注册依赖。Helper 由组件提供；
+5 秒是示例，不是新增默认值。`RequiredBy` 加 target 前排序会传播失败；相同排序的
+`WantedBy` 仍需等待，但 helper 失败不令 target 失败。Helper 应报告真实初始化结果。
+空 target 也完成一次事务。成功以本轮 job 的 `done` 为准，不能只检查 target active
+或 RestartUnit 方法调用成功。
+
+信号投递、原有恢复准备及 restart 准入、target 完成，依次发生在私有 RPC 返回和
+既有 `restore_ack` 之前。ACK 仍在同一连接 FD 交接（私有 `attach-session`）和 MUX
+之前，Host ready 的既有含义不变。Attach 只做恢复准备。Target 失败或超时返回错误，
+不发送成功恢复 ACK。等待使用既有私有 RPC 的剩余预算（10 秒），包括排队耗时；
+断链取消等待。Host `timeouts.restore` 可进一步约束 ACK/MUX 等待。Unit timeout
+应与该预算匹配。
+
+执行控制点时用户环境已经解冻，主程序 MUX 尚未接回。同步 hook 不能等待本轮 Host
+exec 或主程序 MUX 来完成。不增加 Host hook、完成消息、身份字段、第二阶段 ready，
+也不改变网络恢复策略或解冻范围。
+
+配套 Sandboxer `snapshot.restore-notify.sh` E2E 用例覆盖 direct/systemd 信号、排除
+原机 attach、连续捕获和恢复、必需/可选服务失败、unit/RPC 超时及空 target。
 
 <a id="stdio"></a>
 

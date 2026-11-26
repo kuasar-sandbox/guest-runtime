@@ -139,7 +139,11 @@ func TestExecutorLinkLargePayloads(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			reply.ID, reply.Reply = 0, false
+			deadline, _ := ctx.Deadline()
+			if reply.Deadline != deadline.UnixNano() {
+				t.Fatal("RPC budget was not propagated")
+			}
+			reply.ID, reply.Reply, reply.Deadline = 0, false, 0
 			if !reflect.DeepEqual(reply, tc.msg) {
 				t.Fatal("payload changed across a stream frame larger than the socket buffers")
 			}
