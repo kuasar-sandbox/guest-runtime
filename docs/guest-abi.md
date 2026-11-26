@@ -295,7 +295,8 @@ CH exit. A primary restart does not restart systemd or replay `init`.
 ### Signal handling
 
 - sandbox-ctl sends quiesce / restore / attach / ping over vsock. These messages
-  do not directly signal the primary app.
+  signal the primary only for a subscribed memory restore, as described in
+  [Restore notifications](#restore-notifications).
 - **Normal Host shutdown uses the Guest protocol.** `Runtime.Shutdown` and
   localctl `shutdown` request the Guest stop transaction and wait for actual
   exit, with the bounded escalation below. The Guest ACK means accepted,
@@ -1254,6 +1255,87 @@ Quiesce does not close the outer vsock listener, terminate or signal the primary
 reset the RNG, or clean application logs. Recursive cgroup freezing, rather
 than SIGTERM or stdout backpressure, stops user execution. Restore-time RNG
 reseeding remains unimplemented.
+
+<a id="restore-notifications"></a>
+
+### Restore notifications
+
+Only a true memory Snapshot restore notifies Guest components. Cold boot, ordinary
+process restarts, source resume after capture, capture failure recovery and ordinary
+attach do not. Configure subscriptions independently:
+
+```yaml
+launch:
+  exec: /usr/local/bin/application
+  restore_signal: SIGUSR1
+  plugin:
+    - exec: /usr/local/bin/credential-agent
+      restore_signal: SIGUSR2
+```
+
+The Host accepts signal names (with or without `SIG`) or decimal strings such as
+`"10"`, and validates Linux signal numbers 1–64 before launch. LaunchSpec and each
+PluginSpec carry the resolved integer `restore_signal`; zero means unsubscribed,
+with no StopSignal fallback. An omitted field inherits the source E policy on cold
+derivation; explicit `""` clears it. Plugin lists still replace as a whole. The
+policy persists in artifacts and captured memory; memory restore rejects launch
+overrides. Existing snapshots retain their captured Runtime and behavior.
+
+After thaw, outer sends a private `restore` or `attach` lifecycle request. For
+restore, inner signals the still-live subscribed main and plugin main processes
+before reopening restart admission. Exited or not-yet-started instances are
+skipped; there is no broadcast to process groups/descendants, queue or later
+resend. Delivery errors are logged and do not independently fail restore.
+Signals are asynchronous and ordinary signals can coalesce: completion of the
+notification does not mean a handler or business initialization has completed.
+Components must install handlers before capture and own their refresh/idempotency
+logic; the Runtime does not translate signals into envd HTTP requests.
+
+When systemd is active, Runtime provides `sandbox-restore.target` without linking
+it into cold boot. Inner restarts it every true restore, including when the
+captured target was already active, and waits for the matching job's final result.
+A component can install and enable this unit (or create equivalent dependency
+links):
+
+```ini
+[Unit]
+Description=Refresh credentials after sandbox restore
+PartOf=sandbox-restore.target
+Before=sandbox-restore.target
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/libexec/sandbox-refresh-credentials
+TimeoutStartSec=5s
+[Install]
+RequiredBy=sandbox-restore.target
+```
+
+`systemctl enable sandbox-refresh-credentials.service` registers the dependency.
+The helper is component-owned; 5 seconds is an example, not a new default.
+`RequiredBy` plus ordering before the target propagates failure. `WantedBy` with
+the same ordering still waits, but a failed helper does not fail the target.
+Helpers must report their actual initialization result. An empty target also
+completes a transaction. Success is this job's `done` result, not merely an active
+target or a successful RestartUnit method reply.
+
+Signal delivery, existing recovery preparation and restart admission, then target
+completion precede the private reply and existing `restore_ack`. ACK still
+precedes the same connection FD handoff (private `attach-session`) and MUX; Host
+ready retains its existing meaning. Attach performs only recovery preparation.
+Target failure/timeout returns an error without a successful restore ACK. Waiting
+uses the remaining existing private RPC budget (10 seconds), including queued
+time; connection loss cancels it. Host `timeouts.restore` can further bound the
+ACK/MUX wait. Unit timeouts must fit that budget.
+
+The user environment has already thawed while the main MUX is still detached.
+Synchronous hooks must not depend on this round's Host exec or main MUX to finish.
+No new Host hook, completion message, identity field, second ready stage, network
+restore policy or thaw scope is introduced.
+
+The paired Sandboxer `snapshot.restore-notify.sh` E2E case covers direct/systemd
+signals, source attach exclusion, repeated capture/restore, required/wanted
+failures, unit/RPC timeout and the empty target.
 
 <a id="stdio"></a>
 

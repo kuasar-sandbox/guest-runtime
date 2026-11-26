@@ -607,7 +607,7 @@ func finishReattach(c *vsockConn, execution executionControl, epoch uint32, newH
 	}
 	// Only after thaw can the inner acknowledge its local readiness. This
 	// includes opening exec gates before the Host can act on the ACK.
-	if err := execution.prepareReattach(); err != nil {
+	if err := execution.prepareReattach(newHost); err != nil {
 		return false, fmt.Errorf("%s readiness: %w", operation, err)
 	}
 	spec := execution.stdioSpec()

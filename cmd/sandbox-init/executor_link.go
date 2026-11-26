@@ -22,18 +22,29 @@ import (
 // This protocol is private to two instances of the same executable. It is
 // preserved together with them in a memory snapshot, not exposed as a Host ABI.
 type executorMessage struct {
-	ID      uint64            `json:"id,omitempty"`
-	Reply   bool              `json:"reply,omitempty"`
-	Op      string            `json:"op,omitempty"`
-	Error   string            `json:"error,omitempty"`
-	Launch  *proto.LaunchSpec `json:"launch,omitempty"`
-	Request *proto.Message    `json:"request,omitempty"`
-	PID     int               `json:"pid,omitempty"`
-	Code    int               `json:"code,omitempty"`
-	Signal  int               `json:"signal,omitempty"`
-	Token   string            `json:"token,omitempty"`
-	Epoch   uint64            `json:"epoch,omitempty"`
-	Reason  string            `json:"reason,omitempty"`
+	// Deadline belongs to this private RPC, not the Host protocol or snapshot
+	// identity. Propagate its remaining budget, including time queued on mu.
+	Deadline int64             `json:"deadline,omitempty"`
+	ctx      context.Context   `json:"-"`
+	ID       uint64            `json:"id,omitempty"`
+	Reply    bool              `json:"reply,omitempty"`
+	Op       string            `json:"op,omitempty"`
+	Error    string            `json:"error,omitempty"`
+	Launch   *proto.LaunchSpec `json:"launch,omitempty"`
+	Request  *proto.Message    `json:"request,omitempty"`
+	PID      int               `json:"pid,omitempty"`
+	Code     int               `json:"code,omitempty"`
+	Signal   int               `json:"signal,omitempty"`
+	Token    string            `json:"token,omitempty"`
+	Epoch    uint64            `json:"epoch,omitempty"`
+	Reason   string            `json:"reason,omitempty"`
+}
+
+func (m executorMessage) context() context.Context {
+	if m.ctx != nil {
+		return m.ctx
+	}
+	return context.Background()
 }
 
 type executorReply struct {
@@ -42,6 +53,8 @@ type executorReply struct {
 }
 
 type executorLink struct {
+	ctx       context.Context
+	cancel    context.CancelFunc
 	conn      *net.UnixConn
 	writing   chan struct{}
 	mu        sync.Mutex
@@ -81,11 +94,13 @@ func executorLinkFromFile(file *os.File) (*executorLink, error) {
 }
 
 func newExecutorLink(conn *net.UnixConn) *executorLink {
-	return &executorLink{conn: conn, writing: make(chan struct{}, 1), pending: make(map[uint64]chan executorReply), done: make(chan struct{})}
+	ctx, cancel := context.WithCancel(context.Background())
+	return &executorLink{ctx: ctx, cancel: cancel, conn: conn, writing: make(chan struct{}, 1), pending: make(map[uint64]chan executorReply), done: make(chan struct{})}
 }
 
 func (l *executorLink) close() {
 	l.closeOnce.Do(func() {
+		l.cancel()
 		close(l.done)
 		_ = l.conn.Close()
 	})
@@ -264,6 +279,12 @@ func (l *executorLink) serve(handler func(executorMessage, *int) (executorMessag
 					_ = unix.Close(fd)
 				}
 			}()
+			msg.ctx = l.ctx
+			if msg.Deadline != 0 {
+				var cancel context.CancelFunc
+				msg.ctx, cancel = context.WithDeadline(l.ctx, time.Unix(0, msg.Deadline))
+				defer cancel()
+			}
 			resp, err := handler(msg, &fd)
 			resp.ID, resp.Reply = msg.ID, true
 			if err != nil {
@@ -277,6 +298,9 @@ func (l *executorLink) serve(handler func(executorMessage, *int) (executorMessag
 }
 
 func (l *executorLink) call(ctx context.Context, msg executorMessage, fd int) (executorMessage, error) {
+	if deadline, ok := ctx.Deadline(); ok {
+		msg.Deadline = deadline.UnixNano()
+	}
 	waiter := make(chan executorReply, 1)
 	l.mu.Lock()
 	l.next++

@@ -673,6 +673,11 @@ func phase3Supervise(s *supervisorState, b *consoleBridge, sigCh chan os.Signal)
 				if wasPrimary {
 					s.appPid.Store(0)
 				}
+				// Retire plugin PIDs under the same lock as Wait4. Restore
+				// notification must never observe an already-recycled PID.
+				if err == nil && pid > 0 && !wasPrimary && !wasExec {
+					s.pluginReg.onExit(pid, status)
+				}
 				s.primaryMu.Unlock()
 				if err != nil || pid <= 0 {
 					break
@@ -687,8 +692,6 @@ func phase3Supervise(s *supervisorState, b *consoleBridge, sigCh chan os.Signal)
 					}
 					continue // restarting in place — keep reaping
 				}
-				// Route plugin exits; other shared-PID descendants have no waiter.
-				s.pluginReg.onExit(pid, status)
 			}
 		case syscall.SIGTERM, syscall.SIGINT:
 			s.shutdown.Store(true) // stop any in-flight app restart from re-forking

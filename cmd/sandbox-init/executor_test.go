@@ -111,7 +111,7 @@ func TestExecutorQuiesceJoinsReceivedSessionCleanup(t *testing.T) {
 	for _, kind := range []string{proto.TypeExec, proto.TypeConnect} {
 		t.Run(kind, func(t *testing.T) {
 			_, sup, _ := usageReattachFixture(t)
-			if err := sup.prepareReattach(); err != nil {
+			if err := sup.prepareReattach(false); err != nil {
 				t.Fatal(err)
 			}
 			guest, host := usageSocketPair(t)
