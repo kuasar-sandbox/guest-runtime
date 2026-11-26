@@ -370,11 +370,12 @@ jobs:
             if [ "$TARGET_ARCH" = x86_64 ]; then make -C guest-runtime test; make -C guest-runtime vet; fi
             export SANDBOXER_VERSION='${{ needs.preflight.outputs.sandboxer_version }}'
             if [[ -n "$SANDBOXER_VERSION" ]]; then
-              make -C guest-runtime flatten-ctl
+              make -C guest-runtime flatten-ctl BUILD_VERSION='${{ needs.preflight.outputs.version }}'
               export RELEASE_MATERIALS_GO_NOTICE_ROOT=/src/selected-sandboxer-go
             else
-              make -C guest-runtime sandbox-init flatten-ctl
+              make -C guest-runtime sandbox-init flatten-ctl BUILD_VERSION='${{ needs.preflight.outputs.version }}'
             fi
+            if [ -f guest-runtime/internal/version/version.go ] && [ -z "$SANDBOXER_VERSION" ]; then make -C guest-runtime check-version BUILD_VERSION='${{ needs.preflight.outputs.version }}'; fi
             make -C guest-runtime sandbox-runtime BUILD_MKFS_EROFS="$(command -v mkfs.erofs)"
             cd /src/guest-runtime
             export VERSION='${{ needs.preflight.outputs.version }}'
