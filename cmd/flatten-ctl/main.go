@@ -46,6 +46,7 @@ import (
 	"github.com/kuasar-sandbox/accelerator/pkg/remote"
 	"github.com/kuasar-sandbox/accelerator/pkg/tarstream"
 	"github.com/kuasar-sandbox/guest-runtime/internal/util"
+	"github.com/kuasar-sandbox/guest-runtime/internal/version"
 )
 
 const (
@@ -54,6 +55,9 @@ const (
 )
 
 func main() {
+	if version.PrintIfRequested("flatten-ctl") {
+		return
+	}
 	if len(os.Args) < 2 {
 		printUsage()
 		os.Exit(1)
@@ -84,6 +88,7 @@ func main() {
 
 func printUsage() {
 	fmt.Fprintf(os.Stderr, `Usage: flatten-ctl <command> [flags]
+       flatten-ctl --version
 
 Commands:
   export   Flatten registry/archive/rootfs input → tarstream image artifact (optional upload).

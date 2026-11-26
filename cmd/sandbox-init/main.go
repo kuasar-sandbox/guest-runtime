@@ -20,6 +20,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/kuasar-sandbox/guest-runtime/internal/version"
 	"github.com/kuasar-sandbox/guest-runtime/pkg/guestabi/mux"
 	"github.com/kuasar-sandbox/guest-runtime/pkg/guestabi/proto"
 	"golang.org/x/sys/unix"
@@ -47,6 +48,9 @@ const (
 )
 
 func main() {
+	if version.PrintIfRequested("sandbox-init") {
+		return
+	}
 	if len(os.Args) == 3 && os.Args[1] == "systemd-bootstrap" {
 		runSystemdBootstrap(os.Args[2])
 		return

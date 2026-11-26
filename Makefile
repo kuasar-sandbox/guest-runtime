@@ -41,6 +41,12 @@ BINDIR    := bin/$(TARGET_ARCH)
 BUILD_DIR := build/$(TARGET_ARCH)
 GO        := go
 GO_BUILD_FLAGS := -trimpath
+# Version is explicitly supplied by release builds; ordinary builds are dev.
+BUILD_VERSION ?= dev
+VERSION_TAG := $(shell git tag --points-at HEAD --list 'runtime-v[0-9]*' --sort=refname 2>/dev/null | \
+	grep -E '^runtime-v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-preview\.[0-9]{8}(\.[1-9][0-9]*)?)?$$' | \
+	awk -v preferred="$(BUILD_VERSION)" 'NR == 1 { first = $$0 } $$0 == preferred { exact = $$0 } END { print (exact != "" ? exact : first) }')
+VERSION_LDFLAGS := -X github.com/kuasar-sandbox/guest-runtime/internal/version.releaseVersion=$(BUILD_VERSION) -X github.com/kuasar-sandbox/guest-runtime/internal/version.gitTag=$(VERSION_TAG)
 
 SANDBOX_INIT  ?= $(BINDIR)/sandbox-init
 ENVD          ?= native-deps/bin/$(TARGET_ARCH)/envd
@@ -71,7 +77,7 @@ build: sandbox-init flatten-ctl
 
 flatten-ctl:
 	@mkdir -p "$(BINDIR)"
-	GOOS=linux GOARCH=$(GO_ARCH) CGO_ENABLED=0 $(GO) build $(GO_BUILD_FLAGS) -o "$(BINDIR)/flatten-ctl" ./cmd/flatten-ctl
+	GOOS=linux GOARCH=$(GO_ARCH) CGO_ENABLED=0 $(GO) build $(GO_BUILD_FLAGS) -ldflags '$(VERSION_LDFLAGS)' -o "$(BINDIR)/flatten-ctl" ./cmd/flatten-ctl
 	$(call link_bin,flatten-ctl)
 
 native-deps:
@@ -79,7 +85,7 @@ native-deps:
 
 sandbox-init:
 	@mkdir -p "$(BINDIR)"
-	GOOS=linux GOARCH=$(GO_ARCH) CGO_ENABLED=0 $(GO) build $(GO_BUILD_FLAGS) -ldflags '-s -w' -o "$(BINDIR)/sandbox-init" ./cmd/sandbox-init
+	GOOS=linux GOARCH=$(GO_ARCH) CGO_ENABLED=0 $(GO) build $(GO_BUILD_FLAGS) -ldflags '-s -w $(VERSION_LDFLAGS)' -o "$(BINDIR)/sandbox-init" ./cmd/sandbox-init
 	$(call link_bin,sandbox-init)
 
 envd:
@@ -175,7 +181,7 @@ release-runtime:
 	$(release_recursive)@set -e; accelerator_tag="$(ACCELERATOR_VERSION)"; \
 	workspace="$$(python3 -B "$(KUASAR_PLATFORM_DIR)/ci/integration/go_workspace.py" \
 		--root .. --owners guest-runtime --version "$(RUNTIME_VERSION)" --dependency-tag "accelerator=$$accelerator_tag")"; \
-	$(release_make) sandbox-init flatten-ctl GOWORK="$$workspace" BINDIR="$(abspath $(BINDIR))"; \
+	$(release_make) sandbox-init flatten-ctl GOWORK="$$workspace" BUILD_VERSION="$(RUNTIME_VERSION)" BINDIR="$(abspath $(BINDIR))"; \
 	$(release_make) systemd; \
 	$(release_make) sandbox-runtime GOWORK="$$workspace" BINDIR="$(abspath $(BINDIR))" \
 		FLATTEN_CTL="$(abspath $(BINDIR))/flatten-ctl" \
@@ -225,3 +231,18 @@ help:
 	@echo "  test-release       test both independent release lines"
 	@echo "  clean"
 	@echo "  TARGET_ARCH        x86_64 (default) | aarch64"
+
+.PHONY: check-version
+# Verify the newly built clean release binaries on their native architecture.
+check-version:
+	@test "$(HOST_ARCH)" = "$(TARGET_ARCH)"
+	@set -e; source="$(VERSION_TAG)"; \
+	if [ -z "$$source" ]; then source="$$(git rev-parse HEAD | cut -c1-12)"; fi; \
+	for name in sandbox-init flatten-ctl; do \
+	  binary="$(BINDIR)/$$name"; \
+	  actual="$$("$$binary" --version)"; \
+	  rc=0; "$$binary" --version unexpected >/dev/null 2>&1 || rc=$$?; \
+	  if [ "$$rc" -ne 2 ]; then echo "$$name accepted extra version arguments" >&2; exit 1; fi; \
+	  expected="$$name $(BUILD_VERSION) ($$source)"; \
+	  if [ "$$actual" != "$$expected" ]; then printf 'expected %s, got %s\n' "$$expected" "$$actual" >&2; exit 1; fi; \
+	done
