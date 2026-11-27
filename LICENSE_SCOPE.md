@@ -17,3 +17,14 @@ Project scripts that fetch and build the kernel, and project-maintained configur
 ## Go submodule notices
 
 `scripts/release-notices/rootless-containers-proto/COPYING` contains the upstream Apache-2.0 license omitted by the Go submodule archive. Packaging supplements the selected `github.com/rootless-containers/proto/go-proto` dependency with this license and its human attribution. Other modules and versions still require their own license material.
+
+## Native Runtime payload
+
+The Runtime Bundle also contains Envd and a private systemd/D-Bus installation
+with its selected loader and library dependencies. These retain their upstream
+licenses; the root Apache-2.0 declaration does not relicense them. Runtime archives
+carry the collected materials under `share/licenses/runtime/`, including
+`share/licenses/runtime/systemd-runtime/`. The native installation manifest and
+package validation keep that inventory tied to the delivered payload. See
+[native maintenance](native-deps/README.md#private-systemd-installation) and
+[Runtime delivery](docs/runtime-bundle.md#release-artifacts).

@@ -15,23 +15,18 @@ This document defines image packaging, filesystem layout, versioning and consump
 | Component | Responsibility |
 | --- | --- |
 | `sandboxer` | `sandbox-ctl` starts CH and attaches the runtime image as guest virtio-pmem. |
-| `guest-runtime` | Build `sandbox-init` and `flatten-ctl`, and package them with `envd` into one EROFS image. |
-| `guest-runtime/native-deps` | Build `vmlinux` and `envd`; the optional gateway is a separate opt-in target, not runtime payload. |
+| `guest-runtime` | Build `sandbox-init` and `flatten-ctl`, and package them with `envd` and the private systemd installation into one EROFS image. |
+| `guest-runtime/native-deps` | Build `vmlinux`, `envd` and the verified systemd installation; the optional gateway is a separate opt-in target, not runtime payload. |
 | `accelerator` | Supply the reusable `pkg/{flatten,image,remote,tar}` packages used by `flatten-ctl`, and Manifest/Cache/Store capabilities. |
 
 `sandbox-runtime.bundle` does not contain the user rootfs, user dependencies, guest kernel or Cloud Hypervisor. The user rootfs comes from `boot.root.base`/`boot.disks[]`. The kernel is published in the vmlinux package; the VMM is published by sandboxer.
 
 ### Place in the system
 
-```text
-                 build time                                      run time
-
-  guest-runtime/bin/<arch>/sandbox-init ─┐
-  guest-runtime/bin/<arch>/flatten-ctl├─► sandbox-runtime.bundle ──► sandbox-ctl
-  native-deps/bin/<arch>/envd ────────┘             ▲                     │
-                                                 │                     ▼
-                                           runtime release          guest /sbin/init
-```
+The Runtime build combines the Go binaries, Envd and the private systemd payload.
+The Runtime release delivers the resulting Bundle. At launch, sandboxer attaches
+that file and the guest kernel executes its `/sbin/init`; the application image
+does not need its own copy of sandbox-init.
 
 The image is a node-shared artifact. Sandboxes using the same version on a node map the same host file through virtio-pmem and DAX instead of copying runtime file pages independently.
 
@@ -60,19 +55,34 @@ The image root contains:
 /sysdisks/disk-{0..7}-upper/        Data-disk upper mountpoints
 /opt/sandbox-runtime/bin/envd       E2B guest agent
 /opt/sandbox-runtime/bin/flatten-ctl
+/opt/sandbox-runtime/bin/sandbox-init  Hardlink to /sbin/init; systemd executor
+/usr/lib/sandbox-runtime/systemd/     Private systemd installation and libraries
 ```
 
-The `/sysdisks/` mountpoints are precreated by the current Makefile for data-disk ordinals 0–7. Apart from these platform paths, the image supplies no `/etc`, `/usr`, shared libraries or general distribution environment.
+The `/sysdisks/` mountpoints are precreated by the current Makefile for data-disk
+ordinals 0–7. The private systemd tree includes its matching loader, libraries,
+tools, units and metadata. It is isolated platform payload, not a general
+distribution or a replacement for the application's userspace dependencies.
 
 `sandbox-init` performs early mounting and switch-root through Go syscalls. The rootfs actually seen by the user application comes from its image. Before switch-root, `/opt/sandbox-runtime` is bind-mounted at the same path in the user rootfs. Applications can read the platform tools but should not place their own files under that reserved path.
+
+With `launch.systemd: runtime`, the private installation is projected read-only
+at `/run/sandbox-runtime/systemd` in the application environment. The selected
+manager uses its matching private loader and libraries; the application image
+does not have to provide those systemd dependencies. Workload executables still
+use their own image dependencies. With `provided`, the application supplies a
+qualified installation instead. See [application startup](using-guest-runtime.md#application-startup)
+for selection and [Guest ABI](guest-abi.md#systemd-environments) for the full contract.
 
 ### Guest payload
 
 | File | Source | Purpose |
 | --- | --- | --- |
 | `/sbin/init` | `bin/<arch>/sandbox-init` | Guest PID 1: mounts, handshakes and application supervision. |
+| `/opt/sandbox-runtime/bin/sandbox-init` | Hardlink to `/sbin/init` | Reserved executor entry point used by `sandbox-init.service`. |
 | `/opt/sandbox-runtime/bin/envd` | `native-deps/bin/<arch>/envd` | E2B data-plane agent. |
 | `/opt/sandbox-runtime/bin/flatten-ctl` | `bin/<arch>/flatten-ctl` | Pull/flatten OCI images inside the build sandbox. |
+| `/usr/lib/sandbox-runtime/systemd/` | Verified `native-deps/bin/<arch>/systemd` installation | Systemd manager, tools, units and private dependencies for Runtime mode. |
 
 `fsck.erofs` is a diagnostic/test tool and is not included in the runtime image. `vmlinux` is not runtime-image content; it is released independently as `vmlinux-<arch>-vX.Y.Z.tar.gz`.
 

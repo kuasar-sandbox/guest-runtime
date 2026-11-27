@@ -13,3 +13,11 @@
 ## Go 子模块声明
 
 `scripts/release-notices/rootless-containers-proto/COPYING` 是 Go 子模块归档遗漏的上游 Apache-2.0 许可证。打包为选定的 `github.com/rootless-containers/proto/go-proto` 依赖补充许可证和人类可读的归属说明；其他模块和版本仍须提供各自的许可证材料。
+
+## Runtime 原生载荷
+
+Runtime Bundle 还包含 Envd、私有 systemd/D-Bus 安装及其选定 loader 和依赖库。这些内容保留上游
+许可证，根目录 Apache-2.0 声明不对其重新授权。Runtime 归档在 `share/licenses/runtime/` 下携带
+收集的材料，其中包括 `share/licenses/runtime/systemd-runtime/`。原生安装清单及包校验将该清单与
+交付载荷对应起来。详见 [Native 维护](native-deps/README_zh.md#systemd-私有安装)和
+[Runtime 交付](docs/runtime-bundle_zh.md#发布件)。

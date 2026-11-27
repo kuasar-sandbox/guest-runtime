@@ -10,7 +10,7 @@ Unless a subsection specifies `native-deps/`, run commands from the `guest-runti
 
 | Mode | Accelerator | sandbox-init |
 | --- | --- | --- |
-| Standalone CLI development | Obtainable versions in `go.mod`. | Not needed to build only flatten-ctl. |
+| Standalone development from a released checkout | Published versions in its `go.mod`. | Not needed to build only flatten-ctl. |
 | Coordinated source development | Selected guest-runtime + accelerator Go workspace. | Built from this repository with the selected workspace. |
 | Runtime release reproduction | Clean checkout matching `ACCELERATOR_VERSION`; the release target generates the selected workspace. | Rebuilt from the same selected guest-runtime commit as flatten-ctl. |
 
@@ -28,16 +28,20 @@ The selected-source Go build uses a workspace with the sibling `accelerator` mod
 
 For coordinated development, use compatible `main` revisions from these sibling repositories. To reproduce a released composition, use the exact component tags selected by the corresponding [project aggregate release](https://github.com/kuasar-sandbox/kuasar-sandbox/releases) rather than independently choosing GitHub Latest tags. The complete six-repository workspace is documented in the [project README](https://github.com/kuasar-sandbox/kuasar-sandbox).
 
-Standalone `flatten-ctl` builds resolve the obtainable versions committed in `go.mod`.
-Coordinated Preview builds use only the selected `guest-runtime` and `accelerator`
-source modules. Generate that closure before building or testing:
+Standalone `flatten-ctl` builds resolve the versions committed in `go.mod`.
+For coordinated development, including main or PR sources whose companion versions
+are not yet published, use the selected `guest-runtime` and `accelerator` source
+modules. Generate that closure before building or testing:
 
 ```bash
-GOWORK="$(python3 ../kuasar-sandbox/ci/integration/go_workspace.py --root .. --owners guest-runtime)" || exit 1
+GOWORK="$(python3 ../kuasar-sandbox/ci/integration/go_workspace.py --root .. --owners guest-runtime --source-requirements)" || exit 1
 export GOWORK
 ```
 
-The workspace validates module paths without rewriting `go.mod`/`go.sum`. Runtime
+The workspace validates module paths and binds declared internal requirements to
+the selected sources, without rewriting `go.mod`/`go.sum`. This avoids fetching an
+unpublished companion version's module metadata. Release reproduction retains the
+dedicated release target's exact tag/source checks. Runtime
 publication builds `sandbox-init` from `cmd/sandbox-init`; Sandboxer and Connector are not
 Runtime Go workspace members. Its default output is `bin/<arch>/sandbox-init`.
 Envd and versitygw keep their independent Go module builds. The standalone Kernel
@@ -103,7 +107,7 @@ Common entry points:
 make flatten-ctl                 # Build the target-architecture guest tool.
 make native-deps                 # Build vmlinux / envd / systemd natively.
 make sandbox-runtime             # Produce bin/<arch>/sandbox-runtime.bundle.
-make build                       # Build flatten-ctl + sandbox-runtime.
+make build                       # Build sandbox-init + flatten-ctl + sandbox-runtime.
 make build TARGET_ARCH=aarch64 SYSTEMD_PAYLOAD=/path/to/verified-aarch64/systemd
 ```
 

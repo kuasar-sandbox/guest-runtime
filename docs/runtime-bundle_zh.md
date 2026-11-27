@@ -20,8 +20,8 @@ rootfs 组装、vsock 控制面、stdio MUX、exec/attach/quiesce 等 ABI 由
 | 组件 | 职责 |
 |---|---|
 | `sandboxer` | `sandbox-ctl` 启动 CH,把 runtime 镜像作为 virtio-pmem 挂入 guest |
-| `guest-runtime` | 构建 `sandbox-init`、`flatten-ctl`，并与 `envd` 打包为单一 EROFS 镜像 |
-| `guest-runtime/native-deps` | 构建 `vmlinux`、`envd`;可选网关单独按需构建,不是 runtime payload |
+| `guest-runtime` | 构建 `sandbox-init`、`flatten-ctl`，并与 `envd`、私有 systemd 安装打包为单一 EROFS 镜像 |
+| `guest-runtime/native-deps` | 构建 `vmlinux`、`envd` 和经过验证的 systemd 安装；可选网关单独按需构建，不是 Runtime payload |
 | `accelerator` | 提供 `flatten-ctl` 复用的 `pkg/{flatten,image,remote,tar}` 和 manifest/cache/store 能力 |
 
 `sandbox-runtime.bundle` 不包含用户 rootfs、用户依赖、guest kernel 或
@@ -30,15 +30,8 @@ kernel 由 `vmlinux` 包发布;VMM 由 `sandboxer` 发布。
 
 ### 系统位置
 
-```
-                 build time                                      run time
-
-  guest-runtime/bin/<arch>/sandbox-init ─┐
-  guest-runtime/bin/<arch>/flatten-ctl├─► sandbox-runtime.bundle ──► sandbox-ctl
-  native-deps/bin/<arch>/envd ────────┘             ▲                     │
-                                                 │                     ▼
-                                           runtime release          guest /sbin/init
-```
+Runtime 构建将 Go 二进制、Envd 与私有 systemd 安装组合成 Bundle，再由 Runtime 发行单元交付。
+启动时，sandboxer 挂入这个文件，由 Guest 内核执行其中的 `/sbin/init`；应用镜像无需自行复制 sandbox-init。
 
 这份镜像是节点级共享资产。同一节点上相同版本的 sandbox 通过 virtio-pmem +
 DAX 映射同一份 host 文件,避免每个 sandbox 独立复制 runtime 文件页。
@@ -68,22 +61,32 @@ DAX 映射同一份 host 文件,避免每个 sandbox 独立复制 runtime 文件
 /sysdisks/disk-{0..7}-upper/        数据盘 upper 挂载点
 /opt/sandbox-runtime/bin/envd       e2b guest agent
 /opt/sandbox-runtime/bin/flatten-ctl
+/opt/sandbox-runtime/bin/sandbox-init  /sbin/init 的硬链接；systemd executor
+/usr/lib/sandbox-runtime/systemd/     私有 systemd 安装及依赖库
 ```
 
-当前 Makefile 为序号 0–7 的数据盘预建 `/sysdisks/` 挂载点。除这些平台路径外,
-镜像不提供 `/etc`、`/usr`、共享库或通用发行版环境。
+当前 Makefile 为序号 0–7 的数据盘预建 `/sysdisks/` 挂载点。私有 systemd 目录包含匹配的
+loader、依赖库、工具、unit 和元数据。这是隔离的平台载荷，不是通用发行版，也不替代应用自己的用户态依赖。
 `sandbox-init` 通过 Go syscall 完成早期挂载和 switch-root;用户应用真正看到
 的 rootfs 来自用户镜像。`/opt/sandbox-runtime` 在 switch-root 前 bind 到
 用户 rootfs 同名路径,应用可以只读访问平台工具,但不应把自己的文件放在这个
 保留路径下。
+
+选择 `launch.systemd: runtime` 时，私有安装以只读方式投影到应用环境的
+`/run/sandbox-runtime/systemd`。所选 manager 使用匹配的私有 loader 和依赖库，应用镜像无需提供
+这些 systemd 依赖；工作负载可执行文件仍使用自己镜像中的依赖。选择 `provided` 时则由应用提供
+合格安装。选择流程见[应用启动](using-guest-runtime_zh.md#application-startup)，完整契约见
+[Guest ABI](guest-abi_zh.md#systemd-environments)。
 
 ### guest payload
 
 | 文件 | 来源 | 用途 |
 |---|---|---|
 | `/sbin/init` | `bin/<arch>/sandbox-init` | guest PID 1,负责挂载、握手、应用监督 |
+| `/opt/sandbox-runtime/bin/sandbox-init` | `/sbin/init` 的硬链接 | `sandbox-init.service` 使用的保留 executor 入口 |
 | `/opt/sandbox-runtime/bin/envd` | `native-deps/bin/<arch>/envd` | e2b 数据面 agent |
 | `/opt/sandbox-runtime/bin/flatten-ctl` | `bin/<arch>/flatten-ctl` | build sandbox 内拉取/展平 OCI 镜像 |
+| `/usr/lib/sandbox-runtime/systemd/` | 经过验证的 `native-deps/bin/<arch>/systemd` 安装 | Runtime 模式的 systemd manager、工具、unit 和私有依赖 |
 
 `fsck.erofs` 是诊断/测试工具,不进入 runtime 镜像。`vmlinux` 不是 runtime
 镜像内容,由 `vmlinux-<arch>-vX.Y.Z.tar.gz` 独立发布。

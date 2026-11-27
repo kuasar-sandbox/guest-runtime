@@ -96,6 +96,8 @@ NETDEVICES=y                    Network-driver umbrella; missing dependencies ca
                                 silently remove requested VIRTIO_NET.
 NET=y, INET=y                   Networking and AF_INET support; retain the dependencies
                                 needed by AF_VSOCK and AF_NETLINK as well.
+INET_DIAG=y, INET_TCP_DIAG=y,   Diagnose and release eligible old platform TCP sockets
+INET_DIAG_DESTROY=y             during true memory restore.
 VIRTIO=y, VIRTIO_PCI=y          Virtio bus.
 VIRTIO_BLK=y                    Root/data disks: one writable device for single,
                                 or a read-only base plus writable upper for overlay.
@@ -114,6 +116,7 @@ EROFS_FS=y                      Read-only runtime root and application overlay b
 EXT4_FS=y                       Writable single disks and overlay upper layers.
 OVERLAY_FS=y                    Assemble application root/data disks using overlay layout.
 TMPFS=y                         Runtime mounts such as /tmp.
+AUTOFS_FS=y                     First-access mounts for reserved data-disk slots.
 NETWORK_FILESYSTEMS=y           NFS umbrella; preserve dependencies so NFS_FS survives.
 NFS_FS=y + NFS_V3 + NFS_V4(.1/.2) Guest NFS mounts; SUNRPC/LOCKD are selected dependencies.
                                 KEYS=y supports v4 idmap; DNS_RESOLVER=y supports referrals.
@@ -125,6 +128,11 @@ FUSE_FS=y                       FUSE for s3fs and similar guest clients; devtmpf
 The runtime's pmem boot root is distinct from application root/data disks.
 Their single/overlay device order and mount assembly are defined by the
 [Guest root and disk contract](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/guest-abi.md#base-and-root).
+
+The TCP diagnostic features support [platform network restore](network-restore.md).
+An older captured kernel without socket-destruction support still restores, with
+a logged, nonfatal cleanup failure. Replacing the external kernel file does not
+upgrade a memory snapshot's kernel; cold-start and capture new state to adopt it.
 
 For the bundled runtime, validate the resolved configuration and the actual Guest
 mount: `/opt/sandbox-runtime` must be read-only EROFS with `dax=always`. Merely

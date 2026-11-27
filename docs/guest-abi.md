@@ -8,6 +8,10 @@ workload; follow the boot phases when changing initialization; use the protocol
 sections when implementing a host peer. These are three views of the same Guest
 boundary, not separate independently maintained specifications.
 
+For an operational starting point, use [Using guest-runtime](using-guest-runtime.md)
+to select artifacts, choose an application startup mode and prepare restore hooks.
+This page retains the detailed behavior required by workload and Host integrators.
+
 This repository builds and packages PID 1, supplies the shared Go protocol packages,
 and maintains this wire contract together with the sandboxer host peer. Host workflows belong to [Runtime](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/runtime.md), host field defaults to
 [configuration](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/configuration.md), and interpreted usage/Budget to
@@ -381,6 +385,16 @@ Init → `launch_ack` → Host ACK/MUX → primary/plugins → `app_started` ord
 then applies. Service READY and `app_started` are not product-health checks
 and do not imply that all user units have started. `TimeoutStartSec=infinity`
 preserves the existing Host launch deadline and Init timeout semantics.
+
+The runtime also installs the reserved
+`/run/systemd/system/sysinit.target.d/50-sandbox-init.conf` drop-in, which adds
+`Requires=sandbox-init.service` and `After=sandbox-init.service`. Standard system
+services inherit the executor-READY barrier through their default dependencies on
+`sysinit.target`. User units that deliberately disable those dependencies retain
+their own ordering; READY still does not mean Launch Init or application health
+has completed. Existing copies of this reserved drop-in in the searched unit
+directories must be the exact runtime-owned regular file; conflicting contents
+or a non-regular file fail preparation instead of being silently shadowed.
 
 #### Delegation, tools and PATH
 
