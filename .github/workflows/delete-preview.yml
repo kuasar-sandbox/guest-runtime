@@ -45,20 +45,13 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
-      - name: Check out pinned hosted bootstrap
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          repository: kuasar-sandbox/kuasar-sandbox
-          ref: 17a3469a33b4859ec13bb8399b81b657495d120f
-          path: trusted/platform
-          sparse-checkout: |
-            ci/hosted
-            ci/native-cache
-          persist-credentials: false
-      - name: Bootstrap standard runner
-        run: bash trusted/platform/ci/hosted/bootstrap.sh --profile release-control
-      - name: Check environment GitHub CLI
+      - name: Check preview cleanup tools
         run: |
+          python3 - <<'PY'
+          import json, os, re, subprocess, sys
+          if sys.version_info < (3, 9):
+              raise SystemExit('preview cleanup requires Python 3.9 or newer')
+          PY
           gh --version
           gh_help="$(gh api --help)"
           [[ "$gh_help" == *--slurp* ]] || { echo "environment gh must support api --slurp" >&2; exit 1; }

@@ -10,6 +10,7 @@ import hashlib
 import os
 from pathlib import Path
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -162,6 +163,7 @@ def check(platform):
                 assert f"Download validated {arch} bundle" in publish
     pr = yaml.safe_load((ROOT / ".github/workflows/integration-tests.yml").read_text())
     assert pr["jobs"]["ci"]["uses"] == "kuasar-sandbox/kuasar-sandbox/.github/workflows/ci-entry.yml@main"
+    check_preview_cleanup(workflows['delete-preview.yml']['delete'])
     for filename in ("release-runtime.yml", "release-vmlinux.yml"):
         validation = next(step for step in workflows[filename]["preflight"]["steps"]
                           if step.get("name") == "Validate hosted workflow contracts")
@@ -250,6 +252,90 @@ def check(platform):
     for command in ('package', 'validate'):
         assert f'scripts/release.sh {command} vmlinux "$VERSION" "$TARGET_ARCH"' in kernel_build["with"]["run"]
     print("guest workflows: public callers, dual target identity, source/material/ABI boundaries PASS")
+
+
+def check_preview_cleanup(job):
+    """Run the exact tool gate without installing packages or contacting GitHub."""
+    steps = job['steps']
+    assert [step['name'] for step in steps] == [
+        'Require trusted cleanup controller', 'Check out trusted cleanup tooling',
+        'Check preview cleanup tools', 'Delete preview release, assets, and tag']
+    assert steps[1]['with'] == {'persist-credentials': False}
+    deletion = steps[-1]
+    assert deletion['run'] == 'bash scripts/delete-preview.sh "$UNIT" "$VERSION" "$SOURCE_SHA" "$MODE"'
+    assert deletion['env'] == {'GH_TOKEN': '${{ github.token }}', 'UNIT': '${{ inputs.unit }}',
+                               'VERSION': '${{ inputs.version }}', 'SOURCE_SHA': '${{ inputs.source_sha }}',
+                               'MODE': '${{ inputs.mode }}'}
+    with tempfile.TemporaryDirectory(prefix='preview-cleanup-tools-') as directory:
+        root = Path(directory)
+        tools = root / 'bin'; tools.mkdir()
+        log = root / 'gh.log'
+        gh = tools / 'gh'
+        gh.write_text('''#!/bin/sh
+printf '%s\\n' "$*" >> "$GH_FIXTURE_LOG"
+case "$*" in
+  --version) [ "$GH_FIXTURE_MODE" != version-failure ] || exit 37; echo 'gh fixture';;
+  'api --help')
+    [ "$GH_FIXTURE_MODE" != help-failure ] || exit 38
+    [ "$GH_FIXTURE_MODE" = missing-slurp ] || printf '%s\\n' '--slurp';;
+  "api repos/$GITHUB_REPOSITORY/git/ref/tags/$VERSION")
+    if [ "$GH_FIXTURE_MODE" = auth-failure ]; then echo 'Forbidden (HTTP 403)' >&2
+    else echo 'Not Found (HTTP 404)' >&2; fi
+    exit 1;;
+  "api --paginate --slurp repos/$GITHUB_REPOSITORY/releases?per_page=100")
+    printf '%s\\n' '[]';;
+  *) echo 'unexpected GitHub operation' >&2; exit 99;;
+esac
+''')
+        gh.chmod(0o755)
+        python = tools / 'python3'
+        env = dict(os.environ, PATH=str(tools) + os.pathsep + os.environ.get('PATH', ''),
+                   GH_FIXTURE_LOG=str(log), GH_FIXTURE_MODE='normal')
+        # Deletion has no jq or Go consumer; Python's standard-library JSON
+        # parser and gh api --paginate --slurp supply its actual requirements.
+        for mode, expected in (('normal', 0), ('version-failure', 37), ('help-failure', 38),
+                               ('missing-slurp', 1), ('missing-python', 73), ('old-python', 1)):
+            program = 'exec ' + shlex.quote(sys.executable) + ' "$@"\n'
+            if mode == 'missing-python':
+                program = 'exit 73\n'
+            elif mode == 'old-python':
+                source = 'import sys; text=sys.stdin.read(); sys.version_info=(3,8); exec(compile(text,"python-version-fixture","exec"))'
+                program = 'exec ' + shlex.quote(sys.executable) + ' -c ' + shlex.quote(source) + '\n'
+            python.write_text('#!/bin/sh\n' + program); python.chmod(0o755)
+            log.unlink(missing_ok=True)
+            result = subprocess.run(['bash', '-euo', 'pipefail', '-c', steps[2]['run']],
+                                    env=dict(env, GH_FIXTURE_MODE=mode), capture_output=True, text=True, timeout=10)
+            assert result.returncode == expected, (mode, result.returncode, result.stderr)
+            calls = log.read_text().splitlines() if log.exists() else []
+            assert all(call in ('--version', 'api --help') for call in calls)
+            if mode in ('missing-python', 'old-python'):
+                assert not calls, 'GitHub command ran after an unusable Python environment'
+        for ref, accepted in (('refs/heads/main', True), ('refs/heads/release/v1.2.x', False),
+                               ('refs/tags/v1.2.3', False)):
+            result = subprocess.run(['bash', '-euo', 'pipefail', '-c', steps[0]['run']],
+                                    env=dict(env, GITHUB_REF=ref), capture_output=True, text=True, timeout=10)
+            assert (result.returncode == 0) == accepted, (ref, result.stderr)
+        python.write_text('#!/bin/sh\nexec ' + shlex.quote(sys.executable) + ' "$@"\n')
+        for mode, source, accepted in (('normal', '1' * 40, True),
+                                       ('normal', 'invalid', False),
+                                       ('auth-failure', '1' * 40, False)):
+            log.unlink(missing_ok=True)
+            actual = dict(env, GH_FIXTURE_MODE=mode, GH_TOKEN='fixture-no-access',
+                          GITHUB_REPOSITORY='kuasar-sandbox/guest-runtime', UNIT='runtime',
+                          VERSION='runtime-v1.2.3-preview.20261127', SOURCE_SHA=source, MODE='incomplete')
+            result = subprocess.run(['bash', '-euo', 'pipefail', '-c', deletion['run']],
+                                    cwd=ROOT, env=actual, capture_output=True, text=True, timeout=10)
+            assert (result.returncode == 0) == accepted, (mode, source, result.stderr)
+            calls = log.read_text().splitlines() if log.exists() else []
+            assert all('--method' not in call and 'DELETE' not in call for call in calls)
+            if accepted:
+                assert 'already absent' in result.stdout
+                assert calls == [
+                    'api repos/kuasar-sandbox/guest-runtime/git/ref/tags/runtime-v1.2.3-preview.20261127',
+                    'api --paginate --slurp repos/kuasar-sandbox/guest-runtime/releases?per_page=100']
+            elif source == 'invalid':
+                assert not calls, 'GitHub was queried for invalid deletion identity'
+    print('Preview cleanup: Python/gh tool failures and non-main controllers rejected without package installation')
 
 
 def check_runtime_cache_scope(script):
