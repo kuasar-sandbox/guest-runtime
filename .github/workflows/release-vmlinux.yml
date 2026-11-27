@@ -283,22 +283,6 @@ jobs:
       actions: write
       contents: read
     steps:
-      - name: Check out trusted cleanup tooling
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          persist-credentials: false
-      - name: Check out pinned hosted bootstrap
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          repository: kuasar-sandbox/kuasar-sandbox
-          ref: ${{ needs.preflight.outputs.framework_sha }}
-          path: trusted/platform
-          sparse-checkout: |
-            ci/hosted
-            ci/native-cache
-          persist-credentials: false
-      - name: Bootstrap standard runner
-        run: bash trusted/platform/ci/hosted/bootstrap.sh --profile control
       - name: Check environment GitHub CLI
         run: |
           gh --version
