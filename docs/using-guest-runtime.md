@@ -2,7 +2,7 @@
 
 # Use a selected guest Runtime and Kernel
 
-Use this workflow after obtaining and validating a matching aggregate release, or a deliberately selected compatible Runtime/Kernel/sandboxer combination. It checks installed products, prepares an application image, selects direct or systemd startup, and prepares the application for capture and restore. Full platform installation, application templates and cluster scheduling remain in the [project quickstart](https://github.com/kuasar-sandbox/kuasar-sandbox/blob/main/docs/quickstart.md).
+Use this workflow after obtaining and validating a matching aggregate release, or a deliberately selected compatible Runtime/Kernel/sandboxer combination. It checks installed products, prepares an application image, selects direct or systemd startup, and prepares the application for capture and restore. To start a sandbox with the complete platform, use the `docker pull` and `docker run` workflow in the [project Quick Start](https://github.com/kuasar-sandbox/kuasar-sandbox/blob/main/docs/quickstart.md).
 
 The recommended sequence is: verify the released artifacts, flatten the application,
 cold-start it with a built-in empty writable upper, validate its real operation,
@@ -229,7 +229,7 @@ a helper failure fail the target and prevents successful restore ACK. A
 whole job within the existing 10-second private RPC budget, including queue time;
 5 seconds here is an example unit timeout. Host `timeouts.restore` can impose a
 shorter bound. A hook runs after thaw while the main Host MUX is detached, so it
-must not depend on this round's Host exec/MUX to finish. Full notification semantics
+must finish without depending on Host exec/MUX being available during restore. Full notification semantics
 are in [Restore notifications](guest-abi.md#restore-notifications).
 
 ### Network state and verification
@@ -238,7 +238,8 @@ On true restore, the runtime applies the current platform NIC configuration,
 clears its dynamic ARP/NDP entries and makes a bounded attempt to release selected
 old TCP connections. Ordinary source resume or attach does not reset that network
 state. Configure the destination through the Host network provider; avoid adding
-a blanket Guest route flush, NIC recreation or Host polling loop for this work.
+a blanket Guest route flush, NIC recreation or Host polling loop for platform
+network recovery.
 Applications still need to reconnect and renew external state. User-created NICs,
 other network namespaces and ambiguous routed connections remain outside the
 platform cleanup; see [Network restore](network-restore.md).

@@ -2,8 +2,9 @@
 
 # guest-runtime
 
-部署 Kuasar Sandbox 并运行应用，从项目[快速开始](https://github.com/kuasar-sandbox/kuasar-sandbox/blob/main/docs/quickstart_zh.md)
-选择聚合发行版。直接使用组件时，按[使用 guest-runtime](docs/using-guest-runtime_zh.md)
+按项目[快速开始](https://github.com/kuasar-sandbox/kuasar-sandbox/blob/main/docs/quickstart_zh.md)，
+用 `docker pull` 和 `docker run` 启动首个 Sandbox；node-infra 镜像包含相互匹配的 Runtime、Kernel
+与 Host 组件。直接使用组件时，按[使用 guest-runtime](docs/using-guest-runtime_zh.md)
 验证发布的 Runtime 与 Kernel、制备应用镜像，并选择启动和恢复方式。
 源码构建及 [Workbench](https://github.com/kuasar-sandbox/kuasar-sandbox/blob/main/workbench/README_zh.md)
 用于开发、演示和验证。预构建架构以所选发布版的实际资产为准；源码支持某架构不意味着所有历史版本都提供该架构制品。

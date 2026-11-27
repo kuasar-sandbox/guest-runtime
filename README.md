@@ -2,9 +2,9 @@
 
 # guest-runtime
 
-To deploy Kuasar Sandbox and run applications, follow the project
-[Quick Start](https://github.com/kuasar-sandbox/kuasar-sandbox/blob/main/docs/quickstart.md)
-with a selected aggregate release. For direct component use, follow
+Run your first sandbox with `docker pull` and `docker run` in the project
+[Quick Start](https://github.com/kuasar-sandbox/kuasar-sandbox/blob/main/docs/quickstart.md).
+The node-infra image includes the matching Runtime, Kernel and host components. For direct component use, follow
 [Using guest-runtime](docs/using-guest-runtime.md) to verify the published Runtime
 and Kernel, prepare an application image and select its startup and restore behavior.
 Source builds and

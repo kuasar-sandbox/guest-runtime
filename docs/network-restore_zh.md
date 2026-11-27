@@ -17,8 +17,8 @@ sandboxer 提供的单个 virtio-net 接口，包括过期邻居和符合条件�
 4. 请求失败时先检查 Guest 网络日志及当前地址、路由，再区分应用重试失败、内核不支持清理或用户
    管理的网络状态。Restore 成功本身不证明所有旧 TCP socket 已被释放。
 
-实现沿用既有 Host/Guest 线上契约，不新增 Host 配置开关、不遍历用户网络 namespace，也不引入内核
-补丁。以下给出精确所有权和有界行为。
+平台网络恢复使用 Host/Guest 线上契约和内核 Netlink 接口，无需单独的 Host 配置开关或内核
+补丁，也不遍历用户网络 namespace。以下给出精确所有权和有界行为。
 
 ## 行为
 
@@ -81,10 +81,10 @@ socket 释放失败不会导致无限重试；全局权限/能力错误及期限
 50 ms 限制 TCP 的额外工作，不是给每个连接各分配一份预算。调度延迟可能增加观测到的墙钟时间，
 配置期限不构成硬实时 SLA。
 
-当前 x86_64、arm64 内核配置启用 `INET_DIAG`、`INET_TCP_DIAG`、`INET_DIAG_DESTROY`。
-无需新增 network namespace、veth、BPF、Netfilter 或用户态网络工具。不支持销毁的旧内核仍继续
-Restore，并记录 TCP 操作不支持。已有快照保留其捕获时的 init 和内核；安装新 Runtime 不能将新行为
-补入旧快照。要使用该功能，需用新 Runtime 创建新的快照。
+随项目提供的 x86_64、arm64 内核配置启用 `INET_DIAG`、`INET_TCP_DIAG`、`INET_DIAG_DESTROY`。
+网络恢复无需额外 network namespace、veth、BPF、Netfilter 或用户态网络工具。不支持销毁的旧内核
+仍继续 Restore，并记录 TCP 操作不支持。快照保留捕获时的 init 和内核；安装其他 Runtime 或 Kernel
+不会改变已有快照。要采用其他 Runtime/Kernel 组合，需用该组合冷启动并重新捕获。
 
 | 观测结果 | 解释与下一步 |
 | --- | --- |

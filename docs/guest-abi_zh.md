@@ -259,7 +259,7 @@ CH 正常退出不能覆盖环境失败或缺失的必要终止事实。Primary 
 | `runtime` | 使用 `/run/sandbox-runtime/systemd` 中与 Runtime 匹配的完整安装。 |
 | `provided` | 要求最终工作负载 rootfs 提供合格安装。 |
 
-本轮仅接受 Linux amd64、arm64 上动态链接 glibc 的 manager。它必须具有唯一合法的
+支持 Linux amd64、arm64 上动态链接 glibc 的 manager。它必须具有唯一合法的
 解释器（分别为 `ld-linux-x86-64.so.2`、`ld-linux-aarch64.so.1`）、来自 `libc.so.6`
 的版本化 GLIBC 导入，以及 SONAME 匹配且包含 `GLIBC_PRIVATE` 版本定义的 loader。
 发行版解释器符号链接和 Runtime 私有前缀均受支持；静态 manager、musl 和其他 loader
@@ -726,20 +726,17 @@ primary 仍接收上游挂载变化，同时保有自己的 `/proc` 与本地挂
 
 #### 兼容性与内存恢复
 
-Host 消息、primary/placeholder 行为、退出通知、restart 策略以及仅冷启动执行初始化
-的契约保持不变。可观察变化包括 Guest 全局路径由 `/app` 改为 `/sandbox`、init 命令
-进入用户执行环境，以及 shared PID 模式暴露内层而非外层 PID 1。依赖全局路径或外层
-管理进程视图的脚本需要调整；普通 scoped membership 仍按 `cgroup_control` 显示
-`/` 或 `/init`。Plugin 与 shared primary 也改为共享内层 mount namespace，不再
-各持一份私有副本。它们的挂载变化因而在该环境内跨进程可见，并在进程退出或
-restart 后保留。依赖原先逐进程挂载隔离或自动挂载清理的程序，需要显式管理这些
-需求。
+用户执行环境的 Guest 全局 cgroup 路径为 `/sandbox`。Init 命令在该环境运行，shared PID
+模式暴露内层 PID 1。依赖旧 `/app` 路径或外层管理进程视图的脚本，必须适配这一拓扑。
+Scoped membership 按 `cgroup_control` 显示 `/` 或 `/init`。Plugin 与 shared primary
+共享内层 mount namespace；挂载变化在该环境内跨进程可见，并在进程退出或 restart 后保留。
+需要逐进程挂载隔离或挂载清理的应用，必须显式管理这些要求。Host 消息、primary/placeholder、
+退出通知和 restart 契约适用于该执行环境；初始化仅在冷启动执行。
 
 冷启动从选定 Runtime 构造此模型。内存 Snapshot S 保存两个实例、其 namespace/cgroup
 拓扑和私有通路；恢复必须使用 E/C0 identity 对应的 Runtime backing artifact，继续
 执行捕获时的实现。替换 Host 或 Runtime 文件不能升级已有 S 内的 init。采用新 Runtime
-应经过冷启动，再按正常 E/S 流程生成替代制品。本次重构不改变 E/S 格式，也不在内存
-恢复时重放 Launch。
+应经过冷启动，再按正常 E/S 流程生成替代制品。内存恢复继续捕获的执行状态，不重放 Launch。
 
 <a id="supervision"></a>
 

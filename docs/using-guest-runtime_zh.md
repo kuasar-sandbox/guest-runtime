@@ -2,7 +2,7 @@
 
 # 使用选定的 Guest Runtime 与 Kernel
 
-取得并验证匹配聚合发行版，或明确选定兼容 Runtime/Kernel/sandboxer 组合后，使用本流程检查安装产物、制备应用镜像、选择直接启动或 systemd，并准备应用的捕获与恢复。完整平台安装、应用模板及集群调度见[项目快速开始](https://github.com/kuasar-sandbox/kuasar-sandbox/blob/main/docs/quickstart_zh.md)。
+取得并验证匹配聚合发行版，或明确选定兼容 Runtime/Kernel/sandboxer 组合后，使用本流程检查安装产物、制备应用镜像、选择直接启动或 systemd，并准备应用的捕获与恢复。通过完整平台启动 Sandbox 时，采用[项目快速开始](https://github.com/kuasar-sandbox/kuasar-sandbox/blob/main/docs/quickstart_zh.md)中的 `docker pull` 和 `docker run` 流程。
 
 推荐顺序是：验证发布制品、展平应用、用内建空白可写 upper 冷启动、验证真实业务操作，再捕获可复用状态。
 修改 Runtime、Kernel 或启动策略后，需要重新冷启动并捕获。
@@ -197,7 +197,7 @@ Runtime 提供 `sandbox-restore.target`，在每次真正恢复时重新启动�
 `RequiredBy` 配合上述排序会使 helper 失败传递给 target，并阻止成功的恢复 ACK。改为 `WantedBy`
 时仍等待，但不传播 helper 失败。整个 job 必须在既有 10 秒私有 RPC 预算内完成，包含排队时间；
 这里的 5 秒只是示例 unit 超时。Host `timeouts.restore` 可以施加更短上限。钩子执行时用户环境已解冻、
-主 Host MUX 仍分离，因此不能依赖本轮 Host exec/MUX 才能完成。完整语义见
+主 Host MUX 仍分离，因此钩子必须能在恢复期间不依赖 Host exec/MUX 完成。完整语义见
 [恢复通知](guest-abi_zh.md#restore-notifications)。
 
 ### 网络状态与验证

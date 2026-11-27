@@ -28,9 +28,9 @@ application-owned and how to diagnose the boundary.
    user-managed network state. A successful Restore alone does not prove all old
    TCP sockets were released.
 
-The implementation uses the existing Host/Guest wire contract. It does not add
-Host configuration switches, traverse user network namespaces or introduce a
-kernel patch. The exact ownership and bounded behavior follow.
+Platform network recovery uses the Host/Guest wire contract and the kernel's
+Netlink interfaces. It needs no separate Host configuration switch or kernel
+patch and does not traverse user network namespaces. The exact ownership and bounded behavior follow.
 
 ## Behavior
 
@@ -123,13 +123,13 @@ deadline; the 50 ms deadline bounds TCP's extra work rather than granting that
 budget to each connection. Scheduling delays can extend observed wall time, so
 the configured deadline is not a hard real-time SLA.
 
-The current x86_64 and arm64 kernel configuration enables `INET_DIAG`,
-`INET_TCP_DIAG` and `INET_DIAG_DESTROY`. No new network namespaces, veth, BPF,
-Netfilter or userspace networking binary is required. An older kernel without
+The bundled x86_64 and arm64 kernel configurations enable `INET_DIAG`,
+`INET_TCP_DIAG` and `INET_DIAG_DESTROY`. Network recovery needs no additional
+network namespace, veth, BPF, Netfilter or userspace networking binary. An older kernel without
 destruction support continues Restore and records the unsupported TCP attempt.
-Already captured snapshots keep their captured init and kernel: installing a new
-runtime cannot retrofit this behavior into an old snapshot. Create a fresh
-snapshot with the new runtime to receive the feature.
+Snapshots retain the init and kernel present at capture. Installing another
+Runtime or kernel does not change an existing snapshot. To adopt a different
+Runtime/Kernel combination, cold-start with that combination and capture again.
 
 | Observed result | Interpretation and next check |
 | --- | --- |

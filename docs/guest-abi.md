@@ -343,7 +343,7 @@ CH exit. A primary restart does not restart systemd or replay `init`.
 | `runtime` | Use the matching Runtime installation at `/run/sandbox-runtime/systemd`. |
 | `provided` | Require a qualified installation supplied by the final workload rootfs. |
 
-This release qualifies dynamically linked glibc managers on Linux amd64 and
+The supported managers are dynamically linked glibc binaries on Linux amd64 and
 arm64. The manager must have one valid interpreter, respectively
 `ld-linux-x86-64.so.2` or `ld-linux-aarch64.so.1`, versioned `libc.so.6` imports,
 and a matching loader with the glibc SONAME and `GLIBC_PRIVATE` version
@@ -989,18 +989,16 @@ without replaying files, mounts or init commands.
 
 #### Compatibility and memory restore
 
-Host messages, primary/placeholder behavior, exit notifications, restart
-policy and cold-only initialization retain their existing contract. Observable
-changes are the Guest-global path `/app` becoming `/sandbox`, init commands
-joining the user execution environment, and shared PID mode exposing the inner
-instead of outer PID 1. Scripts that inspected global paths or outer management
-processes must account for that change; ordinary scoped membership remains
+The user execution environment has the Guest-global cgroup path `/sandbox`.
+Init commands run in that environment, and shared PID mode exposes the inner
+PID 1. Scripts that depend on the legacy `/app` path or on a view of outer
+management processes must be adapted to this topology. Scoped membership is
 `/` or `/init` according to `cgroup_control`. Plugins and shared-mode primaries
-also share the inner's mount namespace rather than receiving a private copy.
-Their mount changes are consequently visible across that environment and
-survive process exit or restart. Programs that previously relied on per-process
-mount isolation or automatic mount cleanup must manage those requirements
-explicitly.
+share the inner's mount namespace. Their mount changes are visible across that
+environment and survive process exit or restart; applications that need
+per-process mount isolation or mount cleanup must manage them explicitly.
+The Host-message, primary/placeholder, exit-notification and restart contracts
+apply to this execution environment. Initialization runs only during cold start.
 
 Cold start constructs this model from the selected Runtime. A memory Snapshot
 S preserves both instances, their namespace/cgroup topology and private
@@ -1008,8 +1006,8 @@ channel. Restore requires the Runtime backing artifact recorded by its E/C0
 identity and resumes that captured implementation; replacing the Host or a
 Runtime file cannot upgrade init inside an existing S. Adopt a new Runtime
 through cold start and create replacement artifacts through the normal E/S
-workflow. This refactor does not change the E/S format or replay Launch during
-memory restore.
+workflow. Memory restore resumes the captured execution state without replaying
+Launch.
 
 <a id="supervision"></a>
 

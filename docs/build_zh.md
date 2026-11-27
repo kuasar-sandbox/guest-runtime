@@ -28,16 +28,16 @@
 
 协调开发使用这些兄弟仓相互兼容的 `main` revision。复现已发布组合时,使用对应[项目聚合 Release](https://github.com/kuasar-sandbox/kuasar-sandbox/releases)精确选择的组件 Tag,不要分别选择各仓 GitHub Latest。完整六仓工作区见[项目 README](https://github.com/kuasar-sandbox/kuasar-sandbox)。
 
-独立 `flatten-ctl` 构建解析 `go.mod` 中提交的版本。协调开发（包括依赖配套版本尚未发布的 main 或
-PR 源码）使用选定的 `guest-runtime` 与 `accelerator` 源码模块；构建和测试前生成该闭包：
+独立 `flatten-ctl` 构建解析 `go.mod` 中提交的版本。跨仓源码构建使用相互兼容的 `guest-runtime`
+与 `accelerator` revision；构建和测试前生成依赖工作区：
 
 ```bash
 GOWORK="$(python3 ../kuasar-sandbox/ci/integration/go_workspace.py --root .. --owners guest-runtime --source-requirements)" || exit 1
 export GOWORK
 ```
 
-工作区验证 module path，将声明的内部依赖绑定到选定源码，不改写 `go.mod`/`go.sum`，避免抓取尚未
-发布的配套版本元数据。发行复现仍使用专用 release target 的精确 Tag/源码核验。Runtime 发布从本仓
+工作区验证 module path，将声明的内部依赖绑定到选定源码，不改写 `go.mod`/`go.sum`。内部依赖的
+元数据来自这些本地 checkout。发行复现仍使用专用 release target 的精确 Tag/源码核验。Runtime 发布从本仓
 `cmd/sandbox-init` 构建 PID 1，默认输出 `bin/<arch>/sandbox-init`；Sandboxer、Connector 不加入 Runtime
 Go 工作区。Envd、versitygw 保持独立 Go 模块构建；Kernel 使用 Native 输入，不加入 Go workspace。
 `go-erofs` 继续作为版本化外部依赖。
