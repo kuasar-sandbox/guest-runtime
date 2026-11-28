@@ -538,12 +538,13 @@ init，[所选 guest kernel](vmlinux_zh.md) 提供内核能力；OCI 镜像携�
 | 工作负载需求 | 判断与验收探针 |
 |---|---|
 | 普通用户态服务 | 用 `flatten-ctl info --json app.img` 检查 User、Entrypoint/Cmd、Env、WorkingDir；以实际用户检查可执行路径、DNS 和 upper layer 可写路径。显式 launch 覆盖镜像默认值（[沙箱怎么用 config.json](#沙箱怎么用-configjson)）。 |
+| systemd 管理的服务 | 用 `launch.systemd` 选择 [Runtime 或镜像中合格的 systemd](using-guest-runtime_zh.md#application-startup)；Runtime 提供 executor service 和启动屏障。打包应用自己的 unit，验证实际就绪与恢复行为。复制 sandbox-init 或把 `/sbin/init` 当作主命令不是选择 systemd 的流程。 |
 | 文件 capabilities、SELinux label 或其他 xattr | 此路径不保留 xattr（[布局与元数据政策](https://github.com/kuasar-sandbox/accelerator/blob/main/docs/image-preparation_zh.md#布局与元数据政策)）；重建/适配应用或验证其他受支持部署，不能假设 capability 位和 label 保留。必须测试实际特权操作。 |
 | 设备、内核模块、TUN/bridge 或嵌套容器网络 | 对照所选 kernel 配置；预设不支持可加载模块且裁剪若干设备/网络栈。export 成功不证明这些能力；定制 kernel 须通过内核指南的 ABI/VMM 与启动/恢复验证。 |
 | OCI 元数据驱动行为 | 元数据保留不代表消费者执行；检查镜像默认值合并和显式 mounts/launch，不假设 Docker 网络、Healthcheck 编排或 OnBuild 执行。提供并测试显式构建就绪命令。 |
-| 有状态或外连服务 | 暂停/恢复前后验证文件及应用状态，测试外部连接重建。进程快照不等于外部数据库 checkpoint，也不会续租远端 lease。 |
+| 有状态或外连服务 | 捕获及独立恢复前后验证文件和应用状态，测试外部连接重建。捕获前配置[应用恢复处理器](using-guest-runtime_zh.md#application-restore)。平台[网络重置](network-restore_zh.md)不等于外部数据库 checkpoint，也不会续租远端 lease。 |
 
-在一次性沙箱内执行代表性请求和应拒绝的操作，暂停/恢复并比对命令及文件结果。
+在一次性沙箱内执行代表性请求和应拒绝的操作，捕获/恢复并比对命令及文件结果。
 启动失败时先区分镜像文件/权限与 kernel 能力缺失，再调整启动策略。保留原镜像
 digest 与日志，通过 owner kill 测试沙箱，引用核查后才退役工件。flatten 成功
 不是工作负载兼容性认证。

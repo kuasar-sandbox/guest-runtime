@@ -2,10 +2,12 @@
 
 # guest-runtime
 
-首次运行跨组件沙箱或 Demo，推荐从项目[快速开始](https://github.com/kuasar-sandbox/kuasar-sandbox/blob/main/docs/quickstart_zh.md)
-使用匹配聚合版本的 [workbench](https://github.com/kuasar-sandbox/kuasar-sandbox/blob/main/workbench/README_zh.md)。
-本组件仍可独立构建和部署，workbench 不是生产运行的强制依赖。预构建架构以所选
-发布版的实际资产为准；源码支持某架构不意味着所有历史版本都提供该架构制品。
+按项目[快速开始](https://github.com/kuasar-sandbox/kuasar-sandbox/blob/main/docs/quickstart_zh.md)，
+用 `docker pull` 和 `docker run` 启动首个 Sandbox；node-infra 镜像包含相互匹配的 Runtime、Kernel
+与 Host 组件。直接使用组件时，按[使用 guest-runtime](docs/using-guest-runtime_zh.md)
+验证发布的 Runtime 与 Kernel、制备应用镜像，并选择启动和恢复方式。
+源码构建及 [Workbench](https://github.com/kuasar-sandbox/kuasar-sandbox/blob/main/workbench/README_zh.md)
+用于开发、演示和验证。预构建架构以所选发布版的实际资产为准；源码支持某架构不意味着所有历史版本都提供该架构制品。
 
 `guest-runtime` 构建 [Kuasar Sandbox](https://github.com/kuasar-sandbox/kuasar-sandbox) 使用的 **guest kernel、Runtime image 和 image build tool**。
 
@@ -14,7 +16,7 @@
 ## 职责
 
 - 从有文档记录的 kernel source、config 和 patch set 构建 guest VMLinux image;
-- 构建 Envd 等原生 guest 依赖，并使用环境安装的宿主 EROFS 工具打包与校验;
+- 构建 Envd 和私有 systemd 安装等原生 Guest 依赖，并使用环境安装的宿主 EROFS 工具打包与校验；
 - 构建 OCI/directory 到 EROFS 的 image builder `flatten-ctl`;
 - 组装 `sandbox-runtime.bundle`,其中包括本仓构建的 `sandbox-init` 和本仓维护的 guest payload;
 - 验证生成的 guest/Runtime 文件系统结构;
@@ -26,18 +28,19 @@
 
 | 路径 | 用途 |
 | --- | --- |
-| `cmd/sandbox-init` | 同一二进制承担外层 Guest 管理与内层 PID 1 进程执行 |
+| `cmd/sandbox-init` | 同一二进制承担外层 Guest 管理、直接执行及 systemd 集成 |
 | `pkg/guestabi` | Host 与 Guest 共用的控制、MUX 和转发协议包 |
 | `cmd/flatten-ctl` | 使用共享 `accelerator` package 将 OCI 或目录构建为 deterministic EROFS image |
-| `native-deps/` | Guest VMLinux/Envd 源码输入、补丁树和 Native 维护 |
+| `native-deps/` | Guest VMLinux/Envd/systemd 输入、补丁树和 Native 维护 |
 | `scripts/guest-inspect.py` | 在兼容的 nonrandomized x86_64 布局中从 Host 读取 guest kernel memory counter |
 
 Runtime image 将初始 guest tool 放在 `/opt/sandbox-runtime/bin/`。VMLinux 与 Cloud Hypervisor binary 不嵌入 Runtime bundle:VMLinux 作为独立发行单元发布,Cloud Hypervisor 由 `sandboxer` 构建和发布。
 
 `sandbox-init` 将 Guest 管理与用户进程执行分开：外层负责存储、Host 控制与捕获准备，
-内层 PID 1 负责初始化命令、主进程、plugin 和 exec 会话。用户进程共用以真实
-`/sandbox` 为根的 cgroup namespace，`launch.pid_namespace` 继续提供 private 和
-shared 两种 PID 视图。[Guest ABI](docs/guest-abi_zh.md#guest-processes)说明职责、
+Executor 负责初始化命令、主进程、plugin 和 exec 会话；它既可作为 direct 环境的 PID 1，也可在
+选定 systemd manager 的保留 service 中执行。用户进程共用以真实 `/sandbox` 为根的 cgroup namespace；
+direct 模式通过 `launch.pid_namespace` 提供 private/shared PID 视图，systemd 使用共享环境。
+[Guest ABI](docs/guest-abi_zh.md#guest-processes)说明职责、
 cgroup 下放以及捕获和恢复中的排空、冻结、解冻顺序。
 
 ## 按流程或交付契约阅读
@@ -45,6 +48,8 @@ cgroup 下放以及捕获和恢复中的排空、冻结、解冻顺序。
 | 读者任务 | 指南 |
 | --- | --- |
 | 消费选定发行版、制备应用并绑定产物 | [使用 guest-runtime](docs/using-guest-runtime_zh.md)：验证、冷启动示例、升级与恢复 |
+| 选择直接启动或 systemd，并准备应用恢复钩子 | [应用启动与恢复](docs/using-guest-runtime_zh.md#application-startup) |
+| 理解恢复后的地址变更、旧连接和应用重连 | [网络恢复](docs/network-restore_zh.md) |
 | 查看 Runtime 字节布局、payload、身份和兼容 | [Runtime bundle](docs/runtime-bundle_zh.md) |
 | 核对 Guest 内核能力、架构及精确交付身份 | [VMLinux](docs/vmlinux_zh.md) |
 | 用发行 CLI 导出、检查、缓存或转换镜像 | [flatten-ctl](docs/flatten-cli_zh.md) |

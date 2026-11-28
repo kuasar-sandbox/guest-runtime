@@ -1,9 +1,36 @@
+[English](network-restore.md) | [简体中文](network-restore_zh.md)
+
 # Platform network state on snapshot restore
 
-Implements [proposal #144](https://github.com/kuasar-sandbox/guest-runtime/issues/144)
-for sandboxer's existing single virtio-net platform network. No wire fields,
-Host configuration switches, user namespace traversal or kernel patches are
-introduced.
+A memory restore resumes local application state on a destination whose network
+identity or remote peers may have changed. The Runtime refreshes the single
+virtio-net interface supplied by sandboxer, including stale neighbors and eligible
+old TCP connections. Applications remain responsible for reconnecting and renewing
+external state. This page explains what happens automatically, what remains
+application-owned and how to diagnose the boundary.
+
+## Recommended restore workflow
+
+1. Prepare a cold instance with the selected Runtime/Kernel and configure its
+   platform network through sandboxer or the orchestrator/connector deployment.
+   Register any application refresh handler before capture, using
+   [restore notifications](using-guest-runtime.md#application-restore).
+2. Capture the instance and restore it with the destination's Host network
+   binding. No additional network-reset switch or Guest networking binary is
+   needed. Do not add blanket route flushes or interface recreation for the
+   platform-owned state described below.
+3. After restore, verify a real request and the application's reconnect/lease
+   logic. Platform readiness does not wait for remote peers or application
+   reconnection. Listening sockets remain available; active connections selected
+   for cleanup can fail so the application can establish new ones.
+4. If a request fails, inspect Guest network logs and the current address/route,
+   then separate an application retry failure from unsupported kernel cleanup or
+   user-managed network state. A successful Restore alone does not prove all old
+   TCP sockets were released.
+
+Platform network recovery uses the Host/Guest wire contract and the kernel's
+Netlink interfaces. It needs no separate Host configuration switch or kernel
+patch and does not traverse user network namespaces. The exact ownership and bounded behavior follow.
 
 ## Behavior
 
@@ -96,13 +123,21 @@ deadline; the 50 ms deadline bounds TCP's extra work rather than granting that
 budget to each connection. Scheduling delays can extend observed wall time, so
 the configured deadline is not a hard real-time SLA.
 
-Production x86_64 and arm64 kernel configuration enables `INET_DIAG`,
-`INET_TCP_DIAG` and `INET_DIAG_DESTROY`. No new network namespaces, veth, BPF,
-Netfilter or userspace networking binary is required. An older kernel without
+The bundled x86_64 and arm64 kernel configurations enable `INET_DIAG`,
+`INET_TCP_DIAG` and `INET_DIAG_DESTROY`. Network recovery needs no additional
+network namespace, veth, BPF, Netfilter or userspace networking binary. An older kernel without
 destruction support continues Restore and records the unsupported TCP attempt.
-Already captured snapshots keep their captured init and kernel: installing a new
-runtime cannot retrofit this behavior into an old snapshot. Create a fresh
-snapshot with the new runtime to receive the feature.
+Snapshots retain the init and kernel present at capture. Installing another
+Runtime or kernel does not change an existing snapshot. To adopt a different
+Runtime/Kernel combination, cold-start with that combination and capture again.
+
+| Observed result | Interpretation and next check |
+| --- | --- |
+| Same-IP restore still loses an old connection | True restore also clears selected old platform TCP when the IP is unchanged. Check that the application retries. |
+| Source `snapshot --resume` keeps a connection | Same-VM attach preserves network state; it is not a true restore notification. |
+| Restore succeeds with a TCP permission, unsupported or timeout log | Cleanup is best effort. Check the captured kernel and the application retry path; do not infer full cleanup from ACK. |
+| A user bridge, tunnel, namespace or static neighbor remains | These are outside platform cleanup. Maintain them through the owning application or network component. |
+| A fresh Runtime was installed but an old snapshot behaves as before | The snapshot retains its captured init/kernel. Cold-start and capture new state with the selected pair. |
 
 ## Validation
 

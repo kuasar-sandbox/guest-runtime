@@ -6,6 +6,9 @@
 修改初始化时沿启动阶段阅读，实现 Host 对端时查协议章节；它们是同一 Guest 边界的不同阅读视角，
 不分别维护相互重复的规范。
 
+操作入门见[使用 guest-runtime](using-guest-runtime_zh.md)：选择制品、选择应用启动方式并准备恢复
+钩子。本页保留工作负载及 Host 集成所需的详细行为契约。
+
 guest-runtime 构建 PID 1，将其打入 Runtime Bundle，并提供共享 Go 协议包；线上协议契约由宿主和 Guest 对端共同评审。Host 流程见 [Runtime](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/runtime_zh.md)，Host 字段默认值见
 [配置](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/configuration_zh.md)，Usage 的解释和 Budget 见[资源](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/resources_zh.md)。
 
@@ -256,7 +259,7 @@ CH 正常退出不能覆盖环境失败或缺失的必要终止事实。Primary 
 | `runtime` | 使用 `/run/sandbox-runtime/systemd` 中与 Runtime 匹配的完整安装。 |
 | `provided` | 要求最终工作负载 rootfs 提供合格安装。 |
 
-本轮仅接受 Linux amd64、arm64 上动态链接 glibc 的 manager。它必须具有唯一合法的
+支持 Linux amd64、arm64 上动态链接 glibc 的 manager。它必须具有唯一合法的
 解释器（分别为 `ld-linux-x86-64.so.2`、`ld-linux-aarch64.so.1`）、来自 `libc.so.6`
 的版本化 GLIBC 导入，以及 SONAME 匹配且包含 `GLIBC_PRIVATE` 版本定义的 loader。
 发行版解释器符号链接和 Runtime 私有前缀均受支持；静态 manager、musl 和其他 loader
@@ -286,6 +289,12 @@ Service 核验委托、完成 outer 附着后由主进程发送 `READY=1`。**RE
 Host ACK/MUX → primary/plugins → `app_started` 的次序。Service READY 与 `app_started`
 都不是产品健康检查，也不代表所有用户 units 已启动。`TimeoutStartSec=infinity` 保留
 既有 Host launch deadline 与 Init 命令 timeout 语义。
+
+Runtime 还安装保留的 `/run/systemd/system/sysinit.target.d/50-sandbox-init.conf` drop-in，增加
+`Requires=sandbox-init.service` 和 `After=sandbox-init.service`。标准系统服务通过对
+`sysinit.target` 的默认依赖继承 executor READY 屏障；有意关闭这些依赖的用户 unit 仍自行决定
+排序。READY 仍不表示 Launch Init 或应用健康检查已完成。搜索的 unit 目录中若已有该保留 drop-in，
+必须是与 Runtime 内容完全相同的普通文件；内容冲突或非普通文件会使准备失败，不会被静默遮蔽。
 
 #### 委托、工具与 PATH
 
@@ -717,20 +726,17 @@ primary 仍接收上游挂载变化，同时保有自己的 `/proc` 与本地挂
 
 #### 兼容性与内存恢复
 
-Host 消息、primary/placeholder 行为、退出通知、restart 策略以及仅冷启动执行初始化
-的契约保持不变。可观察变化包括 Guest 全局路径由 `/app` 改为 `/sandbox`、init 命令
-进入用户执行环境，以及 shared PID 模式暴露内层而非外层 PID 1。依赖全局路径或外层
-管理进程视图的脚本需要调整；普通 scoped membership 仍按 `cgroup_control` 显示
-`/` 或 `/init`。Plugin 与 shared primary 也改为共享内层 mount namespace，不再
-各持一份私有副本。它们的挂载变化因而在该环境内跨进程可见，并在进程退出或
-restart 后保留。依赖原先逐进程挂载隔离或自动挂载清理的程序，需要显式管理这些
-需求。
+用户执行环境的 Guest 全局 cgroup 路径为 `/sandbox`。Init 命令在该环境运行，shared PID
+模式暴露内层 PID 1。依赖旧 `/app` 路径或外层管理进程视图的脚本，必须适配这一拓扑。
+Scoped membership 按 `cgroup_control` 显示 `/` 或 `/init`。Plugin 与 shared primary
+共享内层 mount namespace；挂载变化在该环境内跨进程可见，并在进程退出或 restart 后保留。
+需要逐进程挂载隔离或挂载清理的应用，必须显式管理这些要求。Host 消息、primary/placeholder、
+退出通知和 restart 契约适用于该执行环境；初始化仅在冷启动执行。
 
 冷启动从选定 Runtime 构造此模型。内存 Snapshot S 保存两个实例、其 namespace/cgroup
 拓扑和私有通路；恢复必须使用 E/C0 identity 对应的 Runtime backing artifact，继续
 执行捕获时的实现。替换 Host 或 Runtime 文件不能升级已有 S 内的 init。采用新 Runtime
-应经过冷启动，再按正常 E/S 流程生成替代制品。本次重构不改变 E/S 格式，也不在内存
-恢复时重放 Launch。
+应经过冷启动，再按正常 E/S 流程生成替代制品。内存恢复继续捕获的执行状态，不重放 Launch。
 
 <a id="supervision"></a>
 
@@ -1600,8 +1606,10 @@ CH 保存 `local_port_last`、used ring 中预发布的 `TRANSPORT_RESET` 及 re
 `TRANSPORT_RESET`，不消耗新 descriptor。Connected socket 被重置，listener 保留。
 CH 在 Guest 通过 event queue 确认处理 reset 前 gate backend RX，新 REQUEST 等待该门。
 
-Restore 在 thaw 前尽力更新 wall clock、按需替换网络，并推进已暂停的 memory-report
-epoch。Attach 保留 live epoch。两者均重新开放外层挂载门禁并无条件撤销平台冻结请求，
+Restore 在 thaw 前尽力更新 wall clock、重置平台网络，并推进已暂停的 memory-report epoch。
+每次真正 Restore 都清理平台动态邻居，并有界尝试释放旧平台 TCP 连接，即使 `network` 未提供或
+未变化。省略 `network` 时保留配置值。TCP 失败、内核能力不支持或超时只记录日志，不阻止解冻或
+ACK。Attach 保留网络状态和 live epoch。两者均重新开放外层挂载门禁并无条件撤销平台冻结请求，
 覆盖捕获失败后尚未确认的冻结和同 VM resume。两者都遵循以下就绪顺序：
 
 ```mermaid
@@ -1624,6 +1632,14 @@ sequenceDiagram
 Thaw 或内层就绪失败均不发 ACK。时钟/网络失败仍只记录日志并尽力继续。
 ACK 确认执行就绪，不证明应用健康，也不等待 primary 消费 stdio。Host SafeTarget
 归一化及观测 epoch 仍在 ACK/MUX 建立后推进，不重放 Launch、files 或 init。
+
+网络重置使用 outer init 在用户启动前绑定的单个 virtio-net 接口。配置替换移除该接口上其他全局
+IPv4、IPv6 地址，保留已匹配的地址/前缀，只删除 init 成功安装的默认路由；新 IP 配空 nexthop 时
+移除这条自有默认路由。清理接口的动态 ARP/NDP，保留 static、NOARP、proxy 条目和 bridge FDB。
+TCP 选择发生在配置变更前，依据旧本地地址及通过平台接口输出的普通路由。排除 listener、TIME_WAIT
+和其他接口，且不进入用户 network namespace。用精确 socket cookie 执行一次有限释放批次，共用
+50 ms TCP 期限，不等待远端、不重新扫描、不在解冻后继续清理。该范围是现有 sandboxer 网络，
+不是任意 tunnel、封装或报文重定向分类器。交付范围、失败行为及验证见[网络恢复](network-restore_zh.md)。
 
 外层 listener 跨捕获保持；关闭它会让 restore/attach 无人接收。Transport reset 不关
 bind/listen socket。CH 从已保存的 `local_port_last + 1` 继续分配本地端口；重置传输

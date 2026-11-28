@@ -101,6 +101,8 @@ PCI=y, PCI_MSI=y                CH 呈现 virtio-pci 设备;MSI-X 是
                                 现代 virtio-pci 的中断路径,必须启用
 NETDEVICES=y                    网络驱动伞;依赖缺失可使请求的 VIRTIO_NET 被静默移除
 NET=y, INET=y                   网络与 AF_INET 支持;同时保留 AF_VSOCK/AF_NETLINK 的依赖
+INET_DIAG=y, INET_TCP_DIAG=y,   真正内存恢复时诊断并释放符合条件的旧平台 TCP socket
+INET_DIAG_DESTROY=y
 VIRTIO=y, VIRTIO_PCI=y          virtio 总线
 VIRTIO_BLK=y                    根盘/数据盘：single 为一个可写设备，
                                 overlay 为只读 base 加可写 upper
@@ -118,6 +120,7 @@ EROFS_FS=y                      只读 runtime 根与应用 overlay base
 EXT4_FS=y                       可写 single 磁盘与 overlay upper
 OVERLAY_FS=y                    组装使用 overlay 布局的应用根盘/数据盘
 TMPFS=y                         /tmp 等运行时挂载点
+AUTOFS_FS=y                     预留数据盘 slot 的首次访问挂载
 NETWORK_FILESYSTEMS=y           NFS 伞门;须保留依赖使 NFS_FS 在最终配置中生效
 NFS_FS=y + NFS_V3 + NFS_V4(.1/.2) 沙箱挂载 NFS(SUNRPC/LOCKD 自动选入;KEYS=y
                                 供 v4 idmap,DNS_RESOLVER=y 供 v4 referral)
@@ -128,6 +131,9 @@ FUSE_FS=y                       沙箱经 s3fs 挂载 S3(用户态 FUSE;/dev/fus
 
 Runtime 的 pmem 启动根与应用根盘/数据盘不同。后者的 single/overlay 设备顺序及
 挂载组装由 [Guest 根与磁盘契约](https://github.com/kuasar-sandbox/sandboxer/blob/main/docs/guest-abi_zh.md#base-and-root)定义。
+
+TCP 诊断能力用于[平台网络恢复](network-restore_zh.md)。捕获的旧内核缺少 socket 销毁能力时仍可恢复，
+清理失败记录日志且不致命。更换外部 Kernel 文件不会升级内存快照中的内核；采用新能力需要冷启动后重新捕获。
 
 对随附 runtime，既要检查最终配置，也要检查 Guest 的实际挂载：
 `/opt/sandbox-runtime` 必须是带 `dax=always` 的只读 EROFS。仅传入
